@@ -15,7 +15,10 @@
 
 package shell
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Result holds the captured output and exit code of a completed command.
 type Result struct {
@@ -27,5 +30,9 @@ type Result struct {
 // Runner executes external commands. All code outside internal/shell must call
 // through this interface — never import os/exec directly.
 type Runner interface {
+	// Run executes name with args, capturing stdout and stderr.
 	Run(ctx context.Context, name string, args ...string) (Result, error)
+	// RunWithStdin executes name with args, wiring stdin to the provided reader.
+	// Use this when a secret must be delivered via stdin instead of argv.
+	RunWithStdin(ctx context.Context, stdin io.Reader, name string, args ...string) (Result, error)
 }
