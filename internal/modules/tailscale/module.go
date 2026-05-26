@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -282,11 +284,30 @@ func (m *Module) Repair(ctx context.Context) error {
 
 // isSandboxedGUI returns true when the tailscale binary is the sandboxed
 // macOS App Store / GUI build, which rejects --ssh and other daemon flags.
-// The GUI build reports "tailscale version" output containing "tailscale-ipn"
-// or runs from the Tailscale.app bundle path; the open-source CLI does not.
+// Detected by reading the wrapper script at the binary path — the GUI ships
+// a /usr/local/bin/tailscale shell script that delegates to Tailscale.app.
 func isSandboxedGUI(versionOutput string) bool {
+	// Fast path: version output sometimes contains a clue.
 	lower := strings.ToLower(versionOutput)
-	return strings.Contains(lower, "tailscale-ipn") ||
+	if strings.Contains(lower, "tailscale-ipn") ||
 		strings.Contains(lower, "tailscale.app") ||
-		strings.Contains(lower, "sandboxed")
+		strings.Contains(lower, "sandboxed") {
+		return true
+	}
+
+	// Reliable path: read the resolved binary and check for .app bundle.
+	bin, err := exec.LookPath("tailscale")
+	if err != nil {
+		return false
+	}
+	// Read up to 256 bytes to check for the wrapper script pattern.
+	f, err := os.Open(bin) //nolint:gosec // reading known binary path
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	buf := make([]byte, 256)
+	n, _ := f.Read(buf)
+	content := strings.ToLower(string(buf[:n]))
+	return strings.Contains(content, "tailscale.app")
 }
