@@ -27,11 +27,11 @@ func newDaemonCmd() *cobra.Command {
 		Short: "Manage the abysslinkd background daemon",
 	}
 	daemon.AddCommand(
-		&cobra.Command{Use: "start", Short: "Start the daemon", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "stop", Short: "Stop the daemon", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "status", Short: "Show daemon status", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "enable", Short: "Enable daemon auto-start on login", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "disable", Short: "Disable daemon auto-start on login", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "start", Short: "Start the daemon", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "stop", Short: "Stop the daemon", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "status", Short: "Show daemon status", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "enable", Short: "Enable daemon auto-start on login", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "disable", Short: "Disable daemon auto-start on login", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
 	)
 	return daemon
 }

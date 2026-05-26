@@ -25,7 +25,7 @@ func newNotifyCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "notify [title] [body]",
 		Short: "Send a notification via the ntfy backend or wrap a command",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// TODO(Phase 6): implement notify title+body and -- cmd wrap
 			return fmt.Errorf("not implemented yet")
 		},

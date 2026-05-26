@@ -1,0 +1,56 @@
+version: 1
+
+identity:
+  email: you@example.com
+  unix_user: you
+
+tailnet:
+  hostname: mac-dev
+  ssh: true
+  lock:
+    enabled: true
+    disablement_secrets: 2
+    share_with_support: false
+
+mobile:
+  tag: mobile
+  ports:
+    - tcp/22
+    - udp/60000-61000
+  ssh_check_period: 12h
+
+modules:
+  ssh:
+    enabled: true
+    mode: tailscale
+  tmux:
+    enabled: true
+    session: main
+  mosh:
+    enabled: true
+  notify:
+    enabled: true
+    default_topic: rig
+  ntfy:
+    enabled: true
+  watch:
+    enabled: true
+    panes:
+      - main
+
+claudecode:
+  enabled: false
+  api_key_source: keychain
+  notify_on:
+    notification: true
+    stop_after: 60s
+
+power:
+  closed_lid_ac: keep-awake
+
+hardening:
+  filevault: required
+  luks: required
+  firewall_stealth: true
+  ufw_default_deny: true
+  disable_macos_sshd: true

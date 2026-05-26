@@ -1,44 +1,74 @@
-# abysslink.yaml — example configuration
+# abysslink.yaml — declarative phone-to-rig setup
 # Run `abysslink init` to generate a configured version for your machine.
-# Full schema: https://abysslink.dev/docs/config
+version: 1
 
 identity:
-  email: ""        # your email address
-  name: ""         # display name
+  email: you@example.com
+  unix_user: you
 
 tailnet:
-  org: ""          # e.g. "yourorg.github"
-  hostname: ""     # machine hostname on tailnet, e.g. "dev-laptop"
-
-modules:
-  tailscale:
+  hostname: mac-dev
+  ssh: true
+  lock:
     enabled: true
+    disablement_secrets: 2
+    share_with_support: false
+
+mobile:
+  tag: mobile
+  ports:
+    - tcp/22
+    - udp/60000-61000
+  ssh_check_period: 12h
+
+# Core modules — on by default.
+modules:
   ssh:
     enabled: true
+    mode: tailscale        # tailscale | openssh-fallback
   tmux:
     enabled: true
+    session: main
   mosh:
     enabled: true
   notify:
     enabled: true
+    default_topic: rig     # generic notify API + abysslinkd socket
   ntfy:
-    enabled: true
+    enabled: true          # default delivery backend for notify
   watch:
     enabled: true
-  acl:
-    enabled: true
-  lock:
-    enabled: true
-  power:
-    enabled: true
-  hardening:
-    enabled: true
-  # Optional modules (disabled by default):
-  claudecode:
-    enabled: false
-  codeserver:
+    panes:
+      - main               # idle-pane detector → notify
+
+  # Optional modules — opt-in.
+  code_server:
     enabled: false
   ttyd:
     enabled: false
-  eternalterminal:
+  syncthing:
     enabled: false
+  upsnap:
+    enabled: false
+  eternal_terminal:
+    enabled: false
+  atuin:
+    enabled: false
+
+# Optional consumer of the notify API — one of many possible.
+claudecode:
+  enabled: false           # set true to auto-wire Claude Code hooks
+  api_key_source: keychain # keychain | env | none
+  notify_on:
+    notification: true
+    stop_after: 60s        # only buzz when turn ran >= 60s
+
+power:
+  closed_lid_ac: keep-awake
+
+hardening:
+  filevault: required      # macOS only
+  luks: required           # Linux only
+  firewall_stealth: true   # macOS
+  ufw_default_deny: true   # Linux (ufw or firewalld)
+  disable_macos_sshd: true # if mode != openssh-fallback
