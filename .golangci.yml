@@ -1,15 +1,15 @@
+version: "2"
+
 run:
   timeout: 5m
   tests: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - gosec
     - revive
-    - gofmt
-    - goimports
     - gocyclo
     - ineffassign
     - unused
@@ -24,8 +24,6 @@ linters-settings:
         disabled: false
       - name: var-naming
         disabled: false
-  goimports:
-    local-prefixes: github.com/abysslink/abysslink
   gosec:
     excludes:
       - G304  # file path from variable — audit package legitimately reads paths from vars for backup/restore
