@@ -13,21 +13,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command abysslink is the Abysslink CLI — automates a paranoid-by-default
-// phone-to-laptop remote-control setup over Tailscale.
-package main
+package cli
 
 import (
-	"context"
-	"os"
-	"os/signal"
-	"syscall"
+	"fmt"
 
-	"github.com/abysslink/abysslink/internal/cli"
+	"github.com/spf13/cobra"
 )
 
-func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	os.Exit(cli.Execute(ctx))
+func newEnableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "enable <module>",
+		Short: "Enable an optional module",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return fmt.Errorf("not implemented yet")
+		},
+	}
 }

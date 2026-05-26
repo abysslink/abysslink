@@ -13,21 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command abysslink is the Abysslink CLI — automates a paranoid-by-default
-// phone-to-laptop remote-control setup over Tailscale.
-package main
+package cli
 
-import (
-	"context"
-	"os"
-	"os/signal"
-	"syscall"
-
-	"github.com/abysslink/abysslink/internal/cli"
+// Build-time version variables injected via Makefile LDFLAGS.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
 )
-
-func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	os.Exit(cli.Execute(ctx))
-}
