@@ -1,0 +1,42 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - gosec
+    - revive
+    - gofmt
+    - goimports
+    - gocyclo
+    - ineffassign
+    - unused
+    - staticcheck
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15
+  revive:
+    rules:
+      - name: exported
+        disabled: false
+      - name: var-naming
+        disabled: false
+  goimports:
+    local-prefixes: github.com/abysslink/abysslink
+  gosec:
+    excludes:
+      - G304  # file path from variable — audit package legitimately reads paths from vars for backup/restore
+
+issues:
+  exclude-rules:
+    - path: "_test\\.go"
+      linters:
+        - gosec
+    - path: "doc\\.go"
+      linters:
+        - revive
+  max-issues-per-linter: 50
+  max-same-issues: 10
