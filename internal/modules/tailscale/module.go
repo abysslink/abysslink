@@ -155,24 +155,28 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
 				Description: "install tailscale",
+				Explain:     "Tailscale is not on PATH. Install from https://tailscale.com/download then re-run abysslink up --apply.",
 				Reversible:  false,
 			})
 		case "needs_login":
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
 				Description: "ACTION REQUIRED: run `tailscale login` to authenticate (opens browser), then re-run `abysslink up --apply`",
+				Explain:     "Tailscale requires authentication before it can join your tailnet. A browser will open; return here after signing in.",
 				Reversible:  false,
 			})
 		case "running":
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
 				Description: "run tailscale up --ssh",
+				Explain:     "Brings Tailscale up and enables the SSH server so devices on your tailnet can connect without a VPN or open port.",
 				Reversible:  false,
 			})
 		case "ssh":
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
 				Description: "run tailscale up --ssh",
+				Explain:     "Activates Tailscale SSH so devices on your tailnet can connect securely without a VPN or port forward.",
 				Reversible:  false,
 			})
 		}

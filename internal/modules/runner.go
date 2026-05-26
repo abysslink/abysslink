@@ -28,7 +28,7 @@ type ProgressPhase int
 
 // Progress phase constants.
 const (
-	ProgressPhasePlan  ProgressPhase = iota
+	ProgressPhasePlan ProgressPhase = iota
 	ProgressPhaseApply
 )
 
