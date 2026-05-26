@@ -23,6 +23,31 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 )
 
+// ProgressPhase indicates which phase of execution an event belongs to.
+type ProgressPhase int
+
+// Progress phase constants.
+const (
+	ProgressPhasePlan  ProgressPhase = iota
+	ProgressPhaseApply
+)
+
+// ModuleEvent is emitted by PlanAll and ApplyAll after each module completes
+// its phase step.
+type ModuleEvent struct {
+	Module   string
+	Phase    ProgressPhase
+	Index    int // 1-based position in the module list
+	Total    int // total number of modules
+	Actions  []Action
+	Findings []Finding
+	ApplyErr error
+}
+
+// ProgressFunc is a callback invoked after each module completes its phase
+// step. Implementations must not panic.
+type ProgressFunc func(ModuleEvent)
+
 // Runner orchestrates module execution in dependency order.
 type Runner struct {
 	modules []Module
@@ -150,6 +175,120 @@ func (r *Runner) Doctor(ctx context.Context) ([]Finding, error) {
 	}
 
 	return allFindings, nil
+}
+
+// PlanAll runs Detect then Plan for all modules in dependency order, emitting a
+// ModuleEvent via progress after each module completes. It returns the combined
+// actions and findings. The first error stops iteration.
+// If progress is nil, no events are emitted.
+func (r *Runner) PlanAll(ctx context.Context, progress ProgressFunc) ([]Action, []Finding, error) {
+	var allActions []Action
+	var allFindings []Finding
+	total := len(r.modules)
+
+	for i, m := range r.modules {
+		select {
+		case <-ctx.Done():
+			return allActions, allFindings, ctx.Err()
+		default:
+		}
+
+		log := slog.With("module", m.Name())
+
+		// Detect.
+		findings, err := m.Detect(ctx)
+		if err != nil {
+			return allActions, allFindings, fmt.Errorf("module %s detect: %w", m.Name(), err)
+		}
+		for _, f := range findings {
+			log.Info("detect finding", "check", f.Check, "severity", f.Severity, "message", f.Message)
+		}
+		allFindings = append(allFindings, findings...)
+
+		// Plan.
+		actions, err := m.Plan(ctx, true)
+		if err != nil {
+			return allActions, allFindings, fmt.Errorf("module %s plan: %w", m.Name(), err)
+		}
+		for _, a := range actions {
+			log.Info("planned action", "description", a.Description, "reversible", a.Reversible)
+		}
+		allActions = append(allActions, actions...)
+
+		if progress != nil {
+			progress(ModuleEvent{
+				Module:   m.Name(),
+				Phase:    ProgressPhasePlan,
+				Index:    i + 1,
+				Total:    total,
+				Actions:  actions,
+				Findings: findings,
+			})
+		}
+	}
+
+	return allActions, allFindings, nil
+}
+
+// ApplyAll runs Apply then Verify for all modules in dependency order, emitting
+// a ModuleEvent via progress after each module completes. Apply errors do not
+// stop iteration — all modules are attempted. The first Apply error encountered
+// is returned at the end.
+// If progress is nil, no events are emitted.
+func (r *Runner) ApplyAll(ctx context.Context, progress ProgressFunc) ([]Finding, error) {
+	var allFindings []Finding
+	var firstApplyErr error
+	total := len(r.modules)
+
+	for i, m := range r.modules {
+		select {
+		case <-ctx.Done():
+			return allFindings, ctx.Err()
+		default:
+		}
+
+		log := slog.With("module", m.Name())
+
+		// Apply.
+		applyErr := m.Apply(ctx)
+		if applyErr != nil {
+			log.Info("apply error", "error", applyErr)
+			if firstApplyErr == nil {
+				firstApplyErr = fmt.Errorf("module %s apply: %w", m.Name(), applyErr)
+			}
+		} else {
+			log.Info("applied successfully")
+		}
+
+		// Verify.
+		select {
+		case <-ctx.Done():
+			return allFindings, ctx.Err()
+		default:
+		}
+
+		vFindings, err := m.Verify(ctx)
+		if err != nil {
+			return allFindings, fmt.Errorf("module %s verify: %w", m.Name(), err)
+		}
+		for _, f := range vFindings {
+			log.Info("verify finding", "check", f.Check, "severity", f.Severity, "message", f.Message)
+		}
+		allFindings = append(allFindings, vFindings...)
+
+		if progress != nil {
+			progress(ModuleEvent{
+				Module:   m.Name(),
+				Phase:    ProgressPhaseApply,
+				Index:    i + 1,
+				Total:    total,
+				Findings: vFindings,
+				ApplyErr: applyErr,
+			})
+		}
+	}
+
+	return allFindings, firstApplyErr
 }
 
 // Down runs modules in reverse dependency order, calling Verify then Apply(disable).

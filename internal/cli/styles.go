@@ -84,3 +84,6 @@ func iconDoneStr() string { return styleSuccess.Render(iconDone) }
 
 // iconArrowStr returns a blue arrow icon.
 func iconArrowStr() string { return styleInfo.Render(iconArrow) }
+
+// iconSpinStr returns a muted spinner icon.
+func iconSpinStr() string { return styleMuted.Render(iconSpin) }
