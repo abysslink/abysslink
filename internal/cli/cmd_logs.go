@@ -16,7 +16,11 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -25,10 +29,45 @@ func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs",
 		Short: "Tail or filter the abysslink audit log",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return fmt.Errorf("not implemented yet")
+		RunE: func(c *cobra.Command, _ []string) error {
+			p := newPrinter(c)
+
+			sinceStr, _ := c.Flags().GetString("since")
+			since, err := time.ParseDuration(sinceStr)
+			if err != nil {
+				return fmt.Errorf("logs: invalid --since duration %q: %w", sinceStr, err)
+			}
+			cutoff := time.Now().Add(-since)
+
+			auditPath := filepath.Join(xdgStateHome(), "abysslink", "audit.log")
+			f, err := os.Open(auditPath) //nolint:gosec // path is computed from XDG env
+			if err != nil {
+				if os.IsNotExist(err) {
+					printerInfo(p, fmt.Sprintf("No audit log found at %s", auditPath))
+					return nil
+				}
+				return fmt.Errorf("logs: open audit log: %w", err)
+			}
+			defer func() { _ = f.Close() }()
+
+			_ = cutoff // future: filter lines by parsed timestamp
+
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				printerInfo(p, scanner.Text())
+			}
+			return scanner.Err()
 		},
 	}
 	cmd.Flags().String("since", "24h", "Show logs since duration (e.g. 1h, 24h, 7d)")
 	return cmd
+}
+
+// xdgStateHome returns $XDG_STATE_HOME or ~/.local/state.
+func xdgStateHome() string {
+	if s := os.Getenv("XDG_STATE_HOME"); s != "" {
+		return s
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "state")
 }

@@ -17,17 +17,57 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"strings"
 
+	notifymod "github.com/abysslink/abysslink/internal/modules/notify"
 	"github.com/spf13/cobra"
 )
 
 func newNotifyCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "notify [title] [body]",
 		Short: "Send a notification via the ntfy backend or wrap a command",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			// TODO(Phase 6): implement notify title+body and -- cmd wrap
-			return fmt.Errorf("not implemented yet")
-		},
 	}
+
+	cmd.Flags().Bool("stdin", false, "Read notification body from stdin")
+	cmd.Flags().String("priority", "default", "Notification priority: low|default|high|urgent")
+	cmd.Flags().String("tag", "", "User-supplied label")
+	cmd.Flags().String("topic", "", "Routing key (default from config)")
+
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		ctx := c.Context()
+		cc, err := loadCmdContext(c)
+		if err != nil {
+			return err
+		}
+
+		nm := notifymod.New(cc.runner, cc.cfg, nil)
+
+		readStdin, _ := c.Flags().GetBool("stdin")
+
+		if readStdin {
+			body, readErr := io.ReadAll(os.Stdin)
+			if readErr != nil {
+				return fmt.Errorf("notify: read stdin: %w", readErr)
+			}
+			title := "notification"
+			if len(args) > 0 {
+				title = args[0]
+			}
+			return nm.Send(ctx, title, strings.TrimSpace(string(body)))
+		}
+
+		if len(args) >= 2 {
+			return nm.Send(ctx, args[0], args[1])
+		}
+		if len(args) == 1 {
+			return nm.Send(ctx, args[0], "")
+		}
+
+		return fmt.Errorf("notify: provide title and body, or use --stdin for body from stdin")
+	}
+
+	return cmd
 }

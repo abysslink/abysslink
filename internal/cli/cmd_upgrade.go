@@ -17,6 +17,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -25,8 +26,32 @@ func newUpgradeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Upgrade abysslink to the latest release",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return fmt.Errorf("not implemented yet")
+		RunE: func(c *cobra.Command, _ []string) error {
+			if os.Getuid() == 0 {
+				return fmt.Errorf("upgrade: refusing to run as root — run as your normal user")
+			}
+
+			checkOnly, _ := c.Flags().GetBool("check")
+			p := newPrinter(c)
+
+			printerInfo(p, "Checking for updates...")
+
+			updateURL := os.Getenv("ABYSSLINK_UPDATE_URL")
+			if updateURL == "" {
+				printerInfo(p, "No update check endpoint configured. Set ABYSSLINK_UPDATE_URL.")
+				if !checkOnly {
+					return fmt.Errorf("upgrade: not yet implemented — download from https://github.com/abysslink/abysslink/releases")
+				}
+				return nil
+			}
+
+			// TODO: implement actual update check and cosign signature verification.
+			if checkOnly {
+				printerInfo(p, fmt.Sprintf("Update endpoint: %s (check-only, not downloading)", updateURL))
+				return nil
+			}
+
+			return fmt.Errorf("upgrade: auto-update not yet implemented — download from https://github.com/abysslink/abysslink/releases")
 		},
 	}
 	cmd.Flags().Bool("check", false, "Only check for a newer version, do not upgrade")

@@ -16,17 +16,38 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 )
+
+const threatModelText = `Abysslink Threat Model
+======================
+
+Defense                              Status
+──────────────────────────────────── ──────────────────────────────
+No public exposure (no Funnel)       ✓ enforced at schema level
+Phone restricted: SSH+mosh only      ✓ ACL grants tcp/22, udp/60000-61000
+SSH check re-auth every 12h          ✓ default checkPeriod (never extendable)
+macOS sshd disabled w/ TS SSH        ✓ managed by ssh module
+FileVault/LUKS required              ✓ doctor fails closed if off
+API key in keychain                  ✓ secrets package (never on argv)
+Audit trail                          ✓ every Apply writes audit.log
+Reversible (backup+restore)          ✓ audit.Backup on every mutation
+No SSH agent forwarding              ✓ enforced in generated ssh_config
+No telemetry                         ✓ not implemented in v1
+Tailnet Lock on by default           ✓ disablement secrets printed once only
+ntfy binds tailnet IP only           ✓ never 0.0.0.0
+
+Run 'abysslink doctor' to check the current status of each defense.
+`
 
 func newThreatModelCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "threat-model",
 		Short: "Print the security threat model and current mitigations",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return fmt.Errorf("not implemented yet")
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			p := newPrinter(cmd)
+			printerInfo(p, threatModelText)
+			return nil
 		},
 	}
 }
