@@ -223,7 +223,23 @@ func (m *Module) Apply(ctx context.Context) error {
 				return fmt.Errorf("tailscale apply: tailscale up: %w", err)
 			}
 			if res.ExitCode != 0 {
-				return fmt.Errorf("tailscale apply: tailscale up exited %d: %s", res.ExitCode, res.Stderr)
+				combined := res.Stdout + res.Stderr
+				if strings.Contains(combined, "sandboxed") {
+					slog.Warn("tailscale apply: GUI build detected at runtime — retrying without --ssh; install CLI: brew install tailscale")
+					args2 := []string{"up"}
+					if m.cfg.Tailnet.Hostname != "" {
+						args2 = append(args2, "--hostname="+m.cfg.Tailnet.Hostname)
+					}
+					res2, err2 := m.runner.Run(ctx, "tailscale", args2...)
+					if err2 != nil {
+						return fmt.Errorf("tailscale apply: tailscale up (no-ssh retry): %w", err2)
+					}
+					if res2.ExitCode != 0 {
+						return fmt.Errorf("tailscale apply: tailscale up exited %d: %s", res2.ExitCode, res2.Stderr)
+					}
+				} else {
+					return fmt.Errorf("tailscale apply: tailscale up exited %d: %s", res.ExitCode, res.Stderr)
+				}
 			}
 		case "ssh":
 			if sandboxed {
@@ -240,7 +256,12 @@ func (m *Module) Apply(ctx context.Context) error {
 				return fmt.Errorf("tailscale apply: enable SSH: %w", err)
 			}
 			if res.ExitCode != 0 {
-				return fmt.Errorf("tailscale apply: enable SSH exited %d: %s", res.ExitCode, res.Stderr)
+				combined := res.Stdout + res.Stderr
+				if strings.Contains(combined, "sandboxed") {
+					slog.Warn("tailscale apply: GUI build — cannot enable Tailscale SSH; install CLI: brew install tailscale")
+				} else {
+					return fmt.Errorf("tailscale apply: enable SSH exited %d: %s", res.ExitCode, res.Stderr)
+				}
 			}
 		}
 	}
