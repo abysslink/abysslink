@@ -39,7 +39,10 @@ type Finding struct {
 type Action struct {
 	Module      string
 	Description string
-	Reversible  bool
+	// Explain is an optional human-readable rationale for the action.
+	// Empty string means no explain text is shown.
+	Explain    string
+	Reversible bool
 }
 
 // Result summarises what happened during Apply.
