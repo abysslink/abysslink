@@ -1,0 +1,46 @@
+site_name: Abysslink
+site_description: Paranoid-by-default phone-to-laptop remote setup over Tailscale
+site_url: https://abysslink.github.io/abysslink/
+
+repo_name: abysslink/abysslink
+repo_url: https://github.com/abysslink/abysslink
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: purple
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Modules:
+    - Tailscale: modules/tailscale.md
+    - SSH: modules/ssh.md
+    - tmux: modules/tmux.md
+    - mosh: modules/mosh.md
+    - ntfy: modules/ntfy.md
+    - watch: modules/watch.md
+    - claudecode: modules/claudecode.md
+  - Security:
+    - Threat Model: security/threat-model.md
+    - Hardening: security/hardening.md
+  - Operations:
+    - Troubleshooting: operations/troubleshooting.md
+    - FAQ: operations/faq.md
+  - Contributing: contributing.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - tables

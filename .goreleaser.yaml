@@ -63,26 +63,24 @@ archives:
       - abysslink.yaml.example
 
 checksum:
-  name_template: "checksums.txt"
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
   algorithm: sha256
 
-# SBOM generation — enabled in Phase 8 (install syft in release.yml first)
-# sboms:
-#   - id: archive
-#     artifacts: archive
+sboms:
+  - artifacts: archive
+    args: ["$artifact", "--output", "cyclonedx-json@${artifact}.cdx.json"]
 
-# Cosign signing — enabled in Phase 8
-# signs:
-#   - cmd: cosign
-#     certificate: "${artifact}.pem"
-#     args:
-#       - sign-blob
-#       - "--output-certificate=${certificate}"
-#       - "--output-signature=${signature}"
-#       - "${artifact}"
-#       - "--yes"
-#     artifacts: checksum
-#     output: true
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
 
 nfpms:
   - id: packages
