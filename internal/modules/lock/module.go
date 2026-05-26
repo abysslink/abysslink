@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abysslink Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package lock
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/shell"
+)
+
+// lockStatus is the subset of `tailscale lock status --json` we need.
+type lockStatus struct {
+	Enabled bool `json:"Enabled"`
+}
+
+// Module implements the lock module.
+type Module struct {
+	runner shell.Runner
+	cfg    *config.Config
+}
+
+// New returns a new Module.
+func New(runner shell.Runner, cfg *config.Config) *Module {
+	return &Module{runner: runner, cfg: cfg}
+}
+
+// Name returns the module name.
+func (m *Module) Name() string { return "lock" }
+
+// Deps returns the module's dependencies.
+func (m *Module) Deps() []string { return []string{"tailscale"} }
+
+// Detect checks the Tailnet Lock state.
+func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
+	var findings []modules.Finding
+
+	res, err := m.runner.Run(ctx, "tailscale", "lock", "status", "--json")
+	if err != nil {
+		return findings, fmt.Errorf("lock detect: run tailscale lock status: %w", err)
+	}
+
+	if res.ExitCode != 0 {
+		slog.Warn("lock detect: tailscale lock status returned non-zero", "stderr", res.Stderr)
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "lock_status",
+			Severity: modules.SeverityWarning,
+			Message:  "could not query Tailnet Lock status; tailscale may not be running",
+		})
+		return findings, nil
+	}
+
+	var status lockStatus
+	if err := json.Unmarshal([]byte(res.Stdout), &status); err != nil {
+		return findings, fmt.Errorf("lock detect: parse lock status JSON: %w", err)
+	}
+
+	slog.Debug("lock detect", "lock_enabled", status.Enabled, "cfg_enabled", m.cfg.Tailnet.Lock.Enabled)
+
+	if m.cfg.Tailnet.Lock.Enabled && !status.Enabled {
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "lock_enabled",
+			Severity: modules.SeverityWarning,
+			Message:  "config requires Tailnet Lock but it is not enabled on this tailnet",
+		})
+	}
+
+	return findings, nil
+}
+
+// Plan computes actions needed.
+func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
+	findings, err := m.Detect(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var actions []modules.Action
+	for _, f := range findings {
+		if f.Check == "lock_enabled" {
+			actions = append(actions, modules.Action{
+				Module:      m.Name(),
+				Description: "initialize Tailnet Lock",
+				Reversible:  false,
+			})
+		}
+	}
+
+	return actions, nil
+}
+
+// Apply executes planned changes.
+// Tailnet Lock requires interactive confirmation; it is intentionally not automated.
+func (m *Module) Apply(_ context.Context) error {
+	return fmt.Errorf("lock module: apply not yet implemented — requires interactive confirmation")
+}
+
+// Verify re-runs Detect.
+func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
+	return m.Detect(ctx)
+}
+
+// Repair attempts to fix findings.
+func (m *Module) Repair(ctx context.Context) error {
+	return m.Apply(ctx)
+}
