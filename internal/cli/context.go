@@ -55,8 +55,12 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 
+	// Default to WARN so internal slog.Info/Debug noise is hidden.
+	// --verbose drops to Debug for troubleshooting.
 	if verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
+	} else {
+		slog.SetLogLoggerLevel(slog.LevelWarn)
 	}
 
 	cfg, err := config.Load(configPath)
