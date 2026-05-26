@@ -1,0 +1,39 @@
+{
+    "tagOwners": {
+        "tag:laptop": [
+            "owner@example.com"
+        ],
+        "tag:mobile": [
+            "owner@example.com"
+        ]
+    },
+    "grants": [
+        {
+            "src": [
+                "tag:mobile"
+            ],
+            "dst": [
+                "tag:laptop"
+            ],
+            "ip": [
+                "tcp:22",
+                "udp:60000-61000"
+            ]
+        }
+    ],
+    "ssh": [
+        {
+            "action": "check",
+            "src": [
+                "owner@example.com"
+            ],
+            "dst": [
+                "tag:laptop"
+            ],
+            "users": [
+                "macuser"
+            ],
+            "checkPeriod": "12h"
+        }
+    ]
+}

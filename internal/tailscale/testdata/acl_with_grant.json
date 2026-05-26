@@ -1,0 +1,16 @@
+{
+    "grants": [
+        {
+            "src": [
+                "tag:mobile"
+            ],
+            "dst": [
+                "tag:laptop"
+            ],
+            "ip": [
+                "tcp:22",
+                "udp:60000-61000"
+            ]
+        }
+    ]
+}
