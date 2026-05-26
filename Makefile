@@ -18,7 +18,7 @@ LDFLAGS    := -s -w \
   -X $(MODULE)/internal/cli.commit=$(COMMIT) \
   -X $(MODULE)/internal/cli.buildDate=$(BUILD_DATE)
 
-.PHONY: build test lint cover release install clean
+.PHONY: build test lint cover release install clean conformance security-audit
 
 ## build: compile CLI and daemon binaries
 build:
@@ -52,3 +52,43 @@ install:
 clean:
 	rm -f $(BINARY) $(DAEMON) coverage.out coverage.html
 	rm -rf dist/
+
+## conformance: build and run the end-to-end conformance test suite
+conformance: build
+	$(GO) run ./cmd/abysslink-conformance
+
+## security-audit: grep for leaked secrets, check binary size, verify no telemetry
+security-audit:
+	@echo "=== Security Audit ==="
+	@echo "--- Checking for secrets in audit log ---"
+	@! grep -rE '(secret|token|password|api_key)["\s:=]+[a-zA-Z0-9+/]{20,}' \
+		"$${HOME}/.local/state/abysslink/audit.log" 2>/dev/null \
+		&& echo "OK: no secrets found in audit log" \
+		|| echo "WARN: possible secrets in audit log (review manually)"
+	@echo "--- Checking binary size (limit: 50 MB) ---"
+	@if [ -f "$(BINARY)" ]; then \
+		size=$$(stat -f%z "$(BINARY)" 2>/dev/null || stat -c%s "$(BINARY)" 2>/dev/null); \
+		limit=$$((50 * 1024 * 1024)); \
+		if [ "$$size" -gt "$$limit" ]; then \
+			echo "FAIL: $(BINARY) is $$(du -sh $(BINARY) | cut -f1), exceeds 50 MB"; exit 1; \
+		else \
+			echo "OK: $(BINARY) is $$(du -sh $(BINARY) | cut -f1)"; \
+		fi; \
+	else \
+		echo "SKIP: $(BINARY) not built (run make build first)"; \
+	fi
+	@echo "--- Checking for telemetry imports ---"
+	@! grep -r \
+		-e '"github.com/DataDog' \
+		-e '"github.com/getsentry' \
+		-e '"go.opentelemetry.io' \
+		-e '"github.com/newrelic' \
+		-e '"github.com/honeycombio' \
+		-e '"github.com/segmentio/analytics' \
+		-e '"github.com/posthog' \
+		--include="*.go" \
+		--exclude-dir=conformance \
+		. \
+		&& echo "OK: no telemetry imports found" \
+		|| (echo "FAIL: telemetry imports found (see above)"; exit 1)
+	@echo "=== Security audit complete ==="
