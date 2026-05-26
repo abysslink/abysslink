@@ -31,10 +31,10 @@ import (
 )
 
 const (
-	stopHookCommand    = `abysslink notify "Claude stopped" "Session ended"`
-	keychainService    = "abysslink"
-	keychainAccount    = "anthropic-api-key"
-	auditLogFilename   = "claudecode-audit.log"
+	stopHookCommand  = `abysslink notify "Claude stopped" "Session ended"`
+	keychainService  = "abysslink"
+	keychainAccount  = "anthropic-api-key"
+	auditLogFilename = "claudecode-audit.log"
 )
 
 // Module implements the claudecode optional module.
