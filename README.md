@@ -10,6 +10,124 @@ One Go binary. macOS + Linux. Free + open source. No telemetry, no SaaS, no paid
 
 ---
 
+## Why not just use Telegram / ngrok / Cloudflare Tunnel / VNC?
+
+Most "control my laptop remotely" setups fall into one of three failure modes:
+
+### The Telegram approach — convenient, broken by design
+
+People copy-paste terminal output into Telegram bots, pipe commands back in, and call it remote control. This works until it doesn't:
+
+- **Telegram sees every command you type and every output you paste.** Your API keys, database dumps, SSH private key fingerprints — all in Telegram's servers, indexed, associated with your phone number. One breach and it's gone.
+- **No real shell.** You're typing into a bot, not a terminal. No tab completion, no Ctrl-C, no job control, no interactive programs (vim, htop, psql, the Claude Code TUI).
+- **No persistence.** Your "session" dies the moment the bot loses the thread or the server restarts.
+- **Latency compounds.** Every keystroke: phone → Telegram server → bot server → your laptop → bot server → Telegram server → phone. You feel it.
+
+### The tunnel approach — public internet exposure
+
+ngrok, Cloudflare Tunnel, `ssh -R` reverse tunnels — all of these **punch a hole from your laptop to the public internet**. Your terminal is now reachable by anyone who can find the URL or brute-force the auth.
+
+- A misconfigured tunnel is a wide-open shell to a stranger.
+- Tunnel services are third-party infrastructure between you and your machine. They can be subpoenaed, breached, or discontinued.
+- Free tiers rate-limit or scan traffic. Paid tiers still see your traffic.
+
+### The VNC / RDP approach — latency, encryption theater
+
+Remote desktop over the internet requires either a VPN (good) or a public exposure (bad). Even with a VPN, VNC encrypts transport but sends raw pixel data — expensive on mobile, unusable on a degraded cell connection. And you're still relying on a third party (TeamViewer, AnyDesk, RealVNC) to broker the connection.
+
+---
+
+## How Abysslink is different
+
+### Mesh VPN — no public exposure, no third-party broker
+
+Abysslink runs over [Tailscale](https://tailscale.com), a WireGuard-based mesh VPN. Your phone and laptop talk **directly to each other** using WireGuard's end-to-end encryption. No server in the middle sees your traffic.
+
+```
+Phone ──WireGuard──▶ Laptop
+       (encrypted)
+  No Telegram. No ngrok. No cloud proxy.
+```
+
+Tailscale's coordination server only exchanges public keys — it never sees your traffic, commands, or output. If Tailscale's servers went offline tomorrow, your devices would continue to communicate directly.
+
+### Tailnet Lock — cryptographic device authorization
+
+Even within your tailnet, Abysslink enforces **Tailnet Lock**: every device that joins must be signed by a trusted key. An attacker who compromises your Tailscale account cannot silently add a rogue device — it won't be trusted by the other nodes unless it has a valid signature from your signing key.
+
+Disablement secrets are printed once to your terminal and never stored on disk or in any log.
+
+### Tagged ACLs — phone can reach laptop, nothing else
+
+Abysslink writes a minimal Tailscale ACL:
+
+```
+tag:mobile → tag:laptop  (tcp:22, udp:60000–61000, tcp:9867)
+```
+
+Your phone can SSH into your laptop and receive ntfy notifications. Your laptop cannot initiate connections to your phone. No other device in the tailnet can reach either. Tailscale Funnel (public internet exposure) is **permanently rejected** at the YAML schema level — you cannot accidentally enable it.
+
+### mosh + tmux — survives everything
+
+SSH drops when your phone roams from wifi to cell, goes to sleep, or loses signal. Abysslink pairs **mosh** (UDP roaming transport) with **tmux** (persistent sessions):
+
+- mosh reconnects silently when your IP changes — the session never dies
+- tmux persists even if mosh disconnects entirely — reconnect hours later and pick up exactly where you left off
+- tmux-resurrect restores your layout after a reboot
+
+You get the resilience of Eternal Terminal with the auditability of SSH.
+
+### Self-hosted push notifications — your server, your data
+
+Abysslink runs a self-hosted [ntfy](https://ntfy.sh) server bound **exclusively to your tailnet IP**. Notifications travel phone → ntfy server on your laptop → phone. No Telegram, no Pushover, no third-party notification service ever sees your notification content.
+
+```
+Your laptop (ntfy server, tailnet IP only)
+       │
+       │  WireGuard (encrypted)
+       ▼
+Your phone (ntfy app)
+```
+
+The ntfy admin password is stored in your OS keychain and never appears in any log or on any command-line argument.
+
+### Audit log + backup — every change is reversible
+
+Every file Abysslink touches gets a backup and a tamper-evident audit log entry (JSON-lines, hash of diff, no secret content). Undo any change:
+
+```bash
+abysslink backup restore 2026-01-15T14:30:00
+```
+
+Every command that mutates the system is dry-run by default. You see the plan; you type `--apply` to execute it.
+
+### Emergency kill switch
+
+```bash
+abysslink panic
+```
+
+No confirmation prompt. Within 10 seconds: Tailscale session torn down, auth keys revoked, ntfy notified. Then `abysslink repair` brings it back when you're ready.
+
+---
+
+## Threat model summary
+
+| Threat | Mitigation |
+|--------|-----------|
+| Stolen phone | Tailnet Lock — device keys are revocable; `abysslink panic` |
+| Stolen laptop | SSH key required + Tailscale auth; ntfy binds tailnet-only |
+| Compromised Tailscale account | Tailnet Lock: rogue devices can't join without your signing key |
+| Secrets leaked via logs | Audit log stores hashes only; `abysslink doctor` scans for leaks |
+| Unencrypted disk | `abysslink doctor` exits 2 (fatal) if FileVault/LUKS is off |
+| Supply-chain attack on Abysslink | cosign keyless signing; `abysslink upgrade` verifies before replacing |
+| Accidental public exposure | Tailscale Funnel rejected at schema level; ntfy never binds 0.0.0.0 |
+| Command injected via notification | ntfy is receive-only on phone; no command execution path |
+
+Full threat model: [docs/threat-model.md](docs/threat-model.md)
+
+---
+
 ## Install
 
 ```bash
