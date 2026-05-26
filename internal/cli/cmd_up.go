@@ -36,14 +36,14 @@ func newUpCmd() *cobra.Command {
 
 			p := newPrinter(cmd)
 
+			// Header.
 			if cc.dryRun {
-				printerInfo(p, "")
-				printerInfo(p, "  abysslink up  (dry-run — no changes made)")
-				printerInfo(p, "  To apply:  abysslink up --apply")
-				printerInfo(p, "")
+				header := styleBold.Render("abysslink up") + "  " + styleMuted.Render("dry-run · no changes made")
+				printerInfo(p, styleHeaderBox.Render(header))
+				printerInfo(p, styleMuted.Render("  Run with --apply to apply changes.")+"\n")
 			} else {
-				printerInfo(p, "")
-				printerInfo(p, "  abysslink up --apply")
+				header := styleBold.Render("abysslink up") + "  " + styleSuccess.Render("applying")
+				printerInfo(p, styleHeaderBox.Render(header))
 				printerInfo(p, "")
 			}
 
@@ -53,87 +53,98 @@ func newUpCmd() *cobra.Command {
 				return fmt.Errorf("up: %w", err)
 			}
 
-			actions, findings, err := r.Up(ctx, cc.dryRun)
+			actions, findings, runErr := r.Up(ctx, cc.dryRun)
 
-			// Print what was planned / applied.
-			printUpSummary(p, actions, findings, cc.dryRun)
-
-			// Print next-step guidance extracted from findings.
+			printUpTable(p, actions, findings, cc.dryRun)
 			printNextSteps(p, findings)
 
-			if err != nil {
-				return fmt.Errorf("up: %w", err)
+			if runErr != nil {
+				return fmt.Errorf("up: %w", runErr)
 			}
-
 			return nil
 		},
 	}
 }
 
-// printUpSummary renders a human-readable summary of actions and findings.
-func printUpSummary(p Printer, actions []modules.Action, findings []modules.Finding, dryRun bool) {
+// printUpTable renders per-module status rows.
+func printUpTable(p Printer, actions []modules.Action, findings []modules.Finding, dryRun bool) {
 	if len(actions) == 0 {
-		printerInfo(p, "  ✓  System is already converged — nothing to do.")
+		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("System is already converged — nothing to do."))
 		printerInfo(p, "")
 		return
 	}
 
-	// Group actions by module for compact display.
-	seen := map[string]bool{}
+	// Build a set of blocked modules (needs_login, sandboxed, etc.).
+	blocked := map[string]string{} // module → reason
+	for _, f := range findings {
+		switch f.Check {
+		case "needs_login":
+			blocked[f.Module] = "authentication required"
+		case "ssh_sandboxed":
+			blocked[f.Module] = "GUI build — Tailscale SSH unavailable"
+		case "installed":
+			blocked[f.Module] = "not installed — manual step required"
+		}
+	}
+
+	// Deduplicate actions per module.
+	seenModules := map[string]bool{}
+	seenDescriptions := map[string]bool{}
 	for _, a := range actions {
 		key := a.Module + "|" + a.Description
-		if seen[key] {
+		if seenDescriptions[key] {
 			continue
 		}
-		seen[key] = true
+		seenDescriptions[key] = true
 
-		var icon, verb string
+		mod := styleBold.Render(fmt.Sprintf("%-16s", a.Module))
+
 		if dryRun {
-			icon = "→"
-			verb = "will"
+			desc := styleMuted.Render(a.Description)
+			printerInfo(p, fmt.Sprintf("  %s  %s  %s", iconArrowStr(), mod, desc))
+		} else if reason, isBlocked := blocked[a.Module]; isBlocked {
+			if !seenModules[a.Module] {
+				seenModules[a.Module] = true
+				printerInfo(p, fmt.Sprintf("  %s  %s  %s",
+					iconWarnStr(), mod, styleWarn.Render(reason)))
+			}
 		} else {
-			// Check if a finding blocks this module (e.g. needs_login).
-			blocked := false
-			for _, f := range findings {
-				if f.Module == a.Module && (f.Check == "needs_login" || f.Check == "ssh_sandboxed") {
-					blocked = true
-					break
-				}
-			}
-			if blocked {
-				icon = "⚠"
-				verb = "skipped —"
-			} else {
-				icon = "✓"
-				verb = "done —"
-			}
+			desc := styleSuccess.Render(a.Description)
+			printerInfo(p, fmt.Sprintf("  %s  %s  %s", iconDoneStr(), mod, desc))
 		}
-		printerInfo(p, fmt.Sprintf("  %s  [%s]  %s %s", icon, a.Module, verb, a.Description))
 	}
 	printerInfo(p, "")
 
-	// Warnings and fatals from findings (deduplicated).
+	// Extra warnings (non-next-step).
 	seenMsg := map[string]bool{}
 	for _, f := range findings {
 		key := f.Module + "|" + f.Check
-		if seenMsg[key] {
+		if seenMsg[key] || isNextStepFinding(f) {
 			continue
 		}
 		seenMsg[key] = true
 		switch f.Severity {
 		case modules.SeverityFatal:
-			printerError(p, fmt.Sprintf("  ✕  FATAL [%s] %s", f.Module, f.Message))
+			printerInfo(p, fmt.Sprintf("  %s  %s  %s",
+				iconFatalStr(),
+				styleBold.Render(fmt.Sprintf("%-16s", f.Module)),
+				styleFatal.Render(f.Message)))
 		case modules.SeverityWarning:
-			if !isNextStepFinding(f) {
-				printerWarn(p, fmt.Sprintf("  ⚠  WARN  [%s] %s", f.Module, f.Message))
-			}
+			printerInfo(p, fmt.Sprintf("  %s  %s  %s",
+				iconWarnStr(),
+				styleBold.Render(fmt.Sprintf("%-16s", f.Module)),
+				styleWarn.Render(f.Message)))
 		}
 	}
 }
 
-// printNextSteps prints a "Next steps" block for findings that require manual action.
+// printNextSteps prints a styled box for findings that require manual action.
 func printNextSteps(p Printer, findings []modules.Finding) {
-	var steps []string
+	type step struct {
+		title string
+		lines []string
+	}
+	var steps []step
 	seen := map[string]bool{}
 
 	for _, f := range findings {
@@ -144,28 +155,38 @@ func printNextSteps(p Printer, findings []modules.Finding) {
 
 		switch f.Check {
 		case "needs_login":
-			steps = append(steps,
-				"1. Log in to Tailscale:",
-				"      tailscale login",
-				"   (Opens a browser — authenticate, then return to the terminal.)",
-				"",
-				"2. Re-run:",
-				"      abysslink up --apply",
-			)
+			steps = append(steps, step{
+				title: styleWarn.Render("Tailscale needs authentication"),
+				lines: []string{
+					"Run:",
+					"  " + styleCode.Render("tailscale login"),
+					"",
+					"A browser will open. Authenticate, then come back and run:",
+					"  " + styleCode.Render("abysslink up --apply"),
+				},
+			})
 		case "ssh_sandboxed":
-			steps = append(steps,
-				"• Tailscale SSH requires the CLI build (not the App Store version).",
-				"  Install it:",
-				"      brew install tailscale",
-				"  Then re-run:",
-				"      abysslink up --apply",
-			)
-		case "installed":
-			if strings.Contains(f.Module, "tailscale") {
-				steps = append(steps,
-					"• Tailscale is not installed. Install from: https://tailscale.com/download",
-				)
-			}
+			steps = append(steps, step{
+				title: styleWarn.Render("Tailscale SSH requires the CLI build"),
+				lines: []string{
+					"The App Store / GUI version of Tailscale is sandboxed and",
+					"cannot run the SSH server. Install the CLI version:",
+					"  " + styleCode.Render("brew install tailscale"),
+					"",
+					"Then re-run:",
+					"  " + styleCode.Render("abysslink up --apply"),
+				},
+			})
+		}
+
+		if strings.Contains(f.Module, "tailscale") && f.Check == "installed" {
+			steps = append(steps, step{
+				title: styleWarn.Render("Tailscale is not installed"),
+				lines: []string{
+					"Install from: " + styleCode.Render("https://tailscale.com/download"),
+					"Then re-run: " + styleCode.Render("abysslink up --apply"),
+				},
+			})
 		}
 	}
 
@@ -173,16 +194,23 @@ func printNextSteps(p Printer, findings []modules.Finding) {
 		return
 	}
 
-	printerInfo(p, "  ┌─ Next steps ────────────────────────────────────────┐")
-	for _, s := range steps {
-		printerInfo(p, "  │  "+s)
+	var sb strings.Builder
+	sb.WriteString(styleBold.Render("Next steps") + "\n\n")
+	for i, s := range steps {
+		sb.WriteString(s.title + "\n\n")
+		for _, l := range s.lines {
+			sb.WriteString(l + "\n")
+		}
+		if i < len(steps)-1 {
+			sb.WriteString("\n" + styleMuted.Render(strings.Repeat("─", 48)) + "\n\n")
+		}
 	}
-	printerInfo(p, "  └────────────────────────────────────────────────────┘")
+
+	printerInfo(p, styleNextStepBox.Render(strings.TrimRight(sb.String(), "\n")))
 	printerInfo(p, "")
 }
 
-// isNextStepFinding returns true for findings handled by printNextSteps
-// (so they're not double-printed in the warnings block).
+// isNextStepFinding returns true for findings rendered in the next-steps box.
 func isNextStepFinding(f modules.Finding) bool {
 	switch f.Check {
 	case "needs_login", "ssh_sandboxed":

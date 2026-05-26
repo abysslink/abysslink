@@ -97,9 +97,6 @@ func newPrinter(cmd *cobra.Command) Printer {
 // printerInfo calls p.Print for informational messages.
 func printerInfo(p Printer, msg string) { p.Print(msg) }
 
-// printerWarn calls p.Print with a WARN prefix.
-func printerWarn(p Printer, msg string) { p.Print(msg) }
-
 // printerError calls p.Error.
 func printerError(p Printer, msg string) { p.Error(msg) }
 

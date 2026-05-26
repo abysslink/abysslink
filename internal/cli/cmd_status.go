@@ -52,7 +52,6 @@ func newStatusCmd() *cobra.Command {
 			r := cc.runner
 			tsClient := tslocal.NewLocalClient(r)
 
-			// Gather Tailscale status — best-effort, never fatal.
 			tsRunning := "not running"
 			tsIP := ""
 			hostname := ""
@@ -72,25 +71,21 @@ func newStatusCmd() *cobra.Command {
 				}
 			}
 
-			// Tailscale SSH — inferred from config.
 			tsSSH := "disabled"
 			if cc.cfg.Tailnet.SSH {
 				tsSSH = "enabled"
 			}
 
-			// Tailnet Lock — inferred from config.
 			lockStatus := "disabled"
 			if cc.cfg.Tailnet.Lock.Enabled {
 				lockStatus = "enabled"
 			}
 
-			// ntfy — quick port check via config.
 			ntfyStatus := "disabled"
 			if cc.cfg.Modules.Ntfy.Enabled {
-				ntfyStatus = "enabled (check with: abysslink doctor)"
+				ntfyStatus = "enabled"
 			}
 
-			// Disk encryption — platform-specific.
 			diskEncrypt := diskEncryptionStatus()
 
 			rep := statusReport{
@@ -112,8 +107,7 @@ func newStatusCmd() *cobra.Command {
 				return nil
 			}
 
-			// Human-readable box.
-			printStatusBox(p, rep)
+			printStatusPanel(p, rep)
 			return nil
 		},
 	}
@@ -123,47 +117,53 @@ func newStatusCmd() *cobra.Command {
 func diskEncryptionStatus() string {
 	switch runtime.GOOS {
 	case "darwin":
-		// On macOS check FileVault status via fdesetup.
-		// We cannot call shell here (no runner), so report config intent.
-		return "check: run abysslink doctor"
+		return "run: abysslink doctor"
 	case "linux":
-		return "check: run abysslink doctor"
+		return "run: abysslink doctor"
 	default:
 		return "unknown"
 	}
 }
 
-// printStatusBox renders the one-screen status summary.
-func printStatusBox(p Printer, rep statusReport) {
-	icon := func(s string) string {
-		if s == "running" || s == "enabled" || s == "encrypted" {
-			return "●"
-		}
-		return "✕"
+// statusRow renders one row of the status panel.
+func statusRow(label, value string, ok bool) string {
+	var icon string
+	if ok {
+		icon = iconOKStr()
+	} else {
+		icon = iconFatalStr()
+	}
+	lbl := styleMuted.Render(fmt.Sprintf("%-18s", label))
+	return fmt.Sprintf("  %s  %s  %s", icon, lbl, styleBold.Render(value))
+}
+
+// printStatusPanel renders the styled status box.
+func printStatusPanel(p Printer, rep statusReport) {
+	isOK := func(s string) bool {
+		return s == "running" || s == "enabled" || s == "encrypted"
 	}
 
-	hostnameLabel := ""
+	hostnameLabel := rep.Tailscale
 	if rep.Hostname != "" || rep.TailscaleIP != "" {
 		parts := []string{}
 		if rep.Hostname != "" {
 			parts = append(parts, rep.Hostname)
 		}
 		if rep.TailscaleIP != "" {
-			parts = append(parts, rep.TailscaleIP)
+			parts = append(parts, styleMuted.Render(rep.TailscaleIP))
 		}
-		hostnameLabel = " (" + strings.Join(parts, " / ") + ")"
+		hostnameLabel += "  " + styleMuted.Render("("+strings.Join(parts, " · ")+")")
 	}
 
-	row := func(label, ico, value string) string {
-		return fmt.Sprintf("  %-16s  %s  %s", label, ico, value)
-	}
+	var sb strings.Builder
+	sb.WriteString(styleBold.Render("Abysslink Status") + "\n\n")
+	sb.WriteString(statusRow("Tailscale", hostnameLabel, isOK(rep.Tailscale)) + "\n")
+	sb.WriteString(statusRow("Tailscale SSH", rep.TailscaleSSH, isOK(rep.TailscaleSSH)) + "\n")
+	sb.WriteString(statusRow("Tailnet Lock", rep.TailnetLock, isOK(rep.TailnetLock)) + "\n")
+	sb.WriteString(statusRow("ntfy", rep.Ntfy, isOK(rep.Ntfy)) + "\n")
+	sb.WriteString(statusRow("Disk Encryption", rep.DiskEncrypt, isOK(rep.DiskEncrypt)) + "\n")
+	sb.WriteString("\n" + styleMuted.Render(rep.Timestamp))
 
-	printerInfo(p, "┌─ Abysslink Status ──────────────────────────────┐")
-	printerInfo(p, "│"+row("Tailscale", icon(rep.Tailscale), rep.Tailscale+hostnameLabel)+"")
-	printerInfo(p, "│"+row("Tailscale SSH", icon(rep.TailscaleSSH), rep.TailscaleSSH)+"")
-	printerInfo(p, "│"+row("Tailnet Lock", icon(rep.TailnetLock), rep.TailnetLock)+"")
-	printerInfo(p, "│"+row("ntfy", icon(rep.Ntfy), rep.Ntfy)+"")
-	printerInfo(p, "│"+row("Disk Encryption", icon(rep.DiskEncrypt), rep.DiskEncrypt)+"")
-	printerInfo(p, "│"+fmt.Sprintf("  %-16s     %s", "Timestamp", rep.Timestamp)+"")
-	printerInfo(p, "└─────────────────────────────────────────────────┘")
+	printerInfo(p, styleStatusBox.Render(strings.TrimRight(sb.String(), "\n")))
+	printerInfo(p, "")
 }
