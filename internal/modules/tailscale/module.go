@@ -100,9 +100,13 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	}
 
 	if status.BackendState != "Running" {
+		check := "running"
+		if status.BackendState == "NeedsLogin" {
+			check = "needs_login"
+		}
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
-			Check:    "running",
+			Check:    check,
 			Severity: modules.SeverityWarning,
 			Message:  fmt.Sprintf("tailscale backend state is %q (expected Running)", status.BackendState),
 		})
@@ -151,6 +155,12 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
 				Description: "install tailscale",
+				Reversible:  false,
+			})
+		case "needs_login":
+			actions = append(actions, modules.Action{
+				Module:      m.Name(),
+				Description: "ACTION REQUIRED: run `tailscale login` to authenticate (opens browser), then re-run `abysslink up --apply`",
 				Reversible:  false,
 			})
 		case "running":
@@ -207,6 +217,9 @@ func (m *Module) Apply(ctx context.Context) error {
 		switch f.Check {
 		case "installed":
 			return fmt.Errorf("tailscale apply: tailscale is not installed; install it from https://tailscale.com/download and re-run")
+		case "needs_login":
+			slog.Warn("tailscale apply: not logged in — run `tailscale login` to authenticate (opens browser), then re-run `abysslink up --apply`")
+			return nil
 		case "ssh_sandboxed":
 			slog.Warn("tailscale apply: skipping --ssh flag — sandboxed GUI build does not support Tailscale SSH; install CLI: brew install tailscale")
 		case "running":
