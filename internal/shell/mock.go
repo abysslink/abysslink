@@ -32,7 +32,8 @@ type Call struct {
 }
 
 // MockRunner replays pre-scripted Calls in order. Tests use this to avoid
-// executing real processes.
+// executing real processes. After replay, RecordedCalls returns each call
+// enriched with the actual Name and Args that were passed to Run.
 type MockRunner struct {
 	mu    sync.Mutex
 	calls []Call
@@ -45,7 +46,8 @@ func NewMockRunner(calls ...Call) *MockRunner {
 }
 
 // Run returns the next scripted Call result. It returns an error if more calls
-// are made than were scripted.
+// are made than were scripted. The actual name and args are stored in the call
+// record so they can be inspected via RecordedCalls.
 func (m *MockRunner) Run(_ context.Context, name string, args ...string) (Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -53,13 +55,17 @@ func (m *MockRunner) Run(_ context.Context, name string, args ...string) (Result
 		return Result{}, fmt.Errorf("shell: unexpected call %d: %s %v", m.idx, name, args)
 	}
 	c := m.calls[m.idx]
+	// Record the actual name and args for later inspection.
+	m.calls[m.idx].Name = name
+	m.calls[m.idx].Args = args
 	m.idx++
 	return c.Result, c.Err
 }
 
 // RunWithStdin returns the next scripted Call result, reading the stdin content
 // for later assertion via RecordedCalls. It behaves identically to Run for
-// scripted result replay but also stores the stdin bytes in the recorded call.
+// scripted result replay but also stores the actual name, args, and stdin bytes
+// in the recorded call.
 func (m *MockRunner) RunWithStdin(_ context.Context, stdin io.Reader, name string, args ...string) (Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -67,6 +73,9 @@ func (m *MockRunner) RunWithStdin(_ context.Context, stdin io.Reader, name strin
 		return Result{}, fmt.Errorf("shell: unexpected call %d (RunWithStdin): %s %v", m.idx, name, args)
 	}
 	c := m.calls[m.idx]
+	// Record the actual name and args for later inspection.
+	m.calls[m.idx].Name = name
+	m.calls[m.idx].Args = args
 	m.idx++
 
 	if stdin != nil {
