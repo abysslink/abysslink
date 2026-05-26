@@ -18,6 +18,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/spf13/cobra"
@@ -35,6 +36,11 @@ func newDoctorCmd() *cobra.Command {
 			}
 
 			p := newPrinter(cmd)
+
+			header := styleBold.Render("abysslink doctor") + "  " + styleMuted.Render("health check")
+			printerInfo(p, styleHeaderBox.Render(header))
+			printerInfo(p, "")
+
 			mods := allModules(cc.runner, cc.cfg)
 			r, err := modules.NewRunner(mods, cc.cfg)
 			if err != nil {
@@ -49,30 +55,54 @@ func newDoctorCmd() *cobra.Command {
 			hasFatal := false
 			hasWarn := false
 
-			for _, f := range findings {
-				switch f.Severity {
-				case modules.SeverityOK:
-					printerInfo(p, fmt.Sprintf("  OK    [%s] %s", f.Module, f.Check))
-				case modules.SeverityWarning:
-					hasWarn = true
-					printerWarn(p, fmt.Sprintf("  WARN  [%s] %s: %s", f.Module, f.Check, f.Message))
-				case modules.SeverityFatal:
-					hasFatal = true
-					printerError(p, fmt.Sprintf("  FATAL [%s] %s: %s", f.Module, f.Check, f.Message))
-				}
-			}
-
 			if len(findings) == 0 {
-				printerInfo(p, "All checks passed.")
+				printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("All checks passed. System is healthy."))
+				printerInfo(p, "")
 				return nil
 			}
 
+			// Group findings by module.
+			seenMod := map[string]bool{}
+			for _, f := range findings {
+				if !seenMod[f.Module] {
+					seenMod[f.Module] = true
+					printerInfo(p, styleMuted.Render("  "+strings.Repeat("─", 50)))
+					printerInfo(p, "  "+styleBold.Render(f.Module))
+				}
+
+				switch f.Severity {
+				case modules.SeverityOK:
+					printerInfo(p, fmt.Sprintf("    %s  %s",
+						iconDoneStr(),
+						styleMuted.Render(f.Check)))
+				case modules.SeverityWarning:
+					hasWarn = true
+					printerInfo(p, fmt.Sprintf("    %s  %s\n       %s",
+						iconWarnStr(),
+						styleWarn.Render(f.Check),
+						styleMuted.Render(f.Message)))
+				case modules.SeverityFatal:
+					hasFatal = true
+					printerInfo(p, fmt.Sprintf("    %s  %s\n       %s",
+						iconFatalStr(),
+						styleFatal.Render(f.Check),
+						f.Message))
+				}
+			}
+
+			printerInfo(p, styleMuted.Render("  "+strings.Repeat("─", 50)))
+			printerInfo(p, "")
+
 			if hasFatal {
-				printerError(p, "doctor: fatal issues found — system is not safe")
+				printerInfo(p, "  "+iconFatalStr()+"  "+styleFatal.Render("Fatal issues found — system is not safe."))
+				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair"))
+				printerInfo(p, "")
 				os.Exit(2)
 			}
 			if hasWarn {
-				printerWarn(p, "doctor: warnings found — review the above")
+				printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("Warnings found — review the issues above."))
+				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair"))
+				printerInfo(p, "")
 				os.Exit(1)
 			}
 			return nil
