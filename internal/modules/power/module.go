@@ -124,8 +124,32 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 }
 
 // Apply executes planned changes.
-func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("power module: apply not yet implemented")
+func (m *Module) Apply(ctx context.Context) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return m.applyDarwin(ctx)
+	case "linux":
+		slog.Info("power apply: Linux — no automatic power changes; configure systemd-inhibit manually")
+		return nil
+	default:
+		return nil
+	}
+}
+
+// applyDarwin applies macOS sleep settings via pmset.
+func (m *Module) applyDarwin(ctx context.Context) error {
+	if m.cfg.Power.ClosedLidAC != "keep-awake" {
+		return nil
+	}
+	slog.Info("power apply: setting pmset -c sleep 0 disksleep 0")
+	res, err := m.runner.Run(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0")
+	if err != nil {
+		return fmt.Errorf("power apply: pmset: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("power apply: pmset exited %d: %s", res.ExitCode, res.Stderr)
+	}
+	return nil
 }
 
 // Verify re-runs Detect.

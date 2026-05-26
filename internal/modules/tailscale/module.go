@@ -179,8 +179,73 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 }
 
 // Apply executes planned changes.
-func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("tailscale module: apply not yet implemented — use tailscale CLI directly")
+func (m *Module) Apply(ctx context.Context) error {
+	findings, err := m.Detect(ctx)
+	if err != nil {
+		return fmt.Errorf("tailscale apply: detect: %w", err)
+	}
+
+	for _, f := range findings {
+		switch f.Check {
+		case "installed":
+			return fmt.Errorf("tailscale apply: tailscale is not installed; install it from https://tailscale.com/download and re-run")
+		case "running":
+			args := []string{"up"}
+			if m.cfg.Tailnet.SSH {
+				args = append(args, "--ssh")
+			}
+			if m.cfg.Tailnet.Hostname != "" {
+				args = append(args, "--hostname="+m.cfg.Tailnet.Hostname)
+			}
+			slog.Info("tailscale apply: running tailscale up", "args", args)
+			res, err := m.runner.Run(ctx, "tailscale", args...)
+			if err != nil {
+				return fmt.Errorf("tailscale apply: tailscale up: %w", err)
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("tailscale apply: tailscale up exited %d: %s", res.ExitCode, res.Stderr)
+			}
+		case "ssh":
+			args := []string{"up", "--ssh"}
+			if m.cfg.Tailnet.Hostname != "" {
+				args = append(args, "--hostname="+m.cfg.Tailnet.Hostname)
+			}
+			slog.Info("tailscale apply: enabling tailscale SSH", "args", args)
+			res, err := m.runner.Run(ctx, "tailscale", args...)
+			if err != nil {
+				return fmt.Errorf("tailscale apply: enable SSH: %w", err)
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("tailscale apply: enable SSH exited %d: %s", res.ExitCode, res.Stderr)
+			}
+		}
+	}
+
+	// Set hostname if configured and currently different.
+	if m.cfg.Tailnet.Hostname != "" {
+		statusRes, err := m.runner.Run(ctx, "tailscale", "status", "--json")
+		if err == nil && statusRes.ExitCode == 0 {
+			var st struct {
+				Self struct {
+					HostName string `json:"HostName"`
+				} `json:"Self"`
+			}
+			if json.Unmarshal([]byte(statusRes.Stdout), &st) == nil {
+				if st.Self.HostName != "" && st.Self.HostName != m.cfg.Tailnet.Hostname {
+					slog.Info("tailscale apply: setting hostname", "hostname", m.cfg.Tailnet.Hostname)
+					res, err := m.runner.Run(ctx, "tailscale", "set", "--hostname="+m.cfg.Tailnet.Hostname)
+					if err != nil {
+						return fmt.Errorf("tailscale apply: set hostname: %w", err)
+					}
+					if res.ExitCode != 0 {
+						return fmt.Errorf("tailscale apply: set hostname exited %d: %s", res.ExitCode, res.Stderr)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // Verify re-runs Detect and returns findings.
