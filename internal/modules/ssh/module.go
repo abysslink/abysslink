@@ -157,8 +157,41 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 }
 
 // Apply executes planned changes.
-func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("ssh module: apply not yet implemented")
+func (m *Module) Apply(ctx context.Context) error {
+	if !m.cfg.Modules.SSH.Enabled {
+		return nil
+	}
+
+	findings, err := m.Detect(ctx)
+	if err != nil {
+		return fmt.Errorf("ssh apply: detect: %w", err)
+	}
+
+	for _, f := range findings {
+		switch f.Check {
+		case "remote_login":
+			// Disable macOS Remote Login — Tailscale SSH handles auth.
+			slog.Info("ssh apply: disabling macOS Remote Login")
+			res, err := m.runner.Run(ctx, "sudo", "systemsetup", "-setremotelogin", "off")
+			if err != nil {
+				return fmt.Errorf("ssh apply: disable remote login: %w", err)
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("ssh apply: disable remote login exited %d: %s", res.ExitCode, res.Stderr)
+			}
+		case "sshd_running":
+			// Stop and disable sshd on Linux — Tailscale SSH handles auth.
+			slog.Info("ssh apply: stopping sshd (Tailscale SSH mode)")
+			for _, unit := range []string{"sshd", "ssh"} {
+				res, err := m.runner.Run(ctx, "sudo", "systemctl", "disable", "--now", unit)
+				if err == nil && res.ExitCode == 0 {
+					break
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // Verify re-runs Detect.

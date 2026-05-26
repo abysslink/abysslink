@@ -19,6 +19,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -157,9 +160,103 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
+// tmuxConf is the abysslink-managed tmux configuration block.
+const tmuxConf = `# --- abysslink managed ---
+set -g mouse on
+set -g history-limit 50000
+set -g default-terminal "screen-256color"
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+# Resurrect
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
+set -g @continuum-restore 'on'
+run '~/.tmux/plugins/tpm/tpm'
+# --- end abysslink managed ---
+`
+
 // Apply executes planned changes.
-func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("tmux module: apply not yet implemented")
+func (m *Module) Apply(ctx context.Context) error {
+	findings, err := m.Detect(ctx)
+	if err != nil {
+		return fmt.Errorf("tmux apply: detect: %w", err)
+	}
+
+	for _, f := range findings {
+		if f.Check == "installed" || f.Check == "version" {
+			if err := m.installTmux(ctx); err != nil {
+				return err
+			}
+		}
+	}
+
+	if m.cfg.Modules.Tmux.Enabled {
+		if err := m.writeTmuxConf(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// installTmux installs tmux via the platform package manager.
+func (m *Module) installTmux(ctx context.Context) error {
+	slog.Info("tmux apply: installing tmux")
+	switch runtime.GOOS {
+	case "darwin":
+		res, err := m.runner.Run(ctx, "brew", "install", "tmux")
+		if err != nil {
+			return fmt.Errorf("tmux apply: brew install tmux: %w", err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("tmux apply: brew install tmux exited %d: %s", res.ExitCode, res.Stderr)
+		}
+	case "linux":
+		// Try apt, then dnf, then pacman.
+		for _, args := range [][]string{
+			{"apt-get", "install", "-y", "tmux"},
+			{"dnf", "install", "-y", "tmux"},
+			{"pacman", "-Sy", "--noconfirm", "tmux"},
+		} {
+			res, err := m.runner.Run(ctx, "sudo", args...)
+			if err == nil && res.ExitCode == 0 {
+				return nil
+			}
+		}
+		return fmt.Errorf("tmux apply: could not install tmux — no supported package manager found")
+	default:
+		return fmt.Errorf("tmux apply: unsupported OS %q", runtime.GOOS)
+	}
+	return nil
+}
+
+// writeTmuxConf writes the managed tmux.conf block if not already present.
+func (m *Module) writeTmuxConf() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("tmux apply: home dir: %w", err)
+	}
+	confPath := filepath.Join(home, ".tmux.conf")
+
+	existing, _ := os.ReadFile(confPath) //nolint:gosec // user home path
+	if strings.Contains(string(existing), "abysslink managed") {
+		slog.Debug("tmux apply: ~/.tmux.conf already has abysslink block, skipping")
+		return nil
+	}
+
+	slog.Info("tmux apply: writing ~/.tmux.conf")
+	content := string(existing)
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += "\n" + tmuxConf
+
+	if err := os.WriteFile(confPath, []byte(content), 0o600); err != nil { //nolint:gosec // confPath is filepath.Join(home, ".tmux.conf")
+		return fmt.Errorf("tmux apply: write ~/.tmux.conf: %w", err)
+	}
+	return nil
 }
 
 // Verify re-runs Detect.
