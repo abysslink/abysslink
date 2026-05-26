@@ -18,6 +18,7 @@ package shell
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 )
 
@@ -25,6 +26,7 @@ import (
 type Call struct {
 	Name   string
 	Args   []string
+	Stdin  string // captured stdin content from RunWithStdin (empty for Run calls)
 	Result Result
 	Err    error
 }
@@ -53,6 +55,38 @@ func (m *MockRunner) Run(_ context.Context, name string, args ...string) (Result
 	c := m.calls[m.idx]
 	m.idx++
 	return c.Result, c.Err
+}
+
+// RunWithStdin returns the next scripted Call result, reading the stdin content
+// for later assertion via RecordedCalls. It behaves identically to Run for
+// scripted result replay but also stores the stdin bytes in the recorded call.
+func (m *MockRunner) RunWithStdin(_ context.Context, stdin io.Reader, name string, args ...string) (Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.idx >= len(m.calls) {
+		return Result{}, fmt.Errorf("shell: unexpected call %d (RunWithStdin): %s %v", m.idx, name, args)
+	}
+	c := m.calls[m.idx]
+	m.idx++
+
+	if stdin != nil {
+		data, _ := io.ReadAll(stdin)
+		c.Stdin = string(data)
+		// store the captured stdin back in the calls slice so callers can inspect it
+		m.calls[m.idx-1].Stdin = c.Stdin
+	}
+
+	return c.Result, c.Err
+}
+
+// RecordedCalls returns a snapshot of all calls as consumed so far, including
+// any stdin content captured by RunWithStdin.
+func (m *MockRunner) RecordedCalls() []Call {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Call, m.idx)
+	copy(out, m.calls[:m.idx])
+	return out
 }
 
 // Done reports whether all scripted calls were consumed.

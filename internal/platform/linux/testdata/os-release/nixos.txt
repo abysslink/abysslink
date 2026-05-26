@@ -1,0 +1,2 @@
+ID=nixos
+VERSION_ID="23.05"

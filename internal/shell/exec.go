@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os/exec"
 )
 
@@ -33,6 +34,34 @@ type ExecRunner struct{}
 func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
 	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return Result{
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String(),
+				ExitCode: exitErr.ExitCode(),
+			}, nil
+		}
+		return Result{}, err
+	}
+	return Result{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: 0,
+	}, nil
+}
+
+// RunWithStdin executes name with args, wiring stdin to the provided reader.
+// Use this to deliver secrets to a process without placing them on argv.
+func (r *ExecRunner) RunWithStdin(ctx context.Context, stdin io.Reader, name string, args ...string) (Result, error) {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
+	var stdout, stderr bytes.Buffer
+	cmd.Stdin = stdin
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
