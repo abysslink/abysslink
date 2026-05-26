@@ -1,0 +1,194 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abysslink Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package modules_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// fakeModule is a test double for Module that records call counts.
+type fakeModule struct {
+	name     string
+	deps     []string
+	findings []modules.Finding
+	actions  []modules.Action
+	applyErr error
+
+	detectCalls int
+	planCalls   int
+	applyCalls  int
+	verifyCalls int
+
+	// executionOrder records when this module's Apply was called relative to others.
+	executionOrder *[]string
+}
+
+func (f *fakeModule) Name() string { return f.name }
+func (f *fakeModule) Deps() []string {
+	if f.deps == nil {
+		return []string{}
+	}
+	return f.deps
+}
+func (f *fakeModule) Detect(_ context.Context) ([]modules.Finding, error) {
+	f.detectCalls++
+	return f.findings, nil
+}
+func (f *fakeModule) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
+	f.planCalls++
+	return f.actions, nil
+}
+func (f *fakeModule) Apply(_ context.Context) error {
+	f.applyCalls++
+	if f.executionOrder != nil {
+		*f.executionOrder = append(*f.executionOrder, f.name)
+	}
+	return f.applyErr
+}
+func (f *fakeModule) Verify(_ context.Context) ([]modules.Finding, error) {
+	f.verifyCalls++
+	return f.findings, nil
+}
+func (f *fakeModule) Repair(_ context.Context) error { return nil }
+
+func minimalCfg() *config.Config {
+	return config.Defaults()
+}
+
+func TestRunner_DryRun(t *testing.T) {
+	m := &fakeModule{
+		name: "dry-mod",
+		actions: []modules.Action{
+			{Module: "dry-mod", Description: "do something", Reversible: true},
+		},
+	}
+	runner, err := modules.NewRunner([]modules.Module{m}, minimalCfg())
+	require.NoError(t, err)
+
+	actions, findings, err := runner.Up(context.Background(), true /* dryRun */)
+	require.NoError(t, err)
+
+	// Apply must NOT have been called in dry-run mode.
+	assert.Equal(t, 0, m.applyCalls, "Apply must not be called during dry-run")
+	assert.Equal(t, 1, m.planCalls, "Plan must be called")
+	assert.Equal(t, 1, m.detectCalls, "Detect must be called")
+	assert.Equal(t, 1, m.verifyCalls, "Verify must be called")
+	assert.Len(t, actions, 1)
+	_ = findings
+}
+
+func TestRunner_Apply(t *testing.T) {
+	m := &fakeModule{
+		name: "apply-mod",
+		actions: []modules.Action{
+			{Module: "apply-mod", Description: "install thing"},
+		},
+	}
+	runner, err := modules.NewRunner([]modules.Module{m}, minimalCfg())
+	require.NoError(t, err)
+
+	_, _, err = runner.Up(context.Background(), false /* dryRun */)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, m.applyCalls, "Apply must be called when not dry-run")
+}
+
+func TestRunner_ContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// A module that cancels the context during Detect so we verify Up stops cleanly.
+	cancelMod := &fakeModule{name: "cancel-mod"}
+	second := &fakeModule{name: "second-mod"}
+
+	// Wrap cancelMod in a Module that cancels context on Detect.
+	cancellingMod := &cancelOnDetect{fakeModule: cancelMod, cancel: cancel}
+
+	runner, err := modules.NewRunner([]modules.Module{cancellingMod, second}, minimalCfg())
+	require.NoError(t, err)
+
+	_, _, err = runner.Up(ctx, false)
+	// Must return a context error.
+	assert.ErrorIs(t, err, context.Canceled)
+	// The second module must not have been touched.
+	assert.Equal(t, 0, second.detectCalls, "second module must not have been reached")
+}
+
+// cancelOnDetect wraps a fakeModule and cancels the context during Detect.
+type cancelOnDetect struct {
+	*fakeModule
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnDetect) Detect(ctx context.Context) ([]modules.Finding, error) {
+	c.cancel()
+	// After cancellation, return normally — the runner checks ctx.Done() between steps.
+	return c.fakeModule.Detect(ctx)
+}
+
+func TestRunner_DependencyOrder(t *testing.T) {
+	order := &[]string{}
+
+	leaf := &fakeModule{
+		name:           "leaf",
+		actions:        []modules.Action{{Module: "leaf", Description: "leaf action"}},
+		executionOrder: order,
+	}
+	dependent := &fakeModule{
+		name:           "dependent",
+		deps:           []string{"leaf"},
+		actions:        []modules.Action{{Module: "dependent", Description: "dep action"}},
+		executionOrder: order,
+	}
+
+	runner, err := modules.NewRunner([]modules.Module{dependent, leaf}, minimalCfg())
+	require.NoError(t, err)
+
+	_, _, err = runner.Up(context.Background(), false)
+	require.NoError(t, err)
+
+	require.Len(t, *order, 2)
+	assert.Equal(t, "leaf", (*order)[0], "leaf must be applied before dependent")
+	assert.Equal(t, "dependent", (*order)[1])
+}
+
+func TestRunner_Doctor(t *testing.T) {
+	f1 := modules.Finding{Module: "m1", Check: "check-a", Severity: modules.SeverityOK, Message: "all good"}
+	f2 := modules.Finding{Module: "m2", Check: "check-b", Severity: modules.SeverityWarning, Message: "hmm"}
+
+	m1 := &fakeModule{name: "m1", findings: []modules.Finding{f1}}
+	m2 := &fakeModule{name: "m2", findings: []modules.Finding{f2}}
+
+	runner, err := modules.NewRunner([]modules.Module{m1, m2}, minimalCfg())
+	require.NoError(t, err)
+
+	findings, err := runner.Doctor(context.Background())
+	require.NoError(t, err)
+
+	// Doctor calls both Detect and Verify, so each module contributes 2 findings
+	// (findings slice is returned from both Detect and Verify on fakeModule).
+	assert.Equal(t, 1, m1.detectCalls)
+	assert.Equal(t, 1, m1.verifyCalls)
+	assert.Equal(t, 1, m2.detectCalls)
+	assert.Equal(t, 1, m2.verifyCalls)
+	// Each module's finding appears twice (once from Detect, once from Verify).
+	assert.Len(t, findings, 4)
+}

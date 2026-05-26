@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abysslink Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ntfy
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/shell"
+)
+
+const (
+	serverConfigPath = ".config/ntfy/server.yml"
+	ntfyPort         = "8080"
+)
+
+// Module implements the ntfy module.
+type Module struct {
+	runner shell.Runner
+	cfg    *config.Config
+}
+
+// New returns a new Module.
+func New(runner shell.Runner, cfg *config.Config) *Module {
+	return &Module{runner: runner, cfg: cfg}
+}
+
+// Name returns the module name.
+func (m *Module) Name() string { return "ntfy" }
+
+// Deps returns the module's dependencies.
+func (m *Module) Deps() []string { return []string{"tailscale"} }
+
+// Detect checks whether ntfy is installed and configured correctly.
+func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
+	var findings []modules.Finding
+
+	// Check if ntfy is installed.
+	res, err := m.runner.Run(ctx, "ntfy", "version")
+	if err != nil || res.ExitCode != 0 {
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "installed",
+			Severity: modules.SeverityFatal,
+			Message:  "ntfy is not installed or not on PATH",
+		})
+		return findings, nil
+	}
+	slog.Debug("ntfy version", "output", strings.TrimSpace(res.Stdout))
+
+	// Check if server config exists.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return findings, fmt.Errorf("ntfy detect: get home dir: %w", err)
+	}
+	cfgPath := filepath.Join(home, serverConfigPath)
+
+	data, err := os.ReadFile(cfgPath) //nolint:gosec
+	if err != nil {
+		if os.IsNotExist(err) {
+			findings = append(findings, modules.Finding{
+				Module:   m.Name(),
+				Check:    "config_exists",
+				Severity: modules.SeverityWarning,
+				Message:  fmt.Sprintf("ntfy server config not found at %s", cfgPath),
+			})
+			return findings, nil
+		}
+		return findings, fmt.Errorf("ntfy detect: read config: %w", err)
+	}
+
+	// Security check: verify the listen address does NOT bind to 0.0.0.0.
+	cfgContent := string(data)
+	if strings.Contains(cfgContent, "0.0.0.0") || hasWildcardListen(cfgContent) {
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "listen_address",
+			Severity: modules.SeverityFatal,
+			Message:  "ntfy server.yml binds to 0.0.0.0 — must bind to tailnet IP only",
+		})
+	}
+
+	return findings, nil
+}
+
+// hasWildcardListen returns true if the config contains a listen-http line with just a port (":8080").
+func hasWildcardListen(cfgContent string) bool {
+	for _, line := range strings.Split(cfgContent, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "listen-http:") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "listen-http:"))
+			val = strings.Trim(val, `"'`)
+			// A value like ":8080" (no host) binds to all interfaces.
+			if strings.HasPrefix(val, ":") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// generateServerConfig returns the ntfy server.yml contents bound to tailnetIP.
+func (m *Module) generateServerConfig(tailnetIP string) []byte {
+	home := os.Getenv("HOME")
+	return []byte(fmt.Sprintf(`# ntfy server config — managed by abysslink
+listen-http: "%s:%s"
+base-url: "http://%s:%s"
+auth-file: "%s/.local/state/abysslink/ntfy/user.db"
+auth-default-access: "deny-all"
+behind-proxy: false
+`, tailnetIP, ntfyPort, tailnetIP, ntfyPort, home))
+}
+
+// Plan computes actions needed.
+func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
+	if !m.cfg.Modules.Ntfy.Enabled {
+		return nil, nil
+	}
+
+	findings, err := m.Detect(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var actions []modules.Action
+	for _, f := range findings {
+		switch f.Check {
+		case "installed":
+			actions = append(actions, modules.Action{
+				Module:      m.Name(),
+				Description: "install ntfy",
+				Reversible:  false,
+			})
+		case "config_exists", "listen_address":
+			actions = append(actions, modules.Action{
+				Module:      m.Name(),
+				Description: "write ntfy server.yml bound to tailnet IP",
+				Reversible:  true,
+			})
+		}
+	}
+
+	// Always plan service installation if ntfy is enabled and installed.
+	hasInstalled := false
+	for _, f := range findings {
+		if f.Check == "installed" {
+			hasInstalled = true
+		}
+	}
+	if !hasInstalled {
+		actions = append(actions, modules.Action{
+			Module:      m.Name(),
+			Description: "install ntfy service (launchd/systemd)",
+			Reversible:  true,
+		})
+	}
+
+	return actions, nil
+}
+
+// Apply writes the ntfy server.yml config bound to the tailnet IP.
+func (m *Module) Apply(ctx context.Context) error {
+	// Retrieve the tailnet IP from tailscale status.
+	tailnetIP, err := m.getTailnetIP(ctx)
+	if err != nil {
+		return fmt.Errorf("ntfy apply: get tailnet IP: %w", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("ntfy apply: get home dir: %w", err)
+	}
+	cfgPath := filepath.Join(home, serverConfigPath)
+
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		return fmt.Errorf("ntfy apply: mkdir %s: %w", filepath.Dir(cfgPath), err)
+	}
+
+	data := m.generateServerConfig(tailnetIP)
+	slog.Info("ntfy apply: writing server config", "path", cfgPath)
+	if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
+		return fmt.Errorf("ntfy apply: write config: %w", err)
+	}
+
+	return nil
+}
+
+// getTailnetIP runs tailscale ip to get the tailnet IP address.
+func (m *Module) getTailnetIP(ctx context.Context) (string, error) {
+	res, err := m.runner.Run(ctx, "tailscale", "ip", "--4")
+	if err != nil {
+		return "", fmt.Errorf("tailscale ip: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("tailscale ip exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	ip := strings.TrimSpace(res.Stdout)
+	if ip == "" {
+		return "", fmt.Errorf("tailscale ip returned empty output")
+	}
+	return ip, nil
+}
+
+// Verify checks that server.yml does not bind to 0.0.0.0.
+func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
+	return m.Detect(ctx)
+}
+
+// Repair re-writes the correct config.
+func (m *Module) Repair(ctx context.Context) error {
+	return m.Apply(ctx)
+}
