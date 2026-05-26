@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+version: 2
+
+project_name: abysslink
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: abysslink
+    binary: abysslink
+    main: ./cmd/abysslink
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/abysslink/abysslink/internal/cli.version={{.Version}}
+      - -X github.com/abysslink/abysslink/internal/cli.commit={{.Commit}}
+      - -X github.com/abysslink/abysslink/internal/cli.buildDate={{.Date}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: abysslinkd
+    binary: abysslinkd
+    main: ./cmd/abysslinkd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/abysslink/abysslink/internal/cli.version={{.Version}}
+      - -X github.com/abysslink/abysslink/internal/cli.commit={{.Commit}}
+      - -X github.com/abysslink/abysslink/internal/cli.buildDate={{.Date}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    builds:
+      - abysslink
+      - abysslinkd
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+      - NOTICE
+      - abysslink.yaml.example
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# SBOM generation — enabled in Phase 8 (install syft in release.yml first)
+# sboms:
+#   - id: archive
+#     artifacts: archive
+
+# Cosign signing — enabled in Phase 8
+# signs:
+#   - cmd: cosign
+#     certificate: "${artifact}.pem"
+#     args:
+#       - sign-blob
+#       - "--output-certificate=${certificate}"
+#       - "--output-signature=${signature}"
+#       - "${artifact}"
+#       - "--yes"
+#     artifacts: checksum
+#     output: true
+
+nfpms:
+  - id: packages
+    builds:
+      - abysslink
+      - abysslinkd
+    package_name: abysslink
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    vendor: Abysslink Contributors
+    homepage: https://abysslink.dev
+    maintainer: Abysslink Contributors <hello@abysslink.dev>
+    description: >-
+      Automates a paranoid-by-default phone-to-laptop remote-control setup
+      over Tailscale. One command to rule them all: abysslink up.
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: abysslink.yaml.example
+        dst: /usr/share/doc/abysslink/abysslink.yaml.example
+        type: doc
+      - src: LICENSE
+        dst: /usr/share/doc/abysslink/LICENSE
+        type: doc
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+      - typo
+
+release:
+  github:
+    owner: abysslink
+    name: abysslink
+  draft: true
+  prerelease: auto
+  name_template: "Abysslink {{.Tag}}"
+  footer: |
+    ## Verify this release
+
+    Download the binary and verify with cosign (Phase 8+):
+    ```
+    cosign verify-blob --certificate abysslink_<version>_linux_amd64.tar.gz.pem \
+      --signature abysslink_<version>_linux_amd64.tar.gz.sig \
+      abysslink_<version>_linux_amd64.tar.gz
+    ```
+
+    Or use the one-liner installer:
+    ```
+    curl -fsSL https://abysslink.dev/install.sh | bash
+    ```
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-SNAPSHOT-{{ .ShortCommit }}"
