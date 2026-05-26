@@ -18,6 +18,7 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/spf13/cobra"
@@ -38,14 +39,13 @@ func newUpCmd() *cobra.Command {
 
 			// Header.
 			if cc.dryRun {
-				header := styleBold.Render("abysslink up") + "  " + styleMuted.Render("dry-run · no changes made")
+				header := styleBold.Render("abysslink up") + "  " + styleMuted.Render("dry-run · preview only")
 				printerInfo(p, styleHeaderBox.Render(header))
-				printerInfo(p, styleMuted.Render("  Run with --apply to apply changes.")+"\n")
 			} else {
-				header := styleBold.Render("abysslink up") + "  " + styleSuccess.Render("applying")
+				header := styleBold.Render("abysslink up") + "  " + styleSuccess.Render("✦  applying")
 				printerInfo(p, styleHeaderBox.Render(header))
-				printerInfo(p, "")
 			}
+			printerInfo(p, "")
 
 			mods := allModules(cc.runner, cc.cfg)
 			r, err := modules.NewRunner(mods, cc.cfg)
@@ -53,88 +53,43 @@ func newUpCmd() *cobra.Command {
 				return fmt.Errorf("up: %w", err)
 			}
 
-			actions, findings, runErr := r.Up(ctx, cc.dryRun)
+			// Pass 1 — Scan phase (always runs).
+			printerInfo(p, "  "+iconSpinStr()+"  "+styleMuted.Render(fmt.Sprintf("Scanning %d modules...", len(mods))))
 
-			printUpTable(p, actions, findings, cc.dryRun)
-			printNextSteps(p, findings)
+			actions, findings, planErr := r.PlanAll(ctx, func(evt modules.ModuleEvent) {
+				printerInfo(p, scanRowStr(evt))
+			})
+			if planErr != nil {
+				return fmt.Errorf("up: %w", planErr)
+			}
 
-			if runErr != nil {
-				return fmt.Errorf("up: %w", runErr)
+			printPlanDetail(p, actions, findings, cc.dryRun)
+
+			// Pass 2 — Apply phase (only if not dry-run).
+			var applyFindings []modules.Finding
+			var applyErr error
+			if !cc.dryRun {
+				unique := uniqueActions(actions)
+				printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
+				printerInfo(p, "  "+styleBold.Render(fmt.Sprintf("Applying %d changes...", len(unique))))
+				printerInfo(p, "")
+
+				start := time.Now()
+				applyFindings, applyErr = r.ApplyAll(ctx, func(evt modules.ModuleEvent) {
+					printerInfo(p, applyRowStr(evt))
+				})
+				printFinalSummary(p, actions, applyFindings, time.Since(start))
+			}
+
+			// Pass 3 — Next steps (always runs).
+			allFindings := append(findings, applyFindings...)
+			printNextSteps(p, allFindings)
+
+			if applyErr != nil {
+				return fmt.Errorf("up: %w", applyErr)
 			}
 			return nil
 		},
-	}
-}
-
-// printUpTable renders per-module status rows.
-func printUpTable(p Printer, actions []modules.Action, findings []modules.Finding, dryRun bool) {
-	if len(actions) == 0 {
-		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("System is already converged — nothing to do."))
-		printerInfo(p, "")
-		return
-	}
-
-	// Build a set of blocked modules (needs_login, sandboxed, etc.).
-	blocked := map[string]string{} // module → reason
-	for _, f := range findings {
-		switch f.Check {
-		case "needs_login":
-			blocked[f.Module] = "authentication required"
-		case "ssh_sandboxed":
-			blocked[f.Module] = "GUI build — Tailscale SSH unavailable"
-		case "installed":
-			blocked[f.Module] = "not installed — manual step required"
-		}
-	}
-
-	// Deduplicate actions per module.
-	seenModules := map[string]bool{}
-	seenDescriptions := map[string]bool{}
-	for _, a := range actions {
-		key := a.Module + "|" + a.Description
-		if seenDescriptions[key] {
-			continue
-		}
-		seenDescriptions[key] = true
-
-		mod := styleBold.Render(fmt.Sprintf("%-16s", a.Module))
-
-		if dryRun {
-			desc := styleMuted.Render(a.Description)
-			printerInfo(p, fmt.Sprintf("  %s  %s  %s", iconArrowStr(), mod, desc))
-		} else if reason, isBlocked := blocked[a.Module]; isBlocked {
-			if !seenModules[a.Module] {
-				seenModules[a.Module] = true
-				printerInfo(p, fmt.Sprintf("  %s  %s  %s",
-					iconWarnStr(), mod, styleWarn.Render(reason)))
-			}
-		} else {
-			desc := styleSuccess.Render(a.Description)
-			printerInfo(p, fmt.Sprintf("  %s  %s  %s", iconDoneStr(), mod, desc))
-		}
-	}
-	printerInfo(p, "")
-
-	// Extra warnings (non-next-step).
-	seenMsg := map[string]bool{}
-	for _, f := range findings {
-		key := f.Module + "|" + f.Check
-		if seenMsg[key] || isNextStepFinding(f) {
-			continue
-		}
-		seenMsg[key] = true
-		switch f.Severity {
-		case modules.SeverityFatal:
-			printerInfo(p, fmt.Sprintf("  %s  %s  %s",
-				iconFatalStr(),
-				styleBold.Render(fmt.Sprintf("%-16s", f.Module)),
-				styleFatal.Render(f.Message)))
-		case modules.SeverityWarning:
-			printerInfo(p, fmt.Sprintf("  %s  %s  %s",
-				iconWarnStr(),
-				styleBold.Render(fmt.Sprintf("%-16s", f.Module)),
-				styleWarn.Render(f.Message)))
-		}
 	}
 }
 
@@ -208,13 +163,4 @@ func printNextSteps(p Printer, findings []modules.Finding) {
 
 	printerInfo(p, styleNextStepBox.Render(strings.TrimRight(sb.String(), "\n")))
 	printerInfo(p, "")
-}
-
-// isNextStepFinding returns true for findings rendered in the next-steps box.
-func isNextStepFinding(f modules.Finding) bool {
-	switch f.Check {
-	case "needs_login", "ssh_sandboxed":
-		return true
-	}
-	return false
 }
