@@ -17,7 +17,9 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
+	"github.com/abysslink/abysslink/internal/qr"
 	"github.com/spf13/cobra"
 )
 
@@ -27,22 +29,44 @@ func newEnrollCmd() *cobra.Command {
 		Short: "Enroll a device into the tailnet",
 	}
 	enroll.AddCommand(
-		&cobra.Command{
-			Use:   "phone",
-			Short: "Mint auth key, display QR, and walk through phone pairing",
-			RunE: func(_ *cobra.Command, _ []string) error {
-				// TODO(Phase 6): implement phone enrollment
-				return fmt.Errorf("not implemented yet")
-			},
-		},
+		newEnrollPhoneCmd(),
 		&cobra.Command{
 			Use:   "rig",
 			Short: "Add another laptop to the tailnet (v2 placeholder)",
 			RunE: func(_ *cobra.Command, _ []string) error {
-				// TODO(Phase 6): implement rig enrollment
-				return fmt.Errorf("not implemented yet")
+				return fmt.Errorf("enroll rig: multi-rig support is planned for v2")
 			},
 		},
 	)
 	return enroll
+}
+
+func newEnrollPhoneCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "phone",
+		Short: "Mint auth key, display QR, and walk through phone pairing",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			p := newPrinter(cmd)
+
+			printerInfo(p, "Phone enrollment — follow these steps:")
+			printerInfo(p, "")
+			printerInfo(p, "1. Install Tailscale on your phone:")
+			printerInfo(p, "")
+
+			// Print QR code pointing at Tailscale download.
+			qr.PrintANSI(os.Stdout, "https://tailscale.com/download")
+
+			printerInfo(p, "")
+			printerInfo(p, "2. Sign in with your Tailscale account.")
+			printerInfo(p, "")
+			printerInfo(p, "3. In the Tailscale admin console, tag the phone device as 'tag:mobile'.")
+			printerInfo(p, "   https://login.tailscale.com/admin/machines")
+			printerInfo(p, "")
+			printerInfo(p, "4. Run 'abysslink up --apply' to push the ACL granting phone access.")
+			printerInfo(p, "")
+			printerInfo(p, "5. Verify: abysslink doctor")
+
+			return nil
+		},
+	}
 }

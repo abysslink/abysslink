@@ -17,7 +17,9 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
+	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/spf13/cobra"
 )
 
@@ -25,9 +27,55 @@ func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Exhaustive verification of all modules and security posture",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			// TODO(Phase 6): implement doctor checks
-			return fmt.Errorf("not implemented yet")
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+
+			p := newPrinter(cmd)
+			mods := allModules(cc.runner, cc.cfg)
+			r, err := modules.NewRunner(mods, cc.cfg)
+			if err != nil {
+				return err
+			}
+
+			findings, err := r.Doctor(ctx)
+			if err != nil {
+				return fmt.Errorf("doctor: %w", err)
+			}
+
+			hasFatal := false
+			hasWarn := false
+
+			for _, f := range findings {
+				switch f.Severity {
+				case modules.SeverityOK:
+					printerInfo(p, fmt.Sprintf("  OK    [%s] %s", f.Module, f.Check))
+				case modules.SeverityWarning:
+					hasWarn = true
+					printerWarn(p, fmt.Sprintf("  WARN  [%s] %s: %s", f.Module, f.Check, f.Message))
+				case modules.SeverityFatal:
+					hasFatal = true
+					printerError(p, fmt.Sprintf("  FATAL [%s] %s: %s", f.Module, f.Check, f.Message))
+				}
+			}
+
+			if len(findings) == 0 {
+				printerInfo(p, "All checks passed.")
+				return nil
+			}
+
+			if hasFatal {
+				printerError(p, "doctor: fatal issues found — system is not safe")
+				os.Exit(2)
+			}
+			if hasWarn {
+				printerWarn(p, "doctor: warnings found — review the above")
+				os.Exit(1)
+			}
+			return nil
 		},
 	}
 }

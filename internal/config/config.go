@@ -18,6 +18,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -197,6 +198,29 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: decode %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// Write marshals cfg to YAML and writes it to path, creating parent directories
+// as needed. The file is written atomically via a temp file + rename.
+func Write(path string, cfg *Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("config: create directory: %w", err)
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("config: marshal: %w", err)
+	}
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("config: write temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("config: rename to final path: %w", err)
+	}
+	return nil
 }
 
 // Validate checks that cfg contains internally consistent, safe values.
