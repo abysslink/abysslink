@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -92,8 +93,52 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 }
 
 // Apply executes planned changes.
-func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("mosh module: apply not yet implemented")
+func (m *Module) Apply(ctx context.Context) error {
+	if !m.cfg.Modules.Mosh.Enabled {
+		return nil
+	}
+
+	findings, err := m.Detect(ctx)
+	if err != nil {
+		return fmt.Errorf("mosh apply: detect: %w", err)
+	}
+
+	for _, f := range findings {
+		if f.Check != "installed" {
+			continue
+		}
+		slog.Info("mosh apply: installing mosh-server")
+		switch runtime.GOOS {
+		case "darwin":
+			res, err := m.runner.Run(ctx, "brew", "install", "mosh")
+			if err != nil {
+				return fmt.Errorf("mosh apply: brew install mosh: %w", err)
+			}
+			if res.ExitCode != 0 {
+				return fmt.Errorf("mosh apply: brew install mosh exited %d: %s", res.ExitCode, res.Stderr)
+			}
+		case "linux":
+			installed := false
+			for _, args := range [][]string{
+				{"apt-get", "install", "-y", "mosh"},
+				{"dnf", "install", "-y", "mosh"},
+				{"pacman", "-Sy", "--noconfirm", "mosh"},
+			} {
+				res, err := m.runner.Run(ctx, "sudo", args...)
+				if err == nil && res.ExitCode == 0 {
+					installed = true
+					break
+				}
+			}
+			if !installed {
+				return fmt.Errorf("mosh apply: could not install mosh — no supported package manager found")
+			}
+		default:
+			return fmt.Errorf("mosh apply: unsupported OS %q", runtime.GOOS)
+		}
+	}
+
+	return nil
 }
 
 // Verify re-runs Detect.
