@@ -1,0 +1,44 @@
+# abysslink.yaml — example configuration
+# Run `abysslink init` to generate a configured version for your machine.
+# Full schema: https://abysslink.dev/docs/config
+
+identity:
+  email: ""        # your email address
+  name: ""         # display name
+
+tailnet:
+  org: ""          # e.g. "yourorg.github"
+  hostname: ""     # machine hostname on tailnet, e.g. "dev-laptop"
+
+modules:
+  tailscale:
+    enabled: true
+  ssh:
+    enabled: true
+  tmux:
+    enabled: true
+  mosh:
+    enabled: true
+  notify:
+    enabled: true
+  ntfy:
+    enabled: true
+  watch:
+    enabled: true
+  acl:
+    enabled: true
+  lock:
+    enabled: true
+  power:
+    enabled: true
+  hardening:
+    enabled: true
+  # Optional modules (disabled by default):
+  claudecode:
+    enabled: false
+  codeserver:
+    enabled: false
+  ttyd:
+    enabled: false
+  eternalterminal:
+    enabled: false
