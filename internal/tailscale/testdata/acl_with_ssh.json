@@ -1,0 +1,17 @@
+{
+    "ssh": [
+        {
+            "action": "check",
+            "src": [
+                "owner@example.com"
+            ],
+            "dst": [
+                "tag:laptop"
+            ],
+            "users": [
+                "macuser"
+            ],
+            "checkPeriod": "12h"
+        }
+    ]
+}

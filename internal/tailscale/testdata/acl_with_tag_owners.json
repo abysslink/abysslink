@@ -1,0 +1,10 @@
+{
+    "tagOwners": {
+        "tag:laptop": [
+            "owner@example.com"
+        ],
+        "tag:mobile": [
+            "owner@example.com"
+        ]
+    }
+}
