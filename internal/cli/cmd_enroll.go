@@ -30,7 +30,7 @@ func newEnrollCmd() *cobra.Command {
 		&cobra.Command{
 			Use:   "phone",
 			Short: "Mint auth key, display QR, and walk through phone pairing",
-			RunE: func(cmd *cobra.Command, args []string) error {
+			RunE: func(_ *cobra.Command, _ []string) error {
 				// TODO(Phase 6): implement phone enrollment
 				return fmt.Errorf("not implemented yet")
 			},
@@ -38,7 +38,7 @@ func newEnrollCmd() *cobra.Command {
 		&cobra.Command{
 			Use:   "rig",
 			Short: "Add another laptop to the tailnet (v2 placeholder)",
-			RunE: func(cmd *cobra.Command, args []string) error {
+			RunE: func(_ *cobra.Command, _ []string) error {
 				// TODO(Phase 6): implement rig enrollment
 				return fmt.Errorf("not implemented yet")
 			},

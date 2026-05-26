@@ -1,0 +1,9 @@
+version: 1
+
+identity:
+  email: you@example.com
+  unix_user: you
+  unexpected_field: should-fail
+
+tailnet:
+  hostname: mac-dev

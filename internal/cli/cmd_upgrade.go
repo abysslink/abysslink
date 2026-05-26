@@ -25,7 +25,7 @@ func newUpgradeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Upgrade abysslink to the latest release",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("not implemented yet")
 		},
 	}

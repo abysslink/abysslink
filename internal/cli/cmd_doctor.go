@@ -25,7 +25,7 @@ func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Exhaustive verification of all modules and security posture",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// TODO(Phase 6): implement doctor checks
 			return fmt.Errorf("not implemented yet")
 		},

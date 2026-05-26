@@ -1,0 +1,8 @@
+version: 1
+
+identity:
+  email: you@example.com
+  unix_user: you
+
+tailnet:
+  hostname: ""

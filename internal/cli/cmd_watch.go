@@ -30,21 +30,21 @@ func newWatchCmd() *cobra.Command {
 		&cobra.Command{
 			Use:   "add",
 			Short: "Add a new watcher",
-			RunE: func(cmd *cobra.Command, args []string) error {
+			RunE: func(_ *cobra.Command, _ []string) error {
 				return fmt.Errorf("not implemented yet")
 			},
 		},
 		&cobra.Command{
 			Use:   "list",
 			Short: "List active watchers",
-			RunE: func(cmd *cobra.Command, args []string) error {
+			RunE: func(_ *cobra.Command, _ []string) error {
 				return fmt.Errorf("not implemented yet")
 			},
 		},
 		&cobra.Command{
 			Use:   "remove",
 			Short: "Remove a watcher",
-			RunE: func(cmd *cobra.Command, args []string) error {
+			RunE: func(_ *cobra.Command, _ []string) error {
 				return fmt.Errorf("not implemented yet")
 			},
 		},

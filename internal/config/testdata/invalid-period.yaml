@@ -1,0 +1,11 @@
+version: 1
+
+identity:
+  email: you@example.com
+  unix_user: you
+
+tailnet:
+  hostname: mac-dev
+
+mobile:
+  ssh_check_period: notaduration

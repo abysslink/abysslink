@@ -25,7 +25,7 @@ func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs",
 		Short: "Tail or filter the abysslink audit log",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("not implemented yet")
 		},
 	}

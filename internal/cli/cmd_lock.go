@@ -27,10 +27,10 @@ func newLockCmd() *cobra.Command {
 		Short: "Manage Tailnet Lock",
 	}
 	lock.AddCommand(
-		&cobra.Command{Use: "init", Short: "Initialise Tailnet Lock and print disablement secrets", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "sign", Short: "Sign a node key with a Tailnet Lock signing key", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "status", Short: "Report Tailnet Lock status", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "rotate", Short: "Rotate Tailnet Lock signing keys", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "init", Short: "Initialise Tailnet Lock and print disablement secrets", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "sign", Short: "Sign a node key with a Tailnet Lock signing key", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "status", Short: "Report Tailnet Lock status", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "rotate", Short: "Rotate Tailnet Lock signing keys", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
 	)
 	return lock
 }

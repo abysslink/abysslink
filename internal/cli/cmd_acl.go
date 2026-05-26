@@ -27,10 +27,10 @@ func newACLCmd() *cobra.Command {
 		Short: "Manage Tailscale ACL policies",
 	}
 	acl.AddCommand(
-		&cobra.Command{Use: "pull", Short: "Pull current ACL from the Tailscale admin API", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "push", Short: "Push local ACL changes to the Tailscale admin API", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "validate", Short: "Validate the local ACL against Tailscale rules", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "diff", Short: "Show diff between local and remote ACL", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "pull", Short: "Pull current ACL from the Tailscale admin API", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "push", Short: "Push local ACL changes to the Tailscale admin API", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "validate", Short: "Validate the local ACL against Tailscale rules", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "diff", Short: "Show diff between local and remote ACL", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
 	)
 	return acl
 }

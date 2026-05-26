@@ -1,0 +1,8 @@
+version: 1
+
+identity:
+  email: notanemail
+  unix_user: you
+
+tailnet:
+  hostname: mac-dev

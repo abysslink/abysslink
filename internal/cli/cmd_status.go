@@ -25,7 +25,7 @@ func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "One-screen health summary of the Tailscale setup",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// TODO(Phase 6): implement status summary
 			return fmt.Errorf("not implemented yet")
 		},
