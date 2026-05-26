@@ -69,7 +69,12 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		})
 		return findings, nil
 	}
-	slog.Debug("tailscale version", "output", strings.TrimSpace(res.Stdout))
+	versionOut := strings.TrimSpace(res.Stdout)
+	slog.Debug("tailscale version", "output", versionOut)
+	sandboxed := isSandboxedGUI(versionOut)
+	if sandboxed {
+		slog.Info("tailscale detect: sandboxed GUI build detected — Tailscale SSH not supported")
+	}
 
 	// Check backend state.
 	statusRes, err := m.runner.Run(ctx, "tailscale", "status", "--json")
@@ -101,8 +106,8 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		})
 	}
 
-	// Check SSH capability.
-	if m.cfg.Tailnet.SSH && !status.TailscaleSSH {
+	// Check SSH capability — skip for sandboxed GUI builds where --ssh is unsupported.
+	if m.cfg.Tailnet.SSH && !sandboxed && !status.TailscaleSSH {
 		sshEnabled := false
 		for _, cap := range status.Self.Capabilities {
 			if strings.Contains(cap, "ssh") {
@@ -118,6 +123,13 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 				Message:  "tailscale SSH is not enabled; run: tailscale up --ssh",
 			})
 		}
+	} else if m.cfg.Tailnet.SSH && sandboxed {
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "ssh_sandboxed",
+			Severity: modules.SeverityWarning,
+			Message:  "Tailscale SSH is not available in the sandboxed GUI build; install the CLI: brew install tailscale",
+		})
 	}
 
 	return findings, nil
@@ -180,6 +192,10 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 
 // Apply executes planned changes.
 func (m *Module) Apply(ctx context.Context) error {
+	// Detect sandboxed GUI build upfront — affects which flags are valid.
+	verRes, _ := m.runner.Run(ctx, "tailscale", "version")
+	sandboxed := isSandboxedGUI(strings.TrimSpace(verRes.Stdout))
+
 	findings, err := m.Detect(ctx)
 	if err != nil {
 		return fmt.Errorf("tailscale apply: detect: %w", err)
@@ -189,9 +205,11 @@ func (m *Module) Apply(ctx context.Context) error {
 		switch f.Check {
 		case "installed":
 			return fmt.Errorf("tailscale apply: tailscale is not installed; install it from https://tailscale.com/download and re-run")
+		case "ssh_sandboxed":
+			slog.Warn("tailscale apply: skipping --ssh flag — sandboxed GUI build does not support Tailscale SSH; install CLI: brew install tailscale")
 		case "running":
 			args := []string{"up"}
-			if m.cfg.Tailnet.SSH {
+			if m.cfg.Tailnet.SSH && !sandboxed {
 				args = append(args, "--ssh")
 			}
 			if m.cfg.Tailnet.Hostname != "" {
@@ -206,6 +224,10 @@ func (m *Module) Apply(ctx context.Context) error {
 				return fmt.Errorf("tailscale apply: tailscale up exited %d: %s", res.ExitCode, res.Stderr)
 			}
 		case "ssh":
+			if sandboxed {
+				slog.Warn("tailscale apply: skipping --ssh — sandboxed GUI build; install CLI: brew install tailscale")
+				continue
+			}
 			args := []string{"up", "--ssh"}
 			if m.cfg.Tailnet.Hostname != "" {
 				args = append(args, "--hostname="+m.cfg.Tailnet.Hostname)
@@ -256,4 +278,15 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 // Repair attempts to fix findings.
 func (m *Module) Repair(ctx context.Context) error {
 	return m.Apply(ctx)
+}
+
+// isSandboxedGUI returns true when the tailscale binary is the sandboxed
+// macOS App Store / GUI build, which rejects --ssh and other daemon flags.
+// The GUI build reports "tailscale version" output containing "tailscale-ipn"
+// or runs from the Tailscale.app bundle path; the open-source CLI does not.
+func isSandboxedGUI(versionOutput string) bool {
+	lower := strings.ToLower(versionOutput)
+	return strings.Contains(lower, "tailscale-ipn") ||
+		strings.Contains(lower, "tailscale.app") ||
+		strings.Contains(lower, "sandboxed")
 }
