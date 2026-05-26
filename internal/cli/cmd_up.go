@@ -25,7 +25,7 @@ func newUpCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "up",
 		Short: "Converge the system to match abysslink.yaml (dry-run by default)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// TODO(Phase 6): implement module runner convergence
 			return fmt.Errorf("not implemented yet")
 		},

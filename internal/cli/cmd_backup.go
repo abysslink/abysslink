@@ -27,8 +27,8 @@ func newBackupCmd() *cobra.Command {
 		Short: "Manage configuration backups",
 	}
 	backup.AddCommand(
-		&cobra.Command{Use: "ls", Short: "List available backups", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "restore", Short: "Restore a configuration backup", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "ls", Short: "List available backups", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "restore", Short: "Restore a configuration backup", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
 	)
 	return backup
 }

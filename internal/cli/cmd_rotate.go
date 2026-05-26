@@ -27,8 +27,8 @@ func newRotateCmd() *cobra.Command {
 		Short: "Rotate secrets stored in the OS keychain",
 	}
 	rotate.AddCommand(
-		&cobra.Command{Use: "anthropic-key", Short: "Rotate the Anthropic API key", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "ntfy-creds", Short: "Rotate ntfy credentials", RunE: func(cmd *cobra.Command, args []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "anthropic-key", Short: "Rotate the Anthropic API key", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+		&cobra.Command{Use: "ntfy-creds", Short: "Rotate ntfy credentials", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
 	)
 	return rotate
 }

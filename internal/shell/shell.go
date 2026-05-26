@@ -13,22 +13,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package cli
+package shell
 
-import (
-	"fmt"
+import "context"
 
-	"github.com/spf13/cobra"
-)
+// Result holds the captured output and exit code of a completed command.
+type Result struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
 
-func newUninstallCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "uninstall",
-		Short: "Remove abysslink configuration and optionally all associated data",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return fmt.Errorf("not implemented yet")
-		},
-	}
-	cmd.Flags().Bool("purge", false, "Also remove all backups, audit logs, and keychain entries")
-	return cmd
+// Runner executes external commands. All code outside internal/shell must call
+// through this interface — never import os/exec directly.
+type Runner interface {
+	Run(ctx context.Context, name string, args ...string) (Result, error)
 }

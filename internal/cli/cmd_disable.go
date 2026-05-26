@@ -26,7 +26,7 @@ func newDisableCmd() *cobra.Command {
 		Use:   "disable <module>",
 		Short: "Disable an optional module",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("not implemented yet")
 		},
 	}

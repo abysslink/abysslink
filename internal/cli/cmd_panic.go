@@ -25,7 +25,7 @@ func newPanicCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "panic",
 		Short: "Emergency: revoke all keys and disconnect from the tailnet immediately",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("not implemented yet")
 		},
 	}

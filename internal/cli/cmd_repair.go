@@ -25,7 +25,7 @@ func newRepairCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "repair",
 		Short: "Auto-fix failures detected by doctor",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// TODO(Phase 6): implement repair
 			return fmt.Errorf("not implemented yet")
 		},
