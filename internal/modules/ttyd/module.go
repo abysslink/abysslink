@@ -23,20 +23,23 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
+const ttydPort = "7681"
+
 // Module implements the ttyd optional module.
-// ttyd provides a web-based terminal, bound to the tailnet IP only,
-// secured with tailscale cert HTTPS.
+// ttyd provides a web-based terminal, bound to the tailnet IP only.
 type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
+	plat   platform.Platform
 }
 
 // New returns a new ttyd Module.
-func New(runner shell.Runner, cfg *config.Config) *Module {
-	return &Module{runner: runner, cfg: cfg}
+func New(d modules.Deps) *Module {
+	return &Module{runner: d.Runner, cfg: d.Cfg, plat: d.Platform}
 }
 
 // Name returns the canonical module name.
@@ -129,9 +132,37 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply is not yet implemented — ttyd must be installed manually.
-func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("ttyd module: apply not yet implemented — install ttyd manually and re-run `abysslink up`")
+// Apply installs ttyd and runs it bound to the tailnet IP only. ttyd has no
+// stdin credential path (only --credential on argv, which would leak), so
+// access control is the tailnet ACL rather than basic auth — surfaced as a
+// warning. Never bind to 0.0.0.0.
+func (m *Module) Apply(ctx context.Context) error {
+	if !m.cfg.Modules.Ttyd.Enabled {
+		return nil
+	}
+
+	if res, err := m.runner.Run(ctx, "ttyd", "--version"); err != nil || res.ExitCode != 0 {
+		slog.Info("ttyd apply: installing ttyd")
+		if err := m.plat.InstallPackage(ctx, "ttyd"); err != nil {
+			return fmt.Errorf("ttyd apply: install: %w", err)
+		}
+	}
+
+	ip, err := modules.TailnetIP(ctx, m.runner)
+	if err != nil {
+		return fmt.Errorf("ttyd apply: %w", err)
+	}
+
+	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
+		Label:     "dev.abysslink.ttyd",
+		Args:      []string{"ttyd", "-i", ip, "-p", ttydPort, "bash"},
+		KeepAlive: true,
+		RunAtLoad: true,
+	}); err != nil {
+		return fmt.Errorf("ttyd apply: install service: %w", err)
+	}
+	slog.Warn("ttyd apply: bound to " + ip + ":" + ttydPort + " with NO basic auth — access is limited to the tailnet ACL; never expose this port publicly")
+	return nil
 }
 
 // Verify re-runs Detect to confirm ttyd is correctly installed and bound.

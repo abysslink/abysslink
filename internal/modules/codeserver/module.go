@@ -24,8 +24,11 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/platform"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -44,13 +47,16 @@ type codeServerConfig struct {
 
 // Module implements the code-server optional module.
 type Module struct {
-	runner shell.Runner
-	cfg    *config.Config
+	runner   shell.Runner
+	cfg      *config.Config
+	plat     platform.Platform
+	keychain secrets.KeychainStore
+	audit    *audit.Audit
 }
 
 // New returns a new code-server Module.
-func New(runner shell.Runner, cfg *config.Config) *Module {
-	return &Module{runner: runner, cfg: cfg}
+func New(d modules.Deps) *Module {
+	return &Module{runner: d.Runner, cfg: d.Cfg, plat: d.Platform, keychain: d.Keychain, audit: d.Audit}
 }
 
 // Name returns the canonical module name.
@@ -179,9 +185,80 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply is not yet implemented — code-server must be installed manually.
-func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("code-server module: apply not yet implemented — install code-server manually and re-run `abysslink up`")
+// Apply installs code-server, writes a tailnet-bound config with a keychain
+// password, and installs the background service.
+func (m *Module) Apply(ctx context.Context) error {
+	if !m.cfg.Modules.CodeServer.Enabled {
+		return nil
+	}
+
+	if res, err := m.runner.Run(ctx, "code-server", "--version"); err != nil || res.ExitCode != 0 {
+		slog.Info("code-server apply: installing code-server")
+		if err := m.plat.InstallPackage(ctx, "code-server"); err != nil {
+			return fmt.Errorf("code-server apply: install: %w", err)
+		}
+	}
+
+	ip, err := modules.TailnetIP(ctx, m.runner)
+	if err != nil {
+		return fmt.Errorf("code-server apply: %w", err)
+	}
+
+	pw, err := m.ensurePassword(ctx)
+	if err != nil {
+		return fmt.Errorf("code-server apply: %w", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("code-server apply: home dir: %w", err)
+	}
+	cfgPath := home + "/" + codeServerConfigPath
+	if err := os.MkdirAll(home+"/.config/code-server", 0o700); err != nil {
+		return fmt.Errorf("code-server apply: mkdir config: %w", err)
+	}
+	data, err := yaml.Marshal(codeServerConfig{
+		BindAddr: ip + ":" + codeServerPort,
+		Auth:     "password",
+		Password: pw,
+		Cert:     false,
+	})
+	if err != nil {
+		return fmt.Errorf("code-server apply: marshal config: %w", err)
+	}
+	if err := m.audit.WriteFile(cfgPath, data, 0o600, false); err != nil {
+		return fmt.Errorf("code-server apply: write config: %w", err)
+	}
+
+	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
+		Label:     "dev.abysslink.codeserver",
+		Args:      []string{"code-server"},
+		KeepAlive: true,
+		RunAtLoad: true,
+	}); err != nil {
+		return fmt.Errorf("code-server apply: install service: %w", err)
+	}
+	slog.Info("code-server apply: configured and service installed", "bind", ip+":"+codeServerPort)
+	return nil
+}
+
+// ensurePassword returns the code-server password from the keychain, generating
+// and storing one on first run. Never placed on argv (keychain uses stdin).
+func (m *Module) ensurePassword(ctx context.Context) (string, error) {
+	if m.keychain == nil {
+		return "", fmt.Errorf("no keychain backend available to store the code-server password")
+	}
+	if pw, err := m.keychain.Get(ctx, "abysslink", "code-server-password"); err == nil && pw != "" {
+		return pw, nil
+	}
+	pw, err := modules.GenPassword()
+	if err != nil {
+		return "", err
+	}
+	if err := m.keychain.Set(ctx, "abysslink", "code-server-password", pw); err != nil {
+		return "", fmt.Errorf("store code-server password: %w", err)
+	}
+	return pw, nil
 }
 
 // Verify re-runs Detect to confirm code-server is correctly configured.

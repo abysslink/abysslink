@@ -25,6 +25,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -41,11 +42,12 @@ const (
 type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
+	plat   platform.Platform
 }
 
 // New returns a new eternal-terminal Module.
-func New(runner shell.Runner, cfg *config.Config) *Module {
-	return &Module{runner: runner, cfg: cfg}
+func New(d modules.Deps) *Module {
+	return &Module{runner: d.Runner, cfg: d.Cfg, plat: d.Platform}
 }
 
 // Name returns the canonical module name.
@@ -174,9 +176,31 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply is not yet implemented — eternal-terminal must be installed manually.
-func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("eternal-terminal module: apply not yet implemented — install ET manually and re-run `abysslink up`")
+// Apply installs eternal-terminal and runs etserver on tcp/2022. ET is a
+// TCP-based mosh alternative for networks that block UDP; access is still
+// gated by the tailnet ACL (etACLPort).
+func (m *Module) Apply(ctx context.Context) error {
+	if !m.cfg.Modules.EternalTerminal.Enabled {
+		return nil
+	}
+
+	if res, err := m.runner.Run(ctx, "et", "--version"); err != nil || res.ExitCode != 0 {
+		slog.Info("eternal-terminal apply: installing eternal-terminal")
+		if err := m.plat.InstallPackage(ctx, "eternal-terminal"); err != nil {
+			return fmt.Errorf("eternal-terminal apply: install: %w", err)
+		}
+	}
+
+	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
+		Label:     "dev.abysslink.etserver",
+		Args:      []string{"etserver", "--port", "2022"},
+		KeepAlive: true,
+		RunAtLoad: true,
+	}); err != nil {
+		return fmt.Errorf("eternal-terminal apply: install service: %w", err)
+	}
+	slog.Info("eternal-terminal apply: etserver installed on tcp/2022 (grant " + etACLPort + " in the tailnet ACL)")
+	return nil
 }
 
 // Verify re-runs Detect to confirm eternal-terminal is correctly installed.

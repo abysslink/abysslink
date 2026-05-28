@@ -15,19 +15,13 @@
 
 package cli
 
-import (
-	"fmt"
-
-	"github.com/spf13/cobra"
-)
+import "github.com/spf13/cobra"
 
 func newDisableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "disable <module>",
-		Short: "Disable an optional module",
+		Short: "Disable a module in abysslink.yaml",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return fmt.Errorf("not implemented yet")
-		},
+		RunE:  func(cmd *cobra.Command, args []string) error { return toggleModule(cmd, args[0], false) },
 	}
 }
