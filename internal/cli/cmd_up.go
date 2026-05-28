@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/spf13/cobra"
 )
@@ -70,6 +71,16 @@ func newUpCmd() *cobra.Command {
 
 			printPlanDetail(p, actions, findings, cc.dryRun)
 
+			// Fail-closed gates run only at apply time (dry-run still previews).
+			if !cc.dryRun {
+				// SSH re-auth interval may not be raised above the 12h default
+				// without explicit operator consent.
+				accept, _ := cmd.Flags().GetBool("accept-checkperiod-extension")
+				if err := checkPeriodGate(cc.cfg, accept); err != nil {
+					return err
+				}
+			}
+
 			// Fail-closed gate: never configure remote access on an unencrypted
 			// disk. Blocks apply unless the operator explicitly overrides.
 			if !cc.dryRun {
@@ -113,7 +124,25 @@ func newUpCmd() *cobra.Command {
 	}
 	cmd.Flags().Bool("force-unsafe", false,
 		"Override fail-closed safety checks such as disk encryption (DANGEROUS)")
+	cmd.Flags().Bool("accept-checkperiod-extension", false,
+		"Allow ssh_check_period to exceed the 12h re-auth default")
 	return cmd
+}
+
+// checkPeriodGate enforces the immutable default that the SSH re-auth interval
+// is never raised above 12h without explicit consent. Values at or below 12h
+// (settable down) always pass.
+func checkPeriodGate(cfg *config.Config, accept bool) error {
+	d, err := time.ParseDuration(cfg.Mobile.SSHCheckPeriod)
+	if err != nil {
+		return nil // malformed durations are caught by config.Validate
+	}
+	if d > 12*time.Hour && !accept {
+		return fmt.Errorf("up: ssh_check_period %s exceeds the 12h security default; "+
+			"re-run with --accept-checkperiod-extension to allow a longer re-auth interval",
+			cfg.Mobile.SSHCheckPeriod)
+	}
+	return nil
 }
 
 // diskEncryptionBlockers returns the subset of findings that must fail closed:
