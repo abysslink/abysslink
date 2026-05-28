@@ -143,6 +143,8 @@ type Modules struct {
 	Upsnap          BasicModule  `yaml:"upsnap"`
 	EternalTerminal BasicModule  `yaml:"eternal_terminal"`
 	Atuin           BasicModule  `yaml:"atuin"`
+	Sandbox         BasicModule  `yaml:"sandbox"`
+	Asciinema       BasicModule  `yaml:"asciinema"`
 }
 
 // ClaudeCodeNotifyOn controls which Claude Code events trigger a notification.
