@@ -85,13 +85,18 @@ func newInitCmd() *cobra.Command {
 				return err
 			}
 
-			// Phase 3 — Config questions.
+			// Phase 3 — OS security hardening (firewall + AC sleep).
+			if err := runSecurityFixes(ctx, p, runner, plat, autoYes); err != nil {
+				return err
+			}
+
+			// Phase 4 — Config questions.
 			cfg, err := runInitForm(cmd, autoYes)
 			if err != nil {
 				return err
 			}
 
-			// Phase 4 — Install missing tools for the user's chosen modules.
+			// Phase 5 — Install missing tools for the user's chosen modules.
 			if err := installModuleTools(ctx, p, runner, plat, cfg, toolStatus, autoYes); err != nil {
 				return err
 			}
@@ -346,6 +351,99 @@ func installModuleTools(ctx context.Context, p Printer, runner shell.Runner, pla
 		}
 	}
 	return nil
+}
+
+// runSecurityFixes checks macOS firewall and AC sleep settings, prompting to fix
+// each. These reduce the attack surface before the first `abysslink up --apply`.
+// On Linux these checks are handled by the UFW and power modules; skip here.
+func runSecurityFixes(ctx context.Context, p Printer, runner shell.Runner, plat platform.Platform, autoYes bool) error {
+	if plat.OS() != "darwin" {
+		return nil
+	}
+	printerInfo(p, "")
+	printerInfo(p, "  "+styleBold.Render("Security hardening"))
+	printerInfo(p, "")
+	if err := maybeFixFirewall(ctx, p, runner, autoYes); err != nil {
+		return err
+	}
+	return maybeFixSleep(ctx, p, runner, autoYes)
+}
+
+// maybeFixFirewall checks the macOS Application Firewall and offers to enable it.
+func maybeFixFirewall(ctx context.Context, p Printer, runner shell.Runner, autoYes bool) error {
+	const fwBin = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+	nameCol := styleNameCol.Render("firewall")
+
+	res, err := runner.Run(ctx, fwBin, "--getglobalstate")
+	if err == nil && strings.Contains(res.Stdout+res.Stderr, "enabled") {
+		printerInfo(p, fmt.Sprintf("  %s  %s  enabled", iconDoneStr(), nameCol))
+		return nil
+	}
+
+	printerInfo(p, fmt.Sprintf("  %s  %s  disabled", iconWarnStr(), nameCol))
+	fix := autoYes
+	if !autoYes {
+		if err := huh.NewConfirm().
+			Title("Enable macOS Application Firewall?").
+			Description("Blocks unexpected inbound connections. Requires sudo password.").
+			Value(&fix).Run(); err != nil {
+			return err
+		}
+	}
+	if !fix {
+		return nil
+	}
+	printerInfo(p, fmt.Sprintf("  %s  Enabling firewall...", iconSpinStr()))
+	if _, err := runner.Run(ctx, "sudo", fwBin, "--setglobalstate", "on"); err != nil {
+		return fmt.Errorf("init: enable firewall: %w", err)
+	}
+	printerInfo(p, fmt.Sprintf("  %s  %s  enabled", iconDoneStr(), nameCol))
+	return nil
+}
+
+// maybeFixSleep checks whether the system sleeps on AC power and offers to disable it.
+// A rig that sleeps at night is unreachable from the phone.
+func maybeFixSleep(ctx context.Context, p Printer, runner shell.Runner, autoYes bool) error {
+	nameCol := styleNameCol.Render("sleep (AC)")
+	if checkACSleepDisabled(ctx, runner) {
+		printerInfo(p, fmt.Sprintf("  %s  %s  disabled", iconDoneStr(), nameCol))
+		return nil
+	}
+
+	printerInfo(p, fmt.Sprintf("  %s  %s  enabled — rig may sleep and become unreachable", iconWarnStr(), nameCol))
+	fix := autoYes
+	if !autoYes {
+		if err := huh.NewConfirm().
+			Title("Prevent sleep while on AC power?").
+			Description("Keeps the rig reachable overnight. Requires sudo password.").
+			Value(&fix).Run(); err != nil {
+			return err
+		}
+	}
+	if !fix {
+		return nil
+	}
+	printerInfo(p, fmt.Sprintf("  %s  Updating power settings...", iconSpinStr()))
+	if _, err := runner.Run(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"); err != nil {
+		return fmt.Errorf("init: disable AC sleep: %w", err)
+	}
+	printerInfo(p, fmt.Sprintf("  %s  %s  disabled", iconDoneStr(), nameCol))
+	return nil
+}
+
+// checkACSleepDisabled returns true when pmset reports sleep=0 for current power source.
+func checkACSleepDisabled(ctx context.Context, runner shell.Runner) bool {
+	res, err := runner.Run(ctx, "pmset", "-g")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "sleep" && fields[1] == "0" {
+			return true
+		}
+	}
+	return false
 }
 
 // runInitForm runs the interactive questionnaire and returns the resulting Config.
