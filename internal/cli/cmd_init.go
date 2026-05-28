@@ -314,7 +314,7 @@ func startTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner, p
 	if err := doStartTailscaleDaemon(ctx, runner, plat); err != nil {
 		// Non-fatal: print guidance and continue so the user can start it manually.
 		printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render("Could not start daemon automatically:"))
-		printerInfo(p, "  "+styleMuted.Render("  macOS:  brew services start tailscale"))
+		printerInfo(p, "  "+styleMuted.Render("  macOS:  brew services restart tailscale"))
 		printerInfo(p, "  "+styleMuted.Render("  Linux:  sudo systemctl enable --now tailscaled"))
 		printerInfo(p, "  "+styleMuted.Render("Start it, then re-run `abysslink up --apply`."))
 		return nil
@@ -350,13 +350,16 @@ func waitForDaemon(ctx context.Context, runner shell.Runner) bool {
 }
 
 // doStartTailscaleDaemon issues the OS-specific daemon start command.
-// On macOS the tailscale launchd daemon is a system-level service and requires sudo.
+// On macOS tailscale is installed by Homebrew as a user LaunchAgent
+// (~/.Library/LaunchAgents/) and must be managed WITHOUT sudo. Using
+// "restart" instead of "start" handles the common case where the plist is
+// already loaded in launchd but the service is in an error state.
 func doStartTailscaleDaemon(ctx context.Context, runner shell.Runner, plat platform.Platform) error {
 	switch plat.OS() {
 	case "darwin":
-		res, err := runner.Run(ctx, "sudo", "brew", "services", "start", "tailscale")
+		res, err := runner.Run(ctx, "brew", "services", "restart", "tailscale")
 		if err != nil {
-			return fmt.Errorf("brew services start tailscale: %w\n%s", err, strings.TrimSpace(res.Stderr))
+			return fmt.Errorf("brew services restart tailscale: %w\n%s", err, strings.TrimSpace(res.Stderr))
 		}
 		return nil
 	default: // linux
