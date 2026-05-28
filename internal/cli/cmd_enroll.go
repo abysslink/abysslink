@@ -89,7 +89,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 			printNtfyQR(ctx, p, cc)
 
 			// Printable runbook for the remaining manual steps.
-			if path, err := writeRunbook(cc); err == nil {
+			if path, err := writeRunbook(ctx, cc); err == nil {
 				printerInfo(p, "")
 				printerInfo(p, "Manual steps (SSO passkey, disable SMS 2FA, hide lock-screen previews) are in:")
 				printerInfo(p, "  "+styleCode.Render(path))
@@ -142,10 +142,13 @@ func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext) {
 	}
 	res, err := cc.runner.Run(ctx, "tailscale", "ip", "--4")
 	if err != nil || res.ExitCode != 0 {
+		printerInfo(p, styleWarn.Render("⚠  Could not get tailnet IP — ntfy subscription QR skipped."))
+		printerInfo(p, styleMuted.Render("  Run `tailscale up` then re-run `abysslink enroll phone` to get the QR."))
 		return
 	}
 	ip := strings.TrimSpace(res.Stdout)
 	if ip == "" {
+		printerInfo(p, styleWarn.Render("⚠  tailscale ip returned empty — ntfy subscription QR skipped."))
 		return
 	}
 	topic := cc.cfg.Modules.Notify.DefaultTopic
@@ -160,7 +163,7 @@ func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext) {
 
 // writeRunbook writes a Markdown runbook of the remaining manual steps and
 // returns its path. It is recorded through the audit log like any other write.
-func writeRunbook(cc *cmdContext) (string, error) {
+func writeRunbook(ctx context.Context, cc *cmdContext) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -178,7 +181,7 @@ func writeRunbook(cc *cmdContext) (string, error) {
 	if cc.cfg == nil {
 		return "", fmt.Errorf("no config")
 	}
-	deps, err := buildDeps(context.Background(), cc)
+	deps, err := buildDeps(ctx, cc)
 	if err != nil {
 		return "", err
 	}

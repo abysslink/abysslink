@@ -183,14 +183,16 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 		}
 	}
 
-	// Always plan service installation if ntfy is enabled and installed.
-	hasInstalled := false
+	// Plan service install only when the binary is present (hasInstallFinding means
+	// the binary is MISSING, so we skip service install — can't install a service
+	// for a binary that doesn't exist yet; Apply handles it in order).
+	hasInstallFinding := false
 	for _, f := range findings {
 		if f.Check == "installed" {
-			hasInstalled = true
+			hasInstallFinding = true
 		}
 	}
-	if !hasInstalled {
+	if !hasInstallFinding {
 		actions = append(actions, modules.Action{
 			Module:      m.Name(),
 			Description: "install ntfy service (launchd/systemd)",
@@ -239,7 +241,7 @@ func (m *Module) Apply(ctx context.Context) error {
 	}
 
 	if err := m.ensureAdminUser(ctx); err != nil {
-		slog.Warn("ntfy apply: could not provision admin user", "err", err)
+		return fmt.Errorf("ntfy apply: provision admin user: %w", err)
 	}
 
 	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{

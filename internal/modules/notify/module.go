@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -74,7 +75,7 @@ func (m *Module) Name() string { return "notify" }
 func (m *Module) Deps() []string { return []string{"ntfy"} }
 
 // Detect checks whether the ntfy backend is configured and running.
-func (m *Module) Detect(_ context.Context) ([]modules.Finding, error) {
+func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	var findings []modules.Finding
 
 	if !m.cfg.Modules.Notify.Enabled {
@@ -82,14 +83,19 @@ func (m *Module) Detect(_ context.Context) ([]modules.Finding, error) {
 		return nil, nil
 	}
 
-	// Try an HTTP GET to ntfy health endpoint.
+	// Try an HTTP GET to ntfy health endpoint. Context is passed so the
+	// request is cancelled if the parent context times out or is cancelled.
 	client := &http.Client{
 		Timeout: httpTimeout,
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
 		},
 	}
-	resp, err := client.Get(m.baseURL() + ntfyHealthPath) //nolint:noctx
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL()+ntfyHealthPath, nil)
+	if err != nil {
+		return findings, fmt.Errorf("notify detect: build request: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		msg := fmt.Sprintf("ntfy service is not reachable at localhost:%d", m.cfg.Modules.Ntfy.ListenPort())
 		if err != nil {
@@ -137,27 +143,32 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply starts the ntfy service via the platform service manager.
+// Apply starts the ntfy service via the OS-appropriate service manager.
 func (m *Module) Apply(ctx context.Context) error {
-	// Attempt to start ntfy via platform service manager.
-	// Try launchd first (macOS), then systemd (Linux).
-	res, err := m.runner.Run(ctx, "launchctl", "start", "sh.ntfy.ntfyd")
-	if err == nil && res.ExitCode == 0 {
-		slog.Info("notify apply: started ntfy via launchctl")
-		return nil
+	switch runtime.GOOS {
+	case "darwin":
+		res, err := m.runner.Run(ctx, "launchctl", "start", "sh.ntfy.ntfyd")
+		if err == nil && res.ExitCode == 0 {
+			slog.Info("notify apply: started ntfy via launchctl")
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("notify apply: launchctl start ntfy: %w", err)
+		}
+		return fmt.Errorf("notify apply: launchctl start ntfy exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	default: // linux
+		res, err := m.runner.Run(ctx, "systemctl", "--user", "start", "ntfy")
+		if err == nil && res.ExitCode == 0 {
+			slog.Info("notify apply: started ntfy via systemctl")
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("notify apply: systemctl start ntfy: %w", err)
+		}
+		return fmt.Errorf("notify apply: systemctl start ntfy exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-
-	res, err = m.runner.Run(ctx, "systemctl", "--user", "start", "ntfy")
-	if err == nil && res.ExitCode == 0 {
-		slog.Info("notify apply: started ntfy via systemctl")
-		return nil
-	}
-
-	return fmt.Errorf("notify module: could not start ntfy service via launchd or systemd")
 }
 
 // Verify sends a test HTTP request to ntfy health endpoint.
-func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 	var findings []modules.Finding
 
 	if !m.cfg.Modules.Notify.Enabled {
@@ -170,7 +181,11 @@ func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
 			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
 		},
 	}
-	resp, err := client.Get(m.baseURL() + ntfyHealthPath) //nolint:noctx
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL()+ntfyHealthPath, nil)
+	if err != nil {
+		return findings, fmt.Errorf("notify verify: build request: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
