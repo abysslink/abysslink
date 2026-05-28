@@ -32,8 +32,10 @@ import (
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
+//nolint:gochecknoglobals
+var ntfyBaseURL = "http://localhost:8080"
+
 const (
-	ntfyBaseURL    = "http://localhost:8080"
 	ntfyHealthPath = "/v1/health"
 	ntfyMsgPath    = "/v1/message"
 	httpTimeout    = 5 * time.Second

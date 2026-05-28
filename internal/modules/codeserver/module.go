@@ -37,6 +37,14 @@ const (
 	codeServerConfigPath = ".config/code-server/config.yaml"
 )
 
+// isBindAddrTailnetOnly returns true when addr is bound to a specific tailnet IP
+// (not empty, not 0.0.0.0, not 127.0.0.1).
+func isBindAddrTailnetOnly(addr string) bool {
+	return addr != "" &&
+		!strings.HasPrefix(addr, "0.0.0.0:") &&
+		!strings.HasPrefix(addr, "127.0.0.1:")
+}
+
 // codeServerConfig represents the code-server config.yaml structure.
 type codeServerConfig struct {
 	BindAddr string `yaml:"bind-addr"`
@@ -129,9 +137,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 
 	// Validate bind-addr: must not be 0.0.0.0 or 127.0.0.1.
 	bindAddr := csCfg.BindAddr
-	if bindAddr == "" ||
-		strings.HasPrefix(bindAddr, "0.0.0.0:") ||
-		strings.HasPrefix(bindAddr, "127.0.0.1:") {
+	if !isBindAddrTailnetOnly(bindAddr) {
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "bind_addr_tailnet",
