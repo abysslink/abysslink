@@ -98,10 +98,28 @@ type NotifyModule struct {
 	DefaultTopic string `yaml:"default_topic"`
 }
 
-// WatchModule configures the idle-pane watcher.
+// WatchModule configures the watchers run by abysslinkd.
 type WatchModule struct {
-	Enabled bool     `yaml:"enabled"`
-	Panes   []string `yaml:"panes"`
+	Enabled bool        `yaml:"enabled"`
+	Panes   []string    `yaml:"panes"`
+	Files   []FileWatch `yaml:"files,omitempty"`
+	HTTP    []HTTPWatch `yaml:"http,omitempty"`
+}
+
+// FileWatch notifies when a line appended to Path matches Grep (a regexp).
+type FileWatch struct {
+	Path  string `yaml:"path"`
+	Grep  string `yaml:"grep"`
+	Label string `yaml:"label,omitempty"`
+}
+
+// HTTPWatch notifies when GET URL's status code changes from Expect (or from
+// the previous observation when Expect is 0). IntervalSecs defaults to 60.
+type HTTPWatch struct {
+	URL          string `yaml:"url"`
+	Expect       int    `yaml:"expect,omitempty"`
+	Label        string `yaml:"label,omitempty"`
+	IntervalSecs int    `yaml:"interval_secs,omitempty"`
 }
 
 // Modules groups all module configurations.
