@@ -128,6 +128,19 @@ func hasWildcardListen(cfgContent string) bool {
 	return false
 }
 
+// installNtfyBinary installs the ntfy push-notification server.
+// On macOS, `brew install ntfy` installs a different unrelated tool; the
+// correct package is in the ntfy tap: brew tap ntfy/ntfy + brew install ntfy/ntfy/ntfy.
+func (m *Module) installNtfyBinary(ctx context.Context) error {
+	if m.plat.OS() == "darwin" {
+		if _, err := m.runner.Run(ctx, "brew", "tap", "ntfy/ntfy"); err != nil {
+			slog.Warn("ntfy apply: brew tap ntfy/ntfy failed — proceeding anyway", "err", err)
+		}
+		return m.plat.InstallPackage(ctx, "ntfy/ntfy/ntfy")
+	}
+	return m.plat.InstallPackage(ctx, "ntfy")
+}
+
 // generateServerConfig returns the ntfy server.yml contents bound to tailnetIP.
 func (m *Module) generateServerConfig(tailnetIP string) []byte {
 	home := os.Getenv("HOME")
@@ -195,10 +208,10 @@ func (m *Module) Apply(ctx context.Context) error {
 		return nil
 	}
 
-	// Install the ntfy binary if it is not on PATH.
-	if res, verErr := m.runner.Run(ctx, "ntfy", "version"); verErr != nil || res.ExitCode != 0 {
-		slog.Info("ntfy apply: installing ntfy")
-		if err := m.plat.InstallPackage(ctx, "ntfy"); err != nil {
+	// Install the ntfy push server if it is not on PATH.
+	if res, verErr := m.runner.Run(ctx, "ntfy", "serve", "--help"); verErr != nil || res.ExitCode != 0 {
+		slog.Info("ntfy apply: installing ntfy push server")
+		if err := m.installNtfyBinary(ctx); err != nil {
 			return fmt.Errorf("ntfy apply: install ntfy: %w", err)
 		}
 	}
