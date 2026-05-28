@@ -28,14 +28,14 @@ func TestGenerateServerConfig_BindsTailnetIPNotWildcard(t *testing.T) {
 	m := New(modules.Deps{Cfg: config.Defaults()})
 	out := string(m.generateServerConfig("100.64.1.2"))
 
-	assert.Contains(t, out, "listen-http: \"100.64.1.2:8080\"", "must bind to the tailnet IP")
+	assert.Contains(t, out, "listen-http: \"100.64.1.2:2586\"", "must bind to the tailnet IP")
 	assert.NotContains(t, out, "0.0.0.0", "must never bind to all interfaces")
 	assert.Contains(t, out, "auth-default-access: \"deny-all\"")
 }
 
 func TestHasWildcardListen(t *testing.T) {
-	assert.True(t, hasWildcardListen(`listen-http: ":8080"`), "bare :port binds to all interfaces")
-	assert.False(t, hasWildcardListen(`listen-http: "100.64.1.2:8080"`))
+	assert.True(t, hasWildcardListen(`listen-http: ":2586"`), "bare :port binds to all interfaces")
+	assert.False(t, hasWildcardListen(`listen-http: "100.64.1.2:2586"`))
 	assert.False(t, hasWildcardListen("no listen line here"))
 }
 

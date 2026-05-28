@@ -33,7 +33,6 @@ import (
 
 const (
 	serverConfigPath = ".config/ntfy/server.yml"
-	ntfyPort         = "8080"
 )
 
 // Module implements the ntfy module.
@@ -113,7 +112,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	return findings, nil
 }
 
-// hasWildcardListen returns true if the config contains a listen-http line with just a port (":8080").
+// hasWildcardListen returns true if the config contains a listen-http line with just a port (":PORT").
 func hasWildcardListen(cfgContent string) bool {
 	for _, line := range strings.Split(cfgContent, "\n") {
 		line = strings.TrimSpace(line)
@@ -132,13 +131,14 @@ func hasWildcardListen(cfgContent string) bool {
 // generateServerConfig returns the ntfy server.yml contents bound to tailnetIP.
 func (m *Module) generateServerConfig(tailnetIP string) []byte {
 	home := os.Getenv("HOME")
+	port := fmt.Sprintf("%d", m.cfg.Modules.Ntfy.ListenPort())
 	return []byte(fmt.Sprintf(`# ntfy server config — managed by abysslink
 listen-http: "%s:%s"
 base-url: "http://%s:%s"
 auth-file: "%s/.local/state/abysslink/ntfy/user.db"
 auth-default-access: "deny-all"
 behind-proxy: false
-`, tailnetIP, ntfyPort, tailnetIP, ntfyPort, home))
+`, tailnetIP, port, tailnetIP, port, home))
 }
 
 // Plan computes actions needed.
