@@ -120,11 +120,9 @@ func newUpCmd() *cobra.Command {
 func printSudoNotice(p Printer, actions []modules.Action) {
 	// Descriptions that are known to require elevated privileges.
 	sudoKeywords := []string{
-		"pmset",          // power module
-		"tailscale",      // tailscale daemon start
-		"brew services",  // daemon service management
+		"pmset",          // power module (macOS)
 		"systemctl",      // Linux daemon management
-		"socketfilterfw", // firewall
+		"socketfilterfw", // macOS application firewall
 	}
 
 	var sudoActions []string
@@ -137,9 +135,6 @@ func printSudoNotice(p Printer, actions []modules.Action) {
 			}
 		}
 	}
-
-	// tailscaled daemon check/start runs outside the module system.
-	sudoActions = append([]string{fmt.Sprintf("%-18s %s", "tailscaled", styleMuted.Render("start daemon if not running"))}, sudoActions...)
 
 	printerInfo(p, "")
 	printerInfo(p, "  "+styleWarn.Render("⚠")+"  "+styleBold.Render("sudo required")+"  "+styleMuted.Render("your macOS/Linux password will be requested for:"))
