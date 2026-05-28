@@ -118,3 +118,55 @@ func track() { sentry.CaptureException(nil) }
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "getsentry")
 }
+
+func TestCheckNtfyConfigBindAddr_RejectsWildcard(t *testing.T) {
+	ctx := context.Background()
+
+	err := conformance.CheckNtfyConfigBindAddr(ctx, `listen-http: "0.0.0.0:8080"`)
+	assert.Error(t, err, "0.0.0.0 must be rejected")
+
+	err = conformance.CheckNtfyConfigBindAddr(ctx, `listen-http: ":8080"`)
+	assert.Error(t, err, "bare :port must be rejected")
+}
+
+func TestCheckNtfyConfigBindAddr_AcceptsTailnetIP(t *testing.T) {
+	ctx := context.Background()
+	cfg := `# ntfy config
+listen-http: "100.64.1.2:8080"
+auth-default-access: "deny-all"
+`
+	err := conformance.CheckNtfyConfigBindAddr(ctx, cfg)
+	assert.NoError(t, err, "tailnet IP bind must be accepted")
+}
+
+func TestCheckNtfyConfigBindAddr_NoListenLine(t *testing.T) {
+	ctx := context.Background()
+	err := conformance.CheckNtfyConfigBindAddr(ctx, "auth-default-access: \"deny-all\"\n")
+	assert.NoError(t, err, "no listen-http line should pass")
+}
+
+func TestCheckSSHHardeningDirectives_AllPresent(t *testing.T) {
+	ctx := context.Background()
+	cfg := `PasswordAuthentication no
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+PermitRootLogin no
+AllowUsers alice
+`
+	err := conformance.CheckSSHHardeningDirectives(ctx, cfg)
+	assert.NoError(t, err)
+}
+
+func TestCheckSSHHardeningDirectives_MissingDirective(t *testing.T) {
+	ctx := context.Background()
+	// Missing AllowAgentForwarding — threat-model violation.
+	cfg := `PasswordAuthentication no
+AllowTcpForwarding no
+X11Forwarding no
+PermitRootLogin no
+`
+	err := conformance.CheckSSHHardeningDirectives(ctx, cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "AllowAgentForwarding no")
+}

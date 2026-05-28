@@ -87,6 +87,34 @@ func main() {
 			name: "disable + enable round-trip exits 0",
 			fn:   func(ctx context.Context) error { return testDisableEnableRoundTrip(ctx, binPath, configPath) },
 		},
+		{
+			name: "checkperiod gate rejects >12h without flag",
+			fn:   func(ctx context.Context) error { return testCheckPeriodGateRejectsOver12h(ctx, binPath, tempDir) },
+		},
+		{
+			name: "dry-run mutates no files",
+			fn:   func(ctx context.Context) error { return testDryRunMutatesNoFiles(ctx, binPath, configPath) },
+		},
+		{
+			name: "backup ls does not panic",
+			fn:   func(ctx context.Context) error { return testBackupLsNoPanic(ctx, binPath, configPath) },
+		},
+		{
+			name: "uninstall dry-run shows plan",
+			fn:   func(ctx context.Context) error { return testUninstallDryRunShowsPlan(ctx, binPath, configPath) },
+		},
+		{
+			name: "ntfy config must not bind 0.0.0.0",
+			fn:   func(ctx context.Context) error { return testNtfyBindAddrConformance(ctx) },
+		},
+		{
+			name: "sshd hardening directives conformance",
+			fn:   func(ctx context.Context) error { return testSSHHardeningConformance(ctx) },
+		},
+		{
+			name: "binary size under 50 MB",
+			fn:   func(ctx context.Context) error { return testBinarySizeUnder50MB(ctx, binPath) },
+		},
 	}
 
 	passed := 0
@@ -110,8 +138,12 @@ func main() {
 	}
 }
 
-// locateBinary finds the abysslink binary in PATH, or builds it from source.
+// locateBinary finds the abysslink binary. Checks ABYSSLINK_BIN env first,
+// then PATH, then builds from source. Set ABYSSLINK_BIN to force a specific binary.
 func locateBinary(ctx context.Context) (string, error) {
+	if p := os.Getenv("ABYSSLINK_BIN"); p != "" {
+		return p, nil
+	}
 	if p, err := exec.LookPath("abysslink"); err == nil {
 		return p, nil
 	}
