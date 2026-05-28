@@ -16,6 +16,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/abysslink/abysslink/internal/modules"
@@ -39,7 +40,11 @@ func newRepairCmd() *cobra.Command {
 				printerInfo(p, "Dry-run mode (use --apply to apply changes)")
 			}
 
-			mods := allModules(cc.runner, cc.cfg)
+			deps, err := buildDeps(ctx, cc)
+			if err != nil {
+				return fmt.Errorf("repair: %w", err)
+			}
+			mods := allModules(deps)
 			r, err := modules.NewRunner(mods, cc.cfg)
 			if err != nil {
 				return fmt.Errorf("repair: %w", err)
@@ -69,32 +74,7 @@ func newRepairCmd() *cobra.Command {
 				return nil
 			}
 
-			// Attempt repair on each affected module.
-			modMap := make(map[string]modules.Module, len(mods))
-			for _, m := range mods {
-				modMap[m.Name()] = m
-			}
-
-			var repairErrs []error
-			for modName := range needsRepair {
-				m, ok := modMap[modName]
-				if !ok {
-					continue
-				}
-
-				printerInfo(p, fmt.Sprintf("  Repairing module: %s", modName))
-				if !cc.dryRun {
-					if repErr := m.Repair(ctx); repErr != nil {
-						printerError(p, fmt.Sprintf("  repair [%s]: %v", modName, repErr))
-						repairErrs = append(repairErrs, repErr)
-					} else {
-						printerInfo(p, fmt.Sprintf("  Repaired: %s", modName))
-					}
-				} else {
-					printerInfo(p, fmt.Sprintf("  [plan] would repair: %s", modName))
-				}
-			}
-
+			repairErrs := runModuleRepairs(ctx, p, mods, needsRepair, cc.dryRun)
 			if len(repairErrs) > 0 {
 				return fmt.Errorf("repair: %d module(s) failed to repair", len(repairErrs))
 			}
@@ -102,4 +82,35 @@ func newRepairCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// runModuleRepairs calls Repair on each module flagged in needsRepair, printing
+// progress. In dry-run mode it reports what it would repair without mutating.
+// It returns the errors from any modules that failed to repair.
+func runModuleRepairs(ctx context.Context, p Printer, mods []modules.Module, needsRepair map[string]bool, dryRun bool) []error {
+	modMap := make(map[string]modules.Module, len(mods))
+	for _, m := range mods {
+		modMap[m.Name()] = m
+	}
+
+	var repairErrs []error
+	for modName := range needsRepair {
+		m, ok := modMap[modName]
+		if !ok {
+			continue
+		}
+
+		printerInfo(p, fmt.Sprintf("  Repairing module: %s", modName))
+		if dryRun {
+			printerInfo(p, fmt.Sprintf("  [plan] would repair: %s", modName))
+			continue
+		}
+		if repErr := m.Repair(ctx); repErr != nil {
+			printerError(p, fmt.Sprintf("  repair [%s]: %v", modName, repErr))
+			repairErrs = append(repairErrs, repErr)
+			continue
+		}
+		printerInfo(p, fmt.Sprintf("  Repaired: %s", modName))
+	}
+	return repairErrs
 }

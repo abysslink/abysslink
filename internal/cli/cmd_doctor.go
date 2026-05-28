@@ -41,7 +41,11 @@ func newDoctorCmd() *cobra.Command {
 			printerInfo(p, styleHeaderBox.Render(header))
 			printerInfo(p, "")
 
-			mods := allModules(cc.runner, cc.cfg)
+			deps, err := buildDeps(ctx, cc)
+			if err != nil {
+				return fmt.Errorf("doctor: %w", err)
+			}
+			mods := allModules(deps)
 			r, err := modules.NewRunner(mods, cc.cfg)
 			if err != nil {
 				return err

@@ -85,8 +85,8 @@ func checkLUKS(ctx context.Context, m *Module) ([]modules.Finding, error) {
 		return []modules.Finding{{
 			Module:   m.Name(),
 			Check:    "luks",
-			Severity: modules.SeverityWarning,
-			Message:  "Home directory is not on an encrypted filesystem",
+			Severity: modules.SeverityFatal,
+			Message:  "Home directory is not on an encrypted (LUKS) filesystem — enable full-disk encryption before exposing remote access",
 		}}, nil
 	}
 

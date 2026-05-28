@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -37,11 +38,12 @@ const (
 type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
+	audit  *audit.Audit
 }
 
 // New returns a new Module.
-func New(runner shell.Runner, cfg *config.Config) *Module {
-	return &Module{runner: runner, cfg: cfg}
+func New(d modules.Deps) *Module {
+	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit}
 }
 
 // Name returns the module name.
@@ -197,7 +199,7 @@ func (m *Module) Apply(ctx context.Context) error {
 
 	data := m.generateServerConfig(tailnetIP)
 	slog.Info("ntfy apply: writing server config", "path", cfgPath)
-	if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
+	if err := m.audit.WriteFile(cfgPath, data, 0o600, false); err != nil {
 		return fmt.Errorf("ntfy apply: write config: %w", err)
 	}
 

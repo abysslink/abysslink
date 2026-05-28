@@ -73,6 +73,7 @@ None.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260526-l51 | UX overhaul for abysslink up command: real-time per-module scan rows, rich plan preview with Explain text, live apply progress rows with step counters, final summary | 2026-05-26 | a0dc6c7 | [260526-l51-ux-overhaul-for-abysslink-up-command-rea](.planning/quick/260526-l51-ux-overhaul-for-abysslink-up-command-rea/) |
+| 260528-5gs | Security hardening Slice 1 — foundation wiring: construct platform.Platform + keychain via build-tagged factories and inject through modules.Deps (kills dead platform layer + nil keychain); route tmux/ntfy/claudecode writes through internal/audit (backup+log); fail-closed disk-encryption gate in `up` (--force-unsafe); LUKS→Fatal | 2026-05-28 | (pending) | [260528-5gs-foundation-wiring](.planning/quick/260528-5gs-foundation-wiring/) |
 
 ## Deferred Items
 
