@@ -280,12 +280,30 @@ func (m *Module) installHardenedSSHD(ctx context.Context) error {
 		return fmt.Errorf("ssh apply: sshd config invalid, not reloading: %s", strings.TrimSpace(res.Stderr))
 	}
 
+	return m.reloadSSHD(ctx)
+}
+
+// reloadSSHD reloads the sshd daemon using the appropriate mechanism for the
+// current OS: launchctl on macOS, systemctl on Linux.
+func (m *Module) reloadSSHD(ctx context.Context) error {
+	if runtime.GOOS == "darwin" {
+		// macOS sshd is managed by launchd; kickstart -k stops then relaunches it.
+		res, err := m.runner.Run(ctx, "sudo", "launchctl", "kickstart", "-k", "system/com.openssh.sshd")
+		if err != nil {
+			return fmt.Errorf("ssh apply: reload sshd (launchctl): %w", err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("ssh apply: launchctl kickstart sshd exited %d: %s",
+				res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+		return nil
+	}
+	// Linux: try both common unit names (sshd.service and ssh.service vary by distro).
 	var reloadErr error
 	for _, unit := range []string{"sshd", "ssh"} {
 		res, err := m.runner.Run(ctx, "sudo", "systemctl", "reload", unit)
 		if err == nil && res.ExitCode == 0 {
-			reloadErr = nil
-			break
+			return nil
 		}
 		if err != nil {
 			reloadErr = err
