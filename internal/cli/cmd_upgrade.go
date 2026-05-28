@@ -16,8 +16,14 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -34,26 +40,67 @@ func newUpgradeCmd() *cobra.Command {
 			checkOnly, _ := c.Flags().GetBool("check")
 			p := newPrinter(c)
 
-			printerInfo(p, "Checking for updates...")
-
-			updateURL := os.Getenv("ABYSSLINK_UPDATE_URL")
-			if updateURL == "" {
-				printerInfo(p, "No update check endpoint configured. Set ABYSSLINK_UPDATE_URL.")
-				if !checkOnly {
-					return fmt.Errorf("upgrade: not yet implemented — download from https://github.com/abysslink/abysslink/releases")
-				}
+			latest, err := latestReleaseTag(c.Context())
+			if err != nil {
+				return fmt.Errorf("upgrade: check latest release: %w", err)
+			}
+			printerInfo(p, fmt.Sprintf("Installed: %s   Latest: %s", version, latest))
+			if normalizeTag(latest) == normalizeTag(version) {
+				printerInfo(p, styleSuccess.Render("Already up to date."))
 				return nil
 			}
+			printerInfo(p, styleWarn.Render("A newer release is available."))
 
-			// TODO: implement actual update check and cosign signature verification.
 			if checkOnly {
-				printerInfo(p, fmt.Sprintf("Update endpoint: %s (check-only, not downloading)", updateURL))
 				return nil
 			}
 
-			return fmt.Errorf("upgrade: auto-update not yet implemented — download from https://github.com/abysslink/abysslink/releases")
+			// Self-replace is intentionally NOT performed: abysslink will not
+			// overwrite its own binary without verifying a cryptographic
+			// signature on the downloaded artifact, and signed releases are not
+			// yet published. Installing an unverified binary would be a
+			// supply-chain risk, so we fail closed and direct the user to a
+			// trusted install path.
+			printerInfo(p, "")
+			printerInfo(p, "Self-update is disabled until signed releases are verified. Upgrade via a trusted path:")
+			printerInfo(p, "  • "+styleCode.Render("curl -fsSL https://get.abysslink.dev/install.sh | sh")+" (verifies the release signature)")
+			printerInfo(p, "  • your package manager (brew / apt / dnf), or")
+			printerInfo(p, "  • "+styleCode.Render("go install github.com/abysslink/abysslink/cmd/abysslink@latest"))
+			return nil
 		},
 	}
 	cmd.Flags().Bool("check", false, "Only check for a newer version, do not upgrade")
 	return cmd
 }
+
+// latestReleaseTag returns the tag_name of the latest GitHub release.
+func latestReleaseTag(ctx context.Context) (string, error) {
+	const url = "https://api.github.com/repos/abysslink/abysslink/releases/latest"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", err
+	}
+	if rel.TagName == "" {
+		return "", fmt.Errorf("no tag_name in latest release")
+	}
+	return rel.TagName, nil
+}
+
+// normalizeTag strips a leading "v" so "v1.2.3" and "1.2.3" compare equal.
+func normalizeTag(t string) string { return strings.TrimPrefix(strings.TrimSpace(t), "v") }
