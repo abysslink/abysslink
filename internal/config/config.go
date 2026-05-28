@@ -269,8 +269,12 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("config: claudecode.api_key_source %q must be keychain, env, or none", cfg.ClaudeCode.APIKeySource)
 	}
 	if cfg.ClaudeCode.NotifyOn.StopAfter != "" {
-		if _, err := time.ParseDuration(cfg.ClaudeCode.NotifyOn.StopAfter); err != nil {
+		stopAfter, err := time.ParseDuration(cfg.ClaudeCode.NotifyOn.StopAfter)
+		if err != nil {
 			return fmt.Errorf("config: claudecode.notify_on.stop_after %q is not a valid duration: %w", cfg.ClaudeCode.NotifyOn.StopAfter, err)
+		}
+		if stopAfter < 30*time.Second {
+			return fmt.Errorf("config: claudecode.notify_on.stop_after %q must be at least 30s to avoid chatty notifications", cfg.ClaudeCode.NotifyOn.StopAfter)
 		}
 	}
 	return nil

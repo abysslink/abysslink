@@ -24,6 +24,9 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/modules/acl"
+	"github.com/abysslink/abysslink/internal/modules/claudecode"
+	"github.com/abysslink/abysslink/internal/modules/codeserver"
+	"github.com/abysslink/abysslink/internal/modules/eternalterminal"
 	"github.com/abysslink/abysslink/internal/modules/hardening"
 	"github.com/abysslink/abysslink/internal/modules/lock"
 	"github.com/abysslink/abysslink/internal/modules/mosh"
@@ -33,6 +36,7 @@ import (
 	"github.com/abysslink/abysslink/internal/modules/ssh"
 	tsmod "github.com/abysslink/abysslink/internal/modules/tailscale"
 	"github.com/abysslink/abysslink/internal/modules/tmux"
+	"github.com/abysslink/abysslink/internal/modules/ttyd"
 	"github.com/abysslink/abysslink/internal/modules/watch"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/secrets"
@@ -143,7 +147,10 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 	}, nil
 }
 
-// allModules returns all 11 core modules wired with the shared dependency bundle.
+// allModules returns the core modules plus optional modules wired with the
+// shared dependency bundle. Optional modules no-op when disabled in config, so
+// they are always constructed; enabling one in abysslink.yaml is what activates
+// it on the next `abysslink up`.
 func allModules(deps modules.Deps) []modules.Module {
 	return []modules.Module{
 		tsmod.New(deps),
@@ -157,5 +164,10 @@ func allModules(deps modules.Deps) []modules.Module {
 		watch.New(deps),
 		power.New(deps),
 		hardening.New(deps),
+		// Optional modules (disabled by default; enable via `abysslink enable`).
+		claudecode.New(deps),
+		codeserver.New(deps),
+		ttyd.New(deps),
+		eternalterminal.New(deps),
 	}
 }

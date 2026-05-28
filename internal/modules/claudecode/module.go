@@ -27,8 +27,16 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 )
+
+// anthropicKeyEnv is read (never logged) to seed the keychain on first run.
+const anthropicKeyEnv = "ANTHROPIC_API_KEY"
+
+// notifyHookCommand fires when Claude Code is waiting for input — the primary
+// "buzz my phone" trigger.
+const notifyHookCommand = `abysslink notify "Claude needs you" "waiting for input"`
 
 const (
 	stopHookCommand = `abysslink notify "Claude stopped" "Session ended"`
@@ -41,13 +49,14 @@ const (
 // This module must NOT import or depend on the Claude SDK — it only writes
 // config files that invoke the abysslink binary.
 type Module struct {
-	runner shell.Runner
-	cfg    *config.Config
+	runner   shell.Runner
+	cfg      *config.Config
+	keychain secrets.KeychainStore
 }
 
 // New returns a new claudecode Module.
-func New(runner shell.Runner, cfg *config.Config) *Module {
-	return &Module{runner: runner, cfg: cfg}
+func New(d modules.Deps) *Module {
+	return &Module{runner: d.Runner, cfg: d.Cfg, keychain: d.Keychain}
 }
 
 // Name returns the canonical module name.
@@ -57,8 +66,22 @@ func (m *Module) Name() string { return "claudecode" }
 func (m *Module) Deps() []string { return []string{"notify"} }
 
 // Detect inspects the current system state for Claude Code integration.
-func (m *Module) Detect(_ context.Context) ([]modules.Finding, error) {
+func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	var findings []modules.Finding
+
+	// Post-reboot keychain check: on macOS the login keychain is locked until
+	// the user logs in at the console, so a key that was stored may be
+	// unreadable. Surface that so the hooks do not silently fail.
+	if m.cfg.ClaudeCode.APIKeySource == "keychain" && m.keychain != nil {
+		if v, err := m.keychain.Get(ctx, keychainService, keychainAccount); err != nil || v == "" {
+			findings = append(findings, modules.Finding{
+				Module:   m.Name(),
+				Check:    "api_key_keychain",
+				Severity: modules.SeverityWarning,
+				Message:  "Anthropic API key not readable from the keychain (unset, or the login keychain is locked after reboot — unlock it at the console)",
+			})
+		}
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -186,8 +209,9 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply writes or merges ~/.claude/settings.json with the abysslink notify Stop hook.
-func (m *Module) Apply(_ context.Context) error {
+// Apply writes or merges ~/.claude/settings.json with the abysslink notify hooks
+// and stores the Anthropic API key in the keychain.
+func (m *Module) Apply(ctx context.Context) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("claudecode: home dir: %w", err)
@@ -207,21 +231,23 @@ func (m *Module) Apply(_ context.Context) error {
 		_ = json.Unmarshal(data, &existing)
 	}
 
-	// Build the desired hooks section (overwrite Stop hook).
-	hookConfig := map[string]interface{}{
-		"Stop": []interface{}{
+	// Build the desired hooks section. Notification fires when Claude is waiting
+	// for input (primary trigger); Stop fires when a turn ends.
+	hookEntry := func(command string) []interface{} {
+		return []interface{}{
 			map[string]interface{}{
 				"matcher": "",
 				"hooks": []interface{}{
-					map[string]interface{}{
-						"type":    "command",
-						"command": stopHookCommand,
-					},
+					map[string]interface{}{"type": "command", "command": command},
 				},
 			},
-		},
+		}
 	}
-
+	hookConfig := map[string]interface{}{}
+	if m.cfg.ClaudeCode.NotifyOn.Notification {
+		hookConfig["Notification"] = hookEntry(notifyHookCommand)
+	}
+	hookConfig["Stop"] = hookEntry(stopHookCommand)
 	existing["hooks"] = hookConfig
 
 	data, err := json.MarshalIndent(existing, "", "  ")
@@ -241,7 +267,31 @@ func (m *Module) Apply(_ context.Context) error {
 	}
 
 	slog.Info("claudecode: wrote settings.json with abysslink notify hooks", "path", settingsPath)
+
+	m.storeAPIKey(ctx)
 	return nil
+}
+
+// storeAPIKey moves the Anthropic API key from the environment into the
+// keychain when api_key_source is "keychain", so it is not left in a shell
+// profile. The value is delivered to the keychain via stdin, never argv.
+func (m *Module) storeAPIKey(ctx context.Context) {
+	if m.cfg.ClaudeCode.APIKeySource != "keychain" || m.keychain == nil {
+		return
+	}
+	if existing, err := m.keychain.Get(ctx, keychainService, keychainAccount); err == nil && existing != "" {
+		return // already stored
+	}
+	key := os.Getenv(anthropicKeyEnv)
+	if key == "" {
+		slog.Warn("claudecode: no API key in keychain and " + anthropicKeyEnv + " is unset — set it and re-run, or store the key with your secret manager")
+		return
+	}
+	if err := m.keychain.Set(ctx, keychainService, keychainAccount, key); err != nil {
+		slog.Warn("claudecode: could not store API key in keychain", "err", err)
+		return
+	}
+	slog.Info("claudecode: stored Anthropic API key in keychain")
 }
 
 // Verify re-runs Detect to confirm the hook is in place.
