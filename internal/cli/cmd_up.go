@@ -202,7 +202,7 @@ func requireTailscaleDaemon(p Printer) error {
 	if !waitForDaemon(ctx, runner) {
 		printerInfo(p, "")
 		printerInfo(p, "  "+iconFatalStr()+"  tailscaled did not start — fix manually:")
-		printerInfo(p, "    "+styleCode.Render("sudo brew services start tailscale")+"  "+styleMuted.Render("(macOS)"))
+		printerInfo(p, "    "+styleCode.Render("brew services restart tailscale")+"  "+styleMuted.Render("(macOS)"))
 		printerInfo(p, "    "+styleCode.Render("sudo systemctl enable --now tailscaled")+"  "+styleMuted.Render("(Linux)"))
 		printerInfo(p, "")
 		return fmt.Errorf("up: tailscaled did not start within 15s")
