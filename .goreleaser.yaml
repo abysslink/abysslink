@@ -127,16 +127,37 @@ release:
   footer: |
     ## Verify this release
 
-    Download the binary and verify with cosign (Phase 8+):
-    ```
-    cosign verify-blob --certificate abysslink_<version>_linux_amd64.tar.gz.pem \
-      --signature abysslink_<version>_linux_amd64.tar.gz.sig \
-      abysslink_<version>_linux_amd64.tar.gz
+    Every release is signed with [cosign](https://docs.sigstore.dev/cosign/) keyless signing
+    via GitHub Actions OIDC — no private key used or stored.
+
+    ```sh
+    VERSION={{ .Tag }}
+
+    # Download cosign artifacts for the checksum manifest
+    curl -fsSL https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt     -o checksums.txt
+    curl -fsSL https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt.sig -o checksums.txt.sig
+    curl -fsSL https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt.pem -o checksums.txt.pem
+
+    # Verify cosign signature
+    cosign verify-blob \
+      --certificate checksums.txt.pem \
+      --signature   checksums.txt.sig \
+      --certificate-identity-regexp "https://github.com/abysslink/abysslink/.github/workflows/release.yml@refs/tags/.*" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      checksums.txt
+
+    # Verify your binary's SHA-256 against the signed manifest
+    grep abysslink_${VERSION#v}_linux_amd64.tar.gz checksums.txt | sha256sum --check
     ```
 
-    Or use the one-liner installer:
+    One-liner installer (runs all of the above automatically):
+    ```sh
+    curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | bash
     ```
-    curl -fsSL https://abysslink.dev/install.sh | bash
+
+    Self-update from an installed binary:
+    ```sh
+    abysslink upgrade --apply
     ```
 
 snapshot:
