@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -189,7 +190,16 @@ func (p *Platform) KeepAwake(ctx context.Context, mode platform.KeepAwakeMode) e
 		)
 		return err
 	case platform.KeepAwakeDisplay:
-		return fmt.Errorf("keep-awake display mode: not yet implemented on Linux")
+		// Best-effort: disable X11 screensaver and DPMS. Continues without error
+		// if xset is unavailable (Wayland/headless) — systemd-inhibit already
+		// handles system sleep via KeepAwakeSystem.
+		res, xErr := p.runner.Run(ctx, "xset", "s", "off")
+		if xErr != nil || res.ExitCode != 0 {
+			slog.Warn("keep-awake display: xset unavailable; display may sleep (system keep-awake unaffected)")
+			return nil
+		}
+		_, _ = p.runner.Run(ctx, "xset", "-dpms")
+		return nil
 	default:
 		return fmt.Errorf("unknown keep-awake mode: %s", mode)
 	}
@@ -198,14 +208,59 @@ func (p *Platform) KeepAwake(ctx context.Context, mode platform.KeepAwakeMode) e
 // linuxFirewall is a stub FirewallController for Linux.
 type linuxFirewall struct{ runner shell.Runner }
 
-func (f *linuxFirewall) AllowPort(_ context.Context, _ int, _ string) error {
-	return fmt.Errorf("linux firewall: AllowPort not yet implemented")
+func (f *linuxFirewall) AllowPort(ctx context.Context, port int, proto string) error {
+	rule := fmt.Sprintf("%d/%s", port, proto)
+	// Prefer ufw.
+	if res, err := f.runner.Run(ctx, "ufw", "allow", rule); err == nil && res.ExitCode == 0 {
+		return nil
+	}
+	// Fall back to iptables.
+	_, err := f.runner.Run(ctx, "iptables", "-A", "INPUT",
+		"-p", proto, "--dport", fmt.Sprintf("%d", port), "-j", "ACCEPT")
+	if err != nil {
+		return fmt.Errorf("linux firewall: allow %s: %w", rule, err)
+	}
+	return nil
 }
 
-func (f *linuxFirewall) DenyPort(_ context.Context, _ int, _ string) error {
-	return fmt.Errorf("linux firewall: DenyPort not yet implemented")
+func (f *linuxFirewall) DenyPort(ctx context.Context, port int, proto string) error {
+	rule := fmt.Sprintf("%d/%s", port, proto)
+	// Prefer ufw.
+	if res, err := f.runner.Run(ctx, "ufw", "deny", rule); err == nil && res.ExitCode == 0 {
+		return nil
+	}
+	// Fall back to iptables DROP.
+	_, err := f.runner.Run(ctx, "iptables", "-A", "INPUT",
+		"-p", proto, "--dport", fmt.Sprintf("%d", port), "-j", "DROP")
+	if err != nil {
+		return fmt.Errorf("linux firewall: deny %s: %w", rule, err)
+	}
+	return nil
 }
 
-func (f *linuxFirewall) Status(_ context.Context) (string, error) {
-	return "", fmt.Errorf("linux firewall: Status not yet implemented")
+func (f *linuxFirewall) Status(ctx context.Context) (string, error) {
+	// Try ufw first — most common on Ubuntu/Debian.
+	if res, err := f.runner.Run(ctx, "ufw", "status"); err == nil {
+		out := res.Stdout
+		if strings.Contains(out, "Status: active") {
+			return "enabled", nil
+		}
+		if strings.Contains(out, "Status: inactive") {
+			return "disabled", nil
+		}
+	}
+	// Fall back to nft.
+	if res, err := f.runner.Run(ctx, "nft", "list", "ruleset"); err == nil && res.ExitCode == 0 {
+		if strings.TrimSpace(res.Stdout) != "" {
+			return "enabled", nil
+		}
+	}
+	// Fall back to iptables. Default empty policy produces ~6 lines; more means rules exist.
+	if res, err := f.runner.Run(ctx, "iptables", "-L", "-n"); err == nil && res.ExitCode == 0 {
+		if strings.Count(res.Stdout, "\n") > 6 {
+			return "enabled", nil
+		}
+		return "disabled", nil
+	}
+	return "unknown", nil
 }

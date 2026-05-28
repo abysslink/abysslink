@@ -16,6 +16,8 @@
 package config_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -75,6 +77,15 @@ func TestYamlExampleValidates(t *testing.T) {
 func TestUnknownKey(t *testing.T) {
 	_, err := config.Load("testdata/unknown-key.yaml")
 	require.Error(t, err, "unknown YAML fields must be rejected")
+}
+
+func TestLoad_RejectsFunnelKey(t *testing.T) {
+	// Tailscale Funnel exposes ports publicly — banned at schema level via KnownFields(true).
+	dir := t.TempDir()
+	p := filepath.Join(dir, "funnel.yaml")
+	require.NoError(t, os.WriteFile(p, []byte("version: 1\nfunnel: true\n"), 0o600))
+	_, err := config.Load(p)
+	require.Error(t, err, "funnel: key must be rejected")
 }
 
 func TestValidate_InvalidEmail(t *testing.T) {
