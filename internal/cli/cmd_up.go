@@ -174,7 +174,7 @@ type optionalACLPort struct {
 func optionalACLPorts(cfg *config.Config) []optionalACLPort {
 	var out []optionalACLPort
 	if cfg.Modules.Ntfy.Enabled {
-		out = append(out, optionalACLPort{"ntfy", "tcp/8080"})
+		out = append(out, optionalACLPort{"ntfy", fmt.Sprintf("tcp/%d", cfg.Modules.Ntfy.ListenPort())})
 	}
 	if cfg.Modules.CodeServer.Enabled {
 		out = append(out, optionalACLPort{"code-server", "tcp/8080"})

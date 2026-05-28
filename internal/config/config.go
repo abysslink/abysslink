@@ -92,6 +92,20 @@ type BasicModule struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+// NtfyModule configures the ntfy push-notification server.
+type NtfyModule struct {
+	Enabled bool `yaml:"enabled"`
+	Port    int  `yaml:"port,omitempty"` // 0 means use default (2586)
+}
+
+// ListenPort returns the configured port or the safe default (2586).
+func (m NtfyModule) ListenPort() int {
+	if m.Port > 0 {
+		return m.Port
+	}
+	return 2586
+}
+
 // NotifyModule configures the generic notification API.
 type NotifyModule struct {
 	Enabled      bool   `yaml:"enabled"`
@@ -135,7 +149,7 @@ type Modules struct {
 	Tmux            TmuxModule   `yaml:"tmux"`
 	Mosh            BasicModule  `yaml:"mosh"`
 	Notify          NotifyModule `yaml:"notify"`
-	Ntfy            BasicModule  `yaml:"ntfy"`
+	Ntfy            NtfyModule   `yaml:"ntfy"`
 	Watch           WatchModule  `yaml:"watch"`
 	CodeServer      BasicModule  `yaml:"code_server"`
 	Ttyd            BasicModule  `yaml:"ttyd"`
@@ -196,7 +210,7 @@ func Defaults() *Config {
 			Tmux:   TmuxModule{Enabled: true, Session: "main"},
 			Mosh:   BasicModule{Enabled: true},
 			Notify: NotifyModule{Enabled: true, DefaultTopic: "rig"},
-			Ntfy:   BasicModule{Enabled: true},
+			Ntfy:   NtfyModule{Enabled: true, Port: 2586},
 			Watch:  WatchModule{Enabled: true, Panes: []string{"main"}},
 		},
 		ClaudeCode: ClaudeCode{

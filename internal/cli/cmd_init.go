@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,6 +77,13 @@ func newInitCmd() *cobra.Command {
 				return fmt.Errorf("init: platform detection: %w", err)
 			}
 
+			// Phase 0 — Confirm the user has a Tailscale account (or guide them to create one).
+			if !autoYes {
+				if err := ensureTailscaleAccount(p); err != nil {
+					return err
+				}
+			}
+
 			// Phase 1 — Show what's already installed (never mutates anything).
 			toolStatus := runToolCheck(ctx, p, runner)
 			printerInfo(p, "")
@@ -116,6 +124,78 @@ func newInitCmd() *cobra.Command {
 	}
 	cmd.Flags().Bool("yes", false, "Non-interactive: accept defaults and install missing tools automatically")
 	return cmd
+}
+
+// ensureTailscaleAccount confirms the user has a Tailscale account before proceeding.
+// Tailscale uses SSO only (Google, GitHub, Microsoft, Apple — no username/password).
+// If the user doesn't have an account yet, we show the signup URL and wait.
+func ensureTailscaleAccount(p Printer) error {
+	const signupURL = "https://login.tailscale.com/start"
+
+	printerInfo(p, "  "+styleBold.Render("Tailscale account"))
+	printerInfo(p, "")
+	printerInfo(p, "  Abysslink routes all remote access through your private Tailscale network.")
+	printerInfo(p, "  You need a free Tailscale account to continue.")
+	printerInfo(p, "")
+	printerInfo(p, "  "+styleMuted.Render("Sign in with Google, GitHub, Microsoft, or Apple — no password needed."))
+	printerInfo(p, "  "+styleMuted.Render("Free tier covers 1 user + up to 100 devices."))
+	printerInfo(p, "")
+	printerInfo(p, "  Sign up or log in → "+styleCode.Render(signupURL))
+	printerInfo(p, "")
+
+	var hasAccount bool
+	if err := huh.NewConfirm().
+		Title("Do you have a Tailscale account?").
+		Description("If not, open the URL above in your browser and create one — it takes about 30 seconds.").
+		Affirmative("Yes, I have an account").
+		Negative("No, open the link for me").
+		Value(&hasAccount).Run(); err != nil {
+		return err
+	}
+
+	if !hasAccount {
+		// Open the signup URL in the default browser.
+		_ = openURL(signupURL)
+		printerInfo(p, "")
+		printerInfo(p, "  "+iconWarnStr()+"  Browser opened → "+styleCode.Render(signupURL))
+		printerInfo(p, "  "+styleMuted.Render("Create your account, then come back here."))
+		printerInfo(p, "")
+
+		var ready bool
+		if err := huh.NewConfirm().
+			Title("Ready to continue?").
+			Description("Press yes once your Tailscale account is created.").
+			Value(&ready).Run(); err != nil {
+			return err
+		}
+		if !ready {
+			return fmt.Errorf("init: Tailscale account is required — create one at %s", signupURL)
+		}
+	}
+
+	printerInfo(p, "")
+	return nil
+}
+
+// openURL tries to open a URL in the system browser (best-effort, non-fatal).
+func openURL(url string) error {
+	runner := &shell.ExecRunner{}
+	ctx := context.Background()
+	switch {
+	case isCommandAvailable(ctx, runner, "open"):
+		_, err := runner.Run(ctx, "open", url) // macOS
+		return err
+	case isCommandAvailable(ctx, runner, "xdg-open"):
+		_, err := runner.Run(ctx, "xdg-open", url) // Linux
+		return err
+	}
+	return nil
+}
+
+// isCommandAvailable returns true if the binary is on PATH.
+func isCommandAvailable(ctx context.Context, runner shell.Runner, binary string) bool {
+	_, err := runner.Run(ctx, binary, "--version")
+	return err == nil
 }
 
 // runToolCheck prints the prerequisites table and returns results keyed by tool name.
@@ -456,6 +536,7 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 		enableMosh = true
 		enableNtfy = true
 	)
+	ntfyPort := 2586
 	hostname, _ = os.Hostname()
 
 	if !autoYes {
@@ -498,6 +579,25 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 		if err := form.Run(); err != nil {
 			return nil, fmt.Errorf("init: %w", err)
 		}
+		if enableNtfy {
+			portStr := fmt.Sprintf("%d", ntfyPort)
+			if err := huh.NewInput().
+				Title("ntfy listen port").
+				Description("Port for the notification server on your tailnet.\nDefault 2586 avoids conflicts with local dev servers (8080, 3000, etc.).").
+				Value(&portStr).
+				Validate(func(s string) error {
+					n, err := strconv.Atoi(strings.TrimSpace(s))
+					if err != nil || n < 1024 || n > 65535 {
+						return fmt.Errorf("must be a number between 1024 and 65535")
+					}
+					return nil
+				}).Run(); err != nil {
+				return nil, fmt.Errorf("init: ntfy port: %w", err)
+			}
+			if n, err := strconv.Atoi(strings.TrimSpace(portStr)); err == nil {
+				ntfyPort = n
+			}
+		}
 	}
 
 	cfg := config.Defaults()
@@ -510,6 +610,7 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 	cfg.Modules.Tmux.Enabled = enableTmux
 	cfg.Modules.Mosh.Enabled = enableMosh
 	cfg.Modules.Ntfy.Enabled = enableNtfy
+	cfg.Modules.Ntfy.Port = ntfyPort
 	cfg.Modules.Notify.Enabled = enableNtfy
 	return cfg, nil
 }
