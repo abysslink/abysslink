@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -29,6 +30,11 @@ import (
 func Execute(ctx context.Context) int {
 	rootCmd := buildRootCmd()
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		var ee *exitError
+		if errors.As(err, &ee) {
+			// Message already printed by the command; just return the code.
+			return ee.ExitCode()
+		}
 		slog.Error("abysslink error", "err", err)
 		return 1
 	}

@@ -91,14 +91,31 @@ func (p *Platform) KeepAwake(ctx context.Context, mode platform.KeepAwakeMode) e
 
 type darwinFirewall struct{ runner shell.Runner }
 
-func (f *darwinFirewall) AllowPort(_ context.Context, _ int, _ string) error {
-	return fmt.Errorf("darwin firewall: AllowPort not yet implemented")
+func (f *darwinFirewall) AllowPort(_ context.Context, port int, proto string) error {
+	// macOS Application Firewall is per-application, not per-port.
+	// Per-port rules require the BSD packet filter (pf).
+	return fmt.Errorf("darwin: application firewall is per-application not per-port; use pfctl(8) to allow %s/%d", proto, port)
 }
 
-func (f *darwinFirewall) DenyPort(_ context.Context, _ int, _ string) error {
-	return fmt.Errorf("darwin firewall: DenyPort not yet implemented")
+func (f *darwinFirewall) DenyPort(_ context.Context, port int, proto string) error {
+	return fmt.Errorf("darwin: application firewall is per-application not per-port; use pfctl(8) to deny %s/%d", proto, port)
 }
 
-func (f *darwinFirewall) Status(_ context.Context) (string, error) {
-	return "", fmt.Errorf("darwin firewall: Status not yet implemented")
+func (f *darwinFirewall) Status(ctx context.Context) (string, error) {
+	res, err := f.runner.Run(ctx, "/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate")
+	if err != nil {
+		return "unknown", fmt.Errorf("darwin firewall: socketfilterfw: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return "unknown", fmt.Errorf("darwin firewall: socketfilterfw exited %d: %s",
+			res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	out := strings.TrimSpace(res.Stdout)
+	if strings.Contains(out, "State = 1") {
+		return "enabled", nil
+	}
+	if strings.Contains(out, "State = 0") {
+		return "disabled", nil
+	}
+	return "unknown", nil
 }

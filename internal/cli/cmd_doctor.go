@@ -17,7 +17,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/modules"
@@ -107,13 +106,13 @@ func newDoctorCmd() *cobra.Command {
 				printerInfo(p, "  "+iconFatalStr()+"  "+styleFatal.Render("Fatal issues found — system is not safe."))
 				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair --apply  to auto-fix what can be fixed."))
 				printerInfo(p, "")
-				os.Exit(2)
+				return &exitError{code: 2}
 			}
 			if hasWarn {
 				printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("Warnings found — review the issues above."))
 				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair --apply  to auto-fix what can be fixed."))
 				printerInfo(p, "")
-				os.Exit(1)
+				return &exitError{code: 1}
 			}
 			return nil
 		},
