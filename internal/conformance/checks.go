@@ -187,6 +187,50 @@ func CheckDefaultsMatchThreatModel(_ context.Context, cfgDefaults interface {
 	return nil
 }
 
+// CheckNtfyConfigBindAddr verifies that a generated ntfy server config does not
+// bind to all interfaces. Rejects 0.0.0.0 or a bare :port (no IP prefix).
+func CheckNtfyConfigBindAddr(_ context.Context, configContent string) error {
+	for _, line := range strings.Split(configContent, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "listen-http:") {
+			continue
+		}
+		if strings.Contains(trimmed, "0.0.0.0") {
+			return fmt.Errorf("conformance: ntfy config binds to 0.0.0.0: %q", trimmed)
+		}
+		// Bare :port pattern — strip the key and quotes, check if value starts with ":".
+		val := strings.TrimSpace(strings.TrimPrefix(trimmed, "listen-http:"))
+		val = strings.Trim(val, `"' `)
+		if strings.HasPrefix(val, ":") {
+			return fmt.Errorf("conformance: ntfy config uses bare :port (binds all interfaces): %q", trimmed)
+		}
+	}
+	return nil
+}
+
+// CheckSSHHardeningDirectives verifies that a sshd_config drop-in snippet
+// contains all security-critical directives mandated by the threat model.
+func CheckSSHHardeningDirectives(_ context.Context, configContent string) error {
+	required := []string{
+		"PasswordAuthentication no",
+		"AllowAgentForwarding no",
+		"AllowTcpForwarding no",
+		"X11Forwarding no",
+		"PermitRootLogin no",
+	}
+	var missing []string
+	for _, directive := range required {
+		if !strings.Contains(configContent, directive) {
+			missing = append(missing, directive)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("conformance: sshd config missing required directives: %s",
+			strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // truncate shortens s to at most n bytes, appending "…" if truncated.
 func truncate(s string, n int) string {
 	if len(s) <= n {

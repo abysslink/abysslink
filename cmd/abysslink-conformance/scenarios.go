@@ -20,8 +20,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/abysslink/abysslink/internal/conformance"
 )
 
 // testVersionOutput verifies that `abysslink version` prints "abysslink" somewhere.
@@ -196,4 +199,144 @@ func testDisableEnableRoundTrip(ctx context.Context, binPath, configPath string)
 	}
 
 	return nil
+}
+
+// testCheckPeriodGateRejectsOver12h writes a config with ssh_check_period: 24h
+// and verifies that `abysslink up` refuses unless --accept-checkperiod-extension is given.
+func testCheckPeriodGateRejectsOver12h(ctx context.Context, binPath, tempDir string) error {
+	cfgPath := filepath.Join(tempDir, "checkperiod-gate.yaml")
+	cfg := `version: 1
+tailnet:
+  ssh: true
+mobile:
+  ssh_check_period: 24h
+`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		return fmt.Errorf("write test config: %w", err)
+	}
+
+	// Gate runs at apply time only; dry-run still previews.
+	out, err := runAbysslink(ctx, binPath, "--config", cfgPath, "up", "--apply")
+	if err == nil {
+		return fmt.Errorf("up --apply with 24h checkperiod should have failed but exited 0; output: %s", out)
+	}
+	if !strings.Contains(out, "accept-checkperiod-extension") &&
+		!strings.Contains(strings.ToLower(out), "checkperiod") &&
+		!strings.Contains(strings.ToLower(out), "check_period") &&
+		!strings.Contains(strings.ToLower(out), "ssh_check_period") {
+		return fmt.Errorf("up gate output does not mention checkperiod extension flag: %q", out)
+	}
+	return nil
+}
+
+// testDryRunMutatesNoFiles verifies that `abysslink up` (dry-run default) does not
+// create any new files in the temp config directory.
+func testDryRunMutatesNoFiles(ctx context.Context, binPath, configPath string) error {
+	cfgDir := filepath.Dir(configPath)
+
+	beforeEntries, err := countFiles(cfgDir)
+	if err != nil {
+		return fmt.Errorf("count files before: %w", err)
+	}
+
+	_, _ = runAbysslink(ctx, binPath, "--config", configPath, "up")
+
+	afterEntries, err := countFiles(cfgDir)
+	if err != nil {
+		return fmt.Errorf("count files after: %w", err)
+	}
+
+	if afterEntries > beforeEntries {
+		return fmt.Errorf("dry-run created %d new file(s) in config dir (before=%d after=%d)",
+			afterEntries-beforeEntries, beforeEntries, afterEntries)
+	}
+	return nil
+}
+
+// countFiles returns the number of regular files under dir (non-recursive).
+func countFiles(dir string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// testBackupLsNoPanic verifies that `abysslink backup ls` exits without a Go panic.
+func testBackupLsNoPanic(ctx context.Context, binPath, configPath string) error {
+	out, _ := runAbysslink(ctx, binPath, "--config", configPath, "backup", "ls")
+	if strings.Contains(out, "panic:") && strings.Contains(out, "goroutine") {
+		return fmt.Errorf("backup ls produced Go panic: %q", out)
+	}
+	return nil
+}
+
+// testUninstallDryRunShowsPlan verifies that `abysslink uninstall` (dry-run default)
+// exits without panic and outputs a plan.
+func testUninstallDryRunShowsPlan(ctx context.Context, binPath, configPath string) error {
+	out, _ := runAbysslink(ctx, binPath, "--config", configPath, "uninstall")
+	if strings.Contains(out, "panic:") && strings.Contains(out, "goroutine") {
+		return fmt.Errorf("uninstall dry-run produced Go panic: %q", out)
+	}
+	lowerOut := strings.ToLower(out)
+	if !strings.Contains(lowerOut, "dry") &&
+		!strings.Contains(lowerOut, "plan") &&
+		!strings.Contains(lowerOut, "restore") &&
+		!strings.Contains(lowerOut, "uninstall") &&
+		!strings.Contains(lowerOut, "nothing") {
+		return fmt.Errorf("uninstall dry-run output does not mention plan/restore/dry: %q", out)
+	}
+	return nil
+}
+
+// testNtfyBindAddrConformance calls conformance.CheckNtfyConfigBindAddr with both
+// a compliant and a non-compliant ntfy config to verify the check works.
+func testNtfyBindAddrConformance(ctx context.Context) error {
+	bad := `listen-http: "0.0.0.0:8080"` + "\n"
+	if err := conformance.CheckNtfyConfigBindAddr(ctx, bad); err == nil {
+		return fmt.Errorf("CheckNtfyConfigBindAddr should have rejected 0.0.0.0 config")
+	}
+
+	good := `listen-http: "100.64.1.2:8080"` + "\n"
+	if err := conformance.CheckNtfyConfigBindAddr(ctx, good); err != nil {
+		return fmt.Errorf("CheckNtfyConfigBindAddr rejected valid tailnet-IP config: %w", err)
+	}
+	return nil
+}
+
+// testSSHHardeningConformance calls conformance.CheckSSHHardeningDirectives with
+// a compliant and a non-compliant sshd drop-in config.
+func testSSHHardeningConformance(ctx context.Context) error {
+	good := `PasswordAuthentication no
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+PermitRootLogin no
+AllowUsers alice
+`
+	if err := conformance.CheckSSHHardeningDirectives(ctx, good); err != nil {
+		return fmt.Errorf("CheckSSHHardeningDirectives rejected valid config: %w", err)
+	}
+
+	bad := `PasswordAuthentication no
+AllowTcpForwarding no
+X11Forwarding no
+PermitRootLogin no
+`
+	if err := conformance.CheckSSHHardeningDirectives(ctx, bad); err == nil {
+		return fmt.Errorf("CheckSSHHardeningDirectives should have rejected config missing AllowAgentForwarding")
+	}
+	return nil
+}
+
+// testBinarySizeUnder50MB verifies that the abysslink binary is under 50 MB.
+func testBinarySizeUnder50MB(ctx context.Context, binPath string) error {
+	const limit = 50 << 20 // 50 MB
+	return conformance.CheckBinarySize(ctx, binPath, limit)
 }
