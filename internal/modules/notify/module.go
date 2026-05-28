@@ -32,8 +32,8 @@ import (
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
-//nolint:gochecknoglobals
-var ntfyBaseURL = "http://localhost:8080"
+// ntfyBaseURL is overridden in tests to point at httptest.Server.
+var ntfyBaseURL = "" //nolint:gochecknoglobals
 
 const (
 	ntfyHealthPath = "/v1/health"
@@ -54,6 +54,17 @@ type Module struct {
 // New returns a new Module.
 func New(d modules.Deps) *Module {
 	return &Module{runner: d.Runner, cfg: d.Cfg, keychain: d.Keychain}
+}
+
+// baseURL returns the ntfy base URL, preferring the test-override var, then cfg, then the hardcoded default.
+func (m *Module) baseURL() string {
+	if ntfyBaseURL != "" {
+		return ntfyBaseURL
+	}
+	if m.cfg != nil {
+		return fmt.Sprintf("http://localhost:%d", m.cfg.Modules.Ntfy.ListenPort())
+	}
+	return "http://localhost:2586"
 }
 
 // Name returns the module name.
@@ -78,9 +89,9 @@ func (m *Module) Detect(_ context.Context) ([]modules.Finding, error) {
 			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
 		},
 	}
-	resp, err := client.Get(ntfyBaseURL + ntfyHealthPath) //nolint:noctx
+	resp, err := client.Get(m.baseURL() + ntfyHealthPath) //nolint:noctx
 	if err != nil || resp.StatusCode != http.StatusOK {
-		msg := "ntfy service is not reachable at localhost:8080"
+		msg := fmt.Sprintf("ntfy service is not reachable at localhost:%d", m.cfg.Modules.Ntfy.ListenPort())
 		if err != nil {
 			msg = fmt.Sprintf("ntfy service unreachable: %v", err)
 		}
@@ -159,7 +170,7 @@ func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
 			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
 		},
 	}
-	resp, err := client.Get(ntfyBaseURL + ntfyHealthPath) //nolint:noctx
+	resp, err := client.Get(m.baseURL() + ntfyHealthPath) //nolint:noctx
 	if err != nil {
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
@@ -220,7 +231,7 @@ func (m *Module) SendDirect(ctx context.Context, title, body string) error {
 		topic = "rig"
 	}
 
-	url := fmt.Sprintf("%s/%s", ntfyBaseURL, topic)
+	url := fmt.Sprintf("%s/%s", m.baseURL(), topic)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("notify send: create request: %w", err)
