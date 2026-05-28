@@ -49,8 +49,8 @@ type Module struct {
 }
 
 // New returns a new Module.
-func New(runner shell.Runner, cfg *config.Config, keychain secrets.KeychainStore) *Module {
-	return &Module{runner: runner, cfg: cfg, keychain: keychain}
+func New(d modules.Deps) *Module {
+	return &Module{runner: d.Runner, cfg: d.Cfg, keychain: d.Keychain}
 }
 
 // Name returns the module name.

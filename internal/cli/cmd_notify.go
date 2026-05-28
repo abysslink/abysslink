@@ -43,7 +43,11 @@ func newNotifyCmd() *cobra.Command {
 			return err
 		}
 
-		nm := notifymod.New(cc.runner, cc.cfg, nil)
+		deps, err := buildDeps(ctx, cc)
+		if err != nil {
+			return fmt.Errorf("notify: %w", err)
+		}
+		nm := notifymod.New(deps)
 
 		readStdin, _ := c.Flags().GetBool("stdin")
 
