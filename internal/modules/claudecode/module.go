@@ -333,9 +333,14 @@ func (m *Module) Apply(ctx context.Context) error {
 	}
 
 	// Read existing settings if present; start from empty map otherwise.
+	// If the file exists but contains invalid JSON, return an error rather than
+	// silently overwriting it — that would destroy the user's settings.
 	existing := make(map[string]interface{})
 	if data, err := os.ReadFile(settingsPath); err == nil { //nolint:gosec
-		_ = json.Unmarshal(data, &existing)
+		if err := json.Unmarshal(data, &existing); err != nil {
+			return fmt.Errorf("claudecode: settings.json is not valid JSON (%w); "+
+				"back it up and remove it, then re-run to reset", err)
+		}
 	}
 
 	// Merge abysslink entries into the existing hooks map — never replace it.

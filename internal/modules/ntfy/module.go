@@ -142,8 +142,9 @@ func (m *Module) installNtfyBinary(ctx context.Context) error {
 }
 
 // generateServerConfig returns the ntfy server.yml contents bound to tailnetIP.
-func (m *Module) generateServerConfig(tailnetIP string) []byte {
-	home := os.Getenv("HOME")
+// home must be an absolute path (from os.UserHomeDir) so the auth-file path is
+// correct even when HOME is unset (e.g. launchd agent context).
+func (m *Module) generateServerConfig(tailnetIP, home string) []byte {
 	port := fmt.Sprintf("%d", m.cfg.Modules.Ntfy.ListenPort())
 	return []byte(fmt.Sprintf(`# ntfy server config — managed by abysslink
 listen-http: "%s:%s"
@@ -234,7 +235,7 @@ func (m *Module) Apply(ctx context.Context) error {
 		return fmt.Errorf("ntfy apply: mkdir %s: %w", filepath.Dir(cfgPath), err)
 	}
 
-	data := m.generateServerConfig(tailnetIP)
+	data := m.generateServerConfig(tailnetIP, home)
 	slog.Info("ntfy apply: writing server config", "path", cfgPath)
 	if err := m.audit.WriteFile(cfgPath, data, 0o600, false); err != nil {
 		return fmt.Errorf("ntfy apply: write config: %w", err)

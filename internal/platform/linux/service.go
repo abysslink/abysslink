@@ -133,15 +133,14 @@ func renderUnit(spec platform.ServiceSpec) string {
 	}
 
 	// Inject environment variables in sorted key order for deterministic output.
-	// Each pair is quoted so values containing spaces survive systemd's tokeniser.
+	// Each pair is quoted per systemd.syntax(7) double-quoted string rules.
 	envKeys := make([]string, 0, len(spec.Env))
 	for k := range spec.Env {
 		envKeys = append(envKeys, k)
 	}
 	sort.Strings(envKeys)
 	for _, k := range envKeys {
-		v := strings.ReplaceAll(spec.Env[k], `"`, `\"`)
-		b.WriteString(fmt.Sprintf("Environment=\"%s=%s\"\n", k, v))
+		b.WriteString(fmt.Sprintf("Environment=\"%s=%s\"\n", k, escapeSystemdValue(spec.Env[k])))
 	}
 
 	b.WriteString("\n")
@@ -152,14 +151,24 @@ func renderUnit(spec platform.ServiceSpec) string {
 }
 
 // quoteSystemdToken wraps a token in double-quotes if it contains whitespace,
-// double-quotes, or backslashes, escaping any embedded double-quotes or
-// backslashes first. This follows systemd's unit-file quoting rules (man 5
-// systemd.syntax), which differ from POSIX shell quoting.
+// double-quotes, or backslashes, escaping per systemd.syntax(7) rules.
+// Literal newlines and carriage returns are also escaped to prevent a raw
+// newline from splitting the unit-file directive across lines.
 func quoteSystemdToken(s string) string {
 	if !strings.ContainsAny(s, " \t\r\n\"\\") {
 		return s
 	}
+	return `"` + escapeSystemdValue(s) + `"`
+}
+
+// escapeSystemdValue applies systemd.syntax(7) double-quoted string escaping:
+// backslash first, then double-quote, then C-like whitespace sequences.
+// Use for any value placed inside a systemd double-quoted string.
+func escapeSystemdValue(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
-	return `"` + s + `"`
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\t", `\t`)
+	return s
 }
