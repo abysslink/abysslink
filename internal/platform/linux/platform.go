@@ -165,9 +165,9 @@ func (p *Platform) DiskEncryptionStatus(ctx context.Context) (platform.DiskState
 	return platform.DiskUnencrypted, nil
 }
 
-// Firewall returns the Linux firewall controller stub.
+// Firewall returns the Linux firewall controller.
 func (p *Platform) Firewall() platform.FirewallController {
-	return &linuxFirewall{runner: p.runner}
+	return &linuxFirewall{p: p}
 }
 
 // KeepAwake prevents system or display sleep on Linux.
@@ -198,49 +198,46 @@ func (p *Platform) KeepAwake(ctx context.Context, mode platform.KeepAwakeMode) e
 			slog.Warn("keep-awake display: xset unavailable; display may sleep (system keep-awake unaffected)")
 			return nil
 		}
-		_, _ = p.runner.Run(ctx, "xset", "-dpms")
+		if res2, err2 := p.runner.Run(ctx, "xset", "-dpms"); err2 != nil || res2.ExitCode != 0 {
+			slog.Warn("keep-awake display: xset -dpms failed; DPMS may still be active, display may blank")
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown keep-awake mode: %s", mode)
 	}
 }
 
-// linuxFirewall is a stub FirewallController for Linux.
-type linuxFirewall struct{ runner shell.Runner }
+// linuxFirewall implements platform.FirewallController for Linux.
+// It holds a *Platform so it can use runPrivileged for write operations
+// (ufw/iptables require root) while using the plain runner for read-only
+// status queries.
+type linuxFirewall struct{ p *Platform }
 
 func (f *linuxFirewall) AllowPort(ctx context.Context, port int, proto string) error {
 	rule := fmt.Sprintf("%d/%s", port, proto)
-	// Prefer ufw.
-	if res, err := f.runner.Run(ctx, "ufw", "allow", rule); err == nil && res.ExitCode == 0 {
+	// Prefer ufw (privilege-elevated; ufw manages rules persistently across reboots).
+	if err := f.p.runPrivileged(ctx, "ufw", "allow", rule); err == nil {
 		return nil
 	}
-	// Fall back to iptables.
-	_, err := f.runner.Run(ctx, "iptables", "-A", "INPUT",
+	// Fall back to iptables (privilege-elevated; ephemeral, lost on reboot).
+	return f.p.runPrivileged(ctx, "iptables", "-A", "INPUT",
 		"-p", proto, "--dport", fmt.Sprintf("%d", port), "-j", "ACCEPT")
-	if err != nil {
-		return fmt.Errorf("linux firewall: allow %s: %w", rule, err)
-	}
-	return nil
 }
 
 func (f *linuxFirewall) DenyPort(ctx context.Context, port int, proto string) error {
 	rule := fmt.Sprintf("%d/%s", port, proto)
-	// Prefer ufw.
-	if res, err := f.runner.Run(ctx, "ufw", "deny", rule); err == nil && res.ExitCode == 0 {
+	// Prefer ufw (privilege-elevated).
+	if err := f.p.runPrivileged(ctx, "ufw", "deny", rule); err == nil {
 		return nil
 	}
-	// Fall back to iptables DROP.
-	_, err := f.runner.Run(ctx, "iptables", "-A", "INPUT",
+	// Fall back to iptables DROP (privilege-elevated).
+	return f.p.runPrivileged(ctx, "iptables", "-A", "INPUT",
 		"-p", proto, "--dport", fmt.Sprintf("%d", port), "-j", "DROP")
-	if err != nil {
-		return fmt.Errorf("linux firewall: deny %s: %w", rule, err)
-	}
-	return nil
 }
 
 func (f *linuxFirewall) Status(ctx context.Context) (string, error) {
-	// Try ufw first — most common on Ubuntu/Debian.
-	if res, err := f.runner.Run(ctx, "ufw", "status"); err == nil {
+	// Try ufw first — most common on Ubuntu/Debian. Read-only; no privilege needed.
+	if res, err := f.p.runner.Run(ctx, "ufw", "status"); err == nil {
 		out := res.Stdout
 		if strings.Contains(out, "Status: active") {
 			return "enabled", nil
@@ -249,14 +246,18 @@ func (f *linuxFirewall) Status(ctx context.Context) (string, error) {
 			return "disabled", nil
 		}
 	}
-	// Fall back to nft.
-	if res, err := f.runner.Run(ctx, "nft", "list", "ruleset"); err == nil && res.ExitCode == 0 {
-		if strings.TrimSpace(res.Stdout) != "" {
+	// Fall back to nft. Check for actual deny/reject rules — a skeleton ruleset
+	// (e.g. firewalld on Fedora/RHEL) emits non-empty output with only ACCEPT
+	// policies, which is functionally equivalent to "disabled".
+	if res, err := f.p.runner.Run(ctx, "nft", "list", "ruleset"); err == nil && res.ExitCode == 0 {
+		out := strings.ToLower(res.Stdout)
+		if strings.Contains(out, "drop") || strings.Contains(out, "reject") {
 			return "enabled", nil
 		}
 	}
-	// Fall back to iptables. Default empty policy produces ~6 lines; more means rules exist.
-	if res, err := f.runner.Run(ctx, "iptables", "-L", "-n"); err == nil && res.ExitCode == 0 {
+	// Fall back to iptables. The default empty policy produces 3 chain headers
+	// (~6 lines); more lines indicates user-added rules are present.
+	if res, err := f.p.runner.Run(ctx, "iptables", "-L", "-n"); err == nil && res.ExitCode == 0 {
 		if strings.Count(res.Stdout, "\n") > 6 {
 			return "enabled", nil
 		}
