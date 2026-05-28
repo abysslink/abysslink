@@ -43,6 +43,7 @@ func newWatchAddCmd() *cobra.Command {
 			expect, _ := cmd.Flags().GetInt("expect")
 			label, _ := cmd.Flags().GetString("label")
 			interval, _ := cmd.Flags().GetInt("interval")
+			poll, _ := cmd.Flags().GetInt("poll")
 
 			return mutateWatch(cmd, func(w *config.WatchModule) (string, error) {
 				switch {
@@ -53,7 +54,7 @@ func newWatchAddCmd() *cobra.Command {
 					if grep == "" {
 						return "", fmt.Errorf("--file requires --grep <regexp>")
 					}
-					w.Files = append(w.Files, config.FileWatch{Path: file, Grep: grep, Label: label})
+					w.Files = append(w.Files, config.FileWatch{Path: file, Grep: grep, Label: label, PollSecs: poll})
 					return "Watching file " + file, nil
 				case httpURL != "":
 					w.HTTP = append(w.HTTP, config.HTTPWatch{URL: httpURL, Expect: expect, Label: label, IntervalSecs: interval})
@@ -70,6 +71,7 @@ func newWatchAddCmd() *cobra.Command {
 	cmd.Flags().String("http", "", "URL to poll")
 	cmd.Flags().Int("expect", 0, "expected HTTP status (notify on change; with --http)")
 	cmd.Flags().Int("interval", 0, "HTTP poll interval in seconds (default 60)")
+	cmd.Flags().Int("poll", 0, "file poll interval in seconds (default 2; with --file)")
 	cmd.Flags().String("label", "", "human label for the notification")
 	return cmd
 }

@@ -60,8 +60,13 @@ func (s *Server) watchFile(ctx context.Context, fw config.FileWatch) {
 		label = fw.Path
 	}
 
+	poll := filePollInterval
+	if fw.PollSecs > 0 {
+		poll = time.Duration(fw.PollSecs) * time.Second
+	}
+
 	var offset int64
-	ticker := time.NewTicker(filePollInterval)
+	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	for {
 		select {

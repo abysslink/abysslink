@@ -128,9 +128,33 @@ func (s *Server) startWatchers(ctx context.Context) {
 	s.startFileAndHTTPWatchers(ctx)
 }
 
+// panePoll returns the pane watcher poll interval, using YAML config if set.
+func (s *Server) panePoll() time.Duration {
+	if s.cfg != nil && s.cfg.Modules.Watch.PanePollSecs > 0 {
+		return time.Duration(s.cfg.Modules.Watch.PanePollSecs) * time.Second
+	}
+	return panePollInterval
+}
+
+// paneIdle returns the idle threshold before a notification fires.
+func (s *Server) paneIdle() time.Duration {
+	if s.cfg != nil && s.cfg.Modules.Watch.PaneIdleSecs > 0 {
+		return time.Duration(s.cfg.Modules.Watch.PaneIdleSecs) * time.Second
+	}
+	return paneIdleInterval
+}
+
+// paneCoolOffDur returns the cool-off between successive pane notifications.
+func (s *Server) paneCoolOffDur() time.Duration {
+	if s.cfg != nil && s.cfg.Modules.Watch.PaneCoolOffSecs > 0 {
+		return time.Duration(s.cfg.Modules.Watch.PaneCoolOffSecs) * time.Second
+	}
+	return paneCoolOff
+}
+
 // watchPane polls a tmux pane and notifies when it has been idle at a prompt.
 func (s *Server) watchPane(ctx context.Context, pane string) {
-	ticker := time.NewTicker(panePollInterval)
+	ticker := time.NewTicker(s.panePoll())
 	defer ticker.Stop()
 
 	var lastHash string
@@ -154,7 +178,7 @@ func (s *Server) watchPane(ctx context.Context, pane string) {
 			idleSince = now
 			continue
 		}
-		if now.Sub(idleSince) < paneIdleInterval || now.Sub(lastNotified) < paneCoolOff {
+		if now.Sub(idleSince) < s.paneIdle() || now.Sub(lastNotified) < s.paneCoolOffDur() {
 			continue
 		}
 		if !promptRegex.MatchString(lastNonEmptyLine(res.Stdout)) {
