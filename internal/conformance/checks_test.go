@@ -170,3 +170,88 @@ PermitRootLogin no
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "AllowAgentForwarding no")
 }
+
+// threatModelDefaults is a test adapter for CheckDefaultsMatchThreatModel.
+type threatModelDefaults struct {
+	lockEnabled      bool
+	sshCheckPeriod   string
+	disableMacOSSSHD bool
+	firewallStealth  bool
+	fileVaultPolicy  string
+}
+
+func (d threatModelDefaults) GetTailnetLockEnabled() bool { return d.lockEnabled }
+func (d threatModelDefaults) GetSSHCheckPeriod() string   { return d.sshCheckPeriod }
+func (d threatModelDefaults) GetDisableMacOSSSHD() bool   { return d.disableMacOSSSHD }
+func (d threatModelDefaults) GetFirewallStealth() bool    { return d.firewallStealth }
+func (d threatModelDefaults) GetFileVaultPolicy() string  { return d.fileVaultPolicy }
+
+var allSecureDefaults = threatModelDefaults{
+	lockEnabled:      true,
+	sshCheckPeriod:   "12h",
+	disableMacOSSSHD: true,
+	firewallStealth:  true,
+	fileVaultPolicy:  "required",
+}
+
+func TestCheckDefaultsMatchThreatModel_ValidDefaults(t *testing.T) {
+	err := conformance.CheckDefaultsMatchThreatModel(context.Background(), allSecureDefaults)
+	assert.NoError(t, err)
+}
+
+func TestCheckDefaultsMatchThreatModel_LockDisabled(t *testing.T) {
+	d := allSecureDefaults
+	d.lockEnabled = false
+	err := conformance.CheckDefaultsMatchThreatModel(context.Background(), d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lock.enabled")
+}
+
+func TestCheckDefaultsMatchThreatModel_WrongCheckPeriod(t *testing.T) {
+	d := allSecureDefaults
+	d.sshCheckPeriod = "24h"
+	err := conformance.CheckDefaultsMatchThreatModel(context.Background(), d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ssh_check_period")
+}
+
+func TestCheckDefaultsMatchThreatModel_DisableMacOSSSHDFalse(t *testing.T) {
+	d := allSecureDefaults
+	d.disableMacOSSSHD = false
+	err := conformance.CheckDefaultsMatchThreatModel(context.Background(), d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "disable_macos_sshd")
+}
+
+func TestCheckDefaultsMatchThreatModel_FirewallStealthFalse(t *testing.T) {
+	d := allSecureDefaults
+	d.firewallStealth = false
+	err := conformance.CheckDefaultsMatchThreatModel(context.Background(), d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "firewall_stealth")
+}
+
+func TestCheckDefaultsMatchThreatModel_BadFileVaultPolicy(t *testing.T) {
+	d := allSecureDefaults
+	d.fileVaultPolicy = "optional"
+	err := conformance.CheckDefaultsMatchThreatModel(context.Background(), d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "filevault")
+}
+
+func TestCheckDefaultsMatchThreatModel_MultipleFailures(t *testing.T) {
+	d := threatModelDefaults{
+		lockEnabled:      false,
+		sshCheckPeriod:   "48h",
+		disableMacOSSSHD: false,
+		firewallStealth:  false,
+		fileVaultPolicy:  "optional",
+	}
+	err := conformance.CheckDefaultsMatchThreatModel(context.Background(), d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lock.enabled")
+	assert.Contains(t, err.Error(), "ssh_check_period")
+	assert.Contains(t, err.Error(), "disable_macos_sshd")
+	assert.Contains(t, err.Error(), "firewall_stealth")
+	assert.Contains(t, err.Error(), "filevault")
+}
