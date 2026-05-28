@@ -233,7 +233,11 @@ func (m *Module) bootstrapTPM(ctx context.Context) error {
 	}
 
 	slog.Info("tmux apply: installing TPM (tmux plugin manager)", "dir", tpmDir)
-	res, err := m.runner.Run(ctx, "git", "clone", "https://github.com/tmux-plugins/tpm", tpmDir)
+	// -c credential.helper= disables the OS credential helper so git never
+	// prompts for a password — TPM is a public repo and needs no auth.
+	// --depth 1 keeps the clone fast and small.
+	res, err := m.runner.Run(ctx, "git", "-c", "credential.helper=",
+		"clone", "--depth", "1", "https://github.com/tmux-plugins/tpm", tpmDir)
 	if err != nil {
 		return fmt.Errorf("git clone tpm: %w", err)
 	}
