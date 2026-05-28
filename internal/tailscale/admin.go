@@ -227,6 +227,25 @@ func (a *AdminClient) TagDevice(ctx context.Context, deviceID string, tags []str
 	return nil
 }
 
+// DeleteDevice removes a device from the tailnet (used by panic to revoke a
+// lost or stolen phone). It is idempotent against already-removed devices.
+func (a *AdminClient) DeleteDevice(ctx context.Context, deviceID string) error {
+	if a.isManualMode() {
+		return errors.New("manual mode: remove the device at https://login.tailscale.com/admin/machines")
+	}
+	path := fmt.Sprintf("/api/v2/device/%s", url.PathEscape(deviceID))
+	resp, err := a.doRequest(ctx, http.MethodDelete, path, nil, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		rb, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("admin: delete device returned %d: %s", resp.StatusCode, string(rb))
+	}
+	return nil
+}
+
 // CreateAuthKey creates a pre-authorized auth key with the given tags.
 func (a *AdminClient) CreateAuthKey(ctx context.Context, tags []string) (string, error) {
 	if a.isManualMode() {

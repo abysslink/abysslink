@@ -16,19 +16,21 @@
 package cli
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/spf13/cobra"
 )
 
 func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Tail or filter the abysslink audit log",
+		Short: "Show the abysslink audit log, filtered by age and module",
 		RunE: func(c *cobra.Command, _ []string) error {
 			p := newPrinter(c)
 
@@ -38,28 +40,49 @@ func newLogsCmd() *cobra.Command {
 				return fmt.Errorf("logs: invalid --since duration %q: %w", sinceStr, err)
 			}
 			cutoff := time.Now().Add(-since)
+			moduleFilter, _ := c.Flags().GetString("module")
+			jsonOut, _ := c.Flags().GetBool("json")
 
 			auditPath := filepath.Join(xdgStateHome(), "abysslink", "audit.log")
-			f, err := os.Open(auditPath) //nolint:gosec // path is computed from XDG env
+			entries, err := audit.ReadLog(auditPath)
 			if err != nil {
-				if os.IsNotExist(err) {
-					printerInfo(p, fmt.Sprintf("No audit log found at %s", auditPath))
-					return nil
+				return fmt.Errorf("logs: %w", err)
+			}
+			if len(entries) == 0 {
+				printerInfo(p, fmt.Sprintf("No audit log entries at %s", auditPath))
+				return nil
+			}
+
+			shown := 0
+			for _, e := range entries {
+				if e.Time.Before(cutoff) {
+					continue
 				}
-				return fmt.Errorf("logs: open audit log: %w", err)
+				if moduleFilter != "" &&
+					!strings.Contains(e.Op, moduleFilter) && !strings.Contains(e.Target, moduleFilter) {
+					continue
+				}
+				shown++
+				if jsonOut {
+					line, _ := json.Marshal(e)
+					printerInfo(p, string(line))
+					continue
+				}
+				dry := ""
+				if e.DryRun {
+					dry = styleMuted.Render(" [dry-run]")
+				}
+				printerInfo(p, fmt.Sprintf("%s  %-14s %s%s",
+					e.Time.Format(time.RFC3339), e.Op, e.Target, dry))
 			}
-			defer func() { _ = f.Close() }()
-
-			_ = cutoff // future: filter lines by parsed timestamp
-
-			scanner := bufio.NewScanner(f)
-			for scanner.Scan() {
-				printerInfo(p, scanner.Text())
+			if shown == 0 {
+				printerInfo(p, fmt.Sprintf("No entries in the last %s.", sinceStr))
 			}
-			return scanner.Err()
+			return nil
 		},
 	}
-	cmd.Flags().String("since", "24h", "Show logs since duration (e.g. 1h, 24h, 7d)")
+	cmd.Flags().String("since", "24h", "Show entries newer than this duration (e.g. 1h, 24h)")
+	cmd.Flags().String("module", "", "Only show entries whose op or target contains this string")
 	return cmd
 }
 
