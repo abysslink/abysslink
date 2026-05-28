@@ -72,7 +72,10 @@ func newLockInitCmd() *cobra.Command {
 			lc := tailscale.NewLockClient(cc.runner)
 
 			if st, sErr := lc.Status(ctx); sErr == nil && st.Enabled {
-				printerInfo(p, "Tailnet Lock is already enabled — nothing to do.")
+				printerInfo(p, styleSuccess.Render("Tailnet Lock is already enabled — nothing to do."))
+				printerInfo(p, "")
+				printerInfo(p, styleMuted.Render("To generate fresh disablement secrets, rotate instead:"))
+				printerInfo(p, "  "+styleCode.Render("abysslink lock rotate"))
 				return nil
 			}
 

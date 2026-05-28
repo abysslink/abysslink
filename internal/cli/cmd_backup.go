@@ -101,12 +101,15 @@ func newBackupRestoreCmd() *cobra.Command {
 				latest = baks[0]
 			}
 
+			backupLabel := strings.TrimPrefix(filepath.Base(latest),
+				filepath.Base(target)+".bak.")
+
 			if cc.dryRun {
-				printerInfo(p, fmt.Sprintf("[plan] would restore %s from %s (use --apply)", target, latest))
+				printerInfo(p, fmt.Sprintf("[plan] would restore %s from backup %s (use --apply)", target, backupLabel))
 				return nil
 			}
 
-			ok, err := confirmAction(ctx, cc, fmt.Sprintf("Restore %s from %s?", target, latest))
+			ok, err := confirmAction(ctx, cc, fmt.Sprintf("Restore %s from backup dated %s?", target, backupLabel))
 			if err != nil {
 				return err
 			}
@@ -118,7 +121,7 @@ func newBackupRestoreCmd() *cobra.Command {
 			if err := audit.Restore(target, latest); err != nil {
 				return fmt.Errorf("backup restore: %w", err)
 			}
-			printerInfo(p, fmt.Sprintf("Restored %s from %s", target, latest))
+			printerInfo(p, fmt.Sprintf("Restored %s from backup dated %s", target, backupLabel))
 			return nil
 		},
 	}
