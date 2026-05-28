@@ -24,6 +24,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
@@ -139,29 +140,42 @@ func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []mo
 	return nil
 }
 
-// requireTailscaleDaemon checks that tailscaled is reachable before apply.
-// It prints a clear remediation message and returns an error if the socket is missing.
+// requireTailscaleDaemon ensures tailscaled is running before apply.
+// If the daemon is down it starts it automatically (same as `abysslink init` does)
+// and polls up to 15 s. The tailscale module's Apply handles `tailscale up`
+// (browser auth) interactively — this function only starts the daemon socket.
 func requireTailscaleDaemon(p Printer) error {
+	ctx := context.Background()
 	runner := &shell.ExecRunner{}
-	res, err := runner.Run(context.Background(), "tailscale", "status")
-	if err == nil && res.ExitCode == 0 {
-		return nil
+
+	if res, err := runner.Run(ctx, "tailscale", "status"); err == nil && res.ExitCode == 0 {
+		return nil // already running
 	}
+
 	printerInfo(p, "")
-	printerInfo(p, "  "+iconFatalStr()+"  "+styleBold.Render("Tailscale daemon is not running"))
+	printerInfo(p, "  "+iconWarnStr()+"  tailscaled not running — starting...")
+
+	plat, err := platformauto.New(runner)
+	if err != nil {
+		return fmt.Errorf("up: platform detection: %w", err)
+	}
+	if startErr := doStartTailscaleDaemon(ctx, runner, plat); startErr != nil {
+		slog.Warn("up: could not start tailscaled automatically", "err", startErr)
+	}
+
+	printerInfo(p, "  "+iconSpinStr()+"  Waiting for tailscaled...")
+	if !waitForDaemon(ctx, runner) {
+		printerInfo(p, "")
+		printerInfo(p, "  "+iconFatalStr()+"  tailscaled did not start — fix manually:")
+		printerInfo(p, "    "+styleCode.Render("sudo brew services start tailscale")+"  "+styleMuted.Render("(macOS)"))
+		printerInfo(p, "    "+styleCode.Render("sudo systemctl enable --now tailscaled")+"  "+styleMuted.Render("(Linux)"))
+		printerInfo(p, "")
+		return fmt.Errorf("up: tailscaled did not start within 15s")
+	}
+
+	printerInfo(p, "  "+iconDoneStr()+"  tailscaled ready")
 	printerInfo(p, "")
-	printerInfo(p, "  abysslink up --apply requires tailscaled to be running.")
-	printerInfo(p, "  Start it, then re-run:")
-	printerInfo(p, "")
-	printerInfo(p, "  "+styleMuted.Render("macOS:"))
-	printerInfo(p, "    "+styleCode.Render("sudo brew services start tailscale"))
-	printerInfo(p, "    "+styleCode.Render("tailscale up")+"  "+styleMuted.Render("(opens browser to authenticate)"))
-	printerInfo(p, "")
-	printerInfo(p, "  "+styleMuted.Render("Linux:"))
-	printerInfo(p, "    "+styleCode.Render("sudo systemctl enable --now tailscaled"))
-	printerInfo(p, "    "+styleCode.Render("tailscale up"))
-	printerInfo(p, "")
-	return fmt.Errorf("up: tailscaled is not running")
+	return nil
 }
 
 // checkPeriodGate enforces the immutable default that the SSH re-auth interval
