@@ -37,6 +37,7 @@ import (
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -97,6 +98,12 @@ func newPrinter(cmd *cobra.Command) Printer {
 		return NewJSONPrinter()
 	}
 	return NewHumanPrinter()
+}
+
+// confirmAction prompts the user to confirm a destructive action, honoring the
+// --yes flag (which auto-confirms).
+func confirmAction(ctx context.Context, cc *cmdContext, prompt string) (bool, error) {
+	return tui.Confirm(ctx, prompt, cc.yes)
 }
 
 // printerInfo calls p.Print for informational messages.
