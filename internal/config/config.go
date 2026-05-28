@@ -45,9 +45,20 @@ type Identity struct {
 
 // Tailnet holds per-rig Tailscale configuration.
 type Tailnet struct {
-	Hostname string      `yaml:"hostname"`
-	SSH      bool        `yaml:"ssh"`
-	Lock     TailnetLock `yaml:"lock"`
+	Hostname string       `yaml:"hostname"`
+	SSH      bool         `yaml:"ssh"`
+	Lock     TailnetLock  `yaml:"lock"`
+	Admin    TailnetAdmin `yaml:"admin"`
+}
+
+// TailnetAdmin holds the non-secret admin-API settings used to push ACLs and
+// mint auth keys. The OAuth client SECRET is never stored here — it is read at
+// runtime from the ABYSSLINK_TS_OAUTH_SECRET environment variable (or keychain).
+// When these fields are empty, the ACL module degrades to manual (clipboard +
+// browser) mode.
+type TailnetAdmin struct {
+	Tailnet       string `yaml:"tailnet"`         // tailnet name, e.g. "you@github" or "-" for default
+	OAuthClientID string `yaml:"oauth_client_id"` // NOT secret; the secret comes from env
 }
 
 // TailnetLock holds Tailnet Lock settings.
@@ -240,8 +251,12 @@ func Validate(cfg *Config) error {
 	if cfg.Tailnet.Hostname == "" {
 		return fmt.Errorf("config: tailnet.hostname is required")
 	}
-	if _, err := time.ParseDuration(cfg.Mobile.SSHCheckPeriod); err != nil {
+	checkPeriod, err := time.ParseDuration(cfg.Mobile.SSHCheckPeriod)
+	if err != nil {
 		return fmt.Errorf("config: mobile.ssh_check_period %q is not a valid duration: %w", cfg.Mobile.SSHCheckPeriod, err)
+	}
+	if checkPeriod < time.Minute || checkPeriod > 168*time.Hour {
+		return fmt.Errorf("config: mobile.ssh_check_period %q must be between 1m and 168h", cfg.Mobile.SSHCheckPeriod)
 	}
 	switch cfg.Modules.SSH.Mode {
 	case "tailscale", "openssh-fallback":
