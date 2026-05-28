@@ -185,6 +185,12 @@ func optionalACLPorts(cfg *config.Config) []optionalACLPort {
 	if cfg.Modules.EternalTerminal.Enabled {
 		out = append(out, optionalACLPort{"eternal-terminal", "tcp/2022"})
 	}
+	if cfg.Modules.Syncthing.Enabled {
+		out = append(out, optionalACLPort{"syncthing", "tcp/8384"})
+	}
+	if cfg.Modules.Upsnap.Enabled {
+		out = append(out, optionalACLPort{"upsnap", "tcp/8090"})
+	}
 	return out
 }
 

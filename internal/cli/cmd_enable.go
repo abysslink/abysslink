@@ -60,37 +60,46 @@ func toggleModule(cmd *cobra.Command, name string, enabled bool) error {
 // setModuleEnabled flips the enabled flag for the named module, accepting common
 // aliases. Returns an error for unknown module names.
 func setModuleEnabled(cfg *config.Config, name string, v bool) error {
-	switch name {
-	case "claudecode", "claude-code":
-		cfg.ClaudeCode.Enabled = v
-	case "code-server", "codeserver", "code_server":
-		cfg.Modules.CodeServer.Enabled = v
-	case "ttyd":
-		cfg.Modules.Ttyd.Enabled = v
-	case "eternal-terminal", "eternalterminal", "et":
-		cfg.Modules.EternalTerminal.Enabled = v
-	case "syncthing":
-		cfg.Modules.Syncthing.Enabled = v
-	case "upsnap":
-		cfg.Modules.Upsnap.Enabled = v
-	case "atuin":
-		cfg.Modules.Atuin.Enabled = v
-	case "ssh":
-		cfg.Modules.SSH.Enabled = v
-	case "tmux":
-		cfg.Modules.Tmux.Enabled = v
-	case "mosh":
-		cfg.Modules.Mosh.Enabled = v
-	case "ntfy":
-		cfg.Modules.Ntfy.Enabled = v
-	case "notify":
-		cfg.Modules.Notify.Enabled = v
-	case "watch":
-		cfg.Modules.Watch.Enabled = v
-	default:
-		return fmt.Errorf("unknown module %q (try: claudecode, code-server, ttyd, eternal-terminal, syncthing, upsnap, atuin)", name)
+	// aliases maps canonical name → setter. Multi-word aliases share a setter via
+	// the canonicalise step below.
+	canonical := moduleCanonicalName(name)
+	setters := map[string]func(bool){
+		"claudecode":       func(b bool) { cfg.ClaudeCode.Enabled = b },
+		"code-server":      func(b bool) { cfg.Modules.CodeServer.Enabled = b },
+		"ttyd":             func(b bool) { cfg.Modules.Ttyd.Enabled = b },
+		"eternal-terminal": func(b bool) { cfg.Modules.EternalTerminal.Enabled = b },
+		"syncthing":        func(b bool) { cfg.Modules.Syncthing.Enabled = b },
+		"upsnap":           func(b bool) { cfg.Modules.Upsnap.Enabled = b },
+		"atuin":            func(b bool) { cfg.Modules.Atuin.Enabled = b },
+		"sandbox":          func(b bool) { cfg.Modules.Sandbox.Enabled = b },
+		"asciinema":        func(b bool) { cfg.Modules.Asciinema.Enabled = b },
+		"ssh":              func(b bool) { cfg.Modules.SSH.Enabled = b },
+		"tmux":             func(b bool) { cfg.Modules.Tmux.Enabled = b },
+		"mosh":             func(b bool) { cfg.Modules.Mosh.Enabled = b },
+		"ntfy":             func(b bool) { cfg.Modules.Ntfy.Enabled = b },
+		"notify":           func(b bool) { cfg.Modules.Notify.Enabled = b },
+		"watch":            func(b bool) { cfg.Modules.Watch.Enabled = b },
 	}
+	fn, ok := setters[canonical]
+	if !ok {
+		return fmt.Errorf("unknown module %q — known: claudecode, code-server, ttyd, eternal-terminal, syncthing, upsnap, atuin, sandbox, asciinema, ssh, tmux, mosh, ntfy, notify, watch", name)
+	}
+	fn(v)
 	return nil
+}
+
+// moduleCanonicalName normalises common aliases to the canonical module name.
+func moduleCanonicalName(name string) string {
+	switch name {
+	case "claude-code", "claudecode":
+		return "claudecode"
+	case "codeserver", "code_server":
+		return "code-server"
+	case "eternalterminal", "et", "eternal_terminal":
+		return "eternal-terminal"
+	default:
+		return name
+	}
 }
 
 // resolveConfigPath returns the --config path or the default XDG location.
