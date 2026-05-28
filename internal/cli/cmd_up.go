@@ -26,6 +26,7 @@ import (
 	"github.com/abysslink/abysslink/internal/modules"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
 
@@ -44,7 +45,7 @@ func newUpCmd() *cobra.Command {
 
 			// Header.
 			if cc.dryRun {
-				header := styleBold.Render("abysslink up") + "  " + styleMuted.Render("dry-run · preview only")
+				header := styleBold.Render("abysslink up") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
 				printerInfo(p, styleHeaderBox.Render(header))
 			} else {
 				header := styleBold.Render("abysslink up") + "  " + styleSuccess.Render("✦  applying")
@@ -98,9 +99,12 @@ func newUpCmd() *cobra.Command {
 				printFinalSummary(p, actions, applyFindings, time.Since(start))
 			}
 
-			// Pass 3 — Next steps (always runs).
+			// Pass 3 — Next steps + success summary (always runs).
 			allFindings := append(findings, applyFindings...)
 			printNextSteps(p, allFindings, cc.cfg)
+			if !cc.dryRun && applyErr == nil {
+				printSuccessSummary(p, cc.cfg)
+			}
 
 			if applyErr != nil {
 				return fmt.Errorf("up: %w", applyErr)
@@ -370,5 +374,40 @@ func printNextSteps(p Printer, findings []modules.Finding, cfg *config.Config) {
 	}
 
 	printerInfo(p, styleNextStepBox.Render(strings.TrimRight(sb.String(), "\n")))
+	printerInfo(p, "")
+}
+
+// printSuccessSummary shows a "you're done" box after a clean apply, telling the
+// user exactly what they have and how to connect from their phone.
+func printSuccessSummary(p Printer, cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	hostname := cfg.Tailnet.Hostname
+	if hostname == "" {
+		hostname = "<your-rig>"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(styleSuccess.Render("✓  Your rig is ready") + "\n\n")
+	sb.WriteString(styleBold.Render("Connect from your phone:") + "\n")
+
+	if cfg.Modules.Mosh.Enabled && cfg.Modules.Tmux.Enabled {
+		sb.WriteString("  " + styleCode.Render(fmt.Sprintf("mosh %s -- tmux new -A -s main", hostname)) + "\n")
+	} else if cfg.Modules.Tmux.Enabled {
+		sb.WriteString("  " + styleCode.Render(fmt.Sprintf("ssh %s -t tmux new -A -s main", hostname)) + "\n")
+	} else {
+		sb.WriteString("  " + styleCode.Render(fmt.Sprintf("ssh %s", hostname)) + "\n")
+	}
+
+	sb.WriteString("\n" + styleMuted.Render("Next: pair your phone →  ") +
+		styleCode.Render("abysslink enroll phone"))
+
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorGreen).
+		Padding(1, 2).
+		Width(54)
+	printerInfo(p, style.Render(strings.TrimRight(sb.String(), "\n")))
 	printerInfo(p, "")
 }

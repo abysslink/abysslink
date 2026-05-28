@@ -38,14 +38,32 @@ func Execute(ctx context.Context) int {
 func buildRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "abysslink",
-		Short: "Automates a paranoid-by-default phone-to-laptop remote-control setup over Tailscale",
-		Long: `Abysslink is a single command that produces a working, auditable, paranoid-by-default
-phone-to-laptop remote setup on any macOS or Linux machine.
+		Short: "Secure phone-to-laptop remote control over Tailscale",
+		Long: `Abysslink sets up a hardened, audited remote-access stack on your laptop
+so you can develop from your phone: Tailscale VPN, SSH, ntfy push
+notifications, tmux, and mosh — all locked down by default.
 
-Run 'abysslink init' to get started.`,
+  Typical setup (run once on a new machine):
+    abysslink init          # interactive setup wizard
+    abysslink up --apply    # converge system to config
+    abysslink enroll phone  # pair your phone
+
+  Check status any time:
+    abysslink status        # quick dashboard
+    abysslink doctor        # deep health check + fix guidance
+
+Run 'abysslink <command> --help' for details on any command.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+
+	// Command groups (cobra 1.7+).
+	root.AddGroup(
+		&cobra.Group{ID: "setup", Title: "Setup:"},
+		&cobra.Group{ID: "ops", Title: "Operations:"},
+		&cobra.Group{ID: "advanced", Title: "Advanced:"},
+		&cobra.Group{ID: "emergency", Title: "Emergency:"},
+	)
 
 	// Persistent flags — available to all subcommands.
 	pf := root.PersistentFlags()
@@ -55,32 +73,56 @@ Run 'abysslink init' to get started.`,
 	pf.Bool("yes", false, "skip interactive confirmations")
 	pf.Bool("json", false, "output as JSON")
 	pf.BoolP("verbose", "v", false, "enable debug logging")
-	pf.Bool("explain", false, "print why each action is taken with spec citations")
 
-	// Register all subcommands.
-	root.AddCommand(
+	// Register all subcommands with groups.
+	setupCmds := []*cobra.Command{
 		newInitCmd(),
 		newUpCmd(),
 		newStatusCmd(),
 		newDoctorCmd(),
 		newRepairCmd(),
 		newEnrollCmd(),
+	}
+	for _, c := range setupCmds {
+		c.GroupID = "setup"
+		root.AddCommand(c)
+	}
+
+	opsCmds := []*cobra.Command{
 		newNotifyCmd(),
 		newWatchCmd(),
 		newACLCmd(),
 		newLockCmd(),
 		newRotateCmd(),
-		newEnableCmd(),
-		newDisableCmd(),
 		newLogsCmd(),
 		newBackupCmd(),
-		newThreatModelCmd(),
-		newPanicCmd(),
-		newUninstallCmd(),
 		newUpgradeCmd(),
 		newVersionCmd(),
 		newDaemonCmd(),
-	)
+	}
+	for _, c := range opsCmds {
+		c.GroupID = "ops"
+		root.AddCommand(c)
+	}
+
+	advancedCmds := []*cobra.Command{
+		newEnableCmd(),
+		newDisableCmd(),
+		newThreatModelCmd(),
+		newUninstallCmd(),
+	}
+	for _, c := range advancedCmds {
+		c.GroupID = "advanced"
+		root.AddCommand(c)
+	}
+
+	emergencyCmds := []*cobra.Command{
+		newPanicCmd(),
+	}
+	for _, c := range emergencyCmds {
+		c.GroupID = "emergency"
+		root.AddCommand(c)
+	}
 
 	return root
 }

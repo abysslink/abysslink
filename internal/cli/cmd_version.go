@@ -26,7 +26,8 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print version information",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "abysslink version %s (%s) built %s\n", version, commit, buildDate)
+			printerInfo(newPrinter(cmd),
+				fmt.Sprintf("abysslink %s (%s) built %s", version, commit, buildDate))
 			return nil
 		},
 	}
