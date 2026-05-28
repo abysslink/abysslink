@@ -16,6 +16,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
 
@@ -71,28 +73,10 @@ func newUpCmd() *cobra.Command {
 
 			printPlanDetail(p, actions, findings, cc.dryRun)
 
-			// Fail-closed gates run only at apply time (dry-run still previews).
+			// All fail-closed gates in one block to keep cyclomatic complexity low.
 			if !cc.dryRun {
-				// SSH re-auth interval may not be raised above the 12h default
-				// without explicit operator consent.
-				accept, _ := cmd.Flags().GetBool("accept-checkperiod-extension")
-				if err := checkPeriodGate(cc.cfg, accept); err != nil {
+				if err := applyTimeGates(cmd, p, cc, findings); err != nil {
 					return err
-				}
-			}
-
-			// Fail-closed gate: never configure remote access on an unencrypted
-			// disk. Blocks apply unless the operator explicitly overrides.
-			if !cc.dryRun {
-				if blockers := diskEncryptionBlockers(findings); len(blockers) > 0 {
-					forceUnsafe, _ := cmd.Flags().GetBool("force-unsafe")
-					if !forceUnsafe {
-						for _, b := range blockers {
-							printerError(p, "  ✗  "+b.Message)
-						}
-						return fmt.Errorf("up: refusing to apply — full-disk encryption is required (fail-closed); enable it, or re-run with --force-unsafe to override (NOT recommended)")
-					}
-					slog.Warn("up: --force-unsafe set — applying despite disk encryption being disabled; remote access on an unencrypted disk is dangerous")
 				}
 			}
 
@@ -127,6 +111,57 @@ func newUpCmd() *cobra.Command {
 	cmd.Flags().Bool("accept-checkperiod-extension", false,
 		"Allow ssh_check_period to exceed the 12h re-auth default")
 	return cmd
+}
+
+// applyTimeGates runs all fail-closed checks before the apply phase.
+// Consolidated into one function to keep newUpCmd's cyclomatic complexity below 15.
+func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []modules.Finding) error {
+	// Gate 1: tailscaled must be reachable — everything depends on it.
+	if err := requireTailscaleDaemon(p); err != nil {
+		return err
+	}
+	// Gate 2: SSH re-auth interval may not be raised above 12h without consent.
+	accept, _ := cmd.Flags().GetBool("accept-checkperiod-extension")
+	if err := checkPeriodGate(cc.cfg, accept); err != nil {
+		return err
+	}
+	// Gate 3: never configure remote access on an unencrypted disk.
+	if blockers := diskEncryptionBlockers(findings); len(blockers) > 0 {
+		forceUnsafe, _ := cmd.Flags().GetBool("force-unsafe")
+		if !forceUnsafe {
+			for _, b := range blockers {
+				printerError(p, "  ✗  "+b.Message)
+			}
+			return fmt.Errorf("up: refusing to apply — full-disk encryption is required (fail-closed); enable it, or re-run with --force-unsafe to override (NOT recommended)")
+		}
+		slog.Warn("up: --force-unsafe set — applying despite disk encryption being disabled; remote access on an unencrypted disk is dangerous")
+	}
+	return nil
+}
+
+// requireTailscaleDaemon checks that tailscaled is reachable before apply.
+// It prints a clear remediation message and returns an error if the socket is missing.
+func requireTailscaleDaemon(p Printer) error {
+	runner := &shell.ExecRunner{}
+	res, err := runner.Run(context.Background(), "tailscale", "status")
+	if err == nil && res.ExitCode == 0 {
+		return nil
+	}
+	printerInfo(p, "")
+	printerInfo(p, "  "+iconFatalStr()+"  "+styleBold.Render("Tailscale daemon is not running"))
+	printerInfo(p, "")
+	printerInfo(p, "  abysslink up --apply requires tailscaled to be running.")
+	printerInfo(p, "  Start it, then re-run:")
+	printerInfo(p, "")
+	printerInfo(p, "  "+styleMuted.Render("macOS:"))
+	printerInfo(p, "    "+styleCode.Render("sudo brew services start tailscale"))
+	printerInfo(p, "    "+styleCode.Render("tailscale up")+"  "+styleMuted.Render("(opens browser to authenticate)"))
+	printerInfo(p, "")
+	printerInfo(p, "  "+styleMuted.Render("Linux:"))
+	printerInfo(p, "    "+styleCode.Render("sudo systemctl enable --now tailscaled"))
+	printerInfo(p, "    "+styleCode.Render("tailscale up"))
+	printerInfo(p, "")
+	return fmt.Errorf("up: tailscaled is not running")
 }
 
 // checkPeriodGate enforces the immutable default that the SSH re-auth interval
