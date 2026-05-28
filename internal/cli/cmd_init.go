@@ -21,6 +21,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/platform"
@@ -234,12 +235,33 @@ func startTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner, p
 		return nil
 	}
 
-	if !probeTailscaleDaemon(ctx, runner) {
-		printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render("Daemon starting — may take a few seconds to become ready"))
+	printerInfo(p, fmt.Sprintf("  %s  Waiting for tailscaled...", iconSpinStr()))
+	if !waitForDaemon(ctx, runner) {
+		printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render("Daemon did not respond within 15s — check with: tailscale status"))
 		return nil
 	}
-	printerInfo(p, fmt.Sprintf("  %s  %s  started", iconDoneStr(), styleNameCol.Render("tailscaled")))
+	printerInfo(p, fmt.Sprintf("  %s  %s  ready", iconDoneStr(), styleNameCol.Render("tailscaled")))
 	return nil
+}
+
+// waitForDaemon polls tailscale status until it responds or the 15s deadline passes.
+func waitForDaemon(ctx context.Context, runner shell.Runner) bool {
+	const (
+		maxWait  = 15 * time.Second
+		interval = time.Second
+	)
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		if probeTailscaleDaemon(ctx, runner) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(interval):
+		}
+	}
+	return false
 }
 
 // doStartTailscaleDaemon issues the OS-specific daemon start command.
