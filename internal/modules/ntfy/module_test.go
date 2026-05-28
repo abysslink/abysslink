@@ -26,7 +26,7 @@ import (
 
 func TestGenerateServerConfig_BindsTailnetIPNotWildcard(t *testing.T) {
 	m := New(modules.Deps{Cfg: config.Defaults()})
-	out := string(m.generateServerConfig("100.64.1.2"))
+	out := string(m.generateServerConfig("100.64.1.2", "/home/testuser"))
 
 	assert.Contains(t, out, "listen-http: \"100.64.1.2:2586\"", "must bind to the tailnet IP")
 	assert.NotContains(t, out, "0.0.0.0", "must never bind to all interfaces")
@@ -41,6 +41,6 @@ func TestHasWildcardListen(t *testing.T) {
 
 func TestGenerateServerConfig_IsYAMLish(t *testing.T) {
 	m := New(modules.Deps{Cfg: config.Defaults()})
-	out := string(m.generateServerConfig("100.64.1.2"))
+	out := string(m.generateServerConfig("100.64.1.2", "/home/testuser"))
 	assert.True(t, strings.HasPrefix(out, "# ntfy server config"))
 }

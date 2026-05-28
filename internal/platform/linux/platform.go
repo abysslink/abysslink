@@ -255,10 +255,11 @@ func (f *linuxFirewall) Status(ctx context.Context) (string, error) {
 			return "enabled", nil
 		}
 	}
-	// Fall back to iptables. The default empty policy produces 3 chain headers
-	// (~6 lines); more lines indicates user-added rules are present.
-	if res, err := f.p.runner.Run(ctx, "iptables", "-L", "-n"); err == nil && res.ExitCode == 0 {
-		if strings.Count(res.Stdout, "\n") > 6 {
+	// Fall back to iptables -S (machine-readable rule list). The default empty
+	// policy produces exactly 3 lines (-P INPUT/FORWARD/OUTPUT ACCEPT); any
+	// user-added rule appends an additional -A or -I line.
+	if res, err := f.p.runner.Run(ctx, "iptables", "-S"); err == nil && res.ExitCode == 0 {
+		if strings.Count(res.Stdout, "\n") > 3 {
 			return "enabled", nil
 		}
 		return "disabled", nil

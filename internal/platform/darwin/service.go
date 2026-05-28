@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/platform"
@@ -124,8 +125,13 @@ func renderPlist(spec platform.ServiceSpec) ([]byte, error) {
 	}
 	if len(spec.Env) > 0 {
 		plist += "\t<key>EnvironmentVariables</key>\n\t<dict>\n"
-		for k, v := range spec.Env {
-			plist += "\t\t<key>" + xmlEscape(k) + "</key>\n\t\t<string>" + xmlEscape(v) + "</string>\n"
+		envKeys := make([]string, 0, len(spec.Env))
+		for k := range spec.Env {
+			envKeys = append(envKeys, k)
+		}
+		sort.Strings(envKeys)
+		for _, k := range envKeys {
+			plist += "\t\t<key>" + xmlEscape(k) + "</key>\n\t\t<string>" + xmlEscape(spec.Env[k]) + "</string>\n"
 		}
 		plist += "\t</dict>\n"
 	}
