@@ -208,12 +208,19 @@ func (m *Module) Apply(ctx context.Context) error {
 			}
 		case "sshd_running":
 			// Stop and disable sshd on Linux — Tailscale SSH handles auth.
+			// Try both unit names (distros differ); error only if both fail.
 			slog.Info("ssh apply: stopping sshd (Tailscale SSH mode)")
+			var disableErr error
 			for _, unit := range []string{"sshd", "ssh"} {
 				res, err := m.runner.Run(ctx, "sudo", "systemctl", "disable", "--now", unit)
 				if err == nil && res.ExitCode == 0 {
+					disableErr = nil
 					break
 				}
+				disableErr = fmt.Errorf("systemctl disable %s: exit %d: %s", unit, res.ExitCode, strings.TrimSpace(res.Stderr))
+			}
+			if disableErr != nil {
+				return fmt.Errorf("ssh apply: could not disable sshd (tried sshd and ssh units): %w", disableErr)
 			}
 		case "fallback_config":
 			if err := m.installHardenedSSHD(ctx); err != nil {

@@ -323,7 +323,8 @@ func (m *Module) ensureHostname(ctx context.Context) error {
 			HostName string `json:"HostName"`
 		} `json:"Self"`
 	}
-	if json.Unmarshal([]byte(statusRes.Stdout), &st) != nil {
+	if err := json.Unmarshal([]byte(statusRes.Stdout), &st); err != nil {
+		slog.Warn("tailscale apply: could not parse status JSON for hostname check — hostname may not be set", "err", err)
 		return nil
 	}
 	if st.Self.HostName == "" || st.Self.HostName == m.cfg.Tailnet.Hostname {
