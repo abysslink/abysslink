@@ -25,96 +25,161 @@ import (
 func newWatchCmd() *cobra.Command {
 	watch := &cobra.Command{
 		Use:   "watch",
-		Short: "Manage tmux pane watchers (notify when a pane sits idle at a prompt)",
+		Short: "Manage abysslinkd watchers (tmux pane, file, and HTTP) that notify your phone",
 	}
 	watch.AddCommand(newWatchAddCmd(), newWatchListCmd(), newWatchRemoveCmd())
 	return watch
 }
 
 func newWatchAddCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "add <pane>",
-		Short: "Watch a tmux pane and notify when it is idle at a prompt",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return mutateWatchPanes(cmd, func(panes []string) ([]string, string) {
-				pane := args[0]
-				for _, p := range panes {
-					if p == pane {
-						return panes, fmt.Sprintf("pane %q is already watched", pane)
+	cmd := &cobra.Command{
+		Use:   "add",
+		Short: "Add a watcher: --pane <p>, or --file <path> --grep <re>, or --http <url>",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			pane, _ := cmd.Flags().GetString("pane")
+			file, _ := cmd.Flags().GetString("file")
+			httpURL, _ := cmd.Flags().GetString("http")
+			grep, _ := cmd.Flags().GetString("grep")
+			expect, _ := cmd.Flags().GetInt("expect")
+			label, _ := cmd.Flags().GetString("label")
+			interval, _ := cmd.Flags().GetInt("interval")
+
+			return mutateWatch(cmd, func(w *config.WatchModule) (string, error) {
+				switch {
+				case pane != "":
+					w.Panes = append(w.Panes, pane)
+					return "Watching tmux pane " + pane, nil
+				case file != "":
+					if grep == "" {
+						return "", fmt.Errorf("--file requires --grep <regexp>")
 					}
+					w.Files = append(w.Files, config.FileWatch{Path: file, Grep: grep, Label: label})
+					return "Watching file " + file, nil
+				case httpURL != "":
+					w.HTTP = append(w.HTTP, config.HTTPWatch{URL: httpURL, Expect: expect, Label: label, IntervalSecs: interval})
+					return "Watching URL " + httpURL, nil
+				default:
+					return "", fmt.Errorf("specify one of --pane, --file (+--grep), or --http")
 				}
-				return append(panes, pane), fmt.Sprintf("Now watching pane %q.", pane)
 			})
 		},
 	}
+	cmd.Flags().String("pane", "", "tmux pane to watch for idle-at-prompt")
+	cmd.Flags().String("file", "", "file path to tail")
+	cmd.Flags().String("grep", "", "regexp that an appended line must match (with --file)")
+	cmd.Flags().String("http", "", "URL to poll")
+	cmd.Flags().Int("expect", 0, "expected HTTP status (notify on change; with --http)")
+	cmd.Flags().Int("interval", 0, "HTTP poll interval in seconds (default 60)")
+	cmd.Flags().String("label", "", "human label for the notification")
+	return cmd
 }
 
 func newWatchRemoveCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "remove <pane>",
-		Short: "Stop watching a tmux pane",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return mutateWatchPanes(cmd, func(panes []string) ([]string, string) {
-				pane := args[0]
-				out := panes[:0:0]
-				found := false
-				for _, p := range panes {
-					if p == pane {
-						found = true
-						continue
+	cmd := &cobra.Command{
+		Use:   "remove",
+		Short: "Remove a watcher by --pane, --file, or --http identifier",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			pane, _ := cmd.Flags().GetString("pane")
+			file, _ := cmd.Flags().GetString("file")
+			httpURL, _ := cmd.Flags().GetString("http")
+
+			return mutateWatch(cmd, func(w *config.WatchModule) (string, error) {
+				switch {
+				case pane != "":
+					w.Panes = removeString(w.Panes, pane)
+					return "Removed pane watcher " + pane, nil
+				case file != "":
+					kept := w.Files[:0:0]
+					for _, f := range w.Files {
+						if f.Path != file {
+							kept = append(kept, f)
+						}
 					}
-					out = append(out, p)
+					w.Files = kept
+					return "Removed file watcher " + file, nil
+				case httpURL != "":
+					kept := w.HTTP[:0:0]
+					for _, h := range w.HTTP {
+						if h.URL != httpURL {
+							kept = append(kept, h)
+						}
+					}
+					w.HTTP = kept
+					return "Removed HTTP watcher " + httpURL, nil
+				default:
+					return "", fmt.Errorf("specify one of --pane, --file, or --http")
 				}
-				if !found {
-					return panes, fmt.Sprintf("pane %q was not watched", pane)
-				}
-				return out, fmt.Sprintf("Stopped watching pane %q.", pane)
 			})
 		},
 	}
+	cmd.Flags().String("pane", "", "tmux pane watcher to remove")
+	cmd.Flags().String("file", "", "file watcher (path) to remove")
+	cmd.Flags().String("http", "", "HTTP watcher (url) to remove")
+	return cmd
 }
 
 func newWatchListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List watched tmux panes",
+		Short: "List configured watchers",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			p := newPrinter(cmd)
 			cfg, err := config.Load(resolveConfigPath(cmd))
 			if err != nil {
 				return fmt.Errorf("watch list: %w", err)
 			}
-			if !cfg.Modules.Watch.Enabled || len(cfg.Modules.Watch.Panes) == 0 {
-				printerInfo(p, "No panes are being watched.")
+			w := cfg.Modules.Watch
+			if len(w.Panes) == 0 && len(w.Files) == 0 && len(w.HTTP) == 0 {
+				printerInfo(p, "No watchers configured.")
 				return nil
 			}
-			printerInfo(p, styleBold.Render("Watched panes"))
-			for _, pane := range cfg.Modules.Watch.Panes {
-				printerInfo(p, "  - "+pane)
+			printerInfo(p, styleBold.Render("Watchers"))
+			for _, pane := range w.Panes {
+				printerInfo(p, "  pane  "+pane)
+			}
+			for _, f := range w.Files {
+				printerInfo(p, fmt.Sprintf("  file  %s  (grep %q)", f.Path, f.Grep))
+			}
+			for _, h := range w.HTTP {
+				printerInfo(p, fmt.Sprintf("  http  %s  (expect %d)", h.URL, h.Expect))
 			}
 			return nil
 		},
 	}
 }
 
-// mutateWatchPanes loads config, transforms the pane list via fn, persists, and
-// reports fn's message. The daemon picks up the change on its next restart.
-func mutateWatchPanes(cmd *cobra.Command, fn func([]string) ([]string, string)) error {
+// mutateWatch loads config, applies fn to the watch module, persists, and prints
+// fn's message. Enables the watch module if any watcher remains.
+func mutateWatch(cmd *cobra.Command, fn func(*config.WatchModule) (string, error)) error {
 	p := newPrinter(cmd)
 	path := resolveConfigPath(cmd)
 	cfg, err := config.Load(path)
 	if err != nil {
 		return fmt.Errorf("watch: %w (run `abysslink init` first)", err)
 	}
-	newPanes, msg := fn(cfg.Modules.Watch.Panes)
-	cfg.Modules.Watch.Panes = newPanes
-	cfg.Modules.Watch.Enabled = len(newPanes) > 0 || cfg.Modules.Watch.Enabled
+	msg, err := fn(&cfg.Modules.Watch)
+	if err != nil {
+		return err
+	}
+	w := cfg.Modules.Watch
+	if len(w.Panes) > 0 || len(w.Files) > 0 || len(w.HTTP) > 0 {
+		cfg.Modules.Watch.Enabled = true
+	}
 	if err := config.Write(path, cfg); err != nil {
 		return fmt.Errorf("watch: write config: %w", err)
 	}
 	printerInfo(p, msg)
 	printerInfo(p, styleMuted.Render("Restart the daemon to apply: abysslink daemon stop && abysslink daemon start"))
 	return nil
+}
+
+// removeString returns s without the first occurrence of v.
+func removeString(s []string, v string) []string {
+	out := s[:0:0]
+	for _, x := range s {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
 }

@@ -117,7 +117,7 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// startWatchers launches a goroutine per configured tmux pane watcher.
+// startWatchers launches a goroutine per configured watcher (pane, file, HTTP).
 func (s *Server) startWatchers(ctx context.Context) {
 	if s.cfg == nil || !s.cfg.Modules.Watch.Enabled {
 		return
@@ -125,6 +125,7 @@ func (s *Server) startWatchers(ctx context.Context) {
 	for _, pane := range s.cfg.Modules.Watch.Panes {
 		go s.watchPane(ctx, pane)
 	}
+	s.startFileAndHTTPWatchers(ctx)
 }
 
 // watchPane polls a tmux pane and notifies when it has been idle at a prompt.
