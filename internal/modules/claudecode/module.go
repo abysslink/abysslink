@@ -136,6 +136,49 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	return findings, nil
 }
 
+// mergeHookEntry returns a hook entry list that keeps all existing entries
+// that do NOT contain an abysslink notify command, then appends the new
+// abysslink entry. Safe to call repeatedly (idempotent).
+func mergeHookEntry(existing interface{}, command string) []interface{} {
+	var kept []interface{}
+	if entries, ok := existing.([]interface{}); ok {
+		for _, e := range entries {
+			if !hookEntryIsAbysslink(e) {
+				kept = append(kept, e)
+			}
+		}
+	}
+	return append(kept, map[string]interface{}{
+		"matcher": "",
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": command},
+		},
+	})
+}
+
+// hookEntryIsAbysslink returns true if the hook entry contains an abysslink
+// notify command — used to identify our own entries for idempotent replacement.
+func hookEntryIsAbysslink(entry interface{}) bool {
+	entryMap, ok := entry.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	innerHooks, ok := entryMap["hooks"].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, h := range innerHooks {
+		hMap, ok := h.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if cmd, ok := hMap["command"].(string); ok && strings.Contains(cmd, "abysslink notify") {
+			return true
+		}
+	}
+	return false
+}
+
 // hasStopHook returns true if the settings.json data contains a Stop hook
 // with the expected abysslink notify command.
 func hasStopHook(data []byte) bool {
@@ -201,7 +244,7 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 		case "settings_json_exists", "settings_json_readable", "stop_hook_configured":
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
-				Description: "write ~/.claude/settings.json with abysslink notify hooks",
+				Description: "merge abysslink notify hooks into ~/.claude/settings.json (preserves existing hooks)",
 				Reversible:  true,
 			})
 		}
@@ -231,24 +274,20 @@ func (m *Module) Apply(ctx context.Context) error {
 		_ = json.Unmarshal(data, &existing)
 	}
 
-	// Build the desired hooks section. Notification fires when Claude is waiting
-	// for input (primary trigger); Stop fires when a turn ends.
-	hookEntry := func(command string) []interface{} {
-		return []interface{}{
-			map[string]interface{}{
-				"matcher": "",
-				"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": command},
-				},
-			},
-		}
+	// Merge abysslink entries into the existing hooks map — never replace it.
+	// This preserves the user's SessionStart, UserPromptSubmit, and every other
+	// hook they have configured. We only touch the event types we own (Stop,
+	// Notification), and within those we remove our old entry then re-append so
+	// the operation is idempotent.
+	existingHooks, _ := existing["hooks"].(map[string]interface{})
+	if existingHooks == nil {
+		existingHooks = make(map[string]interface{})
 	}
-	hookConfig := map[string]interface{}{}
 	if m.cfg.ClaudeCode.NotifyOn.Notification {
-		hookConfig["Notification"] = hookEntry(notifyHookCommand)
+		existingHooks["Notification"] = mergeHookEntry(existingHooks["Notification"], notifyHookCommand)
 	}
-	hookConfig["Stop"] = hookEntry(stopHookCommand)
-	existing["hooks"] = hookConfig
+	existingHooks["Stop"] = mergeHookEntry(existingHooks["Stop"], stopHookCommand)
+	existing["hooks"] = existingHooks
 
 	data, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {
