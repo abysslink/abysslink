@@ -67,73 +67,130 @@ func (m *Module) Deps() []string { return []string{"notify"} }
 
 // Detect inspects the current system state for Claude Code integration.
 func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
-	var findings []modules.Finding
-
-	// Post-reboot keychain check: on macOS the login keychain is locked until
-	// the user logs in at the console, so a key that was stored may be
-	// unreadable. Surface that so the hooks do not silently fail.
-	if m.cfg.ClaudeCode.APIKeySource == "keychain" && m.keychain != nil {
-		if v, err := m.keychain.Get(ctx, keychainService, keychainAccount); err != nil || v == "" {
-			findings = append(findings, modules.Finding{
-				Module:   m.Name(),
-				Check:    "api_key_keychain",
-				Severity: modules.SeverityWarning,
-				Message:  "Anthropic API key not readable from the keychain (unset, or the login keychain is locked after reboot — unlock it at the console)",
-			})
-		}
-	}
+	findings := m.detectKeychainState(ctx)
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("claudecode: home dir: %w", err)
 	}
 
-	claudeDir := filepath.Join(home, ".claude")
-	settingsPath := filepath.Join(claudeDir, "settings.json")
+	settingsFindings, data, done := m.detectSettingsFile(home)
+	findings = append(findings, settingsFindings...)
+	if done {
+		return findings, nil
+	}
 
-	// Check if ~/.claude/ directory exists.
+	findings = append(findings, m.detectHooks(data)...)
+	return findings, nil
+}
+
+// detectKeychainState checks both post-reboot keychain lock and missing API key.
+func (m *Module) detectKeychainState(ctx context.Context) []modules.Finding {
+	if m.cfg.ClaudeCode.APIKeySource != "keychain" || m.keychain == nil {
+		return nil
+	}
+	v, err := m.keychain.Get(ctx, keychainService, keychainAccount)
+	if err != nil || v == "" {
+		// Distinguish: key was never stored vs key is locked after reboot.
+		check, msg := "api_key_present",
+			"Anthropic API key is not in the keychain — set ANTHROPIC_API_KEY and re-run `abysslink up --apply` to store it"
+		if err != nil {
+			check, msg = "api_key_keychain",
+				"Anthropic API key not readable from the keychain (unset, or the login keychain is locked after reboot — unlock it at the console)"
+		}
+		return []modules.Finding{{
+			Module: "claudecode", Check: check,
+			Severity: modules.SeverityWarning, Message: msg,
+		}}
+	}
+	return nil
+}
+
+// detectSettingsFile checks that ~/.claude/ exists and settings.json is readable.
+// done=true means the caller should stop and return (directory or file missing).
+func (m *Module) detectSettingsFile(home string) (findings []modules.Finding, data []byte, done bool) {
+	claudeDir := filepath.Join(home, ".claude")
 	if _, err := os.Stat(claudeDir); os.IsNotExist(err) {
-		findings = append(findings, modules.Finding{
-			Module:   m.Name(),
-			Check:    "claude_dir_exists",
+		return []modules.Finding{{
+			Module: "claudecode", Check: "claude_dir_exists",
 			Severity: modules.SeverityWarning,
 			Message:  fmt.Sprintf("Claude Code not installed: %s does not exist", claudeDir),
-		})
-		return findings, nil
+		}}, nil, true
 	}
-
-	// Check if settings.json exists.
-	data, err := os.ReadFile(settingsPath) //nolint:gosec
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	raw, err := os.ReadFile(settingsPath) //nolint:gosec
 	if err != nil {
 		if os.IsNotExist(err) {
-			findings = append(findings, modules.Finding{
-				Module:   m.Name(),
-				Check:    "settings_json_exists",
+			return []modules.Finding{{
+				Module: "claudecode", Check: "settings_json_exists",
 				Severity: modules.SeverityWarning,
 				Message:  fmt.Sprintf("~/.claude/settings.json not found at %s", settingsPath),
-			})
-		} else {
-			findings = append(findings, modules.Finding{
-				Module:   m.Name(),
-				Check:    "settings_json_readable",
-				Severity: modules.SeverityWarning,
-				Message:  fmt.Sprintf("cannot read ~/.claude/settings.json: %v", err),
-			})
+			}}, nil, true
 		}
-		return findings, nil
+		return []modules.Finding{{
+			Module: "claudecode", Check: "settings_json_readable",
+			Severity: modules.SeverityWarning,
+			Message:  fmt.Sprintf("cannot read ~/.claude/settings.json: %v", err),
+		}}, nil, true
 	}
+	return nil, raw, false
+}
 
-	// Check that settings.json contains the Stop hook pointing to abysslink notify.
+// detectHooks checks that the required abysslink hooks are present in settings.json.
+func (m *Module) detectHooks(data []byte) []modules.Finding {
+	var findings []modules.Finding
 	if !hasStopHook(data) {
 		findings = append(findings, modules.Finding{
-			Module:   m.Name(),
-			Check:    "stop_hook_configured",
+			Module: "claudecode", Check: "stop_hook_configured",
 			Severity: modules.SeverityWarning,
 			Message:  fmt.Sprintf("~/.claude/settings.json missing abysslink notify Stop hook (expected command: %q)", stopHookCommand),
 		})
 	}
+	if m.cfg.ClaudeCode.NotifyOn.Notification && !hasNotificationHook(data) {
+		findings = append(findings, modules.Finding{
+			Module: "claudecode", Check: "notification_hook_configured",
+			Severity: modules.SeverityWarning,
+			Message:  fmt.Sprintf("~/.claude/settings.json missing abysslink notify Notification hook (expected command: %q)", notifyHookCommand),
+		})
+	}
+	return findings
+}
 
-	return findings, nil
+// hasNotificationHook returns true if the settings.json contains a Notification
+// hook with the expected abysslink notify command.
+func hasNotificationHook(data []byte) bool {
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false
+	}
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	notifHooks, ok := hooks["Notification"].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, entry := range notifHooks {
+		entryMap, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		innerHooks, ok := entryMap["hooks"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, h := range innerHooks {
+			hMap, ok := h.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if cmd, ok := hMap["command"].(string); ok && strings.Contains(cmd, "abysslink notify") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mergeHookEntry returns a hook entry list that keeps all existing entries
@@ -241,10 +298,17 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 				Description: "create ~/.claude/ directory",
 				Reversible:  true,
 			})
-		case "settings_json_exists", "settings_json_readable", "stop_hook_configured":
+		case "settings_json_exists", "settings_json_readable",
+			"stop_hook_configured", "notification_hook_configured":
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
 				Description: "merge abysslink notify hooks into ~/.claude/settings.json (preserves existing hooks)",
+				Reversible:  true,
+			})
+		case "api_key_present":
+			actions = append(actions, modules.Action{
+				Module:      m.Name(),
+				Description: "store Anthropic API key in OS keychain (reads from $ANTHROPIC_API_KEY)",
 				Reversible:  true,
 			})
 		}

@@ -17,7 +17,6 @@ package watch
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -94,9 +93,11 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply is a no-op — watches run inside abysslinkd.
+// Apply is a no-op — pane watchers run inside abysslinkd and read the config
+// directly at startup; there is nothing for this module to exec externally.
 func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("watch module: apply not yet implemented — watches run in abysslinkd")
+	slog.Debug("watch apply: nothing to apply — abysslinkd reads pane config at startup")
+	return nil
 }
 
 // Verify returns nil — there is no out-of-process state to verify.

@@ -98,9 +98,13 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	for _, f := range findings {
 		if f.Check == "lock_enabled" {
 			actions = append(actions, modules.Action{
-				Module:      m.Name(),
-				Description: "initialize Tailnet Lock",
-				Reversible:  false,
+				Module: m.Name(),
+				Description: "ACTION REQUIRED: run `tailscale lock init` to enable Tailnet Lock " +
+					"— copy the disablement secrets before closing the terminal",
+				Explain: "Tailnet Lock cryptographically signs every device that joins your tailnet. " +
+					"Initialization prints disablement secrets that are the ONLY way to turn lock off later — " +
+					"store them in a password manager and on paper before closing the terminal.",
+				Reversible: false,
 			})
 		}
 	}
@@ -108,10 +112,12 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply does not auto-initialize Tailnet Lock: enabling it prints disablement
-// secrets that the user must record by hand, which requires an interactive
-// terminal that module Apply does not own. Instead it surfaces the next step.
-// The real flow lives in `abysslink lock init`.
+// Apply does not auto-initialize Tailnet Lock: initialization prints disablement
+// secrets that the user MUST record before closing the terminal. That interactive
+// requirement is beyond what a module Apply can own safely.
+//
+// Instead it returns a clear, actionable error so the apply run surfaces the
+// manual step rather than silently claiming success.
 func (m *Module) Apply(ctx context.Context) error {
 	findings, err := m.Detect(ctx)
 	if err != nil {
@@ -119,7 +125,16 @@ func (m *Module) Apply(ctx context.Context) error {
 	}
 	for _, f := range findings {
 		if f.Check == "lock_enabled" {
-			slog.Warn("lock apply: Tailnet Lock is required but not enabled — run `abysslink lock init --apply` to enable it (it prints disablement secrets you must store)")
+			return fmt.Errorf(
+				"lock: Tailnet Lock is required but not yet enabled.\n\n" +
+					"  Enable it now:\n" +
+					"    tailscale lock init\n\n" +
+					"  IMPORTANT: the command prints disablement secrets — the ONLY way to\n" +
+					"  turn lock off later. Save them in your password manager AND on paper\n" +
+					"  before closing the terminal. Once the window is closed they cannot be\n" +
+					"  recovered.\n\n" +
+					"  After init, re-run: abysslink up --apply",
+			)
 		}
 	}
 	return nil
