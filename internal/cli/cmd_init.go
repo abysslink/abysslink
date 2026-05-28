@@ -154,10 +154,13 @@ func ensureTailscaleAccount(p Printer) error {
 	}
 
 	if !hasAccount {
-		// Open the signup URL in the default browser.
-		_ = openURL(signupURL)
+		if err := openURL(signupURL); err != nil {
+			printerInfo(p, "  "+iconWarnStr()+"  Could not open browser — visit manually:")
+			printerInfo(p, "  "+styleCode.Render(signupURL))
+		} else {
+			printerInfo(p, "  "+iconDoneStr()+"  Browser opened → "+styleCode.Render(signupURL))
+		}
 		printerInfo(p, "")
-		printerInfo(p, "  "+iconWarnStr()+"  Browser opened → "+styleCode.Render(signupURL))
 		printerInfo(p, "  "+styleMuted.Render("Create your account, then come back here."))
 		printerInfo(p, "")
 
@@ -447,6 +450,16 @@ func installModuleTools(ctx context.Context, p Printer, runner shell.Runner, pla
 	printerInfo(p, "")
 	printerInfo(p, "  "+styleBold.Render("Missing module tools"))
 	printerInfo(p, "")
+
+	// Show install plan before prompting, so the user knows the full scope.
+	names := make([]string, 0, len(missing))
+	for _, t := range missing {
+		names = append(names, t.name)
+	}
+	printerInfo(p, "  "+styleMuted.Render(fmt.Sprintf(
+		"Will install: %s (via %s)", strings.Join(names, ", "), plat.PackageManager())))
+	printerInfo(p, "")
+
 	for _, t := range missing {
 		if err := installTool(ctx, p, runner, plat, t, autoYes); err != nil {
 			return err
@@ -582,19 +595,19 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title("Enable Tailscale SSH?").
-					Description("Replaces macOS Remote Login with Tailscale's hardened SSH").
+					Description("Replaces macOS Remote Login with Tailscale's cryptographically-verified SSH — no open ports, no password auth").
 					Value(&enableSSH),
 				huh.NewConfirm().
 					Title("Enable tmux?").
-					Description("Persistent terminal session — survives network drops").
+					Description("Keeps your terminal session alive on the rig — reconnect from your phone and pick up exactly where you left off").
 					Value(&enableTmux),
 				huh.NewConfirm().
 					Title("Enable mosh?").
-					Description("Roaming shell — reconnects automatically on IP change").
+					Description("Roaming shell that survives network switches on your phone (WiFi↔LTE), timeouts, and sleep — reconnects automatically").
 					Value(&enableMosh),
 				huh.NewConfirm().
-					Title("Enable ntfy notifications?").
-					Description("Push notifications to your phone when tasks complete").
+					Title("Enable ntfy push notifications?").
+					Description("Sends a buzz to your phone when Claude stops, a build finishes, or any terminal task completes — no polling needed").
 					Value(&enableNtfy),
 			),
 		)
