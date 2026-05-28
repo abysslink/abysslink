@@ -27,6 +27,7 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -37,16 +38,22 @@ const (
 
 // Module implements the ntfy module.
 type Module struct {
-	runner shell.Runner
-	cfg    *config.Config
-	audit  *audit.Audit
-	plat   platform.Platform
+	runner   shell.Runner
+	cfg      *config.Config
+	audit    *audit.Audit
+	plat     platform.Platform
+	keychain secrets.KeychainStore
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit, plat: d.Platform}
+	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit, plat: d.Platform, keychain: d.Keychain}
 }
+
+const (
+	keychainService = "abysslink"
+	keychainAccount = "ntfy-password"
+)
 
 // Name returns the module name.
 func (m *Module) Name() string { return "ntfy" }
@@ -218,6 +225,50 @@ func (m *Module) Apply(ctx context.Context) error {
 		return fmt.Errorf("ntfy apply: write config: %w", err)
 	}
 
+	if err := m.ensureAdminUser(ctx); err != nil {
+		slog.Warn("ntfy apply: could not provision admin user", "err", err)
+	}
+
+	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
+		Label:      "dev.abysslink.ntfy",
+		Args:       []string{"ntfy", "serve", "--config", cfgPath},
+		KeepAlive:  true,
+		RunAtLoad:  true,
+		StdoutPath: filepath.Join(home, ".local", "state", "abysslink", "ntfy.log"),
+	}); err != nil {
+		return fmt.Errorf("ntfy apply: install service: %w", err)
+	}
+
+	return nil
+}
+
+// ensureAdminUser provisions the ntfy admin account, generating a password
+// stored in the keychain. The password is delivered to `ntfy user add` over
+// stdin (twice, for confirmation) — never on argv. Idempotent: a pre-existing
+// keychain password is reused and an already-present user is left alone.
+func (m *Module) ensureAdminUser(ctx context.Context) error {
+	if m.keychain == nil {
+		return fmt.Errorf("no keychain backend to store the ntfy admin password")
+	}
+	pw, err := m.keychain.Get(ctx, keychainService, keychainAccount)
+	if err != nil || pw == "" {
+		pw, err = modules.GenPassword()
+		if err != nil {
+			return err
+		}
+		if err := m.keychain.Set(ctx, keychainService, keychainAccount, pw); err != nil {
+			return fmt.Errorf("store ntfy password: %w", err)
+		}
+	}
+	// `ntfy user add --role=admin admin` reads the password from stdin twice.
+	res, err := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
+		"ntfy", "user", "add", "--role=admin", "admin")
+	if err != nil {
+		return fmt.Errorf("ntfy user add: %w", err)
+	}
+	if res.ExitCode != 0 && !strings.Contains(res.Stdout+res.Stderr, "already exists") {
+		return fmt.Errorf("ntfy user add exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
 	return nil
 }
 
