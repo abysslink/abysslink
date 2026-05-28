@@ -24,6 +24,8 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/modules/acl"
+	asciinema "github.com/abysslink/abysslink/internal/modules/asciinema"
+	atuin "github.com/abysslink/abysslink/internal/modules/atuin"
 	"github.com/abysslink/abysslink/internal/modules/claudecode"
 	"github.com/abysslink/abysslink/internal/modules/codeserver"
 	"github.com/abysslink/abysslink/internal/modules/eternalterminal"
@@ -33,10 +35,13 @@ import (
 	notifymod "github.com/abysslink/abysslink/internal/modules/notify"
 	"github.com/abysslink/abysslink/internal/modules/ntfy"
 	"github.com/abysslink/abysslink/internal/modules/power"
+	sandbox "github.com/abysslink/abysslink/internal/modules/sandbox"
 	"github.com/abysslink/abysslink/internal/modules/ssh"
+	syncthing "github.com/abysslink/abysslink/internal/modules/syncthing"
 	tsmod "github.com/abysslink/abysslink/internal/modules/tailscale"
 	"github.com/abysslink/abysslink/internal/modules/tmux"
 	"github.com/abysslink/abysslink/internal/modules/ttyd"
+	upsnap "github.com/abysslink/abysslink/internal/modules/upsnap"
 	"github.com/abysslink/abysslink/internal/modules/watch"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/secrets"
@@ -169,5 +174,10 @@ func allModules(deps modules.Deps) []modules.Module {
 		codeserver.New(deps),
 		ttyd.New(deps),
 		eternalterminal.New(deps),
+		syncthing.New(deps),
+		atuin.New(deps),
+		upsnap.New(deps),
+		sandbox.New(deps),
+		asciinema.New(deps),
 	}
 }
