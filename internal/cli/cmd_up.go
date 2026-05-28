@@ -86,6 +86,7 @@ func newUpCmd() *cobra.Command {
 			var applyErr error
 			if !cc.dryRun {
 				unique := uniqueActions(actions)
+				printSudoNotice(p, unique)
 				printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
 				printerInfo(p, "  "+styleBold.Render(fmt.Sprintf("Applying %d changes...", len(unique))))
 				printerInfo(p, "")
@@ -114,7 +115,41 @@ func newUpCmd() *cobra.Command {
 	return cmd
 }
 
-// applyTimeGates runs all fail-closed checks before the apply phase.
+// printSudoNotice warns the user that some planned actions require sudo,
+// listing exactly which ones so there are no surprises when the password prompt appears.
+func printSudoNotice(p Printer, actions []modules.Action) {
+	// Descriptions that are known to require elevated privileges.
+	sudoKeywords := []string{
+		"pmset",          // power module
+		"tailscale",      // tailscale daemon start
+		"brew services",  // daemon service management
+		"systemctl",      // Linux daemon management
+		"socketfilterfw", // firewall
+	}
+
+	var sudoActions []string
+	for _, a := range actions {
+		for _, kw := range sudoKeywords {
+			if strings.Contains(strings.ToLower(a.Description), kw) ||
+				strings.Contains(strings.ToLower(a.Module), kw) {
+				sudoActions = append(sudoActions, fmt.Sprintf("%-18s %s", a.Module, styleMuted.Render(a.Description)))
+				break
+			}
+		}
+	}
+
+	// tailscaled daemon check/start runs outside the module system.
+	sudoActions = append([]string{fmt.Sprintf("%-18s %s", "tailscaled", styleMuted.Render("start daemon if not running"))}, sudoActions...)
+
+	printerInfo(p, "")
+	printerInfo(p, "  "+styleWarn.Render("⚠")+"  "+styleBold.Render("sudo required")+"  "+styleMuted.Render("your macOS/Linux password will be requested for:"))
+	printerInfo(p, "")
+	for _, line := range sudoActions {
+		printerInfo(p, "    "+line)
+	}
+	printerInfo(p, "")
+}
+
 // Consolidated into one function to keep newUpCmd's cyclomatic complexity below 15.
 func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []modules.Finding) error {
 	// Gate 1: tailscaled must be reachable — everything depends on it.
@@ -160,7 +195,7 @@ func requireTailscaleDaemon(p Printer) error {
 		return fmt.Errorf("up: platform detection: %w", err)
 	}
 	if startErr := doStartTailscaleDaemon(ctx, runner, plat); startErr != nil {
-		slog.Warn("up: could not start tailscaled automatically", "err", startErr)
+		printerInfo(p, "  "+iconWarnStr()+"  start command failed: "+styleMuted.Render(startErr.Error()))
 	}
 
 	printerInfo(p, "  "+iconSpinStr()+"  Waiting for tailscaled...")
