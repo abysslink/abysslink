@@ -54,30 +54,18 @@ clean:
 	rm -rf dist/
 
 ## conformance: build and run the end-to-end conformance test suite
+## Uses ABYSSLINK_BIN so the suite tests the binary just built, not PATH.
 conformance: build
-	$(GO) run ./cmd/abysslink-conformance
+	ABYSSLINK_BIN=./$(BINARY) $(GO) run ./cmd/abysslink-conformance
 
-## security-audit: grep for leaked secrets, check binary size, verify no telemetry
-security-audit:
-	@echo "=== Security Audit ==="
-	@echo "--- Checking for secrets in audit log ---"
-	@! grep -rE '(secret|token|password|api_key)["\s:=]+[a-zA-Z0-9+/]{20,}' \
-		"$${HOME}/.local/state/abysslink/audit.log" 2>/dev/null \
-		&& echo "OK: no secrets found in audit log" \
-		|| echo "WARN: possible secrets in audit log (review manually)"
-	@echo "--- Checking binary size (limit: 50 MB) ---"
-	@if [ -f "$(BINARY)" ]; then \
-		size=$$(stat -f%z "$(BINARY)" 2>/dev/null || stat -c%s "$(BINARY)" 2>/dev/null); \
-		limit=$$((50 * 1024 * 1024)); \
-		if [ "$$size" -gt "$$limit" ]; then \
-			echo "FAIL: $(BINARY) is $$(du -sh $(BINARY) | cut -f1), exceeds 50 MB"; exit 1; \
-		else \
-			echo "OK: $(BINARY) is $$(du -sh $(BINARY) | cut -f1)"; \
-		fi; \
-	else \
-		echo "SKIP: $(BINARY) not built (run make build first)"; \
-	fi
-	@echo "--- Checking for telemetry imports ---"
+## security-audit: run the conformance suite (which covers binary size, secrets,
+## telemetry, ntfy bind-addr, sshd directives, and all CLI gate checks) plus a
+## final telemetry grep for belt-and-suspenders coverage.
+security-audit: build
+	@echo "=== Security Audit (conformance suite) ==="
+	ABYSSLINK_BIN=./$(BINARY) $(GO) run ./cmd/abysslink-conformance
+	@echo ""
+	@echo "=== Belt-and-suspenders telemetry grep ==="
 	@! grep -r \
 		-e '"github.com/DataDog' \
 		-e '"github.com/getsentry' \
