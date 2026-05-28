@@ -124,7 +124,7 @@ No confirmation prompt. Within 10 seconds: Tailscale session torn down, auth key
 | Accidental public exposure | Tailscale Funnel rejected at schema level; ntfy never binds 0.0.0.0 |
 | Command injected via notification | ntfy is receive-only on phone; no command execution path |
 
-Full threat model: [docs/threat-model.md](docs/threat-model.md)
+Full threat model: [docs/security/threat-model.md](docs/security/threat-model.md)
 
 ---
 
@@ -285,7 +285,7 @@ abysslink enable claudecode --apply
 - **Cosign-verified upgrades.** `abysslink upgrade` refuses to replace the binary without a valid sigstore signature. Refuses to run as root.
 - **No telemetry.** The binary makes no outbound calls except to Tailscale's local API and your own ntfy server.
 
-See [docs/threat-model.md](docs/threat-model.md) for the full threat model and mitigations.
+See [docs/security/threat-model.md](docs/security/threat-model.md) for the full threat model and mitigations.
 
 ---
 
@@ -392,7 +392,8 @@ Full documentation at [docs/](docs/) or the hosted site (coming soon).
 
 | Doc | Read it for |
 |-----|-------------|
-| [docs/DESIGN.md](docs/DESIGN.md) | Vision, architecture, security model, module catalog |
-| [docs/IMPLEMENTATION-TASKS.md](docs/IMPLEMENTATION-TASKS.md) | Phased implementation backlog |
-| [docs/BUSINESS.md](docs/BUSINESS.md) | Monetization roadmap |
+| [docs/index.md](docs/index.md) | Overview and architecture |
+| [docs/quickstart.md](docs/quickstart.md) | Install + first-run walkthrough |
+| [docs/security/threat-model.md](docs/security/threat-model.md) | Threat model and mitigations |
+| [docs/modules/](docs/modules/) | Per-module documentation |
 | [CLAUDE.md](CLAUDE.md) | Instructions for Claude Code working in this repo |

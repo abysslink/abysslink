@@ -17,24 +17,15 @@ curl -fsSL https://abysslink.dev/install.sh | sh
 
 The installer downloads the binary, verifies its SHA-256 checksum, optionally verifies the cosign signature if `cosign` is available, and installs to `~/.local/bin/` (non-root) or `/usr/local/bin/` (root).
 
-Alternatively, install via package manager:
-
-```sh
-# Homebrew (macOS / Linux)
-brew install abysslink/tap/abysslink
-
-# Debian / Ubuntu
-sudo apt install abysslink
-
-# Fedora
-sudo dnf install abysslink
-```
-
 Or build from source:
 
 ```sh
 go install github.com/abysslink/abysslink/cmd/abysslink@latest
 ```
+
+> Package-manager installs (`brew install abysslink/tap/abysslink`, `apt`, `dnf`)
+> are **planned** but not yet published. Use the installer or `go install` for now.
+> Check for newer releases any time with `abysslink upgrade --check`.
 
 ## 2. Initialize
 
@@ -45,6 +36,29 @@ abysslink init
 ```
 
 This creates `~/.config/abysslink/abysslink.yaml` with safe defaults. Review it before proceeding.
+
+### Optional: admin API for full automation
+
+To let Abysslink push the tailnet ACL and mint phone auth keys automatically,
+create a Tailscale **OAuth client** at
+<https://login.tailscale.com/admin/settings/oauth> with the `devices` and
+`auth_keys` scopes. Put the non-secret parts in `abysslink.yaml`:
+
+```yaml
+tailnet:
+  admin:
+    tailnet: you@github          # your tailnet name, or "-" for the default
+    oauth_client_id: kxxxxxxxxx  # NOT secret
+```
+
+Then export the secret (it is never written to disk):
+
+```sh
+export ABYSSLINK_TS_OAUTH_SECRET=tskey-client-xxxxxxxx
+```
+
+Without this, `abysslink acl` and `abysslink enroll phone` fall back to manual
+mode (clipboard + browser).
 
 ## 3. Validate (dry run)
 
@@ -82,12 +96,22 @@ abysslink doctor
 
 `doctor` checks disk encryption, SSH config, Tailscale status, ntfy binding, and more. It exits non-zero if any check fails.
 
-## 6. Connect from your phone
+## 6. Enroll your phone
 
-Install the Tailscale app on your phone and join your tailnet. Then:
+```sh
+abysslink enroll phone
+```
 
-1. Open an SSH client (e.g. [Blink Shell](https://blink.sh) or [Termius](https://termius.com))
-2. Connect to your rig's Tailscale hostname (e.g. `ssh user@my-rig.tail12345.ts.net`)
+This installs Tailscale on the phone (QR to the download page), mints a
+single-use tagged auth key and shows it as a QR to scan, waits for the phone to
+join the tailnet, shows a QR to subscribe in the ntfy app, and writes a
+printable runbook (`~/Documents/abysslink-runbook-*.md`) covering the manual SSO
+hardening steps (passkey, disabling SMS 2FA, lock-screen previews).
+
+Then connect from an SSH client:
+
+1. iOS: [Blink Shell](https://blink.sh) (best mosh support) or [Termius](https://termius.com). Android: ConnectBot, or Termux from F-Droid for mosh.
+2. Connect to your rig's Tailscale hostname (e.g. `mosh user@my-rig.tail12345.ts.net -- tmux new -A -s main`)
 3. Your persistent tmux session is waiting
 
 ## Next steps
