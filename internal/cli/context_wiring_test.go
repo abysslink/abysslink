@@ -59,7 +59,7 @@ func TestAllModules_ConstructsCoreSet(t *testing.T) {
 	require.NoError(t, err)
 
 	mods := allModules(deps)
-	assert.Len(t, mods, 15) // 11 core + 4 optional (claudecode, code-server, ttyd, eternal-terminal)
+	assert.Len(t, mods, 20) // 11 core + 9 optional (claudecode, code-server, ttyd, eternal-terminal, syncthing, atuin, upsnap, sandbox, asciinema)
 	for _, m := range mods {
 		assert.NotEmpty(t, m.Name())
 	}
