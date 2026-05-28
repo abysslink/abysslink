@@ -195,6 +195,10 @@ func requireTailscaleDaemon(p Printer) error {
 
 	printerInfo(p, "  "+iconSpinStr()+"  Waiting for tailscaled...")
 	if !waitForDaemon(ctx, runner) {
+		// Show the actual tailscale status output so the user can see why.
+		if diag, diagErr := runner.Run(ctx, "tailscale", "status"); diagErr == nil && diag.Stderr != "" {
+			printerInfo(p, "  "+styleMuted.Render("tailscale status: "+strings.TrimSpace(diag.Stderr)))
+		}
 		printerInfo(p, "")
 		printerInfo(p, "  "+iconFatalStr()+"  tailscaled did not start — fix manually:")
 		printerInfo(p, "    "+styleCode.Render("brew services restart tailscale")+"  "+styleMuted.Render("(macOS)"))

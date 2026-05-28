@@ -243,9 +243,21 @@ func probeVersion(ctx context.Context, runner shell.Runner, t initTool) (string,
 }
 
 // probeTailscaleDaemon returns true when the local tailscaled socket is reachable.
+// "Logged out" is a valid daemon state (socket up, not yet authenticated) and
+// must return true — only "failed to connect" means the daemon is not running.
 func probeTailscaleDaemon(ctx context.Context, runner shell.Runner) bool {
 	res, err := runner.Run(ctx, "tailscale", "status")
-	return err == nil && res.ExitCode == 0
+	if err != nil {
+		return false
+	}
+	if res.ExitCode == 0 {
+		return true // connected + authenticated
+	}
+	// Daemon is up but not authenticated when output does NOT mention socket failure.
+	combined := res.Stdout + res.Stderr
+	return !strings.Contains(combined, "failed to connect") &&
+		!strings.Contains(combined, "is Tailscale running") &&
+		!strings.Contains(combined, "connection refused")
 }
 
 // fmtToolRow renders one row of the prerequisites table.
@@ -312,8 +324,8 @@ func startTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner, p
 	printerInfo(p, fmt.Sprintf("  %s  Starting tailscaled...", iconSpinStr()))
 
 	if err := doStartTailscaleDaemon(ctx, runner, plat); err != nil {
-		// Non-fatal: print guidance and continue so the user can start it manually.
-		printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render("Could not start daemon automatically:"))
+		// Non-fatal: print the actual error + guidance and continue.
+		printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render("Could not start daemon automatically: "+err.Error()))
 		printerInfo(p, "  "+styleMuted.Render("  macOS:  brew services restart tailscale"))
 		printerInfo(p, "  "+styleMuted.Render("  Linux:  sudo systemctl enable --now tailscaled"))
 		printerInfo(p, "  "+styleMuted.Render("Start it, then re-run `abysslink up --apply`."))
