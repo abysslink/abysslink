@@ -16,12 +16,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/shell"
 	tslocal "github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/spf13/cobra"
 )
@@ -86,7 +88,7 @@ func newStatusCmd() *cobra.Command {
 				ntfyStatus = "enabled"
 			}
 
-			diskEncrypt := diskEncryptionStatus()
+			diskEncrypt := diskEncryptionStatus(ctx, r)
 
 			rep := statusReport{
 				Tailscale:    tsRunning,
@@ -113,13 +115,29 @@ func newStatusCmd() *cobra.Command {
 	}
 }
 
-// diskEncryptionStatus returns a human label for the disk encryption state.
-func diskEncryptionStatus() string {
+// diskEncryptionStatus queries the OS for actual disk encryption state.
+// Returns "encrypted", "unencrypted", or "unknown".
+func diskEncryptionStatus(ctx context.Context, r shell.Runner) string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "run: abysslink doctor"
+		res, err := r.Run(ctx, "fdesetup", "status")
+		if err != nil || res.ExitCode != 0 {
+			return "unknown"
+		}
+		if strings.HasPrefix(strings.TrimSpace(res.Stdout), "FileVault is On") {
+			return "encrypted"
+		}
+		return "unencrypted"
 	case "linux":
-		return "run: abysslink doctor"
+		res, err := r.Run(ctx, "lsblk", "--json", "--output", "NAME,TYPE,MOUNTPOINT")
+		if err != nil || res.ExitCode != 0 {
+			return "unknown"
+		}
+		// Any "crypt" type block device indicates LUKS is in use.
+		if strings.Contains(res.Stdout, `"crypt"`) {
+			return "encrypted"
+		}
+		return "unencrypted"
 	default:
 		return "unknown"
 	}
