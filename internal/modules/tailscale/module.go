@@ -26,6 +26,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -43,11 +44,12 @@ type tailscaleStatus struct {
 type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
+	plat   platform.Platform
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg}
+	return &Module{runner: d.Runner, cfg: d.Cfg, plat: d.Platform}
 }
 
 // Name returns the module name.
@@ -112,33 +114,39 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		})
 	}
 
-	// Check SSH capability — skip for sandboxed GUI builds where --ssh is unsupported.
-	if m.cfg.Tailnet.SSH && !sandboxed && !status.TailscaleSSH {
-		sshEnabled := false
-		for _, cap := range status.Self.Capabilities {
-			if strings.Contains(cap, "ssh") {
-				sshEnabled = true
-				break
-			}
-		}
-		if !sshEnabled {
-			findings = append(findings, modules.Finding{
-				Module:   m.Name(),
-				Check:    "ssh",
-				Severity: modules.SeverityWarning,
-				Message:  "tailscale SSH is not enabled; run: tailscale up --ssh",
-			})
-		}
-	} else if m.cfg.Tailnet.SSH && sandboxed {
-		findings = append(findings, modules.Finding{
+	findings = append(findings, m.sshFindings(&status, sandboxed)...)
+
+	return findings, nil
+}
+
+// sshFindings reports whether Tailscale SSH is enabled for the current config,
+// accounting for sandboxed GUI builds that cannot run the SSH server.
+func (m *Module) sshFindings(status *tailscaleStatus, sandboxed bool) []modules.Finding {
+	if !m.cfg.Tailnet.SSH {
+		return nil
+	}
+	if sandboxed {
+		return []modules.Finding{{
 			Module:   m.Name(),
 			Check:    "ssh_sandboxed",
 			Severity: modules.SeverityWarning,
 			Message:  "Tailscale SSH is not available in the sandboxed GUI build; install the CLI: brew install tailscale",
-		})
+		}}
 	}
-
-	return findings, nil
+	if status.TailscaleSSH {
+		return nil
+	}
+	for _, capability := range status.Self.Capabilities {
+		if strings.Contains(capability, "ssh") {
+			return nil
+		}
+	}
+	return []modules.Finding{{
+		Module:   m.Name(),
+		Check:    "ssh",
+		Severity: modules.SeverityWarning,
+		Message:  "tailscale SSH is not enabled; run: tailscale up --ssh",
+	}}
 }
 
 // Plan computes actions needed to reach desired state.
@@ -206,9 +214,14 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply executes planned changes.
+// Apply installs Tailscale if missing, authenticates (interactive browser SSO
+// when needed), enables Tailscale SSH, turns on auto-update, and sets the
+// configured hostname.
 func (m *Module) Apply(ctx context.Context) error {
-	// Detect sandboxed GUI build upfront — affects which flags are valid.
+	if err := m.ensureInstalled(ctx); err != nil {
+		return err
+	}
+
 	verRes, _ := m.runner.Run(ctx, "tailscale", "version")
 	sandboxed := isSandboxedGUI(strings.TrimSpace(verRes.Stdout))
 
@@ -217,102 +230,177 @@ func (m *Module) Apply(ctx context.Context) error {
 		return fmt.Errorf("tailscale apply: detect: %w", err)
 	}
 
+	var needsLogin, notRunning, sshMissing bool
 	for _, f := range findings {
 		switch f.Check {
-		case "installed":
-			return fmt.Errorf("tailscale apply: tailscale is not installed; install it from https://tailscale.com/download and re-run")
 		case "needs_login":
-			slog.Warn("tailscale apply: not logged in — run `tailscale login` to authenticate (opens browser), then re-run `abysslink up --apply`")
-			return nil
-		case "ssh_sandboxed":
-			slog.Warn("tailscale apply: skipping --ssh flag — sandboxed GUI build does not support Tailscale SSH; install CLI: brew install tailscale")
+			needsLogin = true
 		case "running":
-			args := []string{"up"}
-			if m.cfg.Tailnet.SSH && !sandboxed {
-				args = append(args, "--ssh")
-			}
-			if m.cfg.Tailnet.Hostname != "" {
-				args = append(args, "--hostname="+m.cfg.Tailnet.Hostname)
-			}
-			slog.Info("tailscale apply: running tailscale up", "args", args)
-			res, err := m.runner.Run(ctx, "tailscale", args...)
-			if err != nil {
-				return fmt.Errorf("tailscale apply: tailscale up: %w", err)
-			}
-			if res.ExitCode != 0 {
-				combined := res.Stdout + res.Stderr
-				if strings.Contains(combined, "sandboxed") {
-					slog.Warn("tailscale apply: GUI build detected at runtime — retrying without --ssh; install CLI: brew install tailscale")
-					args2 := []string{"up"}
-					if m.cfg.Tailnet.Hostname != "" {
-						args2 = append(args2, "--hostname="+m.cfg.Tailnet.Hostname)
-					}
-					res2, err2 := m.runner.Run(ctx, "tailscale", args2...)
-					if err2 != nil {
-						return fmt.Errorf("tailscale apply: tailscale up (no-ssh retry): %w", err2)
-					}
-					if res2.ExitCode != 0 {
-						return fmt.Errorf("tailscale apply: tailscale up exited %d: %s", res2.ExitCode, res2.Stderr)
-					}
-				} else {
-					return fmt.Errorf("tailscale apply: tailscale up exited %d: %s", res.ExitCode, res.Stderr)
-				}
-			}
+			notRunning = true
 		case "ssh":
-			if sandboxed {
-				slog.Warn("tailscale apply: skipping --ssh — sandboxed GUI build; install CLI: brew install tailscale")
-				continue
-			}
-			args := []string{"up", "--ssh"}
-			if m.cfg.Tailnet.Hostname != "" {
-				args = append(args, "--hostname="+m.cfg.Tailnet.Hostname)
-			}
-			slog.Info("tailscale apply: enabling tailscale SSH", "args", args)
-			res, err := m.runner.Run(ctx, "tailscale", args...)
-			if err != nil {
-				return fmt.Errorf("tailscale apply: enable SSH: %w", err)
-			}
-			if res.ExitCode != 0 {
-				combined := res.Stdout + res.Stderr
-				if strings.Contains(combined, "sandboxed") {
-					slog.Warn("tailscale apply: GUI build — cannot enable Tailscale SSH; install CLI: brew install tailscale")
-				} else {
-					return fmt.Errorf("tailscale apply: enable SSH exited %d: %s", res.ExitCode, res.Stderr)
-				}
-			}
+			sshMissing = true
 		}
 	}
 
-	// Set hostname if configured and currently different.
-	if m.cfg.Tailnet.Hostname != "" {
-		statusRes, err := m.runner.Run(ctx, "tailscale", "status", "--json")
-		if err == nil && statusRes.ExitCode == 0 {
-			var st struct {
-				Self struct {
-					HostName string `json:"HostName"`
-				} `json:"Self"`
-			}
-			if json.Unmarshal([]byte(statusRes.Stdout), &st) == nil {
-				if st.Self.HostName != "" && st.Self.HostName != m.cfg.Tailnet.Hostname {
-					slog.Info("tailscale apply: setting hostname", "hostname", m.cfg.Tailnet.Hostname)
-					res, err := m.runner.Run(ctx, "tailscale", "set", "--hostname="+m.cfg.Tailnet.Hostname)
-					if err != nil {
-						return fmt.Errorf("tailscale apply: set hostname: %w", err)
-					}
-					if res.ExitCode != 0 {
-						return fmt.Errorf("tailscale apply: set hostname exited %d: %s", res.ExitCode, res.Stderr)
-					}
-				}
-			}
+	upArgs := m.upArgs(sandboxed)
+	switch {
+	case needsLogin:
+		// Interactive: `tailscale up` prints the login URL, opens the browser,
+		// and blocks until the user completes SSO authentication.
+		slog.Info("tailscale apply: launching browser login (`tailscale up`)")
+		if err := m.runner.RunInteractive(ctx, "tailscale", upArgs...); err != nil {
+			return fmt.Errorf("tailscale apply: interactive login: %w", err)
+		}
+	case notRunning || sshMissing:
+		if err := m.runUp(ctx, upArgs); err != nil {
+			return err
 		}
 	}
 
+	// Enable auto-update (best-effort — unsupported on some builds/distros).
+	if res, err := m.runner.Run(ctx, "tailscale", "set", "--auto-update"); err != nil || res.ExitCode != 0 {
+		slog.Warn("tailscale apply: could not enable auto-update (non-fatal)")
+	}
+
+	return m.ensureHostname(ctx)
+}
+
+// ensureInstalled installs the tailscale binary via the platform package
+// manager when it is not already on PATH.
+func (m *Module) ensureInstalled(ctx context.Context) error {
+	if res, err := m.runner.Run(ctx, "tailscale", "version"); err == nil && res.ExitCode == 0 {
+		return nil
+	}
+	slog.Info("tailscale apply: installing tailscale")
+	if err := m.plat.InstallPackage(ctx, "tailscale"); err != nil {
+		return fmt.Errorf("tailscale apply: install tailscale: %w", err)
+	}
 	return nil
 }
 
-// Verify re-runs Detect and returns findings.
+// upArgs builds the `tailscale up` argument list, omitting --ssh on sandboxed
+// GUI builds that cannot run the SSH server.
+func (m *Module) upArgs(sandboxed bool) []string {
+	args := []string{"up"}
+	if m.cfg.Tailnet.SSH && !sandboxed {
+		args = append(args, "--ssh")
+	}
+	if m.cfg.Tailnet.Hostname != "" {
+		args = append(args, "--hostname="+m.cfg.Tailnet.Hostname)
+	}
+	return args
+}
+
+// runUp runs `tailscale up` non-interactively (already logged in). A sandboxed
+// GUI build that rejects --ssh is downgraded to a warning rather than an error.
+func (m *Module) runUp(ctx context.Context, args []string) error {
+	slog.Info("tailscale apply: running tailscale up", "args", args)
+	res, err := m.runner.Run(ctx, "tailscale", args...)
+	if err != nil {
+		return fmt.Errorf("tailscale apply: tailscale up: %w", err)
+	}
+	if res.ExitCode == 0 {
+		return nil
+	}
+	if strings.Contains(res.Stdout+res.Stderr, "sandboxed") {
+		slog.Warn("tailscale apply: sandboxed GUI build cannot enable Tailscale SSH; install CLI: brew install tailscale")
+		return nil
+	}
+	return fmt.Errorf("tailscale apply: tailscale up exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+}
+
+// ensureHostname sets the MagicDNS hostname when it differs from config.
+func (m *Module) ensureHostname(ctx context.Context) error {
+	if m.cfg.Tailnet.Hostname == "" {
+		return nil
+	}
+	statusRes, err := m.runner.Run(ctx, "tailscale", "status", "--json")
+	if err != nil || statusRes.ExitCode != 0 {
+		return nil
+	}
+	var st struct {
+		Self struct {
+			HostName string `json:"HostName"`
+		} `json:"Self"`
+	}
+	if json.Unmarshal([]byte(statusRes.Stdout), &st) != nil {
+		return nil
+	}
+	if st.Self.HostName == "" || st.Self.HostName == m.cfg.Tailnet.Hostname {
+		return nil
+	}
+	slog.Info("tailscale apply: setting hostname", "hostname", m.cfg.Tailnet.Hostname)
+	res, err := m.runner.Run(ctx, "tailscale", "set", "--hostname="+m.cfg.Tailnet.Hostname)
+	if err != nil {
+		return fmt.Errorf("tailscale apply: set hostname: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("tailscale apply: set hostname exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
+// Verify re-runs Detect and additionally refuses public exposure: it returns a
+// fatal finding if Tailscale Funnel is active (which exposes a service to the
+// public internet) and a warning if Serve is active. Preventing public exposure
+// is the product's core promise, so a node is never "healthy" while Funnel is on.
 func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+	findings, err := m.Detect(ctx)
+	if err != nil {
+		return findings, err
+	}
+	return append(findings, m.checkNoPublicExposure(ctx)...), nil
+}
+
+// checkNoPublicExposure inspects `tailscale funnel status` and `tailscale serve
+// status`. Detection is conservative — it only flags clearly-active configs to
+// avoid false positives on healthy machines.
+func (m *Module) checkNoPublicExposure(ctx context.Context) []modules.Finding {
+	var findings []modules.Finding
+
+	if m.funnelActive(ctx) {
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "funnel",
+			Severity: modules.SeverityFatal,
+			Message:  "Tailscale Funnel is enabled — this exposes a service to the public internet; disable it with `tailscale funnel reset`",
+		})
+	}
+	if m.serveActive(ctx) {
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "serve",
+			Severity: modules.SeverityWarning,
+			Message:  "Tailscale Serve is active — confirm this is intended; reset with `tailscale serve reset`",
+		})
+	}
+	return findings
+}
+
+// funnelActive reports whether `tailscale funnel status` shows an active funnel.
+func (m *Module) funnelActive(ctx context.Context) bool {
+	res, err := m.runner.Run(ctx, "tailscale", "funnel", "status")
+	if err != nil || res.ExitCode != 0 {
+		return false
+	}
+	out := strings.ToLower(res.Stdout + res.Stderr)
+	// Inactive output is e.g. "Funnel is not configured." / "No serve config".
+	// Active output contains "(funnel on)" beside the exposed URL.
+	return strings.Contains(out, "funnel on")
+}
+
+// serveActive reports whether `tailscale serve status` shows an active proxy.
+func (m *Module) serveActive(ctx context.Context) bool {
+	res, err := m.runner.Run(ctx, "tailscale", "serve", "status")
+	if err != nil || res.ExitCode != 0 {
+		return false
+	}
+	out := strings.ToLower(res.Stdout + res.Stderr)
+	if strings.Contains(out, "no serve config") || strings.TrimSpace(out) == "" {
+		return false
+	}
+	// Active serve output lists proxied targets (a tree with "|--" / "proxy").
+	return strings.Contains(out, "proxy") || strings.Contains(out, "|--")
 }
 
 // Repair attempts to fix findings.

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 )
 
@@ -54,6 +55,17 @@ func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (Resu
 		Stderr:   stderr.String(),
 		ExitCode: 0,
 	}, nil
+}
+
+// RunInteractive executes name with args wired to the parent's stdin/stdout/
+// stderr so interactive flows (e.g. `tailscale up` browser login) work with a
+// live terminal. Output is not captured.
+func (r *ExecRunner) RunInteractive(ctx context.Context, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // RunWithStdin executes name with args, wiring stdin to the provided reader.

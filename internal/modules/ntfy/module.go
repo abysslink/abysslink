@@ -26,6 +26,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -39,11 +40,12 @@ type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
 	audit  *audit.Audit
+	plat   platform.Platform
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit}
+	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit, plat: d.Platform}
 }
 
 // Name returns the module name.
@@ -179,8 +181,21 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply writes the ntfy server.yml config bound to the tailnet IP.
+// Apply installs ntfy if missing and writes the server.yml config bound to the
+// tailnet IP.
 func (m *Module) Apply(ctx context.Context) error {
+	if !m.cfg.Modules.Ntfy.Enabled {
+		return nil
+	}
+
+	// Install the ntfy binary if it is not on PATH.
+	if res, verErr := m.runner.Run(ctx, "ntfy", "version"); verErr != nil || res.ExitCode != 0 {
+		slog.Info("ntfy apply: installing ntfy")
+		if err := m.plat.InstallPackage(ctx, "ntfy"); err != nil {
+			return fmt.Errorf("ntfy apply: install ntfy: %w", err)
+		}
+	}
+
 	// Retrieve the tailnet IP from tailscale status.
 	tailnetIP, err := m.getTailnetIP(ctx)
 	if err != nil {

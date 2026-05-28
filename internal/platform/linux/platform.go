@@ -62,18 +62,18 @@ func (p *Platform) Distro() platform.Distro { return p.distro }
 // PackageManager returns the package manager for this distribution.
 func (p *Platform) PackageManager() platform.PackageManager { return p.pkgMgr }
 
-// InstallPackage installs a package using the detected package manager.
+// InstallPackage installs a package using the detected package manager. System
+// package managers (apt/dnf/pacman) require root, so they are invoked via sudo
+// when the process is not already root; nix installs into the per-user profile
+// and never uses sudo.
 func (p *Platform) InstallPackage(ctx context.Context, name string) error {
 	switch p.pkgMgr {
 	case platform.PkgApt:
-		_, err := p.runner.Run(ctx, "apt-get", "install", "-y", name)
-		return err
+		return p.runPrivileged(ctx, "apt-get", "install", "-y", name)
 	case platform.PkgDnf:
-		_, err := p.runner.Run(ctx, "dnf", "install", "-y", name)
-		return err
+		return p.runPrivileged(ctx, "dnf", "install", "-y", name)
 	case platform.PkgPacman:
-		_, err := p.runner.Run(ctx, "pacman", "-S", "--noconfirm", name)
-		return err
+		return p.runPrivileged(ctx, "pacman", "-S", "--noconfirm", name)
 	case platform.PkgNix:
 		_, err := p.runner.Run(ctx, "nix-env", "-iA", "nixpkgs."+name)
 		return err
@@ -86,20 +86,38 @@ func (p *Platform) InstallPackage(ctx context.Context, name string) error {
 func (p *Platform) RemovePackage(ctx context.Context, name string) error {
 	switch p.pkgMgr {
 	case platform.PkgApt:
-		_, err := p.runner.Run(ctx, "apt-get", "remove", "-y", name)
-		return err
+		return p.runPrivileged(ctx, "apt-get", "remove", "-y", name)
 	case platform.PkgDnf:
-		_, err := p.runner.Run(ctx, "dnf", "remove", "-y", name)
-		return err
+		return p.runPrivileged(ctx, "dnf", "remove", "-y", name)
 	case platform.PkgPacman:
-		_, err := p.runner.Run(ctx, "pacman", "-R", "--noconfirm", name)
-		return err
+		return p.runPrivileged(ctx, "pacman", "-R", "--noconfirm", name)
 	case platform.PkgNix:
 		_, err := p.runner.Run(ctx, "nix-env", "-e", name)
 		return err
 	default:
 		return fmt.Errorf("unsupported package manager: %q", p.pkgMgr)
 	}
+}
+
+// runPrivileged runs a command that needs root. If the process is already root
+// it runs directly; otherwise it prefixes sudo (which prompts on the terminal
+// when credentials are needed). The binary is always exec'd directly — never
+// via a shell — so there is no shell-injection surface.
+func (p *Platform) runPrivileged(ctx context.Context, name string, args ...string) error {
+	var res shell.Result
+	var err error
+	if os.Geteuid() == 0 {
+		res, err = p.runner.Run(ctx, name, args...)
+	} else {
+		res, err = p.runner.Run(ctx, "sudo", append([]string{name}, args...)...)
+	}
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("%s exited %d: %s", name, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return nil
 }
 
 // lsblkOutput is the top-level JSON structure from lsblk -J.
