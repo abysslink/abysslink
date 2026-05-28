@@ -44,4 +44,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}  # Phase 8
+          # No COSIGN_PASSWORD needed — using keyless OIDC signing.
