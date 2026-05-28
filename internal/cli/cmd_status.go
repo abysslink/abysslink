@@ -115,6 +115,25 @@ func newStatusCmd() *cobra.Command {
 	}
 }
 
+// luksDevice is a minimal lsblk JSON device entry used by diskEncryptionStatus.
+type luksDevice struct {
+	Type     string       `json:"type"`
+	Children []luksDevice `json:"children"`
+}
+
+// hasLUKSType recursively checks whether any device in the tree has type "crypt".
+func hasLUKSType(devs []luksDevice) bool {
+	for _, d := range devs {
+		if strings.EqualFold(d.Type, "crypt") {
+			return true
+		}
+		if hasLUKSType(d.Children) {
+			return true
+		}
+	}
+	return false
+}
+
 // diskEncryptionStatus queries the OS for actual disk encryption state.
 // Returns "encrypted", "unencrypted", or "unknown".
 func diskEncryptionStatus(ctx context.Context, r shell.Runner) string {
@@ -129,12 +148,19 @@ func diskEncryptionStatus(ctx context.Context, r shell.Runner) string {
 		}
 		return "unencrypted"
 	case "linux":
-		res, err := r.Run(ctx, "lsblk", "--json", "--output", "NAME,TYPE,MOUNTPOINT")
+		// Use -J -o NAME,TYPE (no MOUNTPOINT) to match platform/linux and avoid
+		// false positives from device names or mount paths containing "crypt".
+		res, err := r.Run(ctx, "lsblk", "-J", "-o", "NAME,TYPE")
 		if err != nil || res.ExitCode != 0 {
 			return "unknown"
 		}
-		// Any "crypt" type block device indicates LUKS is in use.
-		if strings.Contains(res.Stdout, `"crypt"`) {
+		var out struct {
+			Blockdevices []luksDevice `json:"blockdevices"`
+		}
+		if err := json.Unmarshal([]byte(res.Stdout), &out); err != nil {
+			return "unknown"
+		}
+		if hasLUKSType(out.Blockdevices) {
 			return "encrypted"
 		}
 		return "unencrypted"
