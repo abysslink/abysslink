@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"gopkg.in/yaml.v3"
 )
 
@@ -252,8 +253,7 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// Write marshals cfg to YAML and writes it to path, creating parent directories
-// as needed. The file is written atomically via a temp file + rename.
+// Write marshals cfg to YAML and writes it atomically via audit (backup + rename).
 func Write(path string, cfg *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("config: create directory: %w", err)
@@ -264,13 +264,12 @@ func Write(path string, cfg *Config) error {
 		return fmt.Errorf("config: marshal: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("config: write temp file: %w", err)
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("config: audit log path: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("config: rename to final path: %w", err)
+	if err := audit.New(logPath).WriteFile(path, data, 0o600, false); err != nil {
+		return fmt.Errorf("config: write: %w", err)
 	}
 	return nil
 }
