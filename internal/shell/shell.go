@@ -35,4 +35,11 @@ type Runner interface {
 	// RunWithStdin executes name with args, wiring stdin to the provided reader.
 	// Use this when a secret must be delivered via stdin instead of argv.
 	RunWithStdin(ctx context.Context, stdin io.Reader, name string, args ...string) (Result, error)
+	// RunInteractive executes name with args wired directly to the parent
+	// process's stdin/stdout/stderr (inheriting the terminal). Use it for
+	// commands that need a live TTY — interactive auth flows such as
+	// `tailscale up`, which prints a login URL, opens a browser, and blocks
+	// until the user authenticates. Output is NOT captured; only the exit
+	// status is returned.
+	RunInteractive(ctx context.Context, name string, args ...string) error
 }

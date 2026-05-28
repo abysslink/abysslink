@@ -21,13 +21,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -42,11 +42,12 @@ type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
 	audit  *audit.Audit
+	plat   platform.Platform
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit}
+	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit, plat: d.Platform}
 }
 
 // Name returns the module name.
@@ -175,6 +176,7 @@ set -g @plugin 'tmux-plugins/tpm'
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
 set -g @continuum-restore 'on'
+set -g @continuum-save-interval '15'
 run '~/.tmux/plugins/tpm/tpm'
 # --- end abysslink managed ---
 `
@@ -198,6 +200,10 @@ func (m *Module) Apply(ctx context.Context) error {
 		if err := m.writeTmuxConf(); err != nil {
 			return err
 		}
+		if err := m.bootstrapTPM(ctx); err != nil {
+			// Non-fatal: tmux still works without the plugin manager; log and continue.
+			slog.Warn("tmux apply: TPM bootstrap failed; plugins (resurrect/continuum) will be unavailable", "err", err)
+		}
 	}
 
 	return nil
@@ -206,30 +212,33 @@ func (m *Module) Apply(ctx context.Context) error {
 // installTmux installs tmux via the platform package manager.
 func (m *Module) installTmux(ctx context.Context) error {
 	slog.Info("tmux apply: installing tmux")
-	switch runtime.GOOS {
-	case "darwin":
-		res, err := m.runner.Run(ctx, "brew", "install", "tmux")
-		if err != nil {
-			return fmt.Errorf("tmux apply: brew install tmux: %w", err)
-		}
-		if res.ExitCode != 0 {
-			return fmt.Errorf("tmux apply: brew install tmux exited %d: %s", res.ExitCode, res.Stderr)
-		}
-	case "linux":
-		// Try apt, then dnf, then pacman.
-		for _, args := range [][]string{
-			{"apt-get", "install", "-y", "tmux"},
-			{"dnf", "install", "-y", "tmux"},
-			{"pacman", "-Sy", "--noconfirm", "tmux"},
-		} {
-			res, err := m.runner.Run(ctx, "sudo", args...)
-			if err == nil && res.ExitCode == 0 {
-				return nil
-			}
-		}
-		return fmt.Errorf("tmux apply: could not install tmux — no supported package manager found")
-	default:
-		return fmt.Errorf("tmux apply: unsupported OS %q", runtime.GOOS)
+	if err := m.plat.InstallPackage(ctx, "tmux"); err != nil {
+		return fmt.Errorf("tmux apply: install tmux: %w", err)
+	}
+	return nil
+}
+
+// bootstrapTPM clones the Tmux Plugin Manager into ~/.tmux/plugins/tpm if it is
+// not already present, so the resurrect/continuum plugins declared in the conf
+// can load. Idempotent: a no-op when TPM is already installed.
+func (m *Module) bootstrapTPM(ctx context.Context) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	tpmDir := filepath.Join(home, ".tmux", "plugins", "tpm")
+	if _, statErr := os.Stat(tpmDir); statErr == nil {
+		slog.Debug("tmux apply: TPM already present", "dir", tpmDir)
+		return nil
+	}
+
+	slog.Info("tmux apply: installing TPM (tmux plugin manager)", "dir", tpmDir)
+	res, err := m.runner.Run(ctx, "git", "clone", "https://github.com/tmux-plugins/tpm", tpmDir)
+	if err != nil {
+		return fmt.Errorf("git clone tpm: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("git clone tpm exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return nil
 }

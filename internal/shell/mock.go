@@ -88,6 +88,22 @@ func (m *MockRunner) RunWithStdin(_ context.Context, stdin io.Reader, name strin
 	return c.Result, c.Err
 }
 
+// RunInteractive returns the next scripted Call's error, recording the actual
+// name and args. Scripted Result output is ignored since interactive calls do
+// not capture output.
+func (m *MockRunner) RunInteractive(_ context.Context, name string, args ...string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.idx >= len(m.calls) {
+		return fmt.Errorf("shell: unexpected call %d (RunInteractive): %s %v", m.idx, name, args)
+	}
+	c := m.calls[m.idx]
+	m.calls[m.idx].Name = name
+	m.calls[m.idx].Args = args
+	m.idx++
+	return c.Err
+}
+
 // RecordedCalls returns a snapshot of all calls as consumed so far, including
 // any stdin content captured by RunWithStdin.
 func (m *MockRunner) RecordedCalls() []Call {
