@@ -16,22 +16,132 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
+	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/spf13/cobra"
 )
 
+const daemonLabel = "dev.abysslink.abysslinkd"
+
 func newDaemonCmd() *cobra.Command {
-	daemon := &cobra.Command{
+	d := &cobra.Command{
 		Use:   "daemon",
-		Short: "Manage the abysslinkd background daemon",
+		Short: "Manage the abysslinkd background daemon (notify socket + watchers)",
 	}
-	daemon.AddCommand(
-		&cobra.Command{Use: "start", Short: "Start the daemon", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "stop", Short: "Stop the daemon", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "status", Short: "Show daemon status", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "enable", Short: "Enable daemon auto-start on login", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
-		&cobra.Command{Use: "disable", Short: "Disable daemon auto-start on login", RunE: func(_ *cobra.Command, _ []string) error { return fmt.Errorf("not implemented yet") }},
+	d.AddCommand(
+		daemonLifecycleCmd("start", "Start the daemon", func(ctx context.Context, p platform.Platform) error {
+			return p.ServiceStart(ctx, daemonLabel)
+		}),
+		daemonLifecycleCmd("stop", "Stop the daemon", func(ctx context.Context, p platform.Platform) error {
+			return p.ServiceStop(ctx, daemonLabel)
+		}),
+		daemonLifecycleCmd("enable", "Install and start the daemon at login", func(ctx context.Context, p platform.Platform) error {
+			spec, err := daemonServiceSpec()
+			if err != nil {
+				return err
+			}
+			if err := p.ServiceInstall(ctx, spec); err != nil {
+				return err
+			}
+			return p.ServiceStart(ctx, daemonLabel)
+		}),
+		daemonLifecycleCmd("disable", "Stop and remove the daemon login service", func(ctx context.Context, p platform.Platform) error {
+			_ = p.ServiceStop(ctx, daemonLabel)
+			return p.ServiceUninstall(ctx, daemonLabel)
+		}),
+		newDaemonStatusCmd(),
 	)
-	return daemon
+	return d
+}
+
+// daemonLifecycleCmd builds a subcommand that resolves the platform and runs fn.
+func daemonLifecycleCmd(use, short string, fn func(context.Context, platform.Platform) error) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+			deps, err := buildDeps(ctx, cc)
+			if err != nil {
+				return fmt.Errorf("daemon %s: %w", use, err)
+			}
+			if err := fn(ctx, deps.Platform); err != nil {
+				return fmt.Errorf("daemon %s: %w", use, err)
+			}
+			printerInfo(newPrinter(cmd), "daemon "+use+": ok")
+			return nil
+		},
+	}
+}
+
+func newDaemonStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show daemon status",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+			p := newPrinter(cmd)
+			deps, err := buildDeps(ctx, cc)
+			if err != nil {
+				return fmt.Errorf("daemon status: %w", err)
+			}
+
+			svc, _ := deps.Platform.ServiceStatus(ctx, daemonLabel)
+			socketUp := daemon.NewClient().Ping(ctx)
+			watches := 0
+			if cc.cfg.Modules.Watch.Enabled {
+				watches = len(cc.cfg.Modules.Watch.Panes)
+			}
+
+			printerInfo(p, fmt.Sprintf("  service:   %s", svc))
+			printerInfo(p, fmt.Sprintf("  socket:    %s (%s)", daemon.SocketPath(), reachable(socketUp)))
+			printerInfo(p, fmt.Sprintf("  watchers:  %d pane(s)", watches))
+			return nil
+		},
+	}
+}
+
+func reachable(ok bool) string {
+	if ok {
+		return "reachable"
+	}
+	return "not reachable"
+}
+
+// daemonServiceSpec builds the launchd/systemd spec for abysslinkd, resolving
+// the daemon binary next to the running abysslink binary.
+func daemonServiceSpec() (platform.ServiceSpec, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return platform.ServiceSpec{}, fmt.Errorf("resolve executable: %w", err)
+	}
+	binPath := filepath.Join(filepath.Dir(exe), "abysslinkd")
+	if _, statErr := os.Stat(binPath); statErr != nil {
+		binPath = "abysslinkd" // fall back to PATH lookup at service start
+	}
+
+	stateDir := abysslinkStateDir()
+	_ = os.MkdirAll(stateDir, 0o700)
+
+	return platform.ServiceSpec{
+		Label:      daemonLabel,
+		Args:       []string{binPath},
+		StdoutPath: filepath.Join(stateDir, "abysslinkd.out.log"),
+		StderrPath: filepath.Join(stateDir, "abysslinkd.err.log"),
+		KeepAlive:  true,
+		RunAtLoad:  true,
+	}, nil
 }

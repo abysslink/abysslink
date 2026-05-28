@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -186,19 +187,32 @@ func (m *Module) Repair(ctx context.Context) error {
 }
 
 // Send sends a notification via the configured ntfy backend.
-// It tries the abysslinkd Unix socket first, then falls back to direct ntfy POST.
+// It tries the abysslinkd Unix socket first (fast path, no process startup),
+// then falls back to a direct ntfy POST when the daemon is not running.
 func (m *Module) Send(ctx context.Context, title, body string) error {
 	if !m.cfg.Modules.Notify.Enabled {
 		slog.Debug("notify.Send: module disabled, skipping")
 		return nil
 	}
 
+	// Fast path: hand off to a running abysslinkd over its Unix socket.
+	if err := daemon.NewClient().Send(ctx, daemon.NotifyRequest{
+		Title: title,
+		Body:  body,
+		Topic: m.cfg.Modules.Notify.DefaultTopic,
+	}); err == nil {
+		slog.Debug("notify.Send: delivered via abysslinkd socket")
+		return nil
+	}
+
 	// Fall back to direct ntfy POST.
-	return m.sendDirect(ctx, title, body)
+	return m.SendDirect(ctx, title, body)
 }
 
-// sendDirect sends a notification directly to the ntfy HTTP API.
-func (m *Module) sendDirect(ctx context.Context, title, body string) error {
+// SendDirect sends a notification directly to the ntfy HTTP API, bypassing the
+// daemon socket. The daemon itself uses this as its delivery backend (calling
+// the socket-aware Send from inside the daemon would loop).
+func (m *Module) SendDirect(ctx context.Context, title, body string) error {
 	topic := m.cfg.Modules.Notify.DefaultTopic
 	if topic == "" {
 		topic = "rig"
