@@ -176,14 +176,14 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 		case "running":
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
-				Description: "run tailscale up --ssh",
-				Explain:     "Brings Tailscale up and enables the SSH server so devices on your tailnet can connect without a VPN or open port.",
+				Description: "run tailscale up (reconnect), then tailscale set --ssh",
+				Explain:     "Reconnects Tailscale and enables the SSH server so devices on your tailnet can connect without a VPN or open port.",
 				Reversible:  false,
 			})
 		case "ssh":
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
-				Description: "run tailscale up --ssh",
+				Description: "run tailscale set --ssh",
 				Explain:     "Activates Tailscale SSH so devices on your tailnet can connect securely without a VPN or port forward.",
 				Reversible:  false,
 			})
@@ -230,29 +230,25 @@ func (m *Module) Apply(ctx context.Context) error {
 		return fmt.Errorf("tailscale apply: detect: %w", err)
 	}
 
-	var needsLogin, notRunning, sshMissing bool
+	var needsLogin, notRunning bool
 	for _, f := range findings {
 		switch f.Check {
 		case "needs_login":
 			needsLogin = true
 		case "running":
 			notRunning = true
-		case "ssh":
-			sshMissing = true
 		}
 	}
 
-	upArgs := m.upArgs(sandboxed)
-	switch {
-	case needsLogin:
-		// Interactive: `tailscale up` prints the login URL, opens the browser,
-		// and blocks until the user completes SSO authentication.
-		slog.Info("tailscale apply: launching browser login (`tailscale up`)")
-		if err := m.runner.RunInteractive(ctx, "tailscale", upArgs...); err != nil {
-			return fmt.Errorf("tailscale apply: interactive login: %w", err)
-		}
-	case notRunning || sshMissing:
-		if err := m.runUp(ctx, upArgs); err != nil {
+	if err := m.ensureConnected(ctx, needsLogin, notRunning); err != nil {
+		return err
+	}
+
+	// Apply SSH via `tailscale set --ssh` (incremental; idempotent if already on).
+	// `tailscale set` modifies only the specified flag; it does not require
+	// re-stating --accept-routes or other user-configured non-defaults.
+	if m.cfg.Tailnet.SSH {
+		if err := m.enableSSH(ctx, sandboxed); err != nil {
 			return err
 		}
 	}
@@ -263,6 +259,51 @@ func (m *Module) Apply(ctx context.Context) error {
 	}
 
 	return m.ensureHostname(ctx)
+}
+
+// enableSSH enables Tailscale SSH via `tailscale set --ssh`. Using `set` rather
+// than `up` avoids the requirement to re-state all non-default flags that the
+// user may have set (e.g. --accept-routes, --exit-node).
+func (m *Module) enableSSH(ctx context.Context, sandboxed bool) error {
+	if sandboxed {
+		slog.Warn("tailscale apply: sandboxed GUI build cannot enable Tailscale SSH; install CLI: brew install tailscale")
+		return nil
+	}
+	slog.Info("tailscale apply: enabling Tailscale SSH (tailscale set --ssh)")
+	res, err := m.runner.Run(ctx, "tailscale", "set", "--ssh")
+	if err != nil {
+		return fmt.Errorf("tailscale apply: enable SSH: %w", err)
+	}
+	if res.ExitCode == 0 {
+		return nil
+	}
+	if strings.Contains(res.Stdout+res.Stderr, "sandboxed") {
+		slog.Warn("tailscale apply: sandboxed GUI build cannot enable SSH; install CLI: brew install tailscale")
+		return nil
+	}
+	return fmt.Errorf("tailscale apply: tailscale set --ssh exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+}
+
+// ensureConnected handles the auth and reconnect cases before settings are applied.
+// needsLogin: open browser via `tailscale login` (no flags — avoids the
+// "must re-state all non-defaults" error that `tailscale up` triggers).
+// notRunning: reconnect with `tailscale up` (no flags — preserves --accept-routes etc.).
+func (m *Module) ensureConnected(ctx context.Context, needsLogin, notRunning bool) error {
+	switch {
+	case needsLogin:
+		slog.Info("tailscale apply: launching browser login (tailscale login)")
+		if err := m.runner.RunInteractive(ctx, "tailscale", "login"); err != nil {
+			return fmt.Errorf("tailscale apply: interactive login: %w", err)
+		}
+	case notRunning:
+		slog.Info("tailscale apply: reconnecting tailscale (tailscale up)")
+		if res, err := m.runner.Run(ctx, "tailscale", "up"); err != nil {
+			return fmt.Errorf("tailscale apply: reconnect: %w", err)
+		} else if res.ExitCode != 0 {
+			return fmt.Errorf("tailscale apply: reconnect exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+	}
+	return nil
 }
 
 // ensureInstalled installs the tailscale binary via the platform package
@@ -276,37 +317,6 @@ func (m *Module) ensureInstalled(ctx context.Context) error {
 		return fmt.Errorf("tailscale apply: install tailscale: %w", err)
 	}
 	return nil
-}
-
-// upArgs builds the `tailscale up` argument list, omitting --ssh on sandboxed
-// GUI builds that cannot run the SSH server.
-func (m *Module) upArgs(sandboxed bool) []string {
-	args := []string{"up"}
-	if m.cfg.Tailnet.SSH && !sandboxed {
-		args = append(args, "--ssh")
-	}
-	if m.cfg.Tailnet.Hostname != "" {
-		args = append(args, "--hostname="+m.cfg.Tailnet.Hostname)
-	}
-	return args
-}
-
-// runUp runs `tailscale up` non-interactively (already logged in). A sandboxed
-// GUI build that rejects --ssh is downgraded to a warning rather than an error.
-func (m *Module) runUp(ctx context.Context, args []string) error {
-	slog.Info("tailscale apply: running tailscale up", "args", args)
-	res, err := m.runner.Run(ctx, "tailscale", args...)
-	if err != nil {
-		return fmt.Errorf("tailscale apply: tailscale up: %w", err)
-	}
-	if res.ExitCode == 0 {
-		return nil
-	}
-	if strings.Contains(res.Stdout+res.Stderr, "sandboxed") {
-		slog.Warn("tailscale apply: sandboxed GUI build cannot enable Tailscale SSH; install CLI: brew install tailscale")
-		return nil
-	}
-	return fmt.Errorf("tailscale apply: tailscale up exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 }
 
 // ensureHostname sets the MagicDNS hostname when it differs from config.
