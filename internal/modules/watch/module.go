@@ -64,22 +64,12 @@ func (m *Module) Detect(_ context.Context) ([]modules.Finding, error) {
 }
 
 // Plan computes actions needed.
-func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
+func (m *Module) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
 	if !m.cfg.Modules.Watch.Enabled {
 		return nil, nil
 	}
 
-	findings, err := m.Detect(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	var actions []modules.Action
-	for _, f := range findings {
-		if f.Check == "panes_configured" {
-			_ = f // nothing to auto-configure
-		}
-	}
 
 	// Watches run in abysslinkd; signal that config will be applied.
 	if len(m.cfg.Modules.Watch.Panes) > 0 {

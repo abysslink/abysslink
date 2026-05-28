@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/platform"
 )
 
@@ -39,7 +40,11 @@ func (p *Platform) ServiceInstall(ctx context.Context, spec platform.ServiceSpec
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0o750); err != nil {
 		return fmt.Errorf("mkdir LaunchAgents: %w", err)
 	}
-	if err := os.WriteFile(plistPath, data, 0o600); err != nil {
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("audit log path: %w", err)
+	}
+	if err := audit.New(logPath).WriteFile(plistPath, data, 0o600, false); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
 	uid := fmt.Sprintf("%d", os.Getuid())

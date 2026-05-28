@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -102,7 +103,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	if err != nil {
 		return nil, fmt.Errorf("code-server: home dir: %w", err)
 	}
-	cfgPath := home + "/" + codeServerConfigPath
+	cfgPath := filepath.Join(home, codeServerConfigPath)
 
 	data, err := os.ReadFile(cfgPath) //nolint:gosec
 	if err != nil {
@@ -219,8 +220,8 @@ func (m *Module) Apply(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("code-server apply: home dir: %w", err)
 	}
-	cfgPath := home + "/" + codeServerConfigPath
-	if err := os.MkdirAll(home+"/.config/code-server", 0o700); err != nil {
+	cfgPath := filepath.Join(home, codeServerConfigPath)
+	if err := os.MkdirAll(filepath.Join(home, ".config", "code-server"), 0o700); err != nil {
 		return fmt.Errorf("code-server apply: mkdir config: %w", err)
 	}
 	data, err := yaml.Marshal(codeServerConfig{
