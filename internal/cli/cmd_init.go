@@ -350,14 +350,21 @@ func waitForDaemon(ctx context.Context, runner shell.Runner) bool {
 }
 
 // doStartTailscaleDaemon issues the OS-specific daemon start command.
+// On macOS the tailscale launchd daemon is a system-level service and requires sudo.
 func doStartTailscaleDaemon(ctx context.Context, runner shell.Runner, plat platform.Platform) error {
 	switch plat.OS() {
 	case "darwin":
-		_, err := runner.Run(ctx, "brew", "services", "start", "tailscale")
-		return err
+		res, err := runner.Run(ctx, "sudo", "brew", "services", "start", "tailscale")
+		if err != nil {
+			return fmt.Errorf("brew services start tailscale: %w\n%s", err, strings.TrimSpace(res.Stderr))
+		}
+		return nil
 	default: // linux
-		_, err := runner.Run(ctx, "sudo", "systemctl", "enable", "--now", "tailscaled")
-		return err
+		res, err := runner.Run(ctx, "sudo", "systemctl", "enable", "--now", "tailscaled")
+		if err != nil {
+			return fmt.Errorf("systemctl enable tailscaled: %w\n%s", err, strings.TrimSpace(res.Stderr))
+		}
+		return nil
 	}
 }
 
