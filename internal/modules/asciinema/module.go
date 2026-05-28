@@ -156,14 +156,11 @@ func (m *Module) Apply(ctx context.Context) error {
 
 	// Only write if the file doesn't already exist.
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		if m.audit != nil {
-			if err := m.audit.WriteFile(cfgPath, []byte(asciinemaConfig), 0o600, false); err != nil {
-				return fmt.Errorf("asciinema apply: write config: %w", err)
-			}
-		} else {
-			if err := os.WriteFile(cfgPath, []byte(asciinemaConfig), 0o600); err != nil {
-				return fmt.Errorf("asciinema apply: write config (no audit): %w", err)
-			}
+		if m.audit == nil {
+			return fmt.Errorf("asciinema apply: audit not available")
+		}
+		if err := m.audit.WriteFile(cfgPath, []byte(asciinemaConfig), 0o600, false); err != nil {
+			return fmt.Errorf("asciinema apply: write config: %w", err)
 		}
 		slog.Info("asciinema apply: wrote privacy config (cloud uploads disabled)", "path", cfgPath)
 	} else {

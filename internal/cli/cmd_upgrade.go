@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
 
@@ -79,7 +80,7 @@ func newUpgradeCmd() *cobra.Command {
 			}
 
 			// --apply path: download → verify cosign → verify checksum → self-replace.
-			return applyUpgrade(c.Context(), p, latest)
+			return applyUpgrade(c.Context(), p, &shell.ExecRunner{}, latest)
 		},
 	}
 	cmd.Flags().Bool("check", false, "Only check for a newer version, do not upgrade")
@@ -90,7 +91,7 @@ func newUpgradeCmd() *cobra.Command {
 // applyUpgrade downloads the release for the current OS/arch, verifies its
 // cosign signature, checks SHA-256 integrity, and performs an atomic
 // self-replace of the running binary.
-func applyUpgrade(ctx context.Context, p Printer, tag string) error {
+func applyUpgrade(ctx context.Context, p Printer, runner shell.Runner, tag string) error {
 	if err := checkCosignInstalled(); err != nil {
 		return err
 	}
@@ -127,7 +128,7 @@ func applyUpgrade(ctx context.Context, p Printer, tag string) error {
 
 	// Verify cosign signature on the checksum manifest.
 	printerInfo(p, "  ✦  verifying cosign signature...")
-	if err := verifyCosignBlob(ctx,
+	if err := verifyCosignBlob(ctx, runner,
 		filepath.Join(tmpDir, checksums),
 		filepath.Join(tmpDir, checksums+".sig"),
 		filepath.Join(tmpDir, checksums+".pem"),
@@ -172,17 +173,20 @@ func checkCosignInstalled() error {
 
 // verifyCosignBlob verifies the cosign keyless signature on target using the
 // provided .sig and .pem files from the release.
-func verifyCosignBlob(ctx context.Context, target, sigFile, certFile string) error {
-	cmd := exec.CommandContext(ctx, "cosign", "verify-blob", //nolint:gosec
+func verifyCosignBlob(ctx context.Context, runner shell.Runner, target, sigFile, certFile string) error {
+	res, err := runner.Run(ctx, "cosign", "verify-blob",
 		"--certificate", certFile,
 		"--signature", sigFile,
 		"--certificate-identity-regexp", upgradeIdentityRegexp,
 		"--certificate-oidc-issuer", upgradeOIDCIssuer,
 		target,
 	)
-	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("cosign verify-blob: %w\n%s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("cosign verify-blob: %w", err)
+	}
+	if res.ExitCode != 0 {
+		combined := strings.TrimSpace(res.Stdout + res.Stderr)
+		return fmt.Errorf("cosign verify-blob exited %d: %s", res.ExitCode, combined)
 	}
 	return nil
 }

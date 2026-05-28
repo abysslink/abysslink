@@ -18,6 +18,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -32,9 +33,14 @@ func newPanicCmd() *cobra.Command {
 		// No confirmation prompt — designed for one-tap emergency use.
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			cc, _ := loadCmdContext(cmd) // best-effort; falls back to defaults
-
-			emit := func(format string, args ...any) { fmt.Fprintf(os.Stderr, "PANIC: "+format+"\n", args...) }
+			cc, err := loadCmdContext(cmd) // best-effort — proceed even on config load failure
+			if err != nil {
+				slog.Warn("panic: could not load config, proceeding with defaults", "err", err)
+			}
+			p := newPrinter(cmd)
+			emit := func(format string, args ...any) {
+				printerError(p, "PANIC: "+fmt.Sprintf(format, args...))
+			}
 			logPanic := panicAuditLogger()
 
 			emit("disconnecting from the tailnet...")

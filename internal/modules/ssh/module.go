@@ -280,10 +280,21 @@ func (m *Module) installHardenedSSHD(ctx context.Context) error {
 		return fmt.Errorf("ssh apply: sshd config invalid, not reloading: %s", strings.TrimSpace(res.Stderr))
 	}
 
+	var reloadErr error
 	for _, unit := range []string{"sshd", "ssh"} {
-		if res, err := m.runner.Run(ctx, "sudo", "systemctl", "reload", unit); err == nil && res.ExitCode == 0 {
+		res, err := m.runner.Run(ctx, "sudo", "systemctl", "reload", unit)
+		if err == nil && res.ExitCode == 0 {
+			reloadErr = nil
 			break
 		}
+		if err != nil {
+			reloadErr = err
+		} else {
+			reloadErr = fmt.Errorf("reload %s exited %d: %s", unit, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+	}
+	if reloadErr != nil {
+		return fmt.Errorf("ssh apply: could not reload sshd: %w", reloadErr)
 	}
 	return nil
 }

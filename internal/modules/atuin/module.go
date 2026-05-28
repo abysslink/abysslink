@@ -162,14 +162,11 @@ func (m *Module) Apply(ctx context.Context) error {
 	// Only write the config if it doesn't already exist to avoid clobbering
 	// user customisations.
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		if m.audit != nil {
-			if err := m.audit.WriteFile(cfgPath, []byte(atuinConfig), 0o600, false); err != nil {
-				return fmt.Errorf("atuin apply: write config: %w", err)
-			}
-		} else {
-			if err := os.WriteFile(cfgPath, []byte(atuinConfig), 0o600); err != nil {
-				return fmt.Errorf("atuin apply: write config (no audit): %w", err)
-			}
+		if m.audit == nil {
+			return fmt.Errorf("atuin apply: audit not available")
+		}
+		if err := m.audit.WriteFile(cfgPath, []byte(atuinConfig), 0o600, false); err != nil {
+			return fmt.Errorf("atuin apply: write config: %w", err)
 		}
 		slog.Info("atuin apply: wrote local-only config", "path", cfgPath)
 	} else {

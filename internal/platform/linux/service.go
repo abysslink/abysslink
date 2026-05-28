@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/platform"
 )
 
@@ -39,7 +40,11 @@ func (p *Platform) ServiceInstall(ctx context.Context, spec platform.ServiceSpec
 	}
 
 	data := renderUnit(spec)
-	if err := os.WriteFile(unitPath, []byte(data), 0o600); err != nil {
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("audit log path: %w", err)
+	}
+	if err := audit.New(logPath).WriteFile(unitPath, []byte(data), 0o600, false); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
 	}
 
