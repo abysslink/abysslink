@@ -17,6 +17,7 @@ package cli
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -25,7 +26,7 @@ import (
 )
 
 func newUpCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "up",
 		Short: "Converge the system to match abysslink.yaml (dry-run by default)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -47,7 +48,11 @@ func newUpCmd() *cobra.Command {
 			}
 			printerInfo(p, "")
 
-			mods := allModules(cc.runner, cc.cfg)
+			deps, err := buildDeps(ctx, cc)
+			if err != nil {
+				return fmt.Errorf("up: %w", err)
+			}
+			mods := allModules(deps)
 			r, err := modules.NewRunner(mods, cc.cfg)
 			if err != nil {
 				return fmt.Errorf("up: %w", err)
@@ -64,6 +69,21 @@ func newUpCmd() *cobra.Command {
 			}
 
 			printPlanDetail(p, actions, findings, cc.dryRun)
+
+			// Fail-closed gate: never configure remote access on an unencrypted
+			// disk. Blocks apply unless the operator explicitly overrides.
+			if !cc.dryRun {
+				if blockers := diskEncryptionBlockers(findings); len(blockers) > 0 {
+					forceUnsafe, _ := cmd.Flags().GetBool("force-unsafe")
+					if !forceUnsafe {
+						for _, b := range blockers {
+							printerError(p, "  ✗  "+b.Message)
+						}
+						return fmt.Errorf("up: refusing to apply — full-disk encryption is required (fail-closed); enable it, or re-run with --force-unsafe to override (NOT recommended)")
+					}
+					slog.Warn("up: --force-unsafe set — applying despite disk encryption being disabled; remote access on an unencrypted disk is dangerous")
+				}
+			}
 
 			// Pass 2 — Apply phase (only if not dry-run).
 			var applyFindings []modules.Finding
@@ -91,6 +111,25 @@ func newUpCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().Bool("force-unsafe", false,
+		"Override fail-closed safety checks such as disk encryption (DANGEROUS)")
+	return cmd
+}
+
+// diskEncryptionBlockers returns the subset of findings that must fail closed:
+// fatal disk-encryption checks (FileVault on macOS, LUKS on Linux). abysslink
+// up refuses to configure remote access on an unencrypted disk unless the user
+// explicitly passes --force-unsafe. Note this deliberately does NOT block on
+// other fatals such as "tool not installed" — up exists to fix those.
+func diskEncryptionBlockers(findings []modules.Finding) []modules.Finding {
+	var out []modules.Finding
+	for _, f := range findings {
+		if f.Module == "hardening" && f.Severity == modules.SeverityFatal &&
+			(f.Check == "filevault" || f.Check == "luks") {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // printNextSteps prints a styled box for findings that require manual action.

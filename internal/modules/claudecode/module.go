@@ -31,10 +31,9 @@ import (
 )
 
 const (
-	stopHookCommand  = `abysslink notify "Claude stopped" "Session ended"`
-	keychainService  = "abysslink"
-	keychainAccount  = "anthropic-api-key"
-	auditLogFilename = "claudecode-audit.log"
+	stopHookCommand = `abysslink notify "Claude stopped" "Session ended"`
+	keychainService = "abysslink"
+	keychainAccount = "anthropic-api-key"
 )
 
 // Module implements the claudecode optional module.
@@ -231,15 +230,13 @@ func (m *Module) Apply(_ context.Context) error {
 	}
 	data = append(data, '\n')
 
-	// Record the mutation in the audit log before writing.
-	auditLogPath := filepath.Join(claudeDir, auditLogFilename)
-	a := audit.New(auditLogPath)
-	if err := a.Append("write", settingsPath, data, false); err != nil {
-		// Non-fatal: log but continue so the write is not blocked by an audit error.
-		slog.Warn("claudecode: audit log failed", "err", err)
+	// Back up any existing file, write atomically, and record the mutation in
+	// the central audit log (hash only — never the settings body).
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("claudecode: audit log path: %w", err)
 	}
-
-	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+	if err := audit.New(logPath).WriteFile(settingsPath, data, 0o600, false); err != nil {
 		return fmt.Errorf("claudecode: write settings.json: %w", err)
 	}
 

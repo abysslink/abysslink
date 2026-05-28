@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -40,11 +41,12 @@ const (
 type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
+	audit  *audit.Audit
 }
 
 // New returns a new Module.
-func New(runner shell.Runner, cfg *config.Config) *Module {
-	return &Module{runner: runner, cfg: cfg}
+func New(d modules.Deps) *Module {
+	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit}
 }
 
 // Name returns the module name.
@@ -253,7 +255,7 @@ func (m *Module) writeTmuxConf() error {
 	}
 	content += "\n" + tmuxConf
 
-	if err := os.WriteFile(confPath, []byte(content), 0o600); err != nil { //nolint:gosec // confPath is filepath.Join(home, ".tmux.conf")
+	if err := m.audit.WriteFile(confPath, []byte(content), 0o600, false); err != nil {
 		return fmt.Errorf("tmux apply: write ~/.tmux.conf: %w", err)
 	}
 	return nil

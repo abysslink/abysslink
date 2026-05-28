@@ -16,8 +16,11 @@
 package cli
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/modules/acl"
@@ -31,6 +34,8 @@ import (
 	tsmod "github.com/abysslink/abysslink/internal/modules/tailscale"
 	"github.com/abysslink/abysslink/internal/modules/tmux"
 	"github.com/abysslink/abysslink/internal/modules/watch"
+	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
@@ -100,19 +105,50 @@ func printerInfo(p Printer, msg string) { p.Print(msg) }
 // printerError calls p.Error.
 func printerError(p Printer, msg string) { p.Error(msg) }
 
-// allModules returns all 11 core modules with the given runner and config.
-func allModules(runner shell.Runner, cfg *config.Config) []modules.Module {
+// buildDeps constructs the dependency bundle shared by every module: the
+// platform facade for the host OS, the keychain store, and the audit writer.
+// A missing keychain backend (e.g. Linux without secret-tool or pass) is
+// non-fatal — modules that need a secret surface a clear error at point of use
+// rather than panicking.
+func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
+	plat, err := platformauto.New(cc.runner)
+	if err != nil {
+		return modules.Deps{}, fmt.Errorf("platform init: %w", err)
+	}
+
+	kc, err := secrets.NewStore(ctx, cc.runner)
+	if err != nil {
+		slog.Warn("keychain backend unavailable; secret operations will fail until a backend is installed", "err", err)
+		kc = nil
+	}
+
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return modules.Deps{}, fmt.Errorf("audit init: %w", err)
+	}
+
+	return modules.Deps{
+		Cfg:      cc.cfg,
+		Runner:   cc.runner,
+		Platform: plat,
+		Keychain: kc,
+		Audit:    audit.New(logPath),
+	}, nil
+}
+
+// allModules returns all 11 core modules wired with the shared dependency bundle.
+func allModules(deps modules.Deps) []modules.Module {
 	return []modules.Module{
-		tsmod.New(runner, cfg),
-		ssh.New(runner, cfg),
-		tmux.New(runner, cfg),
-		mosh.New(runner, cfg),
-		acl.New(runner, cfg),
-		lock.New(runner, cfg),
-		notifymod.New(runner, cfg, nil),
-		ntfy.New(runner, cfg),
-		watch.New(runner, cfg),
-		power.New(runner, cfg),
-		hardening.New(runner, cfg),
+		tsmod.New(deps),
+		ssh.New(deps),
+		tmux.New(deps),
+		mosh.New(deps),
+		acl.New(deps),
+		lock.New(deps),
+		notifymod.New(deps),
+		ntfy.New(deps),
+		watch.New(deps),
+		power.New(deps),
+		hardening.New(deps),
 	}
 }

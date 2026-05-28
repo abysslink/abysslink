@@ -31,8 +31,8 @@ type Module struct {
 }
 
 // New returns a new Module.
-func New(runner shell.Runner, cfg *config.Config) *Module {
-	return &Module{runner: runner, cfg: cfg}
+func New(d modules.Deps) *Module {
+	return &Module{runner: d.Runner, cfg: d.Cfg}
 }
 
 // Name returns the module name.
