@@ -104,13 +104,20 @@ type WatchModule struct {
 	Panes   []string    `yaml:"panes"`
 	Files   []FileWatch `yaml:"files,omitempty"`
 	HTTP    []HTTPWatch `yaml:"http,omitempty"`
+
+	// Pane watcher timing. Zero values use the compiled-in defaults
+	// (poll 5s, idle 30s, cool-off 300s).
+	PanePollSecs    int `yaml:"pane_poll_secs,omitempty"`
+	PaneIdleSecs    int `yaml:"pane_idle_secs,omitempty"`
+	PaneCoolOffSecs int `yaml:"pane_cool_off_secs,omitempty"`
 }
 
 // FileWatch notifies when a line appended to Path matches Grep (a regexp).
 type FileWatch struct {
-	Path  string `yaml:"path"`
-	Grep  string `yaml:"grep"`
-	Label string `yaml:"label,omitempty"`
+	Path     string `yaml:"path"`
+	Grep     string `yaml:"grep"`
+	Label    string `yaml:"label,omitempty"`
+	PollSecs int    `yaml:"poll_secs,omitempty"` // default 2
 }
 
 // HTTPWatch notifies when GET URL's status code changes from Expect (or from
