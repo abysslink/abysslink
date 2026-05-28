@@ -31,7 +31,10 @@ func Backup(src string) (string, error) {
 		return "", fmt.Errorf("audit: backup read %s: %w", src, err)
 	}
 
-	stamp := time.Now().UTC().Format("20060102T150405Z")
+	// Nanosecond resolution so repeated writes within the same second do not
+	// collide and overwrite an earlier (potentially original) backup. The
+	// fixed-width fractional part keeps lexical order chronological.
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	dst := fmt.Sprintf("%s.bak.%s", src, stamp)
 
 	if err := os.WriteFile(dst, content, 0o600); err != nil { //nolint:gosec
