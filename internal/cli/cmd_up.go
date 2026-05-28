@@ -114,7 +114,7 @@ func newUpCmd() *cobra.Command {
 
 			// Pass 3 — Next steps (always runs).
 			allFindings := append(findings, applyFindings...)
-			printNextSteps(p, allFindings)
+			printNextSteps(p, allFindings, cc.cfg)
 
 			if applyErr != nil {
 				return fmt.Errorf("up: %w", applyErr)
@@ -161,8 +161,35 @@ func diskEncryptionBlockers(findings []modules.Finding) []modules.Finding {
 	return out
 }
 
+// optionalACLPort describes a module that needs a non-default Tailscale ACL grant.
+type optionalACLPort struct {
+	module string
+	port   string
+}
+
+// optionalACLPorts returns the set of enabled modules whose ports are not
+// covered by the default ACL (SSH tcp/22 + mosh udp/60000-61000). Every entry
+// here requires an explicit `abysslink acl push` before the phone can reach the
+// service.
+func optionalACLPorts(cfg *config.Config) []optionalACLPort {
+	var out []optionalACLPort
+	if cfg.Modules.Ntfy.Enabled {
+		out = append(out, optionalACLPort{"ntfy", "tcp/8080"})
+	}
+	if cfg.Modules.CodeServer.Enabled {
+		out = append(out, optionalACLPort{"code-server", "tcp/8080"})
+	}
+	if cfg.Modules.Ttyd.Enabled {
+		out = append(out, optionalACLPort{"ttyd", "tcp/7681"})
+	}
+	if cfg.Modules.EternalTerminal.Enabled {
+		out = append(out, optionalACLPort{"eternal-terminal", "tcp/2022"})
+	}
+	return out
+}
+
 // printNextSteps prints a styled box for findings that require manual action.
-func printNextSteps(p Printer, findings []modules.Finding) {
+func printNextSteps(p Printer, findings []modules.Finding, cfg *config.Config) {
 	type step struct {
 		title string
 		lines []string
@@ -209,6 +236,30 @@ func printNextSteps(p Printer, findings []modules.Finding) {
 					"Install from: " + styleCode.Render("https://tailscale.com/download"),
 					"Then re-run: " + styleCode.Render("abysslink up --apply"),
 				},
+			})
+		}
+	}
+
+	// ACL reminder: any enabled module whose port is not covered by the default
+	// ACL (SSH + mosh) needs an explicit acl push before the phone can reach it.
+	if cfg != nil {
+		if ports := optionalACLPorts(cfg); len(ports) > 0 {
+			lines := []string{
+				"These modules need Tailscale ACL grants to be reachable from your phone:",
+				"",
+			}
+			for _, op := range ports {
+				lines = append(lines, "  "+styleCode.Render(fmt.Sprintf("%-18s", op.module))+" → "+op.port)
+			}
+			lines = append(lines,
+				"",
+				"Apply the ACL now:",
+				"  "+styleCode.Render("abysslink acl push"),
+				"  "+styleCode.Render("abysslink acl push --manual")+"  (no OAuth credentials)",
+			)
+			steps = append(steps, step{
+				title: styleWarn.Render("ACL port grants required"),
+				lines: lines,
 			})
 		}
 	}
