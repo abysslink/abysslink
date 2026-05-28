@@ -108,10 +108,21 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply executes planned changes.
-// Tailnet Lock requires interactive confirmation; it is intentionally not automated.
-func (m *Module) Apply(_ context.Context) error {
-	return fmt.Errorf("lock module: apply not yet implemented — requires interactive confirmation")
+// Apply does not auto-initialize Tailnet Lock: enabling it prints disablement
+// secrets that the user must record by hand, which requires an interactive
+// terminal that module Apply does not own. Instead it surfaces the next step.
+// The real flow lives in `abysslink lock init`.
+func (m *Module) Apply(ctx context.Context) error {
+	findings, err := m.Detect(ctx)
+	if err != nil {
+		return err
+	}
+	for _, f := range findings {
+		if f.Check == "lock_enabled" {
+			slog.Warn("lock apply: Tailnet Lock is required but not enabled — run `abysslink lock init --apply` to enable it (it prints disablement secrets you must store)")
+		}
+	}
+	return nil
 }
 
 // Verify re-runs Detect.

@@ -18,8 +18,10 @@ package cli
 import (
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDiskEncryptionBlockers(t *testing.T) {
@@ -50,4 +52,18 @@ func TestDiskEncryptionBlockers_NoneWhenEncrypted(t *testing.T) {
 		{Module: "hardening", Check: "firewall", Severity: modules.SeverityWarning},
 	}
 	assert.Empty(t, diskEncryptionBlockers(findings))
+}
+
+func TestCheckPeriodGate(t *testing.T) {
+	cfg := config.Defaults()
+
+	cfg.Mobile.SSHCheckPeriod = "12h"
+	require.NoError(t, checkPeriodGate(cfg, false), "12h is the default and must pass")
+
+	cfg.Mobile.SSHCheckPeriod = "1h"
+	require.NoError(t, checkPeriodGate(cfg, false), "lowering below 12h must pass")
+
+	cfg.Mobile.SSHCheckPeriod = "24h"
+	assert.Error(t, checkPeriodGate(cfg, false), "raising above 12h must be blocked")
+	assert.NoError(t, checkPeriodGate(cfg, true), "above 12h allowed with explicit consent")
 }
