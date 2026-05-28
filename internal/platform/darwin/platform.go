@@ -63,7 +63,7 @@ func (p *Platform) DiskEncryptionStatus(ctx context.Context) (platform.DiskState
 	if err != nil {
 		return platform.DiskUnknown, fmt.Errorf("fdesetup status: %w", err)
 	}
-	if strings.HasPrefix(result.Stdout, "F") { // "FileVault is On."
+	if strings.HasPrefix(strings.TrimSpace(result.Stdout), "FileVault is On") {
 		return platform.DiskEncrypted, nil
 	}
 	return platform.DiskUnencrypted, nil

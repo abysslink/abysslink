@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -115,7 +116,11 @@ func renderUnit(spec platform.ServiceSpec) string {
 	b.WriteString("\n")
 
 	b.WriteString("[Service]\n")
-	b.WriteString("ExecStart=" + strings.Join(spec.Args, " ") + "\n")
+	quotedArgs := make([]string, len(spec.Args))
+	for i, a := range spec.Args {
+		quotedArgs[i] = quoteSystemdToken(a)
+	}
+	b.WriteString("ExecStart=" + strings.Join(quotedArgs, " ") + "\n")
 
 	if spec.KeepAlive {
 		b.WriteString("Restart=always\n")
@@ -127,9 +132,16 @@ func renderUnit(spec platform.ServiceSpec) string {
 		b.WriteString("StandardError=file:" + spec.StderrPath + "\n")
 	}
 
-	// Inject environment variables.
-	for k, v := range spec.Env {
-		b.WriteString("Environment=" + k + "=" + v + "\n")
+	// Inject environment variables in sorted key order for deterministic output.
+	// Each pair is quoted so values containing spaces survive systemd's tokeniser.
+	envKeys := make([]string, 0, len(spec.Env))
+	for k := range spec.Env {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	for _, k := range envKeys {
+		v := strings.ReplaceAll(spec.Env[k], `"`, `\"`)
+		b.WriteString(fmt.Sprintf("Environment=\"%s=%s\"\n", k, v))
 	}
 
 	b.WriteString("\n")
@@ -137,4 +149,17 @@ func renderUnit(spec platform.ServiceSpec) string {
 	b.WriteString("WantedBy=default.target\n")
 
 	return b.String()
+}
+
+// quoteSystemdToken wraps a token in double-quotes if it contains whitespace,
+// double-quotes, or backslashes, escaping any embedded double-quotes or
+// backslashes first. This follows systemd's unit-file quoting rules (man 5
+// systemd.syntax), which differ from POSIX shell quoting.
+func quoteSystemdToken(s string) string {
+	if !strings.ContainsAny(s, " \t\r\n\"\\") {
+		return s
+	}
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
 }

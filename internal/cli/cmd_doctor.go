@@ -131,7 +131,7 @@ func findingFix(check string) string {
 		"firewall":             "System Settings → Network → Firewall → Turn On  (macOS)",
 		"application_firewall": "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on",
 		// SSH.
-		"sshd_running": "sudo systemctl enable --now ssh  (Linux)  |  System Preferences → Sharing → Remote Login  (macOS)",
+		"sshd_running": "sudo systemctl disable --now sshd  (Linux)  |  System Settings → General → Sharing → Remote Login → turn off  (macOS)",
 		"checkperiod":  "Lower ssh_check_period in abysslink.yaml (max 12h)",
 		// Tailscale.
 		"needs_login":   "tailscale login",

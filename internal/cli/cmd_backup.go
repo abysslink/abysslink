@@ -85,7 +85,12 @@ func newBackupRestoreCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
-			target := args[0]
+
+			// Resolve to absolute path; audit.Restore requires absolute dst.
+			target, err := filepath.Abs(args[0])
+			if err != nil {
+				return fmt.Errorf("backup restore: resolve path %q: %w", args[0], err)
+			}
 
 			baks, err := audit.Backups(target)
 			if err != nil {
