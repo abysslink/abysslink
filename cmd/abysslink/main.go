@@ -27,16 +27,24 @@ import (
 )
 
 func main() {
-	// Prevent any subprocess (brew, git, etc.) from blocking on interactive
-	// credential prompts. Three complementary guards:
-	//   GIT_TERMINAL_PROMPT=0   — git will not ask for credentials in the terminal
-	//   GIT_ASKPASS=/usr/bin/false — overrides any askpass helper; git gets an
-	//                               immediate non-zero exit instead of a prompt
-	//   HOMEBREW_NO_AUTO_UPDATE=1 — brew skips its git-based tap auto-refresh
-	//                               before each install (would spawn git fetches)
+	// Prevent git/brew from blocking on credential prompts. Layered defences:
+	//
+	//   GIT_TERMINAL_PROMPT=0        — git won't prompt on the terminal
+	//   GIT_ASKPASS=/usr/bin/false   — askpass helper fails immediately
+	//   GIT_CONFIG_COUNT/KEY_0/VALUE_0 — inject credential.helper= (empty) via
+	//     git's env-based config interface (git 2.32+). An empty value CLEARS the
+	//     credential helper list, so helpers like `gh auth git-credential` or
+	//     osxkeychain are never invoked. Without this, `gh` or other helpers write
+	//     their own terminal prompts that bypass GIT_TERMINAL_PROMPT entirely.
+	//   HOMEBREW_NO_AUTO_UPDATE=1    — suppress brew's pre-install git tap refresh
+	//   HOMEBREW_NO_INSTALL_UPGRADE=1 — suppress upgrade checks that also hit git
 	_ = os.Setenv("GIT_TERMINAL_PROMPT", "0")
 	_ = os.Setenv("GIT_ASKPASS", "/usr/bin/false")
+	_ = os.Setenv("GIT_CONFIG_COUNT", "1")
+	_ = os.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
+	_ = os.Setenv("GIT_CONFIG_VALUE_0", "")
 	_ = os.Setenv("HOMEBREW_NO_AUTO_UPDATE", "1")
+	_ = os.Setenv("HOMEBREW_NO_INSTALL_UPGRADE", "1")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
