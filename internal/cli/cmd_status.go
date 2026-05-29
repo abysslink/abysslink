@@ -28,7 +28,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-
 // statusReport is the JSON-serialisable status summary.
 type statusReport struct {
 	Tailscale    string `json:"tailscale"`
