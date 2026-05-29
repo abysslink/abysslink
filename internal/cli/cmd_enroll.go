@@ -25,6 +25,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/qr"
 	"github.com/abysslink/abysslink/internal/tailscale"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -76,6 +77,15 @@ func newEnrollPhoneCmd() *cobra.Command {
 			qr.PrintANSI(os.Stdout, "https://tailscale.com/download")
 			printerInfo(p, "")
 
+			// §6-sanctioned stop point: external action (phone install).
+			// Pause after the install-app QR (step 1) and BEFORE minting/showing
+			// the auth-key QR (step 2). The key-scan and device-join poll are
+			// automated — no stop there (per §6: never for pollable things).
+			autoYes, _ := cmd.Flags().GetBool("yes")
+			if err := enrollPhoneInstallPause(ctx, p, autoYes); err != nil {
+				return err
+			}
+
 			if !hasCreds {
 				printerInfo(p, styleWarn.Render("No admin OAuth client configured — cannot mint an auth key automatically."))
 				printerInfo(p, "Create a single-use, pre-authorized key tagged "+styleCode.Render(tag)+" at:")
@@ -97,6 +107,16 @@ func newEnrollPhoneCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// enrollPhoneInstallPause is the §6-sanctioned stop after the Tailscale install
+// QR (step 1) and before the auth-key QR (step 2). It calls tui.Pause which is
+// a no-op under autoYes=true or when stdin is not a TTY (non-interactive), so
+// automated / CI runs never hang. The key-scan and device-join poll in
+// enrollWithAdminKey are NOT gated — they are pollable (the tool detects the join).
+func enrollPhoneInstallPause(ctx context.Context, p Printer, autoYes bool) error {
+	_ = p // Pause handles its own output; Printer is accepted for future use
+	return tui.Pause(ctx, "Press Enter once Tailscale is installed on your phone", autoYes)
 }
 
 // enrollWithAdminKey mints a tagged auth key, shows its QR, and polls for the
