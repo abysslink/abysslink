@@ -19,12 +19,23 @@ import (
 	"os"
 
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
 )
 
 // noColor reports whether NO_COLOR is set (https://no-color.org).
 func noColor() bool {
 	_, set := os.LookupEnv("NO_COLOR")
 	return set
+}
+
+// terminalWidth returns the current terminal width, defaulting to 80 if
+// the width cannot be determined (e.g. in tests or non-TTY environments).
+func terminalWidth() int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		return 80
+	}
+	return w
 }
 
 // Styles groups the lipgloss styles used across TUI components.
