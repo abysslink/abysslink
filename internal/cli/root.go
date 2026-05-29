@@ -58,6 +58,11 @@ notifications, tmux, and mosh — all locked down by default.
     abysslink status        # quick dashboard
     abysslink doctor        # deep health check + fix guidance
 
+Exit codes (doctor, up):
+  0  — OK: all checks passed; no action needed.
+  1  — Warning: issues found; system operable but review recommended.
+  2  — Fatal: fail-closed or fatal issue; system is not safe to use.
+
 Run 'abysslink <command> --help' for details on any command.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
