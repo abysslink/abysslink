@@ -147,14 +147,17 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 func (m *Module) Apply(ctx context.Context) error {
 	switch runtime.GOOS {
 	case "darwin":
-		res, err := m.runner.Run(ctx, "launchctl", "start", "sh.ntfy.ntfyd")
+		res, err := m.runner.Run(ctx, "launchctl", "start", "dev.abysslink.ntfy")
 		if err == nil && res.ExitCode == 0 {
 			slog.Info("notify apply: started ntfy via launchctl")
 			return nil
 		} else if err != nil {
-			return fmt.Errorf("notify apply: launchctl start ntfy: %w", err)
+			slog.Warn("notify apply: launchctl start failed (ntfy server not supported on macOS)", "err", err)
+			return nil
 		}
-		return fmt.Errorf("notify apply: launchctl start ntfy exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		slog.Warn("notify apply: launchctl start ntfy skipped (ntfy server not supported on macOS)",
+			"exit", res.ExitCode, "stderr", strings.TrimSpace(res.Stderr))
+		return nil
 	default: // linux
 		res, err := m.runner.Run(ctx, "systemctl", "--user", "start", "ntfy")
 		if err == nil && res.ExitCode == 0 {
