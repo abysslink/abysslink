@@ -20,17 +20,50 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/spf13/cobra"
 )
 
+// errPanicStepFailed is the error type returned by a failed panic step,
+// distinguishing it from "step succeeded" for the panicStep helper.
+type errPanicStepFailed struct{ msg string }
+
+func (e errPanicStepFailed) Error() string { return e.msg }
+
+// panicStep prints a ✓ or ✕ marker for a single panic step. This helper is
+// exported for unit-testing; do NOT add confirmation calls here — panic is
+// promptless by design (§4/§6 emergency design contract, T-10-19).
+func panicStep(p Printer, label string, err error) {
+	if err == nil {
+		printerError(p, iconDoneStr()+"  "+label)
+	} else {
+		printerError(p, iconFatalStr()+"  "+label+": "+err.Error())
+	}
+}
+
 func newPanicCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "panic",
 		Short: "Emergency: disconnect, revoke the phone, and destroy the local API key — no confirmation",
-		// No confirmation prompt — designed for one-tap emergency use.
+		Long: `EMERGENCY KILL SWITCH — executes immediately with no confirmation prompt.
+
+Panic disconnects your machine from the tailnet, revokes all phone devices
+tagged with your mobile tag, and destroys the local Anthropic API key from
+the keychain. The consequences are audited and REVERSIBLE via repair:
+
+  abysslink repair --apply     # reconnect after a panic
+
+Output:
+  ✓ / ✕ per step — live feedback without blocking.
+  "done in Xs" timing line.
+
+NOTE: panic is designed for one-tap emergency use. It will NEVER prompt
+for confirmation; if you need that, use abysslink uninstall instead.`,
+		Example: `  # Emergency kill switch — no confirmation, immediate action
+  abysslink panic`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd) // best-effort — proceed even on config load failure
@@ -38,27 +71,43 @@ func newPanicCmd() *cobra.Command {
 				slog.Warn("panic: could not load config, proceeding with defaults", "err", err)
 			}
 			p := newPrinter(cmd)
-			emit := func(format string, args ...any) {
-				printerError(p, "PANIC: "+fmt.Sprintf(format, args...))
-			}
+			start := time.Now()
+
+			// Bold-red banner — "what panic does" for the user landing in emergency mode.
+			banner := styleFatal.Render("PANIC — Emergency kill switch executing NOW")
+			printerError(p, styleHeaderBox.Render(banner))
+			printerError(p, "")
+			printerError(p, styleFatal.Render("Actions: disconnect tailnet · revoke phone devices · destroy local API key"))
+			printerError(p, styleMuted.Render("No confirmation required — this is the emergency design contract."))
+			printerError(p, "")
+
 			logPanic := panicAuditLogger()
 
-			emit("disconnecting from the tailnet...")
-			if res, err := cc.runner.Run(ctx, "tailscale", "down"); err != nil || res.ExitCode != 0 {
-				emit("tailscale down failed — disconnect manually")
+			// Step 1: disconnect tailnet.
+			if res, runErr := cc.runner.Run(ctx, "tailscale", "down"); runErr != nil || res.ExitCode != 0 {
+				panicStep(p, "disconnect tailnet", errPanicStepFailed{"tailscale down failed — disconnect manually"})
 			} else {
-				emit("tailnet disconnected.")
+				panicStep(p, "tailnet disconnected", nil)
 				logPanic("tailscale_down")
 			}
 
-			revokePhoneDevices(ctx, cc, emit, logPanic)
-			destroyLocalAPIKey(ctx, cc, emit, logPanic)
+			// Steps 2+: revoke phone devices and destroy local API key.
+			revokePhoneDevicesWithStep(ctx, cc, p, logPanic)
+			destroyLocalAPIKeyWithStep(ctx, cc, p, logPanic)
 
-			emit("complete. Required manual follow-up:")
-			emit("  1. Revoke the Anthropic API key in the console (the local copy is now deleted):")
-			emit("       https://console.anthropic.com/settings/keys")
-			emit("  2. If devices could not be revoked above, remove them at:")
-			emit("       https://login.tailscale.com/admin/machines")
+			// Timing line.
+			elapsed := time.Since(start)
+			printerError(p, "")
+			printerError(p, styleMuted.Render(fmt.Sprintf("done in %.1fs", elapsed.Seconds())))
+			printerError(p, "")
+
+			// Required manual follow-up.
+			printerError(p, styleBold.Render("Required manual follow-up:"))
+			printerError(p, "  1. Revoke the Anthropic API key in the console:")
+			printerError(p, "       https://console.anthropic.com/settings/keys")
+			printerError(p, "  2. If devices could not be revoked above, remove them at:")
+			printerError(p, "       https://login.tailscale.com/admin/machines")
+
 			// §7 note 12: panic is reversible via repair.
 			emitSecurityNote(p, "panic-reversible")
 			return nil
@@ -77,18 +126,17 @@ func panicAuditLogger() func(action string) {
 	return func(action string) { _ = a.Append("panic:"+action, "panic", nil, false) }
 }
 
-// revokePhoneDevices deletes every device tagged with the mobile tag via the
-// admin API. Requires admin credentials; otherwise the user is directed to the
-// console in the final instructions.
-func revokePhoneDevices(ctx context.Context, cc *cmdContext, emit func(string, ...any), logPanic func(string)) {
+// revokePhoneDevicesWithStep deletes every device tagged with the mobile tag
+// and emits ✓/✕ per device. Requires admin credentials.
+func revokePhoneDevicesWithStep(ctx context.Context, cc *cmdContext, p Printer, logPanic func(string)) {
 	if cc.cfg.Tailnet.Admin.Tailnet == "" || cc.cfg.Tailnet.Admin.OAuthClientID == "" || os.Getenv(oauthSecretEnv) == "" {
-		emit("no admin credentials — cannot auto-revoke the phone (see manual steps below).")
+		panicStep(p, "revoke phone devices", errPanicStepFailed{"no admin credentials — cannot auto-revoke (see manual steps)"})
 		return
 	}
 	admin := tailscale.NewAdminClient(cc.cfg.Tailnet.Admin.Tailnet, cc.cfg.Tailnet.Admin.OAuthClientID, os.Getenv(oauthSecretEnv))
 	devices, err := admin.Devices(ctx)
 	if err != nil {
-		emit("could not list devices to revoke: %v", err)
+		panicStep(p, "list devices to revoke", errPanicStepFailed{err.Error()})
 		return
 	}
 	tag := "tag:" + cc.cfg.Mobile.Tag
@@ -97,27 +145,27 @@ func revokePhoneDevices(ctx context.Context, cc *cmdContext, emit func(string, .
 			if t != tag {
 				continue
 			}
-			if err := admin.DeleteDevice(ctx, d.ID); err != nil {
-				emit("failed to revoke device %s: %v", d.Name, err)
+			if rErr := admin.DeleteDevice(ctx, d.ID); rErr != nil {
+				panicStep(p, "revoke device "+d.Name, errPanicStepFailed{rErr.Error()})
 			} else {
-				emit("revoked device %s", d.Name)
+				panicStep(p, "revoked device "+d.Name, nil)
 				logPanic("revoke_device")
 			}
 		}
 	}
 }
 
-// destroyLocalAPIKey deletes the Anthropic API key from the local keychain so a
-// stolen laptop session cannot use it. Console revocation is a manual step.
-func destroyLocalAPIKey(ctx context.Context, cc *cmdContext, emit func(string, ...any), logPanic func(string)) {
+// destroyLocalAPIKeyWithStep deletes the Anthropic API key from the local
+// keychain and emits a ✓/✕ step marker.
+func destroyLocalAPIKeyWithStep(ctx context.Context, cc *cmdContext, p Printer, logPanic func(string)) {
 	deps, err := buildDeps(ctx, cc)
 	if err != nil || deps.Keychain == nil {
 		return
 	}
 	if err := deps.Keychain.Delete(ctx, "abysslink", "anthropic-api-key"); err != nil {
-		emit("could not delete local API key from keychain: %v", err)
+		panicStep(p, "destroy local API key", errPanicStepFailed{err.Error()})
 		return
 	}
-	emit("deleted the local Anthropic API key from the keychain.")
+	panicStep(p, "deleted local Anthropic API key from keychain", nil)
 	logPanic("destroy_local_api_key")
 }

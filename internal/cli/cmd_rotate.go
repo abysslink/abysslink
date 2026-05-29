@@ -44,6 +44,8 @@ func newRotateAnthropicCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "anthropic-key",
 		Short: "Store a new Anthropic API key in the keychain and verify it",
+		Example: `  # Rotate the Anthropic API key (reads from ABYSSLINK_NEW_ANTHROPIC_KEY env)
+  ABYSSLINK_NEW_ANTHROPIC_KEY=<key> abysslink rotate anthropic-key --apply`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -89,6 +91,8 @@ func newRotateNtfyCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ntfy-creds",
 		Short: "Generate a new ntfy admin password, update ntfy and the keychain",
+		Example: `  # Rotate ntfy admin credentials
+  abysslink rotate ntfy-creds --apply`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)

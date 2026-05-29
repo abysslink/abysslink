@@ -38,6 +38,8 @@ func newLockStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Report Tailnet Lock status",
+		Example: `  # Show whether Tailnet Lock is enabled
+  abysslink lock status`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -63,6 +65,11 @@ func newLockInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
 		Short: "Initialise Tailnet Lock and print disablement secrets (dry-run by default)",
+		Example: `  # Preview lock init (dry-run — no changes)
+  abysslink lock init
+
+  # Initialise Tailnet Lock and print the once-only disablement secrets
+  abysslink lock init --apply`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -150,7 +157,9 @@ func newLockSignCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "sign <node-key>",
 		Short: "Sign a node key into Tailnet Lock",
-		Args:  cobra.ExactArgs(1),
+		Example: `  # Sign a node key into Tailnet Lock
+  abysslink lock sign <node-key>`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -175,6 +184,8 @@ func newLockRotateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rotate",
 		Short: "Guidance for rotating Tailnet Lock disablement secrets",
+		Example: `  # Show guidance for rotating Tailnet Lock disablement secrets
+  abysslink lock rotate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			p := newPrinter(cmd)
 			printerInfo(p, "Rotating disablement secrets requires disabling and re-initialising Tailnet Lock:")

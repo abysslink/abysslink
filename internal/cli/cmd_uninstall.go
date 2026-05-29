@@ -31,6 +31,14 @@ func newUninstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Reverse every change abysslink made, restoring files from backups (dry-run by default)",
+		Example: `  # Preview what uninstall would reverse (dry-run — no changes)
+  abysslink uninstall
+
+  # Reverse all changes (restore from backups)
+  abysslink uninstall --apply
+
+  # Also remove packages and audit log (IRREVERSIBLE — extra confirm required)
+  abysslink uninstall --apply --purge`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)

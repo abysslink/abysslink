@@ -64,6 +64,14 @@ func newInitCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Interactive bootstrap — generates abysslink.yaml and guides the full 7-stage setup",
+		Example: `  # Interactive wizard — creates abysslink.yaml and runs the 7-stage journey
+  abysslink init
+
+  # Non-interactive (CI / scripted) — accept all defaults
+  abysslink init --yes
+
+  # Resume a previously interrupted setup
+  abysslink init --resume`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			p := newPrinter(cmd)

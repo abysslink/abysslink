@@ -27,6 +27,11 @@ func newRepairCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "repair",
 		Short: "Auto-fix failures detected by doctor",
+		Example: `  # Preview what repair would fix (dry-run — no changes)
+  abysslink repair
+
+  # Apply all auto-fixable issues
+  abysslink repair --apply`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)

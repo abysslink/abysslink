@@ -62,8 +62,9 @@ func newDaemonCmd() *cobra.Command {
 // daemonLifecycleCmd builds a subcommand that resolves the platform and runs fn.
 func daemonLifecycleCmd(use, short string, fn func(context.Context, platform.Platform) error) *cobra.Command {
 	return &cobra.Command{
-		Use:   use,
-		Short: short,
+		Use:     use,
+		Short:   short,
+		Example: "  # " + short + "\n  abysslink daemon " + use,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -87,6 +88,8 @@ func newDaemonStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show daemon status",
+		Example: `  # Show whether abysslinkd is running
+  abysslink daemon status`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
