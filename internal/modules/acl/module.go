@@ -115,8 +115,8 @@ func (m *Module) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
 	}
 	return []modules.Action{{
 		Module:      m.Name(),
-		Description: "ensure tailnet ACL restricts tag:mobile → tag:laptop to tcp/22 + udp/60000-61000",
-		Explain:     "Locks the phone down to only SSH and mosh on the laptop; any broader access is denied. " + mode + ".",
+		Description: "ensure tailnet ACL restricts tag:mobile → tag:laptop to tcp/22 + tcp/2586 + udp/60000-61000",
+		Explain:     "Locks the phone down to SSH, ntfy (push notifications), and mosh on the laptop; any broader access is denied. " + mode + ".",
 		Reversible:  false,
 	}}, nil
 }

@@ -16,7 +16,6 @@
 package cli
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -25,19 +24,18 @@ import (
 )
 
 func TestOptionalACLPorts_DefaultConfig(t *testing.T) {
-	// Default config has ntfy enabled — must remind user about its listen port.
+	// ntfy tcp/2586 is now part of the default ACL grant (not optional).
+	// Default config with only ntfy enabled should produce no optional-ACL reminder.
 	cfg := config.Defaults()
+	cfg.Modules.CodeServer.Enabled = false
+	cfg.Modules.Ttyd.Enabled = false
+	cfg.Modules.EternalTerminal.Enabled = false
+	cfg.Modules.Syncthing.Enabled = false
+	cfg.Modules.Upsnap.Enabled = false
 	ports := optionalACLPorts(cfg)
-	require.NotEmpty(t, ports, "default config has ntfy enabled; ACL reminder must fire")
-
-	want := fmt.Sprintf("tcp/%d", cfg.Modules.Ntfy.ListenPort())
-	found := false
 	for _, p := range ports {
-		if p.module == "ntfy" && p.port == want {
-			found = true
-		}
+		assert.NotEqual(t, "ntfy", p.module, "ntfy is in the default grant; must not appear as optional ACL port")
 	}
-	assert.True(t, found, "ntfy port must appear in ACL reminder")
 }
 
 func TestOptionalACLPorts_AllDisabled(t *testing.T) {
