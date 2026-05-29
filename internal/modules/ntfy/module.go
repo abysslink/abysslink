@@ -110,6 +110,21 @@ func (m *Module) ntfyDockerRunning(ctx context.Context) bool {
 	return err == nil && res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "true"
 }
 
+// ntfyDockerIPDrift returns true when the running container's port binding
+// does not include the current tailnet IP — meaning the IP changed since the
+// container was created and it must be recreated.
+func (m *Module) ntfyDockerIPDrift(ctx context.Context, tailnetIP string) bool {
+	port := fmt.Sprintf("%d", m.cfg.Modules.Ntfy.ListenPort())
+	res, err := m.runner.Run(ctx, "docker", "inspect",
+		"--format={{range $k,$v := .NetworkSettings.Ports}}{{range $v}}{{.HostIp}}:{{.HostPort}} {{end}}{{end}}",
+		dockerContainerName)
+	if err != nil || res.ExitCode != 0 {
+		return false
+	}
+	want := tailnetIP + ":" + port
+	return !strings.Contains(res.Stdout, want)
+}
+
 // ntfyInstalled returns true when either a native server binary is available
 // or the Docker container is running.
 func (m *Module) ntfyInstalled(ctx context.Context) bool {
@@ -270,12 +285,16 @@ func (m *Module) Apply(ctx context.Context) error {
 
 // applyNative handles the install path for both Docker (macOS) and native (Linux) modes.
 func (m *Module) applyNative(ctx context.Context, tailnetIP, home string) error {
+	if m.plat.OS() == "darwin" && m.ntfyDockerRunning(ctx) {
+		if m.ntfyDockerIPDrift(ctx, tailnetIP) {
+			slog.Info("ntfy: tailnet IP changed — recreating Docker container", "ip", tailnetIP)
+			m.runner.Run(ctx, "docker", "rm", "-f", dockerContainerName) //nolint:errcheck
+			return m.applyDocker(ctx, tailnetIP, home)
+		}
+		return nil
+	}
 	if !m.ntfyInstalled(ctx) {
 		return m.install(ctx, tailnetIP, home)
-	}
-	// Docker container already running — nothing more to do on macOS.
-	if m.plat.OS() == "darwin" && m.ntfyDockerRunning(ctx) {
-		return nil
 	}
 	return m.configureNative(ctx, tailnetIP, home)
 }
@@ -344,13 +363,15 @@ func (m *Module) applyDocker(ctx context.Context, tailnetIP, home string) error 
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir data dir: %w", err)
 	}
+	// Use MagicDNS hostname for base-url so the phone URL survives IP changes.
+	hostname := m.getTailnetHostname(ctx)
 	dockerCfg := fmt.Sprintf(`# ntfy Docker config — managed by abysslink
 listen-http: "0.0.0.0:80"
 base-url: "http://%s:%s"
 auth-file: "/var/lib/ntfy/user.db"
 auth-default-access: "deny-all"
 behind-proxy: false
-`, tailnetIP, port)
+`, hostname, port)
 	if err := m.audit.WriteFile(cfgPath, []byte(dockerCfg), 0o600, false); err != nil {
 		return fmt.Errorf("write docker config: %w", err)
 	}
@@ -476,6 +497,28 @@ func (m *Module) getTailnetIP(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("tailscale ip returned empty output")
 	}
 	return ip, nil
+}
+
+// getTailnetHostname returns the MagicDNS hostname of this machine (e.g.
+// "vaultofmac.tailXXXX.ts.net"). Falls back to the tailnet IP if unavailable.
+func (m *Module) getTailnetHostname(ctx context.Context) string {
+	res, err := m.runner.Run(ctx, "tailscale", "status", "--json")
+	if err != nil || res.ExitCode != 0 {
+		ip, _ := m.getTailnetIP(ctx)
+		return ip
+	}
+	// Extract Self.DNSName — trim trailing dot.
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, `"DNSName"`) {
+			parts := strings.SplitN(line, `"`, 4)
+			if len(parts) >= 4 {
+				return strings.TrimRight(parts[3], `".,`)
+			}
+		}
+	}
+	ip, _ := m.getTailnetIP(ctx)
+	return ip
 }
 
 // Verify checks that server.yml does not bind to 0.0.0.0 (native mode)
