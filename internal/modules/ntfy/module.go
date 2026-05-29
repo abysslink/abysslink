@@ -237,7 +237,9 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 			hasInstallFinding = true
 		}
 	}
-	if !hasInstallFinding {
+	// Docker mode on macOS manages the container itself; no launchd/systemd service needed.
+	dockerMode := m.plat.OS() == "darwin" && m.ntfyDockerRunning(ctx)
+	if !hasInstallFinding && !dockerMode {
 		actions = append(actions, modules.Action{
 			Module:      m.Name(),
 			Description: "install ntfy service (launchd/systemd)",
@@ -255,37 +257,52 @@ func (m *Module) Apply(ctx context.Context) error {
 	if !m.cfg.Modules.Ntfy.Enabled {
 		return nil
 	}
-
 	tailnetIP, err := m.getTailnetIP(ctx)
 	if err != nil {
 		return fmt.Errorf("ntfy apply: get tailnet IP: %w", err)
 	}
-
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("ntfy apply: get home dir: %w", err)
 	}
+	return m.applyNative(ctx, tailnetIP, home)
+}
 
+// applyNative handles the install path for both Docker (macOS) and native (Linux) modes.
+func (m *Module) applyNative(ctx context.Context, tailnetIP, home string) error {
 	if !m.ntfyInstalled(ctx) {
-		switch {
-		case m.plat.OS() == "darwin" && m.dockerAvailable(ctx):
-			if err := m.applyDocker(ctx, tailnetIP, home); err != nil {
-				return fmt.Errorf("ntfy apply: docker: %w", err)
-			}
-			return nil
-		case m.plat.OS() == "darwin":
-			slog.Warn("ntfy: Docker not available; install Docker Desktop or configure ntfy.sh",
-				"docs", "https://docs.docker.com/desktop/install/mac-install/")
-			return nil
-		default:
-			slog.Info("ntfy apply: installing ntfy push server")
-			if err := m.plat.InstallPackage(ctx, "ntfy"); err != nil {
-				return fmt.Errorf("ntfy apply: install ntfy: %w", err)
-			}
-		}
+		return m.install(ctx, tailnetIP, home)
 	}
+	// Docker container already running — nothing more to do on macOS.
+	if m.plat.OS() == "darwin" && m.ntfyDockerRunning(ctx) {
+		return nil
+	}
+	return m.configureNative(ctx, tailnetIP, home)
+}
 
-	// Native binary path (Linux or macOS with manually-installed binary).
+// install sets up ntfy from scratch (first run).
+func (m *Module) install(ctx context.Context, tailnetIP, home string) error {
+	switch {
+	case m.plat.OS() == "darwin" && m.dockerAvailable(ctx):
+		if err := m.applyDocker(ctx, tailnetIP, home); err != nil {
+			return fmt.Errorf("ntfy apply: docker: %w", err)
+		}
+		return nil
+	case m.plat.OS() == "darwin":
+		slog.Warn("ntfy: Docker not available; install Docker Desktop or configure ntfy.sh",
+			"docs", "https://docs.docker.com/desktop/install/mac-install/")
+		return nil
+	default:
+		slog.Info("ntfy apply: installing ntfy push server")
+		if err := m.plat.InstallPackage(ctx, "ntfy"); err != nil {
+			return fmt.Errorf("ntfy apply: install ntfy: %w", err)
+		}
+		return m.configureNative(ctx, tailnetIP, home)
+	}
+}
+
+// configureNative writes config and registers the service for native (non-Docker) installs.
+func (m *Module) configureNative(ctx context.Context, tailnetIP, home string) error {
 	cfgPath := filepath.Join(home, serverConfigPath)
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		return fmt.Errorf("ntfy apply: mkdir %s: %w", filepath.Dir(cfgPath), err)
@@ -295,11 +312,9 @@ func (m *Module) Apply(ctx context.Context) error {
 	if err := m.audit.WriteFile(cfgPath, data, 0o600, false); err != nil {
 		return fmt.Errorf("ntfy apply: write config: %w", err)
 	}
-
 	if err := m.ensureAdminUser(ctx); err != nil {
 		return fmt.Errorf("ntfy apply: provision admin user: %w", err)
 	}
-
 	ntfyBin := m.ntfyBinPath()
 	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
 		Label:      "dev.abysslink.ntfy",
@@ -310,7 +325,6 @@ func (m *Module) Apply(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ntfy apply: install service: %w", err)
 	}
-
 	return nil
 }
 
@@ -358,6 +372,7 @@ behind-proxy: false
 		"--name", dockerContainerName,
 		"--restart", "always",
 		"-p", fmt.Sprintf("%s:%s:80", tailnetIP, port),
+		"-p", fmt.Sprintf("127.0.0.1:%s:80", port),
 		"-v", cfgPath+":/etc/ntfy/server.yml:ro",
 		"-v", dataDir+":/var/lib/ntfy",
 		dockerImage,

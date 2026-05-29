@@ -269,7 +269,7 @@ func (m *Module) SendDirect(ctx context.Context, title, body string) error {
 	if m.keychain != nil {
 		password, err := m.keychain.Get(ctx, keychainService, keychainAccount)
 		if err == nil && password != "" {
-			req.SetBasicAuth("abysslink", password)
+			req.SetBasicAuth("admin", password)
 		}
 		// If credentials are not found, proceed without auth.
 	}
