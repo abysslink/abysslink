@@ -28,6 +28,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
+
 // statusReport is the JSON-serialisable status summary.
 type statusReport struct {
 	Tailscale    string `json:"tailscale"`
@@ -44,6 +45,11 @@ func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "One-screen health summary of the Tailscale setup",
+		Example: `  # Human-readable dashboard
+  abysslink status
+
+  # Machine-readable JSON object (ANSI-free)
+  abysslink --json status`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -104,8 +110,8 @@ func newStatusCmd() *cobra.Command {
 			p := newPrinter(cmd)
 
 			if cc.jsonOut {
-				data, _ := json.MarshalIndent(rep, "", "  ")
-				printerInfo(p, string(data))
+				// Emit a typed, ANSI-free record via PrintJSON (T-10-18).
+				p.PrintJSON(rep)
 				return nil
 			}
 
