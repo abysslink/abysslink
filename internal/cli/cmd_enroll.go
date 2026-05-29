@@ -157,7 +157,7 @@ func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext) {
 	}
 	url := fmt.Sprintf("ntfy://%s:%d/%s", ip, cc.cfg.Modules.Ntfy.ListenPort(), topic)
 	printerInfo(p, "")
-	printerInfo(p, "3. Subscribe to notifications in the ntfy app (scan):")
+	printerInfo(p, "3. Subscribe to notifications — open ntfy app → tap + → tap \"Scan QR code\":")
 	qr.PrintANSI(os.Stdout, url)
 }
 
