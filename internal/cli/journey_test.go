@@ -28,13 +28,13 @@ import (
 
 // TestJourneyStageCount asserts that journeyStages returns exactly 7 stages.
 func TestJourneyStageCount(t *testing.T) {
-	stages := journeyStages()
+	stages := journeyStages(false)
 	assert.Len(t, stages, 7, "journey must have exactly 7 stages")
 }
 
 // TestJourneyStageLabels asserts that the 7 stage labels match the specified names.
 func TestJourneyStageLabels(t *testing.T) {
-	stages := journeyStages()
+	stages := journeyStages(false)
 	require.Len(t, stages, 7)
 
 	expectedLabels := []string{

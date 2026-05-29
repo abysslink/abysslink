@@ -101,6 +101,12 @@ func newLockInitCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("lock init: %w", err)
 			}
+			// Fail closed: never render an empty "shown ONCE" box or demand the
+			// "I HAVE PRINTED IT" attestation when no secrets came back — that would
+			// lock the user out with nothing recorded (WR-05).
+			if len(res.DisablementSecrets) == 0 {
+				return fmt.Errorf("lock init: tailscale returned no disablement secrets — Tailnet Lock state is uncertain; run `tailscale lock status` and do NOT assume you are protected")
+			}
 
 			// SECURITY: res.DisablementSecrets flows ONLY into tui.SecretBox→Printer.
 			// It is NEVER passed to slog, deps.Audit, or any os.WriteFile call.

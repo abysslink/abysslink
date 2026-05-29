@@ -310,7 +310,7 @@ func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []mo
 	// §7 note 7 fires when the user has explicitly configured a non-default period.
 	accept, _ := cmd.Flags().GetBool("accept-checkperiod-extension")
 	if d, parseErr := time.ParseDuration(cc.cfg.Mobile.SSHCheckPeriod); parseErr == nil && d > 0 {
-		emitSecurityNote(p, "ssh-checkperiod") // §7 note 7 — fires on conditional branch when period is configured
+		emitSecurityNote(p, cc.jsonOut, "ssh-checkperiod") // §7 note 7 — fires on conditional branch when period is configured
 	}
 	if err := checkPeriodGate(cc.cfg, accept); err != nil {
 		return err
@@ -318,7 +318,7 @@ func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []mo
 	// Gate 3: never configure remote access on an unencrypted disk.
 	// §7 note 5 fires here when disk encryption is required.
 	if blockers := diskEncryptionBlockers(findings); len(blockers) > 0 {
-		emitSecurityNote(p, "disk-encryption") // §7 note 5
+		emitSecurityNote(p, cc.jsonOut, "disk-encryption") // §7 note 5
 		forceUnsafe, _ := cmd.Flags().GetBool("force-unsafe")
 		if !forceUnsafe {
 			for _, b := range blockers {
@@ -379,7 +379,9 @@ func requireTailscaleDaemon(p Printer) error {
 func checkPeriodGate(cfg *config.Config, accept bool) error {
 	d, err := time.ParseDuration(cfg.Mobile.SSHCheckPeriod)
 	if err != nil {
-		return nil // malformed durations are caught by config.Validate
+		// Fail closed: a malformed duration must NOT silently bypass the 12h
+		// re-auth floor (an immutable security default). WR-07.
+		return fmt.Errorf("up: ssh_check_period %q is not a valid duration; refusing to apply (fail-closed)", cfg.Mobile.SSHCheckPeriod)
 	}
 	if d > 12*time.Hour && !accept {
 		return fmt.Errorf("up: ssh_check_period %s exceeds the 12h security default; "+

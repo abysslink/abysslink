@@ -46,7 +46,7 @@ func TestSecurityNoteIDs(t *testing.T) {
 func TestEmitSecurityNote_DiskEncryption(t *testing.T) {
 	var buf bytes.Buffer
 	p := NewHumanPrinterTo(&buf, &buf)
-	emitSecurityNote(p, "disk-encryption")
+	emitSecurityNote(p, false, "disk-encryption")
 	output := buf.String()
 	lowerOut := strings.ToLower(output)
 	assert.True(t,
@@ -61,7 +61,7 @@ func TestEmitSecurityNote_DiskEncryption(t *testing.T) {
 func TestEmitSecurityNote_DryRunDefault(t *testing.T) {
 	var buf bytes.Buffer
 	p := NewHumanPrinterTo(&buf, &buf)
-	emitSecurityNote(p, "dry-run-default")
+	emitSecurityNote(p, false, "dry-run-default")
 	output := buf.String()
 	lowerOut := strings.ToLower(output)
 	assert.True(t,
@@ -74,9 +74,18 @@ func TestEmitSecurityNote_UnknownID(t *testing.T) {
 	var buf bytes.Buffer
 	p := NewHumanPrinterTo(&buf, &buf)
 	// Should not panic.
-	emitSecurityNote(p, "nonexistent-note-xyz")
+	emitSecurityNote(p, false, "nonexistent-note-xyz")
 	// No output expected.
 	assert.Empty(t, buf.String())
+}
+
+// TestEmitSecurityNote_JSONSuppressed verifies notes are suppressed under --json
+// so a call site can never leak note prose into the machine-readable stream (WR-01).
+func TestEmitSecurityNote_JSONSuppressed(t *testing.T) {
+	var buf bytes.Buffer
+	p := NewHumanPrinterTo(&buf, &buf)
+	emitSecurityNote(p, true, "disk-encryption")
+	assert.Empty(t, buf.String(), "emitSecurityNote must produce no output when jsonOut=true")
 }
 
 // TestSecurityNotesWired verifies that each of the 12 note IDs is referenced at least
@@ -89,7 +98,7 @@ func TestSecurityNotesWired(t *testing.T) {
 		t.Run(n.id, func(t *testing.T) {
 			var buf bytes.Buffer
 			p := NewHumanPrinterTo(&buf, &buf)
-			emitSecurityNote(p, n.id)
+			emitSecurityNote(p, false, n.id)
 			assert.NotEmpty(t, buf.String(), "note %q should produce output when emitted", n.id)
 		})
 	}

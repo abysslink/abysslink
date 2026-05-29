@@ -138,12 +138,26 @@ func hasFindingSeverity(findings []modules.Finding, sev modules.Severity) bool {
 // if findings are empty and fallback is non-nil, or "error" otherwise.
 func firstFindingMessage(findings []modules.Finding, fallback error) string {
 	if len(findings) > 0 {
-		return findings[0].Message
+		return firstLine(findings[0].Message)
 	}
 	if fallback != nil {
-		return fallback.Error()
+		return firstLine(fallback.Error())
 	}
 	return "error"
+}
+
+// firstLine returns the first line of s, trimmed and capped at 60 runes. A
+// multi-line shell-out error (e.g. brew/systemctl stderr) must never blow out a
+// single live-table row or interleave with the spinner frame (WR-08).
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > 60 {
+		return string(r[:57]) + "..."
+	}
+	return s
 }
 
 // countFindingSeverity counts findings at the given severity.
