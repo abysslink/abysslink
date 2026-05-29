@@ -160,8 +160,8 @@ Exit codes:
 				header := styleBold.Render("abysslink doctor") + "  " + styleMuted.Render("health check")
 				printerInfo(p, styleHeaderBox.Render(header))
 				printerInfo(p, "")
-				emitSecurityNote(p, "doctor-not-full-audit") // §7 note 11
-				emitSecurityNote(p, "no-funnel")             // §7 note 8
+				emitSecurityNote(p, cc.jsonOut, "doctor-not-full-audit") // §7 note 11
+				emitSecurityNote(p, cc.jsonOut, "no-funnel")             // §7 note 8
 				printerInfo(p, "")
 			}
 

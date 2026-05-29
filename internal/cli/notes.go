@@ -19,10 +19,11 @@
 // defined in USER-JOURNEY-TUI.md §7. Notes are defined once here as a slice;
 // call sites reference note IDs only — never duplicate note text at call sites.
 //
-// Use emitSecurityNote(p, id) to render a note at a journey point. Notes are
-// rendered via tui.Note() and printed through the Printer. Notes MUST be
-// suppressed under --json (the journey/notes are off under --json per §9);
-// call sites are responsible for checking cc.jsonOut before calling emitSecurityNote.
+// Use emitSecurityNote(p, jsonOut, id) to render a note at a journey point.
+// Notes are rendered via tui.Note() and printed through the Printer. Notes MUST
+// be suppressed under --json (the journey/notes are off under --json per §9);
+// emitSecurityNote self-guards on jsonOut so a new call site cannot leak note
+// prose into the JSON stream.
 //
 // If any of the 12 notes is missing = the journey is not complete (§7).
 // The test in notes_test.go asserts len(allSecurityNotes)==12.
@@ -199,9 +200,14 @@ var noteIndex = func() map[string]*securityNote {
 // emitSecurityNote renders the security note with the given ID via tui.Note and
 // prints it through p. Call sites reference IDs only — text lives in allSecurityNotes.
 //
-// If id is not found (programming error), emitSecurityNote is a no-op.
-// Notes should be suppressed under --json; the caller is responsible for that check.
-func emitSecurityNote(p Printer, id string) {
+// It is a no-op when jsonOut is true: notes are human-facing prose and would
+// corrupt the newline-delimited JSON stream (§9). Guarding here rather than at
+// every call site keeps the suppression robust as call sites are added (WR-01).
+// If id is not found (programming error), emitSecurityNote is also a no-op.
+func emitSecurityNote(p Printer, jsonOut bool, id string) {
+	if jsonOut {
+		return
+	}
 	n, ok := noteIndex[id]
 	if !ok {
 		return

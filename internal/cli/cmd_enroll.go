@@ -107,7 +107,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 
 			// Printable runbook for the remaining manual steps.
 			// §7 note 10 (lock-screen hygiene) fires here alongside the runbook.
-			emitSecurityNote(p, "lock-screen-hygiene") // §7 note 10
+			emitSecurityNote(p, cc.jsonOut, "lock-screen-hygiene") // §7 note 10
 			if path, err := writeRunbook(ctx, cc); err == nil {
 				printerInfo(p, "")
 				printerInfo(p, "Manual steps (SSO passkey, disable SMS 2FA, hide lock-screen previews) are in:")
@@ -227,10 +227,10 @@ func writeRunbook(ctx context.Context, cc *cmdContext) (string, error) {
 	}
 	path := filepath.Join(dir, "abysslink-runbook-"+time.Now().Format("20060102")+".md")
 
-	body := runbookMarkdown(cc)
 	if cc.cfg == nil {
 		return "", fmt.Errorf("no config")
 	}
+	body := runbookMarkdown(cc)
 	deps, err := buildDeps(ctx, cc)
 	if err != nil {
 		return "", err

@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/spf13/cobra"
 )
@@ -67,8 +69,12 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd) // best-effort — proceed even on config load failure
-			if err != nil {
+			if err != nil || cc == nil {
+				// Emergency kill switch MUST NOT crash: on a config-load failure cc is
+				// nil, so synthesize a defaults context rather than deref a nil pointer
+				// at the first cc.runner use below (CR-02).
 				slog.Warn("panic: could not load config, proceeding with defaults", "err", err)
+				cc = &cmdContext{cfg: config.Defaults(), runner: &shell.ExecRunner{}}
 			}
 			p := newPrinter(cmd)
 			start := time.Now()
@@ -109,7 +115,7 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			printerError(p, "       https://login.tailscale.com/admin/machines")
 
 			// §7 note 12: panic is reversible via repair.
-			emitSecurityNote(p, "panic-reversible")
+			emitSecurityNote(p, cc.jsonOut, "panic-reversible")
 			return nil
 		},
 	}
