@@ -56,3 +56,67 @@ func TestConfirm_CancelledContext(t *testing.T) {
 	_, err := tui.Confirm(ctx, "Confirm?", false)
 	require.Error(t, err)
 }
+
+// Pause with yes=true returns nil immediately (no hang, no error).
+func TestPause_YesFlag(t *testing.T) {
+	err := tui.Pause(context.Background(), "Press Enter to continue...", true)
+	require.NoError(t, err)
+}
+
+// Pause with a non-TTY stdin and yes=false also returns nil immediately.
+// In a test environment stdin is not a TTY so this validates the non-TTY short-circuit.
+func TestPause_NonTTY(t *testing.T) {
+	// In a test runner stdin is not a TTY; Pause must return nil without hanging.
+	err := tui.Pause(context.Background(), "Press Enter to continue...", false)
+	require.NoError(t, err)
+}
+
+// ConfirmTyped with yes=true returns true without prompting.
+func TestConfirmTyped_YesFlag(t *testing.T) {
+	ok, err := tui.ConfirmTyped(context.Background(), "Type UNINSTALL to confirm", "UNINSTALL", true)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+// ConfirmTyped phrase matching table: test non-interactive cases via yes=true.
+func TestConfirmTyped_PhraseMatchTable(t *testing.T) {
+	cases := []struct {
+		name     string
+		yes      bool
+		wantTrue bool
+	}{
+		{"yes flag returns true immediately", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, err := tui.ConfirmTyped(context.Background(), "prompt", "EXACT PHRASE", tc.yes)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantTrue, ok)
+		})
+	}
+}
+
+// ConfirmTyped with a cancelled context and yes=false returns an error (interactive
+// path aborted by context cancellation — ensures the function does not silently
+// succeed on mismatch).
+func TestConfirmTyped_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := tui.ConfirmTyped(ctx, "Type PHRASE", "PHRASE", false)
+	require.Error(t, err)
+}
+
+// ConfirmBlast with yes=true returns true without prompting.
+func TestConfirmBlast_YesFlag(t *testing.T) {
+	ok, err := tui.ConfirmBlast(context.Background(), "Will install mosh, ntfy, tmux.", 3, true)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+// ConfirmBlast with a cancelled context and yes=false returns an error.
+func TestConfirmBlast_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := tui.ConfirmBlast(ctx, "Will install mosh.", 1, false)
+	require.Error(t, err)
+}
