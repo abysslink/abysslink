@@ -94,7 +94,7 @@ func DefaultACL(owner, sshUser string) []byte {
 			{
 				Src: []string{"tag:mobile"},
 				Dst: []string{"tag:laptop"},
-				IP:  []string{"tcp:22", "udp:60000-61000"},
+				IP:  []string{"tcp:22", "tcp:2586", "udp:60000-61000"},
 			},
 		},
 		SSH: []aclSSHRule{
@@ -138,7 +138,7 @@ func (e *ACLEditor) EnsureGrant() error {
 	e.doc.Grants = append(e.doc.Grants, aclGrant{
 		Src: []string{wantSrc},
 		Dst: []string{wantDst},
-		IP:  []string{"tcp:22", "udp:60000-61000"},
+		IP:  []string{"tcp:22", "tcp:2586", "udp:60000-61000"},
 	})
 	return e.flush()
 }
