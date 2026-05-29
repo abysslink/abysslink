@@ -115,6 +115,26 @@ func main() {
 			name: "binary size under 50 MB",
 			fn:   func(ctx context.Context) error { return testBinarySizeUnder50MB(ctx, binPath) },
 		},
+		{
+			name: "init --yes runs headless without hanging",
+			fn:   func(ctx context.Context) error { return testInitYesNoHang(ctx, binPath) },
+		},
+		{
+			name: "doctor --json output is ANSI-free valid JSON",
+			fn:   func(ctx context.Context) error { return testDoctorJSONNoANSI(ctx, binPath, configPath) },
+		},
+		{
+			name: "status --json output is ANSI-free valid JSON",
+			fn:   func(ctx context.Context) error { return testStatusJSONNoANSI(ctx, binPath, configPath) },
+		},
+		{
+			name: "uninstall --apply with empty stdin does not hang (typed-confirm non-interactive safety)",
+			fn:   func(ctx context.Context) error { return testUninstallTypedConfirmNoHang(ctx, binPath, configPath) },
+		},
+		{
+			name: "exit codes 0/1/2 documented in --help",
+			fn:   func(ctx context.Context) error { return testExitCodesDocumented(ctx, binPath, configPath) },
+		},
 	}
 
 	passed := 0

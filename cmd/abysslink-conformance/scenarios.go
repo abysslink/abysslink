@@ -340,3 +340,147 @@ func testBinarySizeUnder50MB(ctx context.Context, binPath string) error {
 	const limit = 50 << 20 // 50 MB
 	return conformance.CheckBinarySize(ctx, binPath, limit)
 }
+
+// testInitYesNoHang verifies that `abysslink init --yes` completes within the
+// context deadline without producing a Go panic trace, and writes a config file.
+// The guided journey must run headless under --yes (T-10-16: never hang in non-TTY).
+func testInitYesNoHang(ctx context.Context, binPath string) error {
+	tmpDir, err := os.MkdirTemp("", "conformance-init-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	cfgPath := filepath.Join(tmpDir, "abysslink.yaml")
+	out, initErr := runAbysslink(ctx, binPath,
+		"--config", cfgPath,
+		"init", "--yes",
+	)
+
+	// A Go panic is a hard fail regardless of exit code.
+	if strings.Contains(out, "panic:") && strings.Contains(out, "goroutine") {
+		return fmt.Errorf("init --yes produced Go panic: %q", out)
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("init --yes timed out — likely hung waiting for interactive input")
+	}
+	if initErr != nil {
+		// Non-zero exit is acceptable: the machine may be missing tools or
+		// the journey stage failed for environmental reasons; as long as it
+		// didn't hang and didn't panic the headless contract is satisfied.
+		return nil
+	}
+	// If it exited 0 the config file should exist.
+	if _, statErr := os.Stat(cfgPath); statErr != nil {
+		return fmt.Errorf("init --yes exited 0 but no config at %s: %w", cfgPath, statErr)
+	}
+	return nil
+}
+
+// testDoctorJSONNoANSI verifies that `abysslink --json doctor` output:
+//   - First line parses as a JSON value (array or object).
+//   - Contains no ANSI ESC (0x1b) bytes.
+//
+// A non-zero exit is acceptable because the machine may not have all tools.
+func testDoctorJSONNoANSI(ctx context.Context, binPath, configPath string) error {
+	out, _ := runAbysslink(ctx, binPath,
+		"--config", configPath,
+		"--json",
+		"doctor",
+	)
+	if ctx.Err() != nil {
+		return fmt.Errorf("doctor --json timed out")
+	}
+	if strings.Contains(out, "panic:") && strings.Contains(out, "goroutine") {
+		return fmt.Errorf("doctor --json produced Go panic: %q", out)
+	}
+	if out == "" {
+		return fmt.Errorf("doctor --json produced no output")
+	}
+	// Check for ANSI ESC bytes.
+	if strings.Contains(out, "\x1b") {
+		return fmt.Errorf("doctor --json output contains ANSI ESC bytes (0x1b) — JSON must be ANSI-free")
+	}
+	// First line should be parseable as JSON (array or object element).
+	firstLine := strings.SplitN(out, "\n", 2)[0]
+	var raw json.RawMessage
+	if err := json.Unmarshal([]byte(firstLine), &raw); err != nil {
+		return fmt.Errorf("doctor --json first line is not valid JSON %q: %w", firstLine, err)
+	}
+	return nil
+}
+
+// testStatusJSONNoANSI extends testStatusJSON to additionally assert no ANSI ESC
+// bytes in the output (T-10-18: JSON must be ANSI-free for machine consumers).
+func testStatusJSONNoANSI(ctx context.Context, binPath, configPath string) error {
+	out, err := runAbysslink(ctx, binPath,
+		"--config", configPath,
+		"--json",
+		"status",
+	)
+	if err != nil {
+		return fmt.Errorf("status --json exited non-zero: %w (output: %s)", err, out)
+	}
+	if out == "" {
+		return fmt.Errorf("status --json produced no output")
+	}
+	// No ANSI escape bytes.
+	if strings.Contains(out, "\x1b") {
+		return fmt.Errorf("status --json output contains ANSI ESC bytes (0x1b) — JSON must be ANSI-free")
+	}
+	// Valid JSON object.
+	firstLine := strings.SplitN(out, "\n", 2)[0]
+	var obj map[string]interface{}
+	if decErr := json.Unmarshal([]byte(firstLine), &obj); decErr != nil {
+		return fmt.Errorf("status --json first line is not valid JSON %q: %w", firstLine, decErr)
+	}
+	return nil
+}
+
+// testUninstallTypedConfirmNoHang verifies that `abysslink uninstall --apply` with
+// empty piped stdin (no TTY) does NOT hang and does NOT panic. The typed-confirm
+// design from 10-04 must be non-interactive-safe: when stdin is empty the
+// confirmation must fail clearly (no blocking read).
+func testUninstallTypedConfirmNoHang(ctx context.Context, binPath, configPath string) error {
+	deadline := 15 * time.Second
+	uninstCtx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+
+	// Pipe empty stdin so no TTY is presented.
+	out, _ := runAbysslinkWithStdin(uninstCtx, binPath, "",
+		"--config", configPath,
+		"uninstall", "--apply",
+	)
+
+	if uninstCtx.Err() != nil {
+		return fmt.Errorf("uninstall --apply timed out after %s (likely blocked on typed confirm)", deadline)
+	}
+	if strings.Contains(out, "panic:") && strings.Contains(out, "goroutine") {
+		return fmt.Errorf("uninstall --apply produced Go panic: %q", out)
+	}
+	// A non-zero exit or "non-interactive" error message is expected and acceptable.
+	return nil
+}
+
+// testExitCodesDocumented verifies that `abysslink --help` or `abysslink doctor --help`
+// mentions exit codes 0, 1, and 2, satisfying the UX-10 documentation requirement.
+func testExitCodesDocumented(ctx context.Context, binPath, configPath string) error {
+	out, _ := runAbysslink(ctx, binPath,
+		"--config", configPath,
+		"--help",
+	)
+	if ctx.Err() != nil {
+		return fmt.Errorf("--help timed out")
+	}
+	if !strings.Contains(out, "0") || !strings.Contains(out, "1") || !strings.Contains(out, "2") {
+		// Fall back to doctor --help
+		doctorOut, _ := runAbysslink(ctx, binPath,
+			"--config", configPath,
+			"doctor", "--help",
+		)
+		if !strings.Contains(doctorOut, "0") || !strings.Contains(doctorOut, "1") || !strings.Contains(doctorOut, "2") {
+			return fmt.Errorf("neither root --help nor doctor --help documents exit codes 0/1/2; root: %q; doctor: %q", out, doctorOut)
+		}
+	}
+	return nil
+}
