@@ -156,13 +156,29 @@ func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext) {
 		topic = "rig"
 	}
 	port := cc.cfg.Modules.Ntfy.ListenPort()
-	deepLink := fmt.Sprintf("ntfy://%s:%d/%s", ip, port, topic)
+
+	// Prefer MagicDNS hostname — survives IP changes.
+	hostname := ip
+	if statusRes, err := cc.runner.Run(ctx, "tailscale", "status", "--json"); err == nil && statusRes.ExitCode == 0 {
+		for _, line := range strings.Split(statusRes.Stdout, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, `"DNSName"`) {
+				parts := strings.SplitN(line, `"`, 4)
+				if len(parts) >= 4 {
+					hostname = strings.TrimRight(parts[3], `".,`)
+				}
+				break
+			}
+		}
+	}
+
+	deepLink := fmt.Sprintf("ntfy://%s:%d/%s", hostname, port, topic)
 	printerInfo(p, "")
 	printerInfo(p, "3. Subscribe to notifications in the ntfy app:")
 	printerInfo(p, styleMuted.Render("   Android: tap + → Scan QR code"))
 	qr.PrintANSI(os.Stdout, deepLink)
 	printerInfo(p, styleMuted.Render("   iPhone:  tap + → enter manually:"))
-	printerInfo(p, fmt.Sprintf("     Server:  http://%s:%d", ip, port))
+	printerInfo(p, fmt.Sprintf("     Server:  http://%s:%d", hostname, port))
 	printerInfo(p, fmt.Sprintf("     Topic:   %s", topic))
 }
 
