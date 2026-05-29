@@ -155,7 +155,7 @@ func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext) {
 	if topic == "" {
 		topic = "rig"
 	}
-	url := fmt.Sprintf("http://%s:%d/%s", ip, cc.cfg.Modules.Ntfy.ListenPort(), topic)
+	url := fmt.Sprintf("ntfy://%s:%d/%s", ip, cc.cfg.Modules.Ntfy.ListenPort(), topic)
 	printerInfo(p, "")
 	printerInfo(p, "3. Subscribe to notifications in the ntfy app (scan):")
 	qr.PrintANSI(os.Stdout, url)
