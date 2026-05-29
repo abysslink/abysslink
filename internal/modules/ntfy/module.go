@@ -17,7 +17,6 @@ package ntfy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -62,10 +61,14 @@ func (m *Module) Name() string { return "ntfy" }
 func (m *Module) Deps() []string { return []string{"tailscale"} }
 
 // ntfyBinPath returns the full path to the ntfy server binary.
+//
 // On macOS, the Homebrew-core formula only builds the client (no 'serve'
-// subcommand), so abysslink installs the official release binary to
-// ~/.local/bin/ntfy. On Linux the system package provides a full binary
-// and PATH lookup is sufficient.
+// subcommand) and the GitHub release darwin binary is also client-only.
+// abysslink builds the server from source via `go install` and places the
+// resulting binary in ~/.local/bin/ntfy.
+//
+// On Linux the system package manager installs a full server binary; PATH
+// lookup is sufficient.
 func (m *Module) ntfyBinPath() string {
 	if m.plat.OS() != "darwin" {
 		return "ntfy"
@@ -77,15 +80,26 @@ func (m *Module) ntfyBinPath() string {
 	return filepath.Join(home, ".local", "bin", "ntfy")
 }
 
-// ntfyInstalled returns true when the ntfy binary exists and includes the
-// 'serve' subcommand (server build). The Homebrew-core 'ntfy' formula is
-// client-only and does not have 'serve'.
+// ntfyInstalled returns true when the ntfy binary at ntfyBinPath() exists and
+// lists 'serve' as a top-level subcommand. This distinguishes the server build
+// from the client-only Homebrew/release builds, which only advertise 'publish'
+// and 'subscribe'. We must not match on the substring "server" (which appears
+// in help text like "Discord server") — we check for 'serve' at the start of a
+// trimmed help line.
 func (m *Module) ntfyInstalled(ctx context.Context) bool {
 	res, err := m.runner.Run(ctx, m.ntfyBinPath(), "--help")
 	if err != nil || res.ExitCode != 0 {
 		return false
 	}
-	return strings.Contains(res.Stdout+res.Stderr, "serve")
+	out := res.Stdout + res.Stderr
+	for _, line := range strings.Split(out, "\n") {
+		t := strings.TrimSpace(line)
+		// Match lines like "   serve     Run the ntfy server" or "   serve, s  ..."
+		if strings.HasPrefix(t, "serve") && len(t) > 5 && (t[5] == ' ' || t[5] == ',') {
+			return true
+		}
+	}
+	return false
 }
 
 // Detect checks whether ntfy is installed and configured correctly.
@@ -155,94 +169,48 @@ func hasWildcardListen(cfgContent string) bool {
 }
 
 // installNtfyBinary installs the ntfy push-notification server.
-// On macOS, the Homebrew-core 'ntfy' formula is client-only (no 'serve'
-// subcommand); we download the official release binary from GitHub instead.
+//
+// On macOS, both the Homebrew-core formula and the official GitHub release
+// darwin binary are client-only builds. We build the server from source via
+// `go install` (which includes server support when CGO/SQLite is available).
+// CGO is available on any macOS developer machine with Xcode Command Line Tools.
+//
+// On Linux, the ntfy package from the system package manager is a full build
+// that includes the server.
 func (m *Module) installNtfyBinary(ctx context.Context) error {
 	if m.plat.OS() == "darwin" {
-		return m.downloadNtfyReleaseDarwin(ctx)
+		return m.buildNtfyServerDarwin(ctx)
 	}
 	return m.plat.InstallPackage(ctx, "ntfy")
 }
 
-// downloadNtfyReleaseDarwin downloads the latest ntfy server release binary
-// from GitHub and installs it to ~/.local/bin/ntfy.
+// buildNtfyServerDarwin builds and installs the ntfy server binary from source
+// using `go install github.com/binwiederhier/ntfy@latest` with GOBIN set to
+// ~/.local/bin. This produces a full server binary (with 'serve', 'user', etc.)
+// because the Go toolchain on macOS has CGO available via Xcode CLT.
 //
-// The Homebrew-core 'ntfy' formula builds with -tags noserver (client-only).
-// The official GitHub release binary is the full build and includes 'serve'.
-func (m *Module) downloadNtfyReleaseDarwin(ctx context.Context) error {
-	// Resolve latest release tag.
-	apiRes, err := m.runner.Run(ctx, "curl", "-sf", "--max-time", "30",
-		"https://api.github.com/repos/binwiederhier/ntfy/releases/latest")
+// Build time: ~1 minute on first run (dependencies are cached afterward).
+func (m *Module) buildNtfyServerDarwin(ctx context.Context) error {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("fetch ntfy release info: %w", err)
+		return fmt.Errorf("get home dir: %w", err)
 	}
-	if apiRes.ExitCode != 0 {
-		return fmt.Errorf("fetch ntfy release info exited %d: %s", apiRes.ExitCode, strings.TrimSpace(apiRes.Stderr))
+	gobinDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(gobinDir, 0o755); err != nil {
+		return fmt.Errorf("create install dir %s: %w", gobinDir, err)
 	}
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.Unmarshal([]byte(apiRes.Stdout), &release); err != nil {
-		return fmt.Errorf("parse ntfy release JSON: %w", err)
-	}
-	tag := release.TagName              // e.g. "v2.23.0"
-	ver := strings.TrimPrefix(tag, "v") // e.g. "2.23.0"
-	assetName := fmt.Sprintf("ntfy_%s_darwin_all.tar.gz", ver)
-	downloadURL := fmt.Sprintf(
-		"https://github.com/binwiederhier/ntfy/releases/download/%s/%s",
-		tag, assetName,
+	slog.Info("ntfy: building server from source via go install (first run ~1 min)", "gobin", gobinDir)
+	res, err := m.runner.RunWithEnv(ctx,
+		map[string]string{"GOBIN": gobinDir},
+		"go", "install", "github.com/binwiederhier/ntfy@latest",
 	)
-
-	// Download tarball to a temp file.
-	tmpFile := filepath.Join(os.TempDir(), assetName)
-	defer func() { _ = os.Remove(tmpFile) }()
-	dlRes, err := m.runner.Run(ctx, "curl", "-sfL", "--max-time", "120",
-		downloadURL, "-o", tmpFile)
 	if err != nil {
-		return fmt.Errorf("download ntfy %s: %w", ver, err)
+		return fmt.Errorf("go install ntfy: %w", err)
 	}
-	if dlRes.ExitCode != 0 {
-		return fmt.Errorf("download ntfy %s exited %d: %s", ver, dlRes.ExitCode, strings.TrimSpace(dlRes.Stderr))
+	if res.ExitCode != 0 {
+		return fmt.Errorf("go install ntfy exited %d: %s — install ntfy manually: https://docs.ntfy.sh/install/",
+			res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-
-	// Extract to a temp directory.
-	tmpDir, err := os.MkdirTemp("", "ntfy-install-*")
-	if err != nil {
-		return fmt.Errorf("create temp dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-	tarRes, err := m.runner.Run(ctx, "tar", "xzf", tmpFile, "-C", tmpDir)
-	if err != nil {
-		return fmt.Errorf("extract ntfy: %w", err)
-	}
-	if tarRes.ExitCode != 0 {
-		return fmt.Errorf("extract ntfy exited %d: %s", tarRes.ExitCode, strings.TrimSpace(tarRes.Stderr))
-	}
-
-	// Binary sits at <tmpDir>/ntfy_VER_darwin_all/ntfy.
-	extractedBin := filepath.Join(tmpDir, fmt.Sprintf("ntfy_%s_darwin_all", ver), "ntfy")
-
-	// Install to user-local bin dir (no sudo required).
-	installPath := m.ntfyBinPath()
-	if err := os.MkdirAll(filepath.Dir(installPath), 0o755); err != nil {
-		return fmt.Errorf("create install dir %s: %w", filepath.Dir(installPath), err)
-	}
-	cpRes, err := m.runner.Run(ctx, "cp", extractedBin, installPath)
-	if err != nil {
-		return fmt.Errorf("install ntfy binary: %w", err)
-	}
-	if cpRes.ExitCode != 0 {
-		return fmt.Errorf("install ntfy binary: cp exited %d: %s", cpRes.ExitCode, strings.TrimSpace(cpRes.Stderr))
-	}
-	chmodRes, err := m.runner.Run(ctx, "chmod", "0755", installPath)
-	if err != nil {
-		return fmt.Errorf("chmod ntfy binary: %w", err)
-	}
-	if chmodRes.ExitCode != 0 {
-		return fmt.Errorf("chmod ntfy binary exited %d: %s", chmodRes.ExitCode, strings.TrimSpace(chmodRes.Stderr))
-	}
-
-	slog.Info("ntfy: installed server binary", "path", installPath, "version", ver)
 	return nil
 }
 
