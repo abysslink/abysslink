@@ -190,10 +190,14 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		sev := modules.SeverityFatal
+		if runtime.GOOS == "darwin" {
+			sev = modules.SeverityWarning
+		}
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "ntfy_health",
-			Severity: modules.SeverityFatal,
+			Severity: sev,
 			Message:  fmt.Sprintf("ntfy health check failed: %v", err),
 		})
 		return findings, nil
@@ -201,10 +205,14 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
+		sev := modules.SeverityFatal
+		if runtime.GOOS == "darwin" {
+			sev = modules.SeverityWarning
+		}
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "ntfy_health",
-			Severity: modules.SeverityFatal,
+			Severity: sev,
 			Message:  fmt.Sprintf("ntfy health endpoint returned HTTP %d", resp.StatusCode),
 		})
 	}
