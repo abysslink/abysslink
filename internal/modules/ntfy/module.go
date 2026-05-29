@@ -185,7 +185,7 @@ func (m *Module) installNtfyBinary(ctx context.Context) error {
 }
 
 // buildNtfyServerDarwin builds and installs the ntfy server binary from source
-// using `go install github.com/binwiederhier/ntfy@latest` with GOBIN set to
+// using `go install heckel.io/ntfy/v2@latest` with GOBIN set to
 // ~/.local/bin. This produces a full server binary (with 'serve', 'user', etc.)
 // because the Go toolchain on macOS has CGO available via Xcode CLT.
 //
@@ -202,7 +202,7 @@ func (m *Module) buildNtfyServerDarwin(ctx context.Context) error {
 	slog.Info("ntfy: building server from source via go install (first run ~1 min)", "gobin", gobinDir)
 	res, err := m.runner.RunWithEnv(ctx,
 		map[string]string{"GOBIN": gobinDir},
-		"go", "install", "github.com/binwiederhier/ntfy@latest",
+		"go", "install", "heckel.io/ntfy/v2@latest",
 	)
 	if err != nil {
 		return fmt.Errorf("go install ntfy: %w", err)
