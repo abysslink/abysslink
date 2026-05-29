@@ -36,10 +36,10 @@ import (
 	"os"
 	"path/filepath"
 
+	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/abysslink/abysslink/internal/tui"
-	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 )
 
 // journeyStageFile is the filename within abysslinkStateDir() where the last
@@ -183,9 +183,15 @@ func journeyStages() []journeyStage {
 // JourneyHeader is omitted and stages run without interactive output.
 // This ensures the journey never hangs in CI or pipe contexts (T-10-16).
 func runJourney(ctx context.Context, p Printer, stages []journeyStage, resumeFrom int, stateFile string, autoYes bool) error {
-	labels := make([]string, len(stages))
-	for i, s := range stages {
-		labels[i] = s.label
+	// Use journeyLabels() as the canonical label source so the header matches
+	// the standard label set even when stages is a stub slice (e.g. in tests).
+	labels := journeyLabels()
+	if len(labels) < len(stages) {
+		// Fallback: build from stage labels for non-standard stage lists (tests).
+		labels = make([]string, len(stages))
+		for i, s := range stages {
+			labels[i] = s.label
+		}
 	}
 
 	for _, s := range stages {
