@@ -16,11 +16,9 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
@@ -48,6 +46,7 @@ import (
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -147,10 +146,14 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 		Platform: plat,
 		Keychain: kc,
 		Audit:    audit.New(logPath),
-		Prompt: func(_ context.Context, msg string) error {
-			fmt.Println(msg)
-			_, err := bufio.NewReader(os.Stdin).ReadString('\n')
-			return err
+		// Prompt routes module prompts through the interactive gate + tui.Pause:
+		// never raw stdout (which would corrupt --json) and never a bare stdin
+		// read (which would block in non-TTY/CI/--json contexts). CR-01 / T-10-16.
+		Prompt: func(ctx context.Context, msg string) error {
+			if !interactive(cc.yes, cc.jsonOut) {
+				return errMissingInput("yes")
+			}
+			return tui.Pause(ctx, msg, cc.yes)
 		},
 	}, nil
 }

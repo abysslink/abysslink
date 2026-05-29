@@ -20,12 +20,15 @@
 // function for that step (never duplicating them), so every stage remains
 // independently runnable and idempotent.
 //
-// Under --yes/--json/non-TTY the journey runs headless (no JourneyHeader,
-// no Pause) so automated invocations never hang. With a TTY, JourneyHeader
-// is printed at each stage boundary and Pause is inserted only at the §6-
-// sanctioned stop points (external-action waits). The last completed stage
-// is persisted to abysslinkStateDir()/journey-state.json so --resume can
-// continue an interrupted run.
+// Under --yes/--json/non-TTY the journey runs headless (no JourneyHeader) so
+// automated invocations never hang. With a TTY, JourneyHeader is printed at
+// each stage boundary. The journey itself is NON-BLOCKING: each stage prints
+// guidance and returns — the §6-sanctioned external-action waits live inside
+// the underlying commands the guidance points to (e.g. `enroll phone`'s
+// enrollPhoneInstallPause), not in this driver loop. Security notes are
+// suppressed under --json. The last completed stage is persisted to
+// abysslinkStateDir()/journey-state.json so --resume can continue an
+// interrupted run.
 
 package cli
 
@@ -75,7 +78,7 @@ func journeyLabels() []string {
 // journeyStages returns the ordered slice of the 7 journey stages. Each stage's
 // run function CALLS the existing command function for that step — it never
 // reimplements the step logic, keeping every stage independently runnable.
-func journeyStages() []journeyStage {
+func journeyStages(jsonOut bool) []journeyStage {
 	return []journeyStage{
 		{
 			index: 1,
@@ -83,8 +86,8 @@ func journeyStages() []journeyStage {
 			// Stage 1: confirm or guide the user to create a Tailscale account.
 			// §7 note 1 (SSO hardening) fires here.
 			run: func(ctx context.Context, p Printer) error {
-				emitSecurityNote(p, "sso-hardening")   // §7 note 1
-				emitSecurityNote(p, "dry-run-default") // §7 note 2
+				emitSecurityNote(p, jsonOut, "sso-hardening")   // §7 note 1
+				emitSecurityNote(p, jsonOut, "dry-run-default") // §7 note 2
 				return ensureTailscaleAccount(p)
 			},
 		},
@@ -94,7 +97,7 @@ func journeyStages() []journeyStage {
 			// Stage 2: tool check + Tailscale binary/daemon ensure + security hardening.
 			// §7 note 4 (sudo notice) fires here before any elevated actions.
 			run: func(ctx context.Context, p Printer) error {
-				emitSecurityNote(p, "sudo-notice") // §7 note 4
+				emitSecurityNote(p, jsonOut, "sudo-notice") // §7 note 4
 				runner := &shell.ExecRunner{}
 				plat, err := platformauto.New(runner)
 				if err != nil {
@@ -115,8 +118,8 @@ func journeyStages() []journeyStage {
 			// when the user runs `abysslink up --apply`.
 			// §7 notes 5 (disk encryption) and 9 (ntfy tailnet-only) fire here.
 			run: func(_ context.Context, p Printer) error {
-				emitSecurityNote(p, "disk-encryption")   // §7 note 5
-				emitSecurityNote(p, "ntfy-tailnet-only") // §7 note 9
+				emitSecurityNote(p, jsonOut, "disk-encryption")   // §7 note 5
+				emitSecurityNote(p, jsonOut, "ntfy-tailnet-only") // §7 note 9
 				printerInfo(p, styleMuted.Render("Config written. Run `abysslink up --apply` to converge."))
 				return nil
 			},
@@ -130,7 +133,7 @@ func journeyStages() []journeyStage {
 			// check whether Lock is already enabled.
 			// §7 note 6 (Tailnet Lock secrets) fires here.
 			run: func(ctx context.Context, p Printer) error {
-				emitSecurityNote(p, "tailnet-lock-secrets") // §7 note 6
+				emitSecurityNote(p, jsonOut, "tailnet-lock-secrets") // §7 note 6
 				runner := &shell.ExecRunner{}
 				lc := tailscale.NewLockClient(runner)
 				if st, err := lc.Status(ctx); err == nil && st.Enabled {
@@ -152,7 +155,7 @@ func journeyStages() []journeyStage {
 			// §7 note 10 (lock screen + SSH client hygiene) fires here — enroll is
 			// where the user is setting up the phone connection.
 			run: func(_ context.Context, p Printer) error {
-				emitSecurityNote(p, "lock-screen-hygiene") // §7 note 10
+				emitSecurityNote(p, jsonOut, "lock-screen-hygiene") // §7 note 10
 				printerInfo(p, styleBold.Render("Enroll your phone:"))
 				printerInfo(p, "  "+styleCode.Render("abysslink enroll phone"))
 				printerInfo(p, "  "+styleMuted.Render("This will show a QR code for the Tailscale app."))
@@ -165,7 +168,7 @@ func journeyStages() []journeyStage {
 			// Stage 6: doctor guidance.
 			// §7 note 11 (doctor is not a full audit) fires here.
 			run: func(_ context.Context, p Printer) error {
-				emitSecurityNote(p, "doctor-not-full-audit") // §7 note 11
+				emitSecurityNote(p, jsonOut, "doctor-not-full-audit") // §7 note 11
 				printerInfo(p, styleBold.Render("Verify your setup:"))
 				printerInfo(p, "  "+styleCode.Render("abysslink doctor"))
 				return nil
@@ -177,9 +180,9 @@ func journeyStages() []journeyStage {
 			// Stage 7: success/next-steps box.
 			// §7 notes 3 (backups reversible), 8 (no Funnel), 12 (panic reversible) fire here.
 			run: func(_ context.Context, p Printer) error {
-				emitSecurityNote(p, "backups-reversible") // §7 note 3
-				emitSecurityNote(p, "no-funnel")          // §7 note 8
-				emitSecurityNote(p, "panic-reversible")   // §7 note 12
+				emitSecurityNote(p, jsonOut, "backups-reversible") // §7 note 3
+				emitSecurityNote(p, jsonOut, "no-funnel")          // §7 note 8
+				emitSecurityNote(p, jsonOut, "panic-reversible")   // §7 note 12
 				printerInfo(p, "")
 				printerInfo(p, styleSuccess.Render("Setup complete — your rig is ready."))
 				printerInfo(p, "")
