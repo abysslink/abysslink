@@ -239,6 +239,19 @@ func (m *Module) buildNtfyServerDarwin(ctx context.Context) error {
 		return fmt.Errorf("extract ntfy source exited %d: %s", tarRes.ExitCode, strings.TrimSpace(tarRes.Stderr))
 	}
 
+	// ntfy's server/server.go uses //go:embed docs to bundle the web UI.
+	// The web UI is built separately (npm) and is not included in the source
+	// archive. Create a placeholder so the embed compiles; the web UI will
+	// return 404 for browser requests but the push notification API is
+	// unaffected — the mobile app never touches the web UI.
+	docsPlaceholder := filepath.Join(tmpDir, "server", "docs", "placeholder.txt")
+	if err := os.MkdirAll(filepath.Dir(docsPlaceholder), 0o755); err != nil {
+		return fmt.Errorf("create server/docs dir: %w", err)
+	}
+	if err := os.WriteFile(docsPlaceholder, []byte("web UI not built — push notification API functional\n"), 0o644); err != nil { //nolint:gosec
+		return fmt.Errorf("create server/docs placeholder: %w", err)
+	}
+
 	// Build from extracted source. `-C` sets the working dir (Go 1.21+).
 	// CGO is on by default on macOS with Xcode CLT → SQLite compiles → server included.
 	installPath := m.ntfyBinPath()
