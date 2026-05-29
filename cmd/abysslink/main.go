@@ -28,11 +28,14 @@ import (
 
 func main() {
 	// Prevent any subprocess (brew, git, etc.) from blocking on interactive
-	// credential or password prompts. Abysslink is not a git client; a prompt
-	// means the operation failed and should surface an error, not hang.
+	// credential prompts. Three complementary guards:
+	//   GIT_TERMINAL_PROMPT=0   — git will not ask for credentials in the terminal
+	//   GIT_ASKPASS=/usr/bin/false — overrides any askpass helper; git gets an
+	//                               immediate non-zero exit instead of a prompt
+	//   HOMEBREW_NO_AUTO_UPDATE=1 — brew skips its git-based tap auto-refresh
+	//                               before each install (would spawn git fetches)
 	_ = os.Setenv("GIT_TERMINAL_PROMPT", "0")
-	// Prevent Homebrew from auto-updating all taps before each install, which
-	// spawns git fetches against GitHub and can block on credentials above.
+	_ = os.Setenv("GIT_ASKPASS", "/usr/bin/false")
 	_ = os.Setenv("HOMEBREW_NO_AUTO_UPDATE", "1")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
