@@ -253,15 +253,26 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// Marshal encodes cfg to canonical YAML bytes. It is the single source of
+// truth for the YAML representation used by both Write and the config preview
+// in cmd_init.go — keeping them byte-faithful to each other.
+func Marshal(cfg *Config) ([]byte, error) {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("config: marshal: %w", err)
+	}
+	return data, nil
+}
+
 // Write marshals cfg to YAML and writes it atomically via audit (backup + rename).
 func Write(path string, cfg *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("config: create directory: %w", err)
 	}
 
-	data, err := yaml.Marshal(cfg)
+	data, err := Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("config: marshal: %w", err)
+		return fmt.Errorf("config: write: %w", err)
 	}
 
 	logPath, err := audit.DefaultLogPath()
