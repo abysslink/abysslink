@@ -133,7 +133,10 @@ func hasWildcardListen(cfgContent string) bool {
 // correct package is in the ntfy tap: brew tap ntfy/ntfy + brew install ntfy/ntfy/ntfy.
 func (m *Module) installNtfyBinary(ctx context.Context) error {
 	if m.plat.OS() == "darwin" {
-		if _, err := m.runner.Run(ctx, "brew", "tap", "ntfy/ntfy"); err != nil {
+		// GIT_TERMINAL_PROMPT=0 prevents git (invoked internally by brew tap)
+		// from blocking on a GitHub credential prompt when cloning the tap repo.
+		noPrompt := map[string]string{"GIT_TERMINAL_PROMPT": "0"}
+		if _, err := m.runner.RunWithEnv(ctx, noPrompt, "brew", "tap", "ntfy/ntfy"); err != nil {
 			slog.Warn("ntfy apply: brew tap ntfy/ntfy failed — proceeding anyway", "err", err)
 		}
 		return m.plat.InstallPackage(ctx, "ntfy/ntfy/ntfy")

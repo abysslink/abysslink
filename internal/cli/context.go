@@ -16,9 +16,11 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
@@ -149,6 +151,11 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 		Platform: plat,
 		Keychain: kc,
 		Audit:    audit.New(logPath),
+		Prompt: func(_ context.Context, msg string) error {
+			fmt.Println(msg)
+			_, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			return err
+		},
 	}, nil
 }
 

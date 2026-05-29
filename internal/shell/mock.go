@@ -26,7 +26,8 @@ import (
 type Call struct {
 	Name   string
 	Args   []string
-	Stdin  string // captured stdin content from RunWithStdin (empty for Run calls)
+	Stdin  string            // captured stdin content from RunWithStdin (empty for Run calls)
+	Env    map[string]string // extra env vars passed via RunWithEnv
 	Result Result
 	Err    error
 }
@@ -102,6 +103,22 @@ func (m *MockRunner) RunInteractive(_ context.Context, name string, args ...stri
 	m.calls[m.idx].Args = args
 	m.idx++
 	return c.Err
+}
+
+// RunWithEnv returns the next scripted Call result. The env map is recorded for
+// later inspection via RecordedCalls but does not affect the scripted output.
+func (m *MockRunner) RunWithEnv(_ context.Context, env map[string]string, name string, args ...string) (Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.idx >= len(m.calls) {
+		return Result{}, fmt.Errorf("shell: unexpected call %d (RunWithEnv): %s %v", m.idx, name, args)
+	}
+	c := m.calls[m.idx]
+	m.calls[m.idx].Name = name
+	m.calls[m.idx].Args = args
+	m.calls[m.idx].Env = env
+	m.idx++
+	return c.Result, c.Err
 }
 
 // RecordedCalls returns a snapshot of all calls as consumed so far, including
