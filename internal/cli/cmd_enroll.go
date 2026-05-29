@@ -155,10 +155,15 @@ func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext) {
 	if topic == "" {
 		topic = "rig"
 	}
-	url := fmt.Sprintf("ntfy://%s:%d/%s", ip, cc.cfg.Modules.Ntfy.ListenPort(), topic)
+	port := cc.cfg.Modules.Ntfy.ListenPort()
+	deepLink := fmt.Sprintf("ntfy://%s:%d/%s", ip, port, topic)
 	printerInfo(p, "")
-	printerInfo(p, "3. Subscribe to notifications — open ntfy app → tap + → tap \"Scan QR code\":")
-	qr.PrintANSI(os.Stdout, url)
+	printerInfo(p, "3. Subscribe to notifications in the ntfy app:")
+	printerInfo(p, styleMuted.Render("   Android: tap + → Scan QR code"))
+	qr.PrintANSI(os.Stdout, deepLink)
+	printerInfo(p, styleMuted.Render("   iPhone:  tap + → enter manually:"))
+	printerInfo(p, fmt.Sprintf("     Server:  http://%s:%d", ip, port))
+	printerInfo(p, fmt.Sprintf("     Topic:   %s", topic))
 }
 
 // writeRunbook writes a Markdown runbook of the remaining manual steps and
