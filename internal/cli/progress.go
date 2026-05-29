@@ -46,7 +46,10 @@ func actionSummaryStr(actions []modules.Action) string {
 
 // printPlanDetail prints the section between scan rows and the apply phase.
 // It shows a deduplicated action list with optional Explain text.
-func printPlanDetail(p Printer, actions []modules.Action, _ []modules.Finding, dryRun bool) {
+//
+// explain — when true, action.Explain rationale is rendered per-action (gated by --explain flag).
+// When false, Explain text is suppressed to keep output concise.
+func printPlanDetail(p Printer, actions []modules.Action, _ []modules.Finding, dryRun bool, explain bool) {
 	unique := uniqueActions(actions)
 	if len(unique) == 0 {
 		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("System is already converged — nothing to do."))
@@ -68,7 +71,8 @@ func printPlanDetail(p Printer, actions []modules.Action, _ []modules.Finding, d
 		line := "  " + iconArrowStr() + "  " + styleBold.Render(fmt.Sprintf("%-12s", action.Module)) + "  " + styleMuted.Render(action.Description)
 		printerInfo(p, line)
 
-		if action.Explain != "" {
+		// Gate rationale on --explain flag (G8 requirement).
+		if explain && action.Explain != "" {
 			for _, wrappedLine := range wordWrap(action.Explain, 60) {
 				printerInfo(p, "  "+strings.Repeat(" ", 16)+styleMuted.Render(wrappedLine))
 			}

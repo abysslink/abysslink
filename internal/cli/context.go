@@ -60,6 +60,7 @@ type cmdContext struct {
 	yes     bool
 	jsonOut bool
 	verbose bool
+	explain bool // gates per-action rationale rendering (--explain flag)
 }
 
 // loadCmdContext loads config and resolves flags from the root command.
@@ -70,6 +71,7 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 	yes, _ := cmd.Flags().GetBool("yes")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	verbose, _ := cmd.Flags().GetBool("verbose")
+	explain, _ := cmd.Flags().GetBool("explain")
 
 	// Default to WARN so internal slog.Info/Debug noise is hidden.
 	// --verbose drops to Debug for troubleshooting.
@@ -98,6 +100,7 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 		yes:     yes,
 		jsonOut: jsonOut,
 		verbose: verbose,
+		explain: explain,
 	}, nil
 }
 

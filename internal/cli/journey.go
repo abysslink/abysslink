@@ -81,7 +81,10 @@ func journeyStages() []journeyStage {
 			index: 1,
 			label: "Account",
 			// Stage 1: confirm or guide the user to create a Tailscale account.
+			// §7 note 1 (SSO hardening) fires here.
 			run: func(ctx context.Context, p Printer) error {
+				emitSecurityNote(p, "sso-hardening")   // §7 note 1
+				emitSecurityNote(p, "dry-run-default") // §7 note 2
 				return ensureTailscaleAccount(p)
 			},
 		},
@@ -89,7 +92,9 @@ func journeyStages() []journeyStage {
 			index: 2,
 			label: "Prerequisites",
 			// Stage 2: tool check + Tailscale binary/daemon ensure + security hardening.
+			// §7 note 4 (sudo notice) fires here before any elevated actions.
 			run: func(ctx context.Context, p Printer) error {
+				emitSecurityNote(p, "sudo-notice") // §7 note 4
 				runner := &shell.ExecRunner{}
 				plat, err := platformauto.New(runner)
 				if err != nil {
@@ -108,7 +113,10 @@ func journeyStages() []journeyStage {
 			// Stage 3: placeholder — the config write already happened in init RunE
 			// before the journey stages run. The up converge runs after the journey
 			// when the user runs `abysslink up --apply`.
+			// §7 notes 5 (disk encryption) and 9 (ntfy tailnet-only) fire here.
 			run: func(_ context.Context, p Printer) error {
+				emitSecurityNote(p, "disk-encryption")   // §7 note 5
+				emitSecurityNote(p, "ntfy-tailnet-only") // §7 note 9
 				printerInfo(p, styleMuted.Render("Config written. Run `abysslink up --apply` to converge."))
 				return nil
 			},
@@ -120,7 +128,9 @@ func journeyStages() []journeyStage {
 			// The real init (with SecretBox + attestation) runs when the user
 			// runs `abysslink lock init --apply`. Here we provide guidance and
 			// check whether Lock is already enabled.
+			// §7 note 6 (Tailnet Lock secrets) fires here.
 			run: func(ctx context.Context, p Printer) error {
+				emitSecurityNote(p, "tailnet-lock-secrets") // §7 note 6
 				runner := &shell.ExecRunner{}
 				lc := tailscale.NewLockClient(runner)
 				if st, err := lc.Status(ctx); err == nil && st.Enabled {
@@ -139,7 +149,10 @@ func journeyStages() []journeyStage {
 			// Stage 5: phone enrollment guidance.
 			// The real enrollment (QR + poll) runs when the user runs
 			// `abysslink enroll phone`. Here we provide guidance.
+			// §7 note 10 (lock screen + SSH client hygiene) fires here — enroll is
+			// where the user is setting up the phone connection.
 			run: func(_ context.Context, p Printer) error {
+				emitSecurityNote(p, "lock-screen-hygiene") // §7 note 10
 				printerInfo(p, styleBold.Render("Enroll your phone:"))
 				printerInfo(p, "  "+styleCode.Render("abysslink enroll phone"))
 				printerInfo(p, "  "+styleMuted.Render("This will show a QR code for the Tailscale app."))
@@ -150,7 +163,9 @@ func journeyStages() []journeyStage {
 			index: 6,
 			label: "Verify",
 			// Stage 6: doctor guidance.
+			// §7 note 11 (doctor is not a full audit) fires here.
 			run: func(_ context.Context, p Printer) error {
+				emitSecurityNote(p, "doctor-not-full-audit") // §7 note 11
 				printerInfo(p, styleBold.Render("Verify your setup:"))
 				printerInfo(p, "  "+styleCode.Render("abysslink doctor"))
 				return nil
@@ -160,7 +175,11 @@ func journeyStages() []journeyStage {
 			index: 7,
 			label: "Done",
 			// Stage 7: success/next-steps box.
+			// §7 notes 3 (backups reversible), 8 (no Funnel), 12 (panic reversible) fire here.
 			run: func(_ context.Context, p Printer) error {
+				emitSecurityNote(p, "backups-reversible") // §7 note 3
+				emitSecurityNote(p, "no-funnel")          // §7 note 8
+				emitSecurityNote(p, "panic-reversible")   // §7 note 12
 				printerInfo(p, "")
 				printerInfo(p, styleSuccess.Render("Setup complete — your rig is ready."))
 				printerInfo(p, "")
