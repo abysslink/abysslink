@@ -193,7 +193,7 @@ func (m *Module) cloneNtfyTap(ctx context.Context) error {
 		return fmt.Errorf("create tap parent dir: %w", err)
 	}
 	res, err = m.runner.RunWithEnv(ctx,
-		map[string]string{"GIT_TERMINAL_PROMPT": "0"},
+		map[string]string{"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""},
 		"git",
 		"-c", "credential.helper=",
 		"-c", "http.prompt=false",
