@@ -31,7 +31,12 @@ import (
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
-const serverConfigPath = ".config/ntfy/server.yml"
+const (
+	serverConfigPath       = ".config/ntfy/server.yml"
+	dockerServerConfigPath = ".config/ntfy/server-docker.yml"
+	dockerContainerName    = "abysslink-ntfy"
+	dockerImage            = "binwiederhier/ntfy"
+)
 
 // Module implements the ntfy module.
 type Module struct {
@@ -58,12 +63,10 @@ func (m *Module) Name() string { return "ntfy" }
 // Deps returns the module's dependencies.
 func (m *Module) Deps() []string { return []string{"tailscale"} }
 
-// ntfyBinPath returns the path to use when running ntfy server commands.
-// On macOS the Homebrew formula and GitHub release binaries are client-only
-// (the ntfy server is not officially supported on macOS — see
-// https://docs.ntfy.sh/install/). Users who manually install a server build
-// should place it at ~/.local/bin/ntfy so abysslink finds it.
-// On Linux the system package installs a full server binary on PATH.
+// ntfyBinPath returns the full path to a native ntfy server binary.
+// On macOS, users who manually install a server build should place it at
+// ~/.local/bin/ntfy; abysslink prefers Docker on macOS when Docker is
+// available. On Linux the system package installs the binary on PATH.
 func (m *Module) ntfyBinPath() string {
 	if m.plat.OS() != "darwin" {
 		return "ntfy"
@@ -75,12 +78,9 @@ func (m *Module) ntfyBinPath() string {
 	return filepath.Join(home, ".local", "bin", "ntfy")
 }
 
-// ntfyInstalled returns true when the ntfy binary exists and lists 'serve' as
-// a top-level subcommand. Client-only builds (Homebrew, darwin release) only
-// advertise 'publish' and 'subscribe'. We avoid matching "server" (substring
-// of "serve") by checking that 'serve' appears at the start of a help line
-// followed by a space or comma.
-func (m *Module) ntfyInstalled(ctx context.Context) bool {
+// ntfyBinaryPresent returns true when the ntfy binary exists and includes
+// the 'serve' subcommand (server build, not client-only).
+func (m *Module) ntfyBinaryPresent(ctx context.Context) bool {
 	res, err := m.runner.Run(ctx, m.ntfyBinPath(), "--help")
 	if err != nil || res.ExitCode != 0 {
 		return false
@@ -95,6 +95,27 @@ func (m *Module) ntfyInstalled(ctx context.Context) bool {
 	return false
 }
 
+// dockerAvailable returns true when the Docker CLI is on PATH and the daemon
+// is reachable. Docker Desktop on macOS provides this.
+func (m *Module) dockerAvailable(ctx context.Context) bool {
+	res, err := m.runner.Run(ctx, "docker", "info")
+	return err == nil && res.ExitCode == 0
+}
+
+// ntfyDockerRunning returns true when the abysslink-ntfy container exists and
+// is in the running state.
+func (m *Module) ntfyDockerRunning(ctx context.Context) bool {
+	res, err := m.runner.Run(ctx, "docker", "inspect",
+		"--format={{.State.Running}}", dockerContainerName)
+	return err == nil && res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "true"
+}
+
+// ntfyInstalled returns true when either a native server binary is available
+// or the Docker container is running.
+func (m *Module) ntfyInstalled(ctx context.Context) bool {
+	return m.ntfyBinaryPresent(ctx) || m.ntfyDockerRunning(ctx)
+}
+
 // Detect checks whether ntfy is installed and configured correctly.
 func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	var findings []modules.Finding
@@ -103,10 +124,13 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		sev := modules.SeverityFatal
 		msg := "ntfy is not installed or not on PATH"
 		if m.plat.OS() == "darwin" {
-			// ntfy server is not officially supported on macOS — not a fatal
-			// error; use ntfy.sh cloud or a Linux machine as the broker.
-			sev = modules.SeverityWarning
-			msg = "ntfy server not supported on macOS — configure ntfy.sh in abysslink.yaml (https://ntfy.sh)"
+			if m.dockerAvailable(ctx) {
+				sev = modules.SeverityWarning
+				msg = "ntfy server not running — will install via Docker on apply"
+			} else {
+				sev = modules.SeverityWarning
+				msg = "ntfy server not supported on macOS without Docker — install Docker Desktop or configure ntfy.sh in abysslink.yaml"
+			}
 		}
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
@@ -116,7 +140,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		})
 		return findings, nil
 	}
-	slog.Debug("ntfy installed", "bin", m.ntfyBinPath())
+	slog.Debug("ntfy available", "docker", m.ntfyDockerRunning(ctx))
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -140,12 +164,16 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 
 	cfgContent := string(data)
 	if strings.Contains(cfgContent, "0.0.0.0") || hasWildcardListen(cfgContent) {
-		findings = append(findings, modules.Finding{
-			Module:   m.Name(),
-			Check:    "listen_address",
-			Severity: modules.SeverityFatal,
-			Message:  "ntfy server.yml binds to 0.0.0.0 — must bind to tailnet IP only",
-		})
+		// Docker mode intentionally uses 0.0.0.0 inside the container; port
+		// binding to the tailnet IP is enforced by the docker -p flag.
+		if !m.ntfyDockerRunning(ctx) {
+			findings = append(findings, modules.Finding{
+				Module:   m.Name(),
+				Check:    "listen_address",
+				Severity: modules.SeverityFatal,
+				Message:  "ntfy server.yml binds to 0.0.0.0 — must bind to tailnet IP only (or use Docker mode)",
+			})
+		}
 	}
 
 	return findings, nil
@@ -181,19 +209,19 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	for _, f := range findings {
 		switch f.Check {
 		case "installed":
+			desc := "install ntfy"
 			if m.plat.OS() == "darwin" {
-				actions = append(actions, modules.Action{
-					Module:      m.Name(),
-					Description: "ACTION REQUIRED: configure ntfy.sh cloud in abysslink.yaml (server not supported on macOS)",
-					Reversible:  false,
-				})
-			} else {
-				actions = append(actions, modules.Action{
-					Module:      m.Name(),
-					Description: "install ntfy",
-					Reversible:  false,
-				})
+				if m.dockerAvailable(ctx) {
+					desc = "run ntfy server in Docker (docker pull + docker run)"
+				} else {
+					desc = "ACTION REQUIRED: install Docker Desktop or configure ntfy.sh in abysslink.yaml"
+				}
 			}
+			actions = append(actions, modules.Action{
+				Module:      m.Name(),
+				Description: desc,
+				Reversible:  false,
+			})
 		case "config_exists", "listen_address":
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
@@ -220,25 +248,12 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// Apply installs ntfy if missing and writes the server.yml config bound to the
-// tailnet IP. On macOS, server installation is skipped with a warning because
-// ntfy does not officially support a macOS server binary; the user must
-// configure ntfy.sh or another external broker.
+// Apply installs ntfy if missing and writes the server config.
+// On macOS: uses Docker if available; otherwise skips with a warning.
+// On Linux: installs via system package manager.
 func (m *Module) Apply(ctx context.Context) error {
 	if !m.cfg.Modules.Ntfy.Enabled {
 		return nil
-	}
-
-	if !m.ntfyInstalled(ctx) {
-		if m.plat.OS() == "darwin" {
-			slog.Warn("ntfy: server not supported on macOS — add your ntfy.sh topic URL to abysslink.yaml and re-run",
-				"docs", "https://docs.ntfy.sh/install/")
-			return nil
-		}
-		slog.Info("ntfy apply: installing ntfy push server")
-		if err := m.plat.InstallPackage(ctx, "ntfy"); err != nil {
-			return fmt.Errorf("ntfy apply: install ntfy: %w", err)
-		}
 	}
 
 	tailnetIP, err := m.getTailnetIP(ctx)
@@ -250,12 +265,31 @@ func (m *Module) Apply(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("ntfy apply: get home dir: %w", err)
 	}
-	cfgPath := filepath.Join(home, serverConfigPath)
 
+	if !m.ntfyInstalled(ctx) {
+		switch {
+		case m.plat.OS() == "darwin" && m.dockerAvailable(ctx):
+			if err := m.applyDocker(ctx, tailnetIP, home); err != nil {
+				return fmt.Errorf("ntfy apply: docker: %w", err)
+			}
+			return nil
+		case m.plat.OS() == "darwin":
+			slog.Warn("ntfy: Docker not available; install Docker Desktop or configure ntfy.sh",
+				"docs", "https://docs.docker.com/desktop/install/mac-install/")
+			return nil
+		default:
+			slog.Info("ntfy apply: installing ntfy push server")
+			if err := m.plat.InstallPackage(ctx, "ntfy"); err != nil {
+				return fmt.Errorf("ntfy apply: install ntfy: %w", err)
+			}
+		}
+	}
+
+	// Native binary path (Linux or macOS with manually-installed binary).
+	cfgPath := filepath.Join(home, serverConfigPath)
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		return fmt.Errorf("ntfy apply: mkdir %s: %w", filepath.Dir(cfgPath), err)
 	}
-
 	data := m.generateServerConfig(tailnetIP, home)
 	slog.Info("ntfy apply: writing server config", "path", cfgPath)
 	if err := m.audit.WriteFile(cfgPath, data, 0o600, false); err != nil {
@@ -280,7 +314,101 @@ func (m *Module) Apply(ctx context.Context) error {
 	return nil
 }
 
-// generateServerConfig returns the ntfy server.yml contents bound to tailnetIP.
+// applyDocker sets up the ntfy server as a Docker container on macOS.
+// The container is bound to the tailnet IP via -p, so ntfy can listen on
+// 0.0.0.0 inside the container without violating the "tailnet IP only" rule.
+func (m *Module) applyDocker(ctx context.Context, tailnetIP, home string) error {
+	port := fmt.Sprintf("%d", m.cfg.Modules.Ntfy.ListenPort())
+
+	// Write a Docker-specific config: ntfy listens on all interfaces inside the
+	// container; Docker's -p flag restricts the host binding to the tailnet IP.
+	cfgPath := filepath.Join(home, dockerServerConfigPath)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		return fmt.Errorf("mkdir config dir: %w", err)
+	}
+	dataDir := filepath.Join(home, ".local", "state", "abysslink", "ntfy")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir data dir: %w", err)
+	}
+	dockerCfg := fmt.Sprintf(`# ntfy Docker config — managed by abysslink
+listen-http: "0.0.0.0:80"
+base-url: "http://%s:%s"
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "deny-all"
+behind-proxy: false
+`, tailnetIP, port)
+	if err := m.audit.WriteFile(cfgPath, []byte(dockerCfg), 0o600, false); err != nil {
+		return fmt.Errorf("write docker config: %w", err)
+	}
+
+	slog.Info("ntfy: pulling Docker image", "image", dockerImage)
+	pullRes, err := m.runner.Run(ctx, "docker", "pull", dockerImage)
+	if err != nil {
+		return fmt.Errorf("docker pull: %w", err)
+	}
+	if pullRes.ExitCode != 0 {
+		return fmt.Errorf("docker pull exited %d: %s", pullRes.ExitCode, strings.TrimSpace(pullRes.Stderr))
+	}
+
+	// Remove any existing container before (re)creating.
+	m.runner.Run(ctx, "docker", "rm", "-f", dockerContainerName) //nolint:errcheck
+
+	slog.Info("ntfy: starting Docker container", "name", dockerContainerName, "bind", tailnetIP+":"+port)
+	runRes, err := m.runner.Run(ctx, "docker", "run", "-d",
+		"--name", dockerContainerName,
+		"--restart", "always",
+		"-p", fmt.Sprintf("%s:%s:80", tailnetIP, port),
+		"-v", cfgPath+":/etc/ntfy/server.yml:ro",
+		"-v", dataDir+":/var/lib/ntfy",
+		dockerImage,
+		"serve",
+		"--config", "/etc/ntfy/server.yml",
+	)
+	if err != nil {
+		return fmt.Errorf("docker run: %w", err)
+	}
+	if runRes.ExitCode != 0 {
+		return fmt.Errorf("docker run exited %d: %s", runRes.ExitCode, strings.TrimSpace(runRes.Stderr))
+	}
+
+	if err := m.ensureAdminUserDocker(ctx); err != nil {
+		return fmt.Errorf("provision admin user: %w", err)
+	}
+
+	return nil
+}
+
+// ensureAdminUserDocker provisions the ntfy admin account inside the Docker
+// container using `docker exec`. Password is read from keychain and piped via
+// stdin — never placed on argv.
+func (m *Module) ensureAdminUserDocker(ctx context.Context) error {
+	if m.keychain == nil {
+		return fmt.Errorf("no keychain backend to store the ntfy admin password")
+	}
+	pw, err := m.keychain.Get(ctx, keychainService, keychainAccount)
+	if err != nil || pw == "" {
+		pw, err = modules.GenPassword()
+		if err != nil {
+			return err
+		}
+		if err := m.keychain.Set(ctx, keychainService, keychainAccount, pw); err != nil {
+			return fmt.Errorf("store ntfy password: %w", err)
+		}
+	}
+	res, err := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
+		"docker", "exec", "-i", dockerContainerName,
+		"ntfy", "user", "add", "--role=admin", "admin",
+	)
+	if err != nil {
+		return fmt.Errorf("docker exec ntfy user add: %w", err)
+	}
+	if res.ExitCode != 0 && !strings.Contains(res.Stdout+res.Stderr, "already exists") {
+		return fmt.Errorf("ntfy user add exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
+// generateServerConfig returns the ntfy server.yml for native (non-Docker) installs.
 func (m *Module) generateServerConfig(tailnetIP, home string) []byte {
 	port := fmt.Sprintf("%d", m.cfg.Modules.Ntfy.ListenPort())
 	return []byte(fmt.Sprintf(`# ntfy server config — managed by abysslink
@@ -292,8 +420,7 @@ behind-proxy: false
 `, tailnetIP, port, tailnetIP, port, home))
 }
 
-// ensureAdminUser provisions the ntfy admin account. Password is stored in the
-// keychain and delivered to `ntfy user add` over stdin — never on argv.
+// ensureAdminUser provisions the ntfy admin account for native installs.
 func (m *Module) ensureAdminUser(ctx context.Context) error {
 	if m.keychain == nil {
 		return fmt.Errorf("no keychain backend to store the ntfy admin password")
@@ -336,12 +463,13 @@ func (m *Module) getTailnetIP(ctx context.Context) (string, error) {
 	return ip, nil
 }
 
-// Verify checks that server.yml does not bind to 0.0.0.0.
+// Verify checks that server.yml does not bind to 0.0.0.0 (native mode)
+// or that the Docker container is running (Docker mode).
 func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 	return m.Detect(ctx)
 }
 
-// Repair re-writes the correct config.
+// Repair re-applies configuration.
 func (m *Module) Repair(ctx context.Context) error {
 	return m.Apply(ctx)
 }
