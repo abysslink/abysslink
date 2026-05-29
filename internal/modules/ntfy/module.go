@@ -17,6 +17,7 @@ package ntfy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -60,13 +61,38 @@ func (m *Module) Name() string { return "ntfy" }
 // Deps returns the module's dependencies.
 func (m *Module) Deps() []string { return []string{"tailscale"} }
 
+// ntfyBinPath returns the full path to the ntfy server binary.
+// On macOS, the Homebrew-core formula only builds the client (no 'serve'
+// subcommand), so abysslink installs the official release binary to
+// ~/.local/bin/ntfy. On Linux the system package provides a full binary
+// and PATH lookup is sufficient.
+func (m *Module) ntfyBinPath() string {
+	if m.plat.OS() != "darwin" {
+		return "ntfy"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "ntfy"
+	}
+	return filepath.Join(home, ".local", "bin", "ntfy")
+}
+
+// ntfyInstalled returns true when the ntfy binary exists and includes the
+// 'serve' subcommand (server build). The Homebrew-core 'ntfy' formula is
+// client-only and does not have 'serve'.
+func (m *Module) ntfyInstalled(ctx context.Context) bool {
+	res, err := m.runner.Run(ctx, m.ntfyBinPath(), "--help")
+	if err != nil || res.ExitCode != 0 {
+		return false
+	}
+	return strings.Contains(res.Stdout+res.Stderr, "serve")
+}
+
 // Detect checks whether ntfy is installed and configured correctly.
 func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	var findings []modules.Finding
 
-	// Check if ntfy is installed.
-	res, err := m.runner.Run(ctx, "ntfy", "version")
-	if err != nil || res.ExitCode != 0 {
+	if !m.ntfyInstalled(ctx) {
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "installed",
@@ -75,7 +101,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		})
 		return findings, nil
 	}
-	slog.Debug("ntfy version", "output", strings.TrimSpace(res.Stdout))
+	slog.Debug("ntfy installed", "bin", m.ntfyBinPath())
 
 	// Check if server config exists.
 	home, err := os.UserHomeDir()
@@ -129,84 +155,94 @@ func hasWildcardListen(cfgContent string) bool {
 }
 
 // installNtfyBinary installs the ntfy push-notification server.
-// On macOS, `brew install ntfy` installs a different unrelated tool; the
-// correct package is in the ntfy tap: brew tap ntfy-sh/ntfy + brew install ntfy-sh/ntfy/ntfy.
+// On macOS, the Homebrew-core 'ntfy' formula is client-only (no 'serve'
+// subcommand); we download the official release binary from GitHub instead.
 func (m *Module) installNtfyBinary(ctx context.Context) error {
 	if m.plat.OS() == "darwin" {
-		return m.installNtfyBinaryDarwin(ctx)
+		return m.downloadNtfyReleaseDarwin(ctx)
 	}
 	return m.plat.InstallPackage(ctx, "ntfy")
 }
 
-// installNtfyBinaryDarwin taps ntfy-sh/ntfy and installs the ntfy push server
-// on macOS. It clones the tap via git directly (not via `brew tap`) so that
-// credential suppression flags are applied on the git binary we control.
+// downloadNtfyReleaseDarwin downloads the latest ntfy server release binary
+// from GitHub and installs it to ~/.local/bin/ntfy.
 //
-// IMPORTANT: if the tap clone fails we must NOT fall through to
-// m.plat.InstallPackage — brew auto-taps on install, which invokes git through
-// brew's sanitized environment (GIT_* vars stripped), reproducing the
-// credential prompt we are trying to eliminate.
-func (m *Module) installNtfyBinaryDarwin(ctx context.Context) error {
-	if err := m.cloneNtfyTap(ctx); err != nil {
-		return fmt.Errorf("ntfy apply: tap clone failed — install ntfy manually (https://docs.ntfy.sh/install/): %w", err)
-	}
-	return m.plat.InstallPackage(ctx, "ntfy-sh/ntfy/ntfy")
-}
-
-// cloneNtfyTap clones the ntfy Homebrew tap directly via git instead of via
-// `brew tap ntfy/ntfy`, eliminating the "Username for 'https://github.com':"
-// credential prompt that persists even when GIT_TERMINAL_PROMPT=0 and
-// GIT_CONFIG_COUNT env vars are set.
-//
-// Root cause of the prompt: Homebrew's Ruby runtime sanitizes the subprocess
-// environment before forking git — it resets PATH and strips GIT_* env vars.
-// Every env-based approach (GIT_TERMINAL_PROMPT, GIT_CONFIG_COUNT, git wrapper
-// in PATH) is therefore ineffective for brew-internal git calls. Calling git
-// ourselves with -c credential.helper= works because the -c flag is parsed by
-// git itself before any external config and cannot be stripped by brew.
-//
-// After this function cloneNtfyTap succeeds, brew install reads the formula
-// from the already-present tap directory without invoking git again (Homebrew
-// skips git operations on taps when HOMEBREW_NO_AUTO_UPDATE=1, which abysslink
-// sets at startup).
-func (m *Module) cloneNtfyTap(ctx context.Context) error {
-	res, err := m.runner.Run(ctx, "brew", "--repository")
+// The Homebrew-core 'ntfy' formula builds with -tags noserver (client-only).
+// The official GitHub release binary is the full build and includes 'serve'.
+func (m *Module) downloadNtfyReleaseDarwin(ctx context.Context) error {
+	// Resolve latest release tag.
+	apiRes, err := m.runner.Run(ctx, "curl", "-sf", "--max-time", "30",
+		"https://api.github.com/repos/binwiederhier/ntfy/releases/latest")
 	if err != nil {
-		return fmt.Errorf("brew --repository: %w", err)
+		return fmt.Errorf("fetch ntfy release info: %w", err)
 	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("brew --repository exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	if apiRes.ExitCode != 0 {
+		return fmt.Errorf("fetch ntfy release info exited %d: %s", apiRes.ExitCode, strings.TrimSpace(apiRes.Stderr))
 	}
-	// Tap directory for `brew tap ntfy-sh/ntfy`.
-	// The Homebrew convention maps tap "user/repo" →
-	//   clone URL: https://github.com/user/homebrew-repo.git
-	//   local dir: $(brew --repository)/Library/Taps/user/homebrew-repo
-	// Using ntfy-sh/ntfy (not the older ntfy/ntfy): the ntfy/homebrew-ntfy
-	// GitHub repo does not exist as a public repo — GitHub returns 401 for
-	// non-existent repos (to prevent enumeration), triggering the git
-	// credential prompt even though no real authentication is needed.
-	tapDir := filepath.Join(strings.TrimSpace(res.Stdout), "Library", "Taps", "ntfy-sh", "homebrew-ntfy")
-	if _, statErr := os.Stat(tapDir); statErr == nil {
-		return nil // tap already present; brew install will use it as-is
+	var release struct {
+		TagName string `json:"tag_name"`
 	}
-	if err := os.MkdirAll(filepath.Dir(tapDir), 0o755); err != nil {
-		return fmt.Errorf("create tap parent dir: %w", err)
+	if err := json.Unmarshal([]byte(apiRes.Stdout), &release); err != nil {
+		return fmt.Errorf("parse ntfy release JSON: %w", err)
 	}
-	res, err = m.runner.RunWithEnv(ctx,
-		map[string]string{"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""},
-		"git",
-		"-c", "credential.helper=",
-		"-c", "http.prompt=false",
-		"clone", "--depth=1", "--quiet",
-		"https://github.com/ntfy-sh/homebrew-ntfy.git",
-		tapDir,
+	tag := release.TagName              // e.g. "v2.23.0"
+	ver := strings.TrimPrefix(tag, "v") // e.g. "2.23.0"
+	assetName := fmt.Sprintf("ntfy_%s_darwin_all.tar.gz", ver)
+	downloadURL := fmt.Sprintf(
+		"https://github.com/binwiederhier/ntfy/releases/download/%s/%s",
+		tag, assetName,
 	)
+
+	// Download tarball to a temp file.
+	tmpFile := filepath.Join(os.TempDir(), assetName)
+	defer func() { _ = os.Remove(tmpFile) }()
+	dlRes, err := m.runner.Run(ctx, "curl", "-sfL", "--max-time", "120",
+		downloadURL, "-o", tmpFile)
 	if err != nil {
-		return fmt.Errorf("git clone ntfy tap: %w", err)
+		return fmt.Errorf("download ntfy %s: %w", ver, err)
 	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("git clone ntfy tap exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	if dlRes.ExitCode != 0 {
+		return fmt.Errorf("download ntfy %s exited %d: %s", ver, dlRes.ExitCode, strings.TrimSpace(dlRes.Stderr))
 	}
+
+	// Extract to a temp directory.
+	tmpDir, err := os.MkdirTemp("", "ntfy-install-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tarRes, err := m.runner.Run(ctx, "tar", "xzf", tmpFile, "-C", tmpDir)
+	if err != nil {
+		return fmt.Errorf("extract ntfy: %w", err)
+	}
+	if tarRes.ExitCode != 0 {
+		return fmt.Errorf("extract ntfy exited %d: %s", tarRes.ExitCode, strings.TrimSpace(tarRes.Stderr))
+	}
+
+	// Binary sits at <tmpDir>/ntfy_VER_darwin_all/ntfy.
+	extractedBin := filepath.Join(tmpDir, fmt.Sprintf("ntfy_%s_darwin_all", ver), "ntfy")
+
+	// Install to user-local bin dir (no sudo required).
+	installPath := m.ntfyBinPath()
+	if err := os.MkdirAll(filepath.Dir(installPath), 0o755); err != nil {
+		return fmt.Errorf("create install dir %s: %w", filepath.Dir(installPath), err)
+	}
+	cpRes, err := m.runner.Run(ctx, "cp", extractedBin, installPath)
+	if err != nil {
+		return fmt.Errorf("install ntfy binary: %w", err)
+	}
+	if cpRes.ExitCode != 0 {
+		return fmt.Errorf("install ntfy binary: cp exited %d: %s", cpRes.ExitCode, strings.TrimSpace(cpRes.Stderr))
+	}
+	chmodRes, err := m.runner.Run(ctx, "chmod", "0755", installPath)
+	if err != nil {
+		return fmt.Errorf("chmod ntfy binary: %w", err)
+	}
+	if chmodRes.ExitCode != 0 {
+		return fmt.Errorf("chmod ntfy binary exited %d: %s", chmodRes.ExitCode, strings.TrimSpace(chmodRes.Stderr))
+	}
+
+	slog.Info("ntfy: installed server binary", "path", installPath, "version", ver)
 	return nil
 }
 
@@ -280,8 +316,8 @@ func (m *Module) Apply(ctx context.Context) error {
 		return nil
 	}
 
-	// Install the ntfy push server if it is not on PATH.
-	if res, verErr := m.runner.Run(ctx, "ntfy", "serve", "--help"); verErr != nil || res.ExitCode != 0 {
+	// Install the ntfy push server if it is not present with server support.
+	if !m.ntfyInstalled(ctx) {
 		slog.Info("ntfy apply: installing ntfy push server")
 		if err := m.installNtfyBinary(ctx); err != nil {
 			return fmt.Errorf("ntfy apply: install ntfy: %w", err)
@@ -314,9 +350,10 @@ func (m *Module) Apply(ctx context.Context) error {
 		return fmt.Errorf("ntfy apply: provision admin user: %w", err)
 	}
 
+	ntfyBin := m.ntfyBinPath()
 	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
 		Label:      "dev.abysslink.ntfy",
-		Args:       []string{"ntfy", "serve", "--config", cfgPath},
+		Args:       []string{ntfyBin, "serve", "--config", cfgPath},
 		KeepAlive:  true,
 		RunAtLoad:  true,
 		StdoutPath: filepath.Join(home, ".local", "state", "abysslink", "ntfy.log"),
@@ -345,9 +382,10 @@ func (m *Module) ensureAdminUser(ctx context.Context) error {
 			return fmt.Errorf("store ntfy password: %w", err)
 		}
 	}
+	ntfyBin := m.ntfyBinPath()
 	// `ntfy user add --role=admin admin` reads the password from stdin twice.
 	res, err := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
-		"ntfy", "user", "add", "--role=admin", "admin")
+		ntfyBin, "user", "add", "--role=admin", "admin")
 	if err != nil {
 		return fmt.Errorf("ntfy user add: %w", err)
 	}
