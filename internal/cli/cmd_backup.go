@@ -16,11 +16,15 @@
 package cli
 
 import (
+	"context"
+	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -111,10 +115,14 @@ func newBackupRestoreCmd() *cobra.Command {
 
 			if cc.dryRun {
 				printerInfo(p, fmt.Sprintf("[plan] would restore %s from backup %s (use --apply)", target, backupLabel))
+				// Also show the diff preview in dry-run so the user sees what will change.
+				if previewErr := restoreDiffPreview(p, target, latest, backupLabel); previewErr != nil {
+					printerInfo(p, styleMuted.Render(fmt.Sprintf("  (diff preview unavailable: %v)", previewErr)))
+				}
 				return nil
 			}
 
-			ok, err := confirmAction(ctx, cc, fmt.Sprintf("Restore %s from backup dated %s?", target, backupLabel))
+			ok, err := confirmRestore(ctx, p, target, latest, backupLabel, cc.yes)
 			if err != nil {
 				return err
 			}
@@ -132,4 +140,137 @@ func newBackupRestoreCmd() *cobra.Command {
 	}
 	cmd.Flags().Bool("original", false, "Restore the earliest (pre-abysslink) backup instead of the most recent")
 	return cmd
+}
+
+// restoreDiffPreview computes and prints a change summary before a restore.
+// It reads the current live target (if it exists) and the chosen backup file,
+// computes SHA-256 hashes for each, and prints a diff summary showing how the
+// content will change. It does NOT mutate anything — callers invoke this for
+// both dry-run and interactive preview before confirming.
+//
+// If the target does not exist (i.e. abysslink created it and there is no
+// prior version), the preview notes that fact instead of erroring.
+func restoreDiffPreview(p Printer, target, backupPath, backupLabel string) error {
+	// Read backup content (must exist).
+	backupBytes, err := os.ReadFile(backupPath) //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("read backup %s: %w", backupPath, err)
+	}
+	backupHash := fmt.Sprintf("%x", sha256.Sum256(backupBytes))
+
+	// Read current target content (may not exist).
+	var currentBytes []byte
+	var currentHash string
+	currentMissing := false
+	currentBytes, err = os.ReadFile(target) //nolint:gosec
+	if err != nil {
+		if os.IsNotExist(err) {
+			currentMissing = true
+		} else {
+			return fmt.Errorf("read current %s: %w", target, err)
+		}
+	} else {
+		currentHash = fmt.Sprintf("%x", sha256.Sum256(currentBytes))
+	}
+
+	printerInfo(p, "")
+	printerInfo(p, styleBold.Render("Restore preview"))
+	printerInfo(p, "")
+
+	if currentMissing {
+		printerInfo(p, fmt.Sprintf(
+			"  %s does not exist (created by abysslink).", target))
+		printerInfo(p, fmt.Sprintf(
+			"  Restoring backup dated %s (sha256: %s…)",
+			backupLabel, backupHash[:12]))
+		printerInfo(p, "")
+		return nil
+	}
+
+	// Same content: nothing to change.
+	if currentHash == backupHash {
+		printerInfo(p, fmt.Sprintf(
+			"  %s and backup dated %s are identical (sha256: %s…).",
+			target, backupLabel, backupHash[:12]))
+		printerInfo(p, "")
+		return nil
+	}
+
+	// Show per-file hashes and a concise line-diff summary.
+	printerInfo(p, fmt.Sprintf(
+		"  Will replace  %s", target))
+	printerInfo(p, fmt.Sprintf(
+		"  Current sha256: %s…", currentHash[:12]))
+	printerInfo(p, fmt.Sprintf(
+		"  Backup sha256 : %s…  (dated %s)", backupHash[:12], backupLabel))
+	printerInfo(p, "")
+
+	// Print a simple line-level diff summary (first few differing lines).
+	printLineDiffSummary(p, currentBytes, backupBytes)
+	return nil
+}
+
+// printLineDiffSummary prints a concise summary of the first changed lines
+// between current and backup bytes. It does not require an external diff library.
+// At most maxDiffLines changed lines are shown; excess is summarised.
+func printLineDiffSummary(p Printer, current, backup []byte) {
+	const maxDiffLines = 6
+
+	currentLines := strings.Split(string(current), "\n")
+	backupLines := strings.Split(string(backup), "\n")
+
+	shown := 0
+	maxLines := len(currentLines)
+	if len(backupLines) > maxLines {
+		maxLines = len(backupLines)
+	}
+
+	for i := 0; i < maxLines && shown < maxDiffLines; i++ {
+		cur := ""
+		bak := ""
+		if i < len(currentLines) {
+			cur = currentLines[i]
+		}
+		if i < len(backupLines) {
+			bak = backupLines[i]
+		}
+		if cur == bak {
+			continue
+		}
+		if cur != "" {
+			printerInfo(p, styleMuted.Render(fmt.Sprintf("  - %s", cur)))
+		}
+		if bak != "" {
+			printerInfo(p, styleInfo.Render(fmt.Sprintf("  + %s", bak)))
+		}
+		shown++
+	}
+
+	if maxLines > maxDiffLines+shown {
+		printerInfo(p, styleMuted.Render(fmt.Sprintf(
+			"  … and %d more line(s) differ.", maxLines-maxDiffLines-shown)))
+	}
+	printerInfo(p, "")
+}
+
+// confirmRestore prints the diff preview and asks the user to confirm the
+// restore. With --yes it returns (true, nil) immediately. In a non-interactive
+// context (no TTY, no --yes) it returns (false, nil) so callers can print
+// "Aborted." without hanging.
+func confirmRestore(ctx context.Context, p Printer, target, backupPath, backupLabel string, yes bool) (bool, error) {
+	if err := restoreDiffPreview(p, target, backupPath, backupLabel); err != nil {
+		printerInfo(p, styleMuted.Render(fmt.Sprintf("  (diff preview unavailable: %v)", err)))
+	}
+
+	if yes {
+		return true, nil
+	}
+
+	if !interactive(false, false) {
+		return false, nil
+	}
+
+	return tui.Confirm(ctx,
+		fmt.Sprintf("Restore %s from backup dated %s?", target, backupLabel),
+		yes)
 }
