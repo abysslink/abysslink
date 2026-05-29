@@ -26,6 +26,7 @@ import (
 	"github.com/abysslink/abysslink/internal/modules"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
@@ -64,11 +65,7 @@ func newUpCmd() *cobra.Command {
 			}
 
 			// Pass 1 — Scan phase (always runs).
-			printerInfo(p, "  "+iconSpinStr()+"  "+styleMuted.Render(fmt.Sprintf("Scanning %d modules...", len(mods))))
-
-			actions, findings, planErr := r.PlanAll(ctx, func(evt modules.ModuleEvent) {
-				printerInfo(p, scanRowStr(evt))
-			})
+			actions, findings, planErr := runScan(ctx, p, r, mods, cc)
 			if planErr != nil {
 				return fmt.Errorf("up: %w", planErr)
 			}
@@ -85,18 +82,10 @@ func newUpCmd() *cobra.Command {
 			// Pass 2 — Apply phase (only if not dry-run).
 			var applyFindings []modules.Finding
 			var applyErr error
+			var applyElapsed time.Duration
 			if !cc.dryRun {
-				unique := uniqueActions(actions)
-				printSudoNotice(p, unique)
-				printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
-				printerInfo(p, "  "+styleBold.Render(fmt.Sprintf("Applying %d changes...", len(unique))))
-				printerInfo(p, "")
-
-				start := time.Now()
-				applyFindings, applyErr = r.ApplyAll(ctx, func(evt modules.ModuleEvent) {
-					printerInfo(p, applyRowStr(evt))
-				})
-				printFinalSummary(p, actions, applyFindings, time.Since(start))
+				applyFindings, applyElapsed, applyErr = runApply(ctx, cmd, p, r, actions, cc)
+				printFinalSummary(p, actions, applyFindings, applyElapsed)
 			}
 
 			// Pass 3 — Next steps + success summary (always runs).
@@ -119,25 +108,179 @@ func newUpCmd() *cobra.Command {
 	return cmd
 }
 
-// printSudoNotice warns the user that some planned actions require sudo,
-// listing exactly which ones so there are no surprises when the password prompt appears.
-func printSudoNotice(p Printer, actions []modules.Action) {
-	// Descriptions that are known to require elevated privileges.
+// runScan runs the Plan phase for all modules, choosing between an animated live
+// table (TTY, color enabled, not JSON) and the plain printer callback path.
+// Returns the combined actions, findings, and first error.
+func runScan(ctx context.Context, p Printer, r *modules.Runner, mods []modules.Module, cc *cmdContext) ([]modules.Action, []modules.Finding, error) {
+	animate := animationEnabled(cc.jsonOut)
+
+	if animate {
+		return runScanAnimated(ctx, p, r, mods)
+	}
+
+	// Plain path — emit rows via Printer as events arrive.
+	printerInfo(p, "  "+iconSpinStr()+"  "+styleMuted.Render(fmt.Sprintf("Scanning %d modules...", len(mods))))
+	return r.PlanAll(ctx, func(evt modules.ModuleEvent) {
+		printerInfo(p, scanRowStr(evt))
+	})
+}
+
+// runScanAnimated drives a live tui.LiveTable for the scan phase.
+func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modules.Module) ([]modules.Action, []modules.Finding, error) {
+	table := tui.NewLiveTable()
+	resultCh := make(chan struct {
+		actions  []modules.Action
+		findings []modules.Finding
+		err      error
+	}, 1)
+
+	go func() {
+		actions, findings, err := r.PlanAll(ctx, func(evt modules.ModuleEvent) {
+			table.SendRow(tui.RowEvent{
+				Module:  evt.Module,
+				Index:   evt.Index,
+				Total:   evt.Total,
+				HasWarn: hasFindingSeverity(evt.Findings, modules.SeverityWarning),
+				WarnMsg: firstFindingMessage(evt.Findings, nil),
+			})
+		})
+		table.Done(err)
+		resultCh <- struct {
+			actions  []modules.Action
+			findings []modules.Finding
+			err      error
+		}{actions, findings, err}
+	}()
+
+	if _, err := runTableProgram(table); err != nil {
+		return nil, nil, err
+	}
+
+	res := <-resultCh
+	return res.actions, res.findings, res.err
+}
+
+// runApply runs the Apply phase, wrapping with a ConfirmBlast gate and choosing
+// between animated and plain output paths. Returns findings, elapsed time, and error.
+// If the user aborts via ConfirmBlast, findings and elapsed are zero and error is nil.
+func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Runner, actions []modules.Action, cc *cmdContext) ([]modules.Finding, time.Duration, error) {
+	unique := uniqueActions(actions)
+	sudoLines := sudoActionsFromActions(unique)
+
+	// Build a summary string for ConfirmBlast.
+	var sb strings.Builder
+	if len(sudoLines) > 0 {
+		sb.WriteString("sudo required for:\n")
+		for _, l := range sudoLines {
+			sb.WriteString("  " + l + "\n")
+		}
+	}
+	summary := strings.TrimRight(sb.String(), "\n")
+
+	// ConfirmBlast — the last gate before mutation (after fail-closed gates).
+	// Skipped when cc.yes=true (ConfirmBlast handles that internally).
+	// Never reached in dry-run (caller guards).
+	ok, err := tui.ConfirmBlast(cmd.Context(), summary, len(unique), cc.yes)
+	if err != nil {
+		return nil, 0, fmt.Errorf("up: confirm: %w", err)
+	}
+	if !ok {
+		printerInfo(p, "  Aborted.")
+		return nil, 0, nil
+	}
+
+	// Proceed with apply.
+	printSudoNotice(p, unique)
+	printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
+	printerInfo(p, "  "+styleBold.Render(fmt.Sprintf("Applying %d changes...", len(unique))))
+	printerInfo(p, "")
+
+	animate := animationEnabled(cc.jsonOut)
+	if animate {
+		findings, applyErr := runApplyAnimated(ctx, r)
+		return findings, 0, applyErr
+	}
+
+	// Plain path.
+	start := time.Now()
+	findings, applyErr := r.ApplyAll(ctx, func(evt modules.ModuleEvent) {
+		printerInfo(p, applyRowStr(evt))
+	})
+	return findings, time.Since(start), applyErr
+}
+
+// runApplyAnimated drives a live tui.LiveTable for the apply phase.
+func runApplyAnimated(ctx context.Context, r *modules.Runner) ([]modules.Finding, error) {
+	table := tui.NewLiveTable()
+	resultCh := make(chan struct {
+		findings []modules.Finding
+		err      error
+	}, 1)
+
+	go func() {
+		findings, err := r.ApplyAll(ctx, func(evt modules.ModuleEvent) {
+			table.SendRow(tui.RowEvent{
+				Module:   evt.Module,
+				Index:    evt.Index,
+				Total:    evt.Total,
+				HasError: evt.ApplyErr != nil,
+				ErrMsg:   firstFindingMessage(evt.Findings, evt.ApplyErr),
+				HasWarn:  hasFindingSeverity(evt.Findings, modules.SeverityWarning),
+				WarnMsg:  firstFindingMessage(evt.Findings, nil),
+			})
+		})
+		table.Done(err)
+		resultCh <- struct {
+			findings []modules.Finding
+			err      error
+		}{findings, err}
+	}()
+
+	if _, err := runTableProgram(table); err != nil {
+		return nil, err
+	}
+
+	res := <-resultCh
+	return res.findings, res.err
+}
+
+// runTableProgram runs the LiveTable as a Bubble Tea program and returns
+// the final model. Factored out to keep animated helpers small.
+func runTableProgram(table *tui.LiveTable) (*tui.LiveTable, error) {
+	// Import bubbletea to run the program.
+	// We run via tui.RunLiveTable to avoid direct bubbletea import here.
+	return tui.RunLiveTable(table)
+}
+
+// sudoActionsFromActions returns the display strings for actions that require
+// elevated privileges (sudo). The caller uses this for both the printSudoNotice
+// display and the ConfirmBlast summary.
+func sudoActionsFromActions(actions []modules.Action) []string {
 	sudoKeywords := []string{
 		"pmset",          // power module (macOS)
 		"systemctl",      // Linux daemon management
 		"socketfilterfw", // macOS application firewall
 	}
 
-	var sudoActions []string
+	var result []string
 	for _, a := range actions {
 		for _, kw := range sudoKeywords {
 			if strings.Contains(strings.ToLower(a.Description), kw) ||
 				strings.Contains(strings.ToLower(a.Module), kw) {
-				sudoActions = append(sudoActions, fmt.Sprintf("%-18s %s", a.Module, styleMuted.Render(a.Description)))
+				result = append(result, fmt.Sprintf("%-18s %s", a.Module, styleMuted.Render(a.Description)))
 				break
 			}
 		}
+	}
+	return result
+}
+
+// printSudoNotice warns the user that some planned actions require sudo,
+// listing exactly which ones so there are no surprises when the password prompt appears.
+func printSudoNotice(p Printer, actions []modules.Action) {
+	sudoActions := sudoActionsFromActions(actions)
+	if len(sudoActions) == 0 {
+		return
 	}
 
 	printerInfo(p, "")

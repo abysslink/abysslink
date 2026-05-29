@@ -202,5 +202,20 @@ func RenderScanRows(rows []RowEvent, hasActionsMap map[string]bool) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+// RunLiveTable runs the given LiveTable as a Bubble Tea program and returns the
+// final LiveTable model. Events must be sent via SendRow and Done must be called
+// from a separate goroutine before this function returns.
+func RunLiveTable(table *LiveTable) (*LiveTable, error) {
+	prog := tea.NewProgram(table)
+	final, err := prog.Run()
+	if err != nil {
+		return table, fmt.Errorf("live table program: %w", err)
+	}
+	if lt, ok := final.(*LiveTable); ok {
+		return lt, nil
+	}
+	return table, nil
+}
+
 // Ensure LiveTable implements tea.Model at compile time.
 var _ tea.Model = (*LiveTable)(nil)
