@@ -255,14 +255,11 @@ type optionalACLPort struct {
 }
 
 // optionalACLPorts returns the set of enabled modules whose ports are not
-// covered by the default ACL (SSH tcp/22 + mosh udp/60000-61000). Every entry
-// here requires an explicit `abysslink acl push` before the phone can reach the
-// service.
+// covered by the default ACL (SSH tcp/22 + ntfy tcp/2586 + mosh udp/60000-61000).
+// Every entry here requires an explicit `abysslink acl push` before the phone
+// can reach the service.
 func optionalACLPorts(cfg *config.Config) []optionalACLPort {
 	var out []optionalACLPort
-	if cfg.Modules.Ntfy.Enabled {
-		out = append(out, optionalACLPort{"ntfy", fmt.Sprintf("tcp/%d", cfg.Modules.Ntfy.ListenPort())})
-	}
 	if cfg.Modules.CodeServer.Enabled {
 		out = append(out, optionalACLPort{"code-server", "tcp/8080"})
 	}
