@@ -27,8 +27,13 @@ func newEnableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "enable <module>",
 		Short: "Enable an optional module in abysslink.yaml",
-		Args:  cobra.ExactArgs(1),
-		RunE:  func(cmd *cobra.Command, args []string) error { return toggleModule(cmd, args[0], true) },
+		Example: `  # Enable the Claude Code integration module
+  abysslink enable claudecode --apply
+
+  # Enable code-server (VS Code in browser)
+  abysslink enable code-server --apply`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error { return toggleModule(cmd, args[0], true) },
 	}
 }
 

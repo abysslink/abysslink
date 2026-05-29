@@ -46,6 +46,11 @@ func newUpgradeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Upgrade abysslink to the latest release",
+		Example: `  # Preview the upgrade (dry-run — no changes)
+  abysslink upgrade
+
+  # Download and install the latest release
+  abysslink upgrade --apply`,
 		RunE: func(c *cobra.Command, _ []string) error {
 			if os.Getuid() == 0 {
 				return fmt.Errorf("upgrade: refusing to run as root — run as your normal user")

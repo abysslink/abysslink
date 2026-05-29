@@ -49,6 +49,8 @@ func newThreatModelCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "threat-model",
 		Short: "Print the security threat model with the current ✓/✗ status of each defense",
+		Example: `  # Show the threat model and current security posture
+  abysslink threat-model`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
