@@ -35,6 +35,14 @@ func newUpCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "up",
 		Short: "Converge the system to match abysslink.yaml (dry-run by default)",
+		Example: `  # Preview what up would do (dry-run by default — no changes)
+  abysslink up
+
+  # Apply all changes (converge the system)
+  abysslink up --apply
+
+  # Show per-action rationale alongside each planned change
+  abysslink up --explain`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)

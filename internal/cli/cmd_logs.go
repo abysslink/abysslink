@@ -31,6 +31,14 @@ func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs",
 		Short: "Show the abysslink audit log, filtered by age and module",
+		Example: `  # Show the full audit log
+  abysslink logs
+
+  # Show mutations from the last 24 hours
+  abysslink logs --since 24h
+
+  # Filter by module
+  abysslink logs --module tailscale`,
 		RunE: func(c *cobra.Command, _ []string) error {
 			p := newPrinter(c)
 

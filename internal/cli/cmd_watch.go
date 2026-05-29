@@ -35,6 +35,11 @@ func newWatchAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add",
 		Short: "Add a watcher: --pane <p>, or --file <path> --grep <re>, or --http <url>",
+		Example: `  # Watch a tmux pane for idle
+  abysslink watch add --pane 0 --label "main session"
+
+  # Watch a log file for a pattern
+  abysslink watch add --file /var/log/app.log --grep "ERROR"`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			pane, _ := cmd.Flags().GetString("pane")
 			file, _ := cmd.Flags().GetString("file")
@@ -80,6 +85,11 @@ func newWatchRemoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove",
 		Short: "Remove a watcher by --pane, --file, or --http identifier",
+		Example: `  # Remove a tmux pane watcher
+  abysslink watch remove --pane 0 --apply
+
+  # Remove a file watcher
+  abysslink watch remove --file /var/log/app.log --apply`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			pane, _ := cmd.Flags().GetString("pane")
 			file, _ := cmd.Flags().GetString("file")
@@ -124,6 +134,8 @@ func newWatchListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List configured watchers",
+		Example: `  # Show all configured watchers
+  abysslink watch list`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			p := newPrinter(cmd)
 			cfg, err := config.Load(resolveConfigPath(cmd))

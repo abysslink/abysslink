@@ -41,6 +41,8 @@ func newEnrollCmd() *cobra.Command {
 		&cobra.Command{
 			Use:   "rig",
 			Short: "Add another laptop to the tailnet (v2 placeholder)",
+			Example: `  # Enroll a second laptop (v2 feature — stub for now)
+  abysslink enroll rig`,
 			RunE: func(cmd *cobra.Command, _ []string) error {
 				printerInfo(newPrinter(cmd), "Multi-rig enrollment is a v2 feature. For now, run `abysslink init` + `abysslink up` on the new machine.")
 				return nil
@@ -54,6 +56,11 @@ func newEnrollPhoneCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "phone",
 		Short: "Mint a tagged auth key, show a QR, and walk through phone pairing",
+		Example: `  # Show a QR code for phone pairing and walk through enrollment
+  abysslink enroll phone
+
+  # Non-interactive enrollment (skip Pause stops)
+  abysslink enroll phone --yes`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)

@@ -29,6 +29,11 @@ func newNotifyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "notify [title] [body]",
 		Short: "Send a notification via the ntfy backend or wrap a command",
+		Example: `  # Send a simple notification
+  abysslink notify "Build done" "CI passed"
+
+  # Send a notification with body from stdin
+  echo "output" | abysslink notify "Script done" --stdin`,
 	}
 
 	cmd.Flags().Bool("stdin", false, "Read notification body from stdin")

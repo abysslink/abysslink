@@ -41,6 +41,8 @@ func newBackupLsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ls",
 		Short: "List files abysslink has modified and their available backups",
+		Example: `  # List all backed-up files and their modification history
+  abysslink backup ls`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			p := newPrinter(cmd)
 
@@ -81,7 +83,12 @@ func newBackupRestoreCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "restore <path>",
 		Short: "Restore a file to its most recent abysslink backup",
-		Args:  cobra.ExactArgs(1),
+		Example: `  # Preview restoring a file (dry-run — no changes)
+  abysslink backup restore /etc/ssh/sshd_config
+
+  # Restore a file from its most recent backup
+  abysslink backup restore /etc/ssh/sshd_config --apply`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)

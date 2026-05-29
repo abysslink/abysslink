@@ -65,6 +65,8 @@ func newACLPullCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "pull",
 		Short: "Print the current tailnet ACL",
+		Example: `  # Print the current tailnet ACL (requires admin credentials)
+  abysslink acl pull`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, _, admin, err := requireAdmin(cmd)
 			if err != nil {
@@ -84,6 +86,11 @@ func newACLPushCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "push",
 		Short: "Converge the tailnet ACL to abysslink's required policy",
+		Example: `  # Preview ACL push (dry-run — no changes)
+  abysslink acl push
+
+  # Apply ACL changes to the tailnet
+  abysslink acl push --apply`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -107,6 +114,8 @@ func newACLValidateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "validate",
 		Short: "Check the tailnet ACL is valid HuJSON and contains abysslink's rules",
+		Example: `  # Validate the tailnet ACL against abysslink's required rules
+  abysslink acl validate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, cc, admin, err := requireAdmin(cmd)
 			if err != nil {
@@ -139,6 +148,8 @@ func newACLDiffCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "diff",
 		Short: "Show the changes abysslink would make to the tailnet ACL",
+		Example: `  # Show a diff of ACL changes abysslink would apply
+  abysslink acl diff`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, cc, admin, err := requireAdmin(cmd)
 			if err != nil {
