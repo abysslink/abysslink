@@ -99,6 +99,8 @@ func newEnrollPhoneCmd() *cobra.Command {
 			printNtfyQR(ctx, p, cc)
 
 			// Printable runbook for the remaining manual steps.
+			// §7 note 10 (lock-screen hygiene) fires here alongside the runbook.
+			emitSecurityNote(p, "lock-screen-hygiene") // §7 note 10
 			if path, err := writeRunbook(ctx, cc); err == nil {
 				printerInfo(p, "")
 				printerInfo(p, "Manual steps (SSO passkey, disable SMS 2FA, hide lock-screen previews) are in:")

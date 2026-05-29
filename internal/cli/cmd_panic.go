@@ -59,6 +59,8 @@ func newPanicCmd() *cobra.Command {
 			emit("       https://console.anthropic.com/settings/keys")
 			emit("  2. If devices could not be revoked above, remove them at:")
 			emit("       https://login.tailscale.com/admin/machines")
+			// §7 note 12: panic is reversible via repair.
+			emitSecurityNote(p, "panic-reversible")
 			return nil
 		},
 	}
