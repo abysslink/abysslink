@@ -17,7 +17,6 @@ package ntfy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -32,9 +31,7 @@ import (
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
-const (
-	serverConfigPath = ".config/ntfy/server.yml"
-)
+const serverConfigPath = ".config/ntfy/server.yml"
 
 // Module implements the ntfy module.
 type Module struct {
@@ -61,15 +58,12 @@ func (m *Module) Name() string { return "ntfy" }
 // Deps returns the module's dependencies.
 func (m *Module) Deps() []string { return []string{"tailscale"} }
 
-// ntfyBinPath returns the full path to the ntfy server binary.
-//
-// On macOS, the Homebrew-core formula only builds the client (no 'serve'
-// subcommand) and the GitHub release darwin binary is also client-only.
-// abysslink builds the server from source via `go install` and places the
-// resulting binary in ~/.local/bin/ntfy.
-//
-// On Linux the system package manager installs a full server binary; PATH
-// lookup is sufficient.
+// ntfyBinPath returns the path to use when running ntfy server commands.
+// On macOS the Homebrew formula and GitHub release binaries are client-only
+// (the ntfy server is not officially supported on macOS — see
+// https://docs.ntfy.sh/install/). Users who manually install a server build
+// should place it at ~/.local/bin/ntfy so abysslink finds it.
+// On Linux the system package installs a full server binary on PATH.
 func (m *Module) ntfyBinPath() string {
 	if m.plat.OS() != "darwin" {
 		return "ntfy"
@@ -81,12 +75,11 @@ func (m *Module) ntfyBinPath() string {
 	return filepath.Join(home, ".local", "bin", "ntfy")
 }
 
-// ntfyInstalled returns true when the ntfy binary at ntfyBinPath() exists and
-// lists 'serve' as a top-level subcommand. This distinguishes the server build
-// from the client-only Homebrew/release builds, which only advertise 'publish'
-// and 'subscribe'. We must not match on the substring "server" (which appears
-// in help text like "Discord server") — we check for 'serve' at the start of a
-// trimmed help line.
+// ntfyInstalled returns true when the ntfy binary exists and lists 'serve' as
+// a top-level subcommand. Client-only builds (Homebrew, darwin release) only
+// advertise 'publish' and 'subscribe'. We avoid matching "server" (substring
+// of "serve") by checking that 'serve' appears at the start of a help line
+// followed by a space or comma.
 func (m *Module) ntfyInstalled(ctx context.Context) bool {
 	res, err := m.runner.Run(ctx, m.ntfyBinPath(), "--help")
 	if err != nil || res.ExitCode != 0 {
@@ -95,7 +88,6 @@ func (m *Module) ntfyInstalled(ctx context.Context) bool {
 	out := res.Stdout + res.Stderr
 	for _, line := range strings.Split(out, "\n") {
 		t := strings.TrimSpace(line)
-		// Match lines like "   serve     Run the ntfy server" or "   serve, s  ..."
 		if strings.HasPrefix(t, "serve") && len(t) > 5 && (t[5] == ' ' || t[5] == ',') {
 			return true
 		}
@@ -108,17 +100,24 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	var findings []modules.Finding
 
 	if !m.ntfyInstalled(ctx) {
+		sev := modules.SeverityFatal
+		msg := "ntfy is not installed or not on PATH"
+		if m.plat.OS() == "darwin" {
+			// ntfy server is not officially supported on macOS — not a fatal
+			// error; use ntfy.sh cloud or a Linux machine as the broker.
+			sev = modules.SeverityWarning
+			msg = "ntfy server not supported on macOS — configure ntfy.sh in abysslink.yaml (https://ntfy.sh)"
+		}
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "installed",
-			Severity: modules.SeverityFatal,
-			Message:  "ntfy is not installed or not on PATH",
+			Severity: sev,
+			Message:  msg,
 		})
 		return findings, nil
 	}
 	slog.Debug("ntfy installed", "bin", m.ntfyBinPath())
 
-	// Check if server config exists.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return findings, fmt.Errorf("ntfy detect: get home dir: %w", err)
@@ -139,7 +138,6 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		return findings, fmt.Errorf("ntfy detect: read config: %w", err)
 	}
 
-	// Security check: verify the listen address does NOT bind to 0.0.0.0.
 	cfgContent := string(data)
 	if strings.Contains(cfgContent, "0.0.0.0") || hasWildcardListen(cfgContent) {
 		findings = append(findings, modules.Finding{
@@ -160,128 +158,12 @@ func hasWildcardListen(cfgContent string) bool {
 		if strings.HasPrefix(line, "listen-http:") {
 			val := strings.TrimSpace(strings.TrimPrefix(line, "listen-http:"))
 			val = strings.Trim(val, `"'`)
-			// A value like ":8080" (no host) binds to all interfaces.
 			if strings.HasPrefix(val, ":") {
 				return true
 			}
 		}
 	}
 	return false
-}
-
-// installNtfyBinary installs the ntfy push-notification server.
-//
-// On macOS, both the Homebrew-core formula and the official GitHub release
-// darwin binary are client-only builds. We build the server from source via
-// `go install` (which includes server support when CGO/SQLite is available).
-// CGO is available on any macOS developer machine with Xcode Command Line Tools.
-//
-// On Linux, the ntfy package from the system package manager is a full build
-// that includes the server.
-func (m *Module) installNtfyBinary(ctx context.Context) error {
-	if m.plat.OS() == "darwin" {
-		return m.buildNtfyServerDarwin(ctx)
-	}
-	return m.plat.InstallPackage(ctx, "ntfy")
-}
-
-// buildNtfyServerDarwin builds and installs the ntfy server binary from source.
-//
-// `go install` is rejected for ntfy because ntfy's go.mod contains replace
-// directives (forbidden for external `go install`). We download the source
-// tarball instead and run `go build -C <srcdir>`, which allows replace
-// directives because the source becomes the main module.
-//
-// Build time: ~2 min on first run; subsequent runs skip if binary already has
-// the 'serve' subcommand.
-func (m *Module) buildNtfyServerDarwin(ctx context.Context) error {
-	// Resolve latest release tag.
-	apiRes, err := m.runner.Run(ctx, "curl", "-sf", "--max-time", "30",
-		"https://api.github.com/repos/binwiederhier/ntfy/releases/latest")
-	if err != nil {
-		return fmt.Errorf("fetch ntfy release info: %w", err)
-	}
-	if apiRes.ExitCode != 0 {
-		return fmt.Errorf("fetch ntfy release info exited %d: %s", apiRes.ExitCode, strings.TrimSpace(apiRes.Stderr))
-	}
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.Unmarshal([]byte(apiRes.Stdout), &release); err != nil {
-		return fmt.Errorf("parse ntfy release JSON: %w", err)
-	}
-	tag := release.TagName              // e.g. "v2.23.0"
-	ver := strings.TrimPrefix(tag, "v") // e.g. "2.23.0"
-
-	// Download source tarball — avoids git credentials and go install restrictions.
-	archiveURL := fmt.Sprintf("https://github.com/binwiederhier/ntfy/archive/refs/tags/%s.tar.gz", tag)
-	tmpTar := filepath.Join(os.TempDir(), fmt.Sprintf("ntfy-src-%s.tar.gz", ver))
-	defer func() { _ = os.Remove(tmpTar) }()
-	dlRes, err := m.runner.Run(ctx, "curl", "-sfL", "--max-time", "120", archiveURL, "-o", tmpTar)
-	if err != nil {
-		return fmt.Errorf("download ntfy source: %w", err)
-	}
-	if dlRes.ExitCode != 0 {
-		return fmt.Errorf("download ntfy source exited %d: %s", dlRes.ExitCode, strings.TrimSpace(dlRes.Stderr))
-	}
-
-	// Extract — use --strip-components=1 so contents land directly in tmpDir.
-	tmpDir, err := os.MkdirTemp("", "ntfy-build-*")
-	if err != nil {
-		return fmt.Errorf("create temp dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-	tarRes, err := m.runner.Run(ctx, "tar", "xzf", tmpTar, "--strip-components=1", "-C", tmpDir)
-	if err != nil {
-		return fmt.Errorf("extract ntfy source: %w", err)
-	}
-	if tarRes.ExitCode != 0 {
-		return fmt.Errorf("extract ntfy source exited %d: %s", tarRes.ExitCode, strings.TrimSpace(tarRes.Stderr))
-	}
-
-	// ntfy's server/server.go uses //go:embed docs to bundle the web UI.
-	// The web UI is built separately (npm) and is not included in the source
-	// archive. Create a placeholder so the embed compiles; the web UI will
-	// return 404 for browser requests but the push notification API is
-	// unaffected — the mobile app never touches the web UI.
-	docsPlaceholder := filepath.Join(tmpDir, "server", "docs", "placeholder.txt")
-	if err := os.MkdirAll(filepath.Dir(docsPlaceholder), 0o755); err != nil {
-		return fmt.Errorf("create server/docs dir: %w", err)
-	}
-	if err := os.WriteFile(docsPlaceholder, []byte("web UI not built — push notification API functional\n"), 0o644); err != nil { //nolint:gosec
-		return fmt.Errorf("create server/docs placeholder: %w", err)
-	}
-
-	// Build from extracted source. `-C` sets the working dir (Go 1.21+).
-	// CGO is on by default on macOS with Xcode CLT → SQLite compiles → server included.
-	installPath := m.ntfyBinPath()
-	if err := os.MkdirAll(filepath.Dir(installPath), 0o755); err != nil {
-		return fmt.Errorf("create install dir: %w", err)
-	}
-	slog.Info("ntfy: building server from source (first run ~2 min)", "src", tmpDir, "out", installPath)
-	buildRes, err := m.runner.Run(ctx, "go", "build", "-C", tmpDir, "-o", installPath, ".")
-	if err != nil {
-		return fmt.Errorf("go build ntfy: %w", err)
-	}
-	if buildRes.ExitCode != 0 {
-		return fmt.Errorf("go build ntfy exited %d: %s — install ntfy manually: https://docs.ntfy.sh/install/",
-			buildRes.ExitCode, strings.TrimSpace(buildRes.Stderr))
-	}
-	return nil
-}
-
-// generateServerConfig returns the ntfy server.yml contents bound to tailnetIP.
-// home must be an absolute path (from os.UserHomeDir) so the auth-file path is
-// correct even when HOME is unset (e.g. launchd agent context).
-func (m *Module) generateServerConfig(tailnetIP, home string) []byte {
-	port := fmt.Sprintf("%d", m.cfg.Modules.Ntfy.ListenPort())
-	return []byte(fmt.Sprintf(`# ntfy server config — managed by abysslink
-listen-http: "%s:%s"
-base-url: "http://%s:%s"
-auth-file: "%s/.local/state/abysslink/ntfy/user.db"
-auth-default-access: "deny-all"
-behind-proxy: false
-`, tailnetIP, port, tailnetIP, port, home))
 }
 
 // Plan computes actions needed.
@@ -299,11 +181,19 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	for _, f := range findings {
 		switch f.Check {
 		case "installed":
-			actions = append(actions, modules.Action{
-				Module:      m.Name(),
-				Description: "install ntfy",
-				Reversible:  false,
-			})
+			if m.plat.OS() == "darwin" {
+				actions = append(actions, modules.Action{
+					Module:      m.Name(),
+					Description: "ACTION REQUIRED: configure ntfy.sh cloud in abysslink.yaml (server not supported on macOS)",
+					Reversible:  false,
+				})
+			} else {
+				actions = append(actions, modules.Action{
+					Module:      m.Name(),
+					Description: "install ntfy",
+					Reversible:  false,
+				})
+			}
 		case "config_exists", "listen_address":
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
@@ -313,9 +203,6 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 		}
 	}
 
-	// Plan service install only when the binary is present (hasInstallFinding means
-	// the binary is MISSING, so we skip service install — can't install a service
-	// for a binary that doesn't exist yet; Apply handles it in order).
 	hasInstallFinding := false
 	for _, f := range findings {
 		if f.Check == "installed" {
@@ -334,21 +221,26 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 }
 
 // Apply installs ntfy if missing and writes the server.yml config bound to the
-// tailnet IP.
+// tailnet IP. On macOS, server installation is skipped with a warning because
+// ntfy does not officially support a macOS server binary; the user must
+// configure ntfy.sh or another external broker.
 func (m *Module) Apply(ctx context.Context) error {
 	if !m.cfg.Modules.Ntfy.Enabled {
 		return nil
 	}
 
-	// Install the ntfy push server if it is not present with server support.
 	if !m.ntfyInstalled(ctx) {
+		if m.plat.OS() == "darwin" {
+			slog.Warn("ntfy: server not supported on macOS — add your ntfy.sh topic URL to abysslink.yaml and re-run",
+				"docs", "https://docs.ntfy.sh/install/")
+			return nil
+		}
 		slog.Info("ntfy apply: installing ntfy push server")
-		if err := m.installNtfyBinary(ctx); err != nil {
+		if err := m.plat.InstallPackage(ctx, "ntfy"); err != nil {
 			return fmt.Errorf("ntfy apply: install ntfy: %w", err)
 		}
 	}
 
-	// Retrieve the tailnet IP from tailscale status.
 	tailnetIP, err := m.getTailnetIP(ctx)
 	if err != nil {
 		return fmt.Errorf("ntfy apply: get tailnet IP: %w", err)
@@ -388,10 +280,20 @@ func (m *Module) Apply(ctx context.Context) error {
 	return nil
 }
 
-// ensureAdminUser provisions the ntfy admin account, generating a password
-// stored in the keychain. The password is delivered to `ntfy user add` over
-// stdin (twice, for confirmation) — never on argv. Idempotent: a pre-existing
-// keychain password is reused and an already-present user is left alone.
+// generateServerConfig returns the ntfy server.yml contents bound to tailnetIP.
+func (m *Module) generateServerConfig(tailnetIP, home string) []byte {
+	port := fmt.Sprintf("%d", m.cfg.Modules.Ntfy.ListenPort())
+	return []byte(fmt.Sprintf(`# ntfy server config — managed by abysslink
+listen-http: "%s:%s"
+base-url: "http://%s:%s"
+auth-file: "%s/.local/state/abysslink/ntfy/user.db"
+auth-default-access: "deny-all"
+behind-proxy: false
+`, tailnetIP, port, tailnetIP, port, home))
+}
+
+// ensureAdminUser provisions the ntfy admin account. Password is stored in the
+// keychain and delivered to `ntfy user add` over stdin — never on argv.
 func (m *Module) ensureAdminUser(ctx context.Context) error {
 	if m.keychain == nil {
 		return fmt.Errorf("no keychain backend to store the ntfy admin password")
@@ -407,7 +309,6 @@ func (m *Module) ensureAdminUser(ctx context.Context) error {
 		}
 	}
 	ntfyBin := m.ntfyBinPath()
-	// `ntfy user add --role=admin admin` reads the password from stdin twice.
 	res, err := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
 		ntfyBin, "user", "add", "--role=admin", "admin")
 	if err != nil {
