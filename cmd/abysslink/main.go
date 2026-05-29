@@ -27,6 +27,14 @@ import (
 )
 
 func main() {
+	// Prevent any subprocess (brew, git, etc.) from blocking on interactive
+	// credential or password prompts. Abysslink is not a git client; a prompt
+	// means the operation failed and should surface an error, not hang.
+	_ = os.Setenv("GIT_TERMINAL_PROMPT", "0")
+	// Prevent Homebrew from auto-updating all taps before each install, which
+	// spawns git fetches against GitHub and can block on credentials above.
+	_ = os.Setenv("HOMEBREW_NO_AUTO_UPDATE", "1")
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	os.Exit(cli.Execute(ctx))
