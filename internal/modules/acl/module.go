@@ -43,11 +43,12 @@ type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
 	audit  *audit.Audit
+	prompt func(ctx context.Context, msg string) error
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit}
+	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit, prompt: d.Prompt}
 }
 
 // Name returns the module name.
@@ -191,15 +192,31 @@ func (m *Module) applyManual(ctx context.Context, owner, user, checkPeriod strin
 		return fmt.Errorf("acl apply: write generated ACL: %w", err)
 	}
 
+	clipOK := true
 	if err := m.copyToClipboard(ctx, desired); err != nil {
 		slog.Warn("acl apply: could not copy ACL to clipboard; paste it manually", "path", genPath, "err", err)
-	} else {
-		slog.Info("acl apply: ACL copied to clipboard", "path", genPath)
+		clipOK = false
 	}
+
+	// Pause so the user reads the instruction before the browser steals focus.
+	notice := "\n  ✦  ACL manual step\n"
+	if clipOK {
+		notice += "     The ACL has been copied to your clipboard.\n"
+	} else {
+		notice += "     Could not copy to clipboard — paste from: " + genPath + "\n"
+	}
+	notice += "     Press [Enter] to open the Tailscale ACL editor, then paste and Save.\n"
+	notice += "     URL: " + aclEditorURL + "\n"
+
+	if m.prompt != nil {
+		if err := m.prompt(ctx, notice); err != nil {
+			slog.Warn("acl apply: prompt interrupted", "err", err)
+		}
+	}
+
 	if err := m.openURL(ctx, aclEditorURL); err != nil {
 		slog.Warn("acl apply: could not open the admin ACL editor; visit it manually", "url", aclEditorURL)
 	}
-	slog.Warn("acl apply: MANUAL STEP — paste the ACL (already on your clipboard) into the editor at " + aclEditorURL + " and Save")
 	return nil
 }
 

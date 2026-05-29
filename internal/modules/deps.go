@@ -16,6 +16,8 @@
 package modules
 
 import (
+	"context"
+
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/platform"
@@ -35,4 +37,9 @@ type Deps struct {
 	Platform platform.Platform
 	Keychain secrets.KeychainStore
 	Audit    *audit.Audit
+	// Prompt displays msg to the user and blocks until they press Enter. It is
+	// wired by the CLI layer (the only layer allowed to write to stdout), so
+	// modules can trigger interactive pauses without violating the no-stdout-in-
+	// library-code rule. Nil means no-op (tests, non-interactive contexts).
+	Prompt func(ctx context.Context, msg string) error
 }
