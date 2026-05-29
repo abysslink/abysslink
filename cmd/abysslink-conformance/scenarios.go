@@ -69,7 +69,7 @@ func testInitCreatesConfig(ctx context.Context, binPath, _ string, configPath st
 }
 
 // testUpDryRun verifies that `abysslink up` (dry-run by default) exits 0 and
-// mentions dry-run mode in its output.
+// signals preview-only mode in its output (banner: "preview only — run with --apply").
 func testUpDryRun(ctx context.Context, binPath, configPath string) error {
 	out, err := runAbysslink(ctx, binPath,
 		"--config", configPath,
@@ -79,8 +79,8 @@ func testUpDryRun(ctx context.Context, binPath, configPath string) error {
 		return fmt.Errorf("up exited non-zero: %w (output: %s)", err, out)
 	}
 	lowerOut := strings.ToLower(out)
-	if !strings.Contains(lowerOut, "dry-run") && !strings.Contains(lowerOut, "dry run") {
-		return fmt.Errorf("up output does not mention dry-run mode: %q", out)
+	if !strings.Contains(lowerOut, "preview only") && !strings.Contains(lowerOut, "--apply") {
+		return fmt.Errorf("up output does not signal preview-only/dry-run mode: %q", out)
 	}
 	return nil
 }
