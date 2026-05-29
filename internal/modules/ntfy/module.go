@@ -130,7 +130,7 @@ func hasWildcardListen(cfgContent string) bool {
 
 // installNtfyBinary installs the ntfy push-notification server.
 // On macOS, `brew install ntfy` installs a different unrelated tool; the
-// correct package is in the ntfy tap: brew tap ntfy/ntfy + brew install ntfy/ntfy/ntfy.
+// correct package is in the ntfy tap: brew tap ntfy-sh/ntfy + brew install ntfy-sh/ntfy/ntfy.
 func (m *Module) installNtfyBinary(ctx context.Context) error {
 	if m.plat.OS() == "darwin" {
 		return m.installNtfyBinaryDarwin(ctx)
@@ -138,17 +138,19 @@ func (m *Module) installNtfyBinary(ctx context.Context) error {
 	return m.plat.InstallPackage(ctx, "ntfy")
 }
 
-// installNtfyBinaryDarwin taps ntfy/ntfy and installs the ntfy push server on
-// macOS. It clones the tap via git directly (not via `brew tap`) so that
-// credential suppression is applied on the git binary we control, not on a git
-// that brew may invoke through its own sanitized environment.
+// installNtfyBinaryDarwin taps ntfy-sh/ntfy and installs the ntfy push server
+// on macOS. It clones the tap via git directly (not via `brew tap`) so that
+// credential suppression flags are applied on the git binary we control.
+//
+// IMPORTANT: if the tap clone fails we must NOT fall through to
+// m.plat.InstallPackage — brew auto-taps on install, which invokes git through
+// brew's sanitized environment (GIT_* vars stripped), reproducing the
+// credential prompt we are trying to eliminate.
 func (m *Module) installNtfyBinaryDarwin(ctx context.Context) error {
 	if err := m.cloneNtfyTap(ctx); err != nil {
-		// Non-fatal: brew install will attempt to tap itself. The credential
-		// prompt risk is documented — warn so the user knows what happened.
-		slog.Warn("ntfy apply: direct tap clone failed — brew will attempt to tap (credential prompt possible)", "err", err)
+		return fmt.Errorf("ntfy apply: tap clone failed — install ntfy manually (https://docs.ntfy.sh/install/): %w", err)
 	}
-	return m.plat.InstallPackage(ctx, "ntfy/ntfy/ntfy")
+	return m.plat.InstallPackage(ctx, "ntfy-sh/ntfy/ntfy")
 }
 
 // cloneNtfyTap clones the ntfy Homebrew tap directly via git instead of via
@@ -175,7 +177,15 @@ func (m *Module) cloneNtfyTap(ctx context.Context) error {
 	if res.ExitCode != 0 {
 		return fmt.Errorf("brew --repository exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-	tapDir := filepath.Join(strings.TrimSpace(res.Stdout), "Library", "Taps", "ntfy", "homebrew-ntfy")
+	// Tap directory for `brew tap ntfy-sh/ntfy`.
+	// The Homebrew convention maps tap "user/repo" →
+	//   clone URL: https://github.com/user/homebrew-repo.git
+	//   local dir: $(brew --repository)/Library/Taps/user/homebrew-repo
+	// Using ntfy-sh/ntfy (not the older ntfy/ntfy): the ntfy/homebrew-ntfy
+	// GitHub repo does not exist as a public repo — GitHub returns 401 for
+	// non-existent repos (to prevent enumeration), triggering the git
+	// credential prompt even though no real authentication is needed.
+	tapDir := filepath.Join(strings.TrimSpace(res.Stdout), "Library", "Taps", "ntfy-sh", "homebrew-ntfy")
 	if _, statErr := os.Stat(tapDir); statErr == nil {
 		return nil // tap already present; brew install will use it as-is
 	}
@@ -188,7 +198,7 @@ func (m *Module) cloneNtfyTap(ctx context.Context) error {
 		"-c", "credential.helper=",
 		"-c", "http.prompt=false",
 		"clone", "--depth=1", "--quiet",
-		"https://github.com/ntfy/homebrew-ntfy.git",
+		"https://github.com/ntfy-sh/homebrew-ntfy.git",
 		tapDir,
 	)
 	if err != nil {
