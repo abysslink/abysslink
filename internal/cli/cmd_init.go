@@ -18,6 +18,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
@@ -28,6 +29,7 @@ import (
 	"github.com/abysslink/abysslink/internal/platform"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -109,8 +111,18 @@ func newInitCmd() *cobra.Command {
 				return err
 			}
 
-			// Phase 5 — Write config.
+			// Phase 5 — Preview config and confirm before writing.
 			configPath := resolveConfigPath(cmd)
+			ok, err := previewAndConfirmConfig(ctx, p, cfg, autoYes)
+			if err != nil {
+				return fmt.Errorf("init: config preview: %w", err)
+			}
+			if !ok {
+				printerInfo(p, "  Aborted — no config written.")
+				return nil
+			}
+
+			// Write config only after the user has confirmed (or --yes was passed).
 			if err := config.Write(configPath, cfg); err != nil {
 				return fmt.Errorf("init: write config: %w", err)
 			}
@@ -658,4 +670,75 @@ func currentUnixUser() string {
 		}
 	}
 	return "user"
+}
+
+// previewAndConfirmConfig marshals cfg to YAML, prints the preview via p, and
+// then asks the user to confirm before writing. It returns (true, nil) when the
+// user confirms (or autoYes is set), and (false, nil) when the user declines.
+// Under autoYes the preview is still printed so the user can see exactly what
+// will be written, but the confirm prompt is skipped.
+//
+// Config contains only email, hostname, module toggles, and safe defaults.
+// Secrets (API keys, tokens) live exclusively in the OS keychain and are never
+// marshalled here — callers must not route the returned yaml through slog or
+// audit (it contains no secrets but the output is also not auditable by value).
+func previewAndConfirmConfig(ctx context.Context, p Printer, cfg *config.Config, autoYes bool) (bool, error) {
+	data, err := config.Marshal(cfg)
+	if err != nil {
+		return false, fmt.Errorf("marshal config for preview: %w", err)
+	}
+
+	printerInfo(p, "")
+	printerInfo(p, styleBold.Render("Config preview")+" "+styleMuted.Render("(what will be written to abysslink.yaml)"))
+	printerInfo(p, "")
+	// Print each line of the YAML with indentation so it stands out as a block.
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		printerInfo(p, "  "+styleCode.Render(line))
+	}
+	printerInfo(p, "")
+
+	if autoYes {
+		slog.Warn("init --yes: skipping config-write confirmation; writing immediately")
+		return true, nil
+	}
+
+	// Non-interactive context (CI, pipe): do not hang — return false so the
+	// caller's RunE can surface an actionable error or skip the write.
+	if !interactive(autoYes, false) {
+		return false, nil
+	}
+
+	count := countEnabledModules(cfg)
+	ok, err := tui.ConfirmBlast(ctx, "Write this config?", count, autoYes)
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+// countEnabledModules counts the number of modules that are enabled in cfg.
+func countEnabledModules(cfg *config.Config) int {
+	n := 0
+	if cfg.Modules.SSH.Enabled {
+		n++
+	}
+	if cfg.Modules.Tmux.Enabled {
+		n++
+	}
+	if cfg.Modules.Mosh.Enabled {
+		n++
+	}
+	if cfg.Modules.Ntfy.Enabled {
+		n++
+	}
+	if cfg.Modules.Watch.Enabled {
+		n++
+	}
+	if cfg.Modules.Notify.Enabled {
+		n++
+	}
+	if cfg.ClaudeCode.Enabled {
+		n++
+	}
+	return n
 }
