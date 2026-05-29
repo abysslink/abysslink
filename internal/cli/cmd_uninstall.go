@@ -16,11 +16,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -58,7 +61,7 @@ func newUninstallCmd() *cobra.Command {
 				return nil
 			}
 
-			ok, err := confirmAction(ctx, cc, "Reverse all changes above and remove abysslink configuration?")
+			ok, purgeOK, err := uninstallConfirmSeq(ctx, p, plan, purge, cc.yes)
 			if err != nil {
 				return err
 			}
@@ -70,6 +73,15 @@ func newUninstallCmd() *cobra.Command {
 			manifest, err := audit.Reverse(logPath, false)
 			if err != nil {
 				return fmt.Errorf("uninstall: %w", err)
+			}
+
+			// When purge was confirmed, honour it; when --yes bypassed, use the
+			// purge flag from the command line (already set).
+			if purge && !purgeOK {
+				// This branch should not happen in practice: purgeOK is always true
+				// when purge=true + yes=true, and false when user declined the
+				// second confirm — in which case we still run Reverse but skip purge.
+				purge = false
 			}
 
 			failures := printReverseManifest(p, manifest) + removeAbysslinkDirs(p, purge)
@@ -144,6 +156,79 @@ func removeAbysslinkDirs(p Printer, purge bool) int {
 	}
 	printerInfo(p, styleMuted.Render("  Third-party packages (tailscale, ntfy, mosh, tmux) are left installed; remove them manually if desired."))
 	return failures
+}
+
+// uninstallConfirmSeq runs the two-stage confirmation sequence for uninstall --apply.
+//
+// Stage 1 (always): requires the user to type "UNINSTALL" (ConfirmTyped). Before the
+// prompt, a blast-radius summary (count of planned actions) is printed inside a danger
+// Note. With --yes the typed gate is bypassed and a slog.Warn records the skip.
+//
+// Stage 2 (only when purge=true): a second confirm warns that --purge will permanently
+// delete the audit log + backups (irreversible). With --yes this second gate is also
+// bypassed with a slog.Warn.
+//
+// Returns (ok, purgeOK, err): ok is false when the UNINSTALL gate is declined (caller
+// must abort and not call audit.Reverse). purgeOK is true only when purge=true AND the
+// user confirmed the second gate (or --yes was set).
+func uninstallConfirmSeq(ctx context.Context, p Printer, plan []audit.ReverseAction, purge, yes bool) (bool, bool, error) {
+	// Print blast-radius summary so the user sees the full scope before the prompt.
+	nActions := len(plan)
+	restores, deletes := 0, 0
+	for _, a := range plan {
+		switch a.Action {
+		case "restore":
+			restores++
+		case "delete":
+			deletes++
+		}
+	}
+	printerInfo(p, fmt.Sprintf(
+		"  Blast radius: %d file(s) affected (%d restore, %d delete).",
+		nActions, restores, deletes))
+	printerInfo(p, "")
+
+	if yes {
+		slog.Warn("uninstall --yes: skipping UNINSTALL typed confirmation gate; executing immediately")
+	} else if !interactive(false, false) {
+		// Non-interactive context (CI, pipe, no TTY): abort without hanging.
+		return false, false, nil
+	}
+
+	// Stage 1: typed UNINSTALL confirm.
+	ok, err := tui.ConfirmTyped(ctx,
+		"Type UNINSTALL to reverse every change made by abysslink",
+		"UNINSTALL",
+		yes)
+	if err != nil {
+		return false, false, err
+	}
+	if !ok {
+		return false, false, nil
+	}
+
+	// Stage 2: purge extra confirm.
+	if !purge {
+		return true, false, nil
+	}
+
+	printerInfo(p, "")
+	printerInfo(p, styleWarn.Render("  WARNING: --purge will permanently delete the audit log and all backups."))
+	printerInfo(p, styleWarn.Render("  This is NOT reversible. There will be no record of changes after this."))
+	printerInfo(p, "")
+
+	if yes {
+		slog.Warn("uninstall --yes: skipping --purge irreversibility confirmation gate")
+		return true, true, nil
+	}
+
+	purgeOK, err := tui.Confirm(ctx,
+		"--purge permanently deletes the audit log + backups. Proceed?",
+		yes)
+	if err != nil {
+		return true, false, err
+	}
+	return true, purgeOK, nil
 }
 
 // abysslinkConfigDir returns the XDG config dir for abysslink (~/.config/abysslink).
