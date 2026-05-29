@@ -84,6 +84,7 @@ Run 'abysslink <command> --help' for details on any command.`,
 	pf.Bool("yes", false, "skip interactive confirmations")
 	pf.Bool("json", false, "output as JSON")
 	pf.BoolP("verbose", "v", false, "enable debug logging")
+	pf.Bool("explain", false, "show per-action rationale alongside each planned change")
 
 	// Register all subcommands with groups.
 	setupCmds := []*cobra.Command{

@@ -70,7 +70,7 @@ func newUpCmd() *cobra.Command {
 				return fmt.Errorf("up: %w", planErr)
 			}
 
-			printPlanDetail(p, actions, findings, cc.dryRun)
+			printPlanDetail(p, actions, findings, cc.dryRun, cc.explain)
 
 			// All fail-closed gates in one block to keep cyclomatic complexity low.
 			if !cc.dryRun {
@@ -299,12 +299,18 @@ func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []mo
 		return err
 	}
 	// Gate 2: SSH re-auth interval may not be raised above 12h without consent.
+	// §7 note 7 fires when the user has explicitly configured a non-default period.
 	accept, _ := cmd.Flags().GetBool("accept-checkperiod-extension")
+	if d, parseErr := time.ParseDuration(cc.cfg.Mobile.SSHCheckPeriod); parseErr == nil && d > 0 {
+		emitSecurityNote(p, "ssh-checkperiod") // §7 note 7 — fires on conditional branch when period is configured
+	}
 	if err := checkPeriodGate(cc.cfg, accept); err != nil {
 		return err
 	}
 	// Gate 3: never configure remote access on an unencrypted disk.
+	// §7 note 5 fires here when disk encryption is required.
 	if blockers := diskEncryptionBlockers(findings); len(blockers) > 0 {
+		emitSecurityNote(p, "disk-encryption") // §7 note 5
 		forceUnsafe, _ := cmd.Flags().GetBool("force-unsafe")
 		if !forceUnsafe {
 			for _, b := range blockers {
