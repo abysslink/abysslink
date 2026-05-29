@@ -20,7 +20,20 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 )
+
+// ansiEscapeRe matches ANSI CSI escape sequences (SGR: color / style codes).
+// Pattern: ESC [ followed by zero or more parameter bytes (0x30–0x3f),
+// zero or more intermediate bytes (0x20–0x2f), and a final byte (0x40–0x7e).
+// The m suffix (SGR) is the common case; we match all final bytes to be thorough.
+var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+// stripANSI removes ANSI escape sequences from s, returning a plain-text string.
+// Used by jsonPrinter to prevent ANSI codes from leaking into structured JSON output.
+func stripANSI(s string) string {
+	return ansiEscapeRe.ReplaceAllString(s, "")
+}
 
 // Printer is the sole interface through which internal/cli writes to
 // stdout/stderr. Callers never use fmt.Println or os.Stdout directly.
@@ -31,6 +44,10 @@ type Printer interface {
 	Printv(key, value string)
 	// Error writes a line to stderr.
 	Error(msg string)
+	// PrintJSON encodes v as a single JSON object and writes it to stdout.
+	// On jsonPrinter it emits a structured, ANSI-free record (one JSON object per line).
+	// On humanPrinter it is a no-op; human output is produced through the styled Print path.
+	PrintJSON(v any)
 }
 
 // humanPrinter writes plain human-readable text.
@@ -52,6 +69,10 @@ func NewHumanPrinterTo(out, err io.Writer) Printer {
 func (p *humanPrinter) Print(msg string)         { _, _ = fmt.Fprintln(p.out, msg) }
 func (p *humanPrinter) Printv(key, value string) { _, _ = fmt.Fprintf(p.out, "%s: %s\n", key, value) }
 func (p *humanPrinter) Error(msg string)         { _, _ = fmt.Fprintln(p.err, msg) }
+
+// PrintJSON is a no-op on humanPrinter. Structured data is for the JSON-mode path only.
+// Human callers produce styled output via Print/Printv; they never call PrintJSON.
+func (p *humanPrinter) PrintJSON(_ any) {}
 
 // jsonPrinter emits newline-delimited JSON objects.
 type jsonPrinter struct {
@@ -76,14 +97,28 @@ func newJSONPrinterTo(out, err io.Writer) Printer {
 	return &jsonPrinter{out: out, err: err, enc: enc}
 }
 
+// Print encodes msg as {"msg": "<stripped>"}, stripping any ANSI escape sequences
+// before emission so that styled strings never leak colour codes into JSON consumers.
 func (p *jsonPrinter) Print(msg string) {
-	_ = p.enc.Encode(map[string]string{"msg": msg})
+	_ = p.enc.Encode(map[string]string{"msg": stripANSI(msg)})
 }
+
+// Printv encodes the key/value pair as a JSON object, stripping ANSI from value.
 func (p *jsonPrinter) Printv(key, value string) {
-	_ = p.enc.Encode(map[string]string{key: value})
+	_ = p.enc.Encode(map[string]string{key: stripANSI(value)})
 }
+
+// Error writes the error message to stderr as {"error": "<msg>"}.
 func (p *jsonPrinter) Error(msg string) {
 	enc := json.NewEncoder(p.err)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(map[string]string{"error": msg})
+}
+
+// PrintJSON encodes v as a single JSON object (one line) using SetEscapeHTML(false).
+// This is the structured data channel for commands like status/doctor/up that need
+// to emit typed records (e.g. statusReport, []doctorFinding) without going through
+// the styled Print path. Each call produces exactly one JSON object terminated by newline.
+func (p *jsonPrinter) PrintJSON(v any) {
+	_ = p.enc.Encode(v)
 }
