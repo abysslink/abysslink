@@ -167,10 +167,10 @@ type testPrinter struct {
 	out *bytes.Buffer
 }
 
-func (p *testPrinter) Print(msg string)          { p.out.WriteString(msg + "\n") }
-func (p *testPrinter) Printv(key, value string)  { p.out.WriteString(key + ": " + value + "\n") }
-func (p *testPrinter) Error(msg string)          { p.out.WriteString(msg + "\n") }
-func (p *testPrinter) PrintJSON(_ any)           {}
+func (p *testPrinter) Print(msg string)         { p.out.WriteString(msg + "\n") }
+func (p *testPrinter) Printv(key, value string) { p.out.WriteString(key + ": " + value + "\n") }
+func (p *testPrinter) Error(msg string)         { p.out.WriteString(msg + "\n") }
+func (p *testPrinter) PrintJSON(_ any)          {}
 
 // Verify testPrinter satisfies the Printer interface at compile time.
 var _ Printer = (*testPrinter)(nil)
