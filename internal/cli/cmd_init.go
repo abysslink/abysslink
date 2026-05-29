@@ -63,11 +63,17 @@ var styleNameCol = lipgloss.NewStyle().Width(nameColW)
 func newInitCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Interactive bootstrap — generates abysslink.yaml for this machine",
+		Short: "Interactive bootstrap — generates abysslink.yaml and guides the full 7-stage setup",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			p := newPrinter(cmd)
 			autoYes, _ := cmd.Flags().GetBool("yes")
+			resume, _ := cmd.Flags().GetBool("resume")
+
+			// Non-interactive check: under --yes/--json/non-TTY the journey runs headless.
+			// interactive() is the canonical predicate (T-10-16).
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			autoYes = autoYes || !interactive(autoYes, jsonOut)
 
 			header := styleBold.Render("abysslink init") + "  " + styleMuted.Render("first-run setup")
 			printerInfo(p, styleHeaderBox.Render(header))
@@ -79,39 +85,27 @@ func newInitCmd() *cobra.Command {
 				return fmt.Errorf("init: platform detection: %w", err)
 			}
 
-			// Phase 0 — Confirm the user has a Tailscale account (or guide them to create one).
-			if !autoYes {
-				if err := ensureTailscaleAccount(p); err != nil {
-					return err
-				}
-			}
-
-			// Phase 1 — Show what's already installed (never mutates anything).
+			// Config form and write — must happen before the journey stages run so
+			// that stage 3 (Converge) and subsequent stages have a config to work with.
 			toolStatus := runToolCheck(ctx, p, runner)
 			printerInfo(p, "")
 
-			// Phase 2 — Tailscale binary + daemon are hard requirements.
 			if err := ensureTailscale(ctx, p, runner, plat, toolStatus, autoYes); err != nil {
 				return err
 			}
-
-			// Phase 3 — OS security hardening (firewall + AC sleep).
 			if err := runSecurityFixes(ctx, p, runner, plat, autoYes); err != nil {
 				return err
 			}
 
-			// Phase 4 — Config questions.
 			cfg, err := runInitForm(cmd, autoYes)
 			if err != nil {
 				return err
 			}
 
-			// Phase 5 — Install missing tools for the user's chosen modules.
 			if err := installModuleTools(ctx, p, runner, plat, cfg, toolStatus, autoYes); err != nil {
 				return err
 			}
 
-			// Phase 5 — Preview config and confirm before writing.
 			configPath := resolveConfigPath(cmd)
 			ok, err := previewAndConfirmConfig(ctx, p, cfg, autoYes)
 			if err != nil {
@@ -122,19 +116,40 @@ func newInitCmd() *cobra.Command {
 				return nil
 			}
 
-			// Write config only after the user has confirmed (or --yes was passed).
 			if err := config.Write(configPath, cfg); err != nil {
 				return fmt.Errorf("init: write config: %w", err)
 			}
 
 			printerInfo(p, "")
 			printerInfo(p, fmt.Sprintf("  %s  Config written to %s", iconDoneStr(), styleCode.Render(configPath)))
-			printerInfo(p, "  "+styleMuted.Render("Next: ")+styleCode.Render("abysslink up --apply"))
+			printerInfo(p, "")
+
+			// Journey orchestration: run the 7-stage guided flow.
+			stateDir := abysslinkStateDir()
+			stateFile := stateDir + "/" + journeyStageFile
+			resumeFrom := 0
+			if resume {
+				resumeFrom, _ = readJourneyState(stateFile)
+				if resumeFrom > 0 {
+					printerInfo(p, fmt.Sprintf("  %s  Resuming from stage %d...", iconDoneStr(), resumeFrom+1))
+					printerInfo(p, "")
+				}
+			}
+
+			stages := journeyStages()
+			if err := runJourney(ctx, p, stages, resumeFrom, stateFile, autoYes); err != nil {
+				return fmt.Errorf("init: journey: %w", err)
+			}
+
+			if !autoYes {
+				printerInfo(p, "  "+styleMuted.Render("Next: ")+styleCode.Render("abysslink up --apply"))
+			}
 			printerInfo(p, "")
 			return nil
 		},
 	}
 	cmd.Flags().Bool("yes", false, "Non-interactive: accept defaults and install missing tools automatically")
+	cmd.Flags().Bool("resume", false, "Continue from the last completed stage (reads journey-state.json)")
 	return cmd
 }
 
