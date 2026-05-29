@@ -368,6 +368,7 @@ func (m *Module) applyDocker(ctx context.Context, tailnetIP, home string) error 
 	dockerCfg := fmt.Sprintf(`# ntfy Docker config — managed by abysslink
 listen-http: "0.0.0.0:80"
 base-url: "http://%s:%s"
+upstream-base-url: "https://ntfy.sh"
 auth-file: "/var/lib/ntfy/user.db"
 auth-default-access: "deny-all"
 behind-proxy: false
