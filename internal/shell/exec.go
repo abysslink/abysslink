@@ -68,6 +68,40 @@ func (r *ExecRunner) RunInteractive(ctx context.Context, name string, args ...st
 	return cmd.Run()
 }
 
+// RunWithEnv executes name with args, extending the current process environment
+// with the provided key→value pairs. Existing env vars not in the map are
+// inherited unchanged.
+func (r *ExecRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (Result, error) {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
+	inherited := os.Environ()
+	extra := make([]string, 0, len(env))
+	for k, v := range env {
+		extra = append(extra, k+"="+v)
+	}
+	cmd.Env = append(inherited, extra...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return Result{
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String(),
+				ExitCode: exitErr.ExitCode(),
+			}, nil
+		}
+		return Result{}, err
+	}
+	return Result{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: 0,
+	}, nil
+}
+
 // RunWithStdin executes name with args, wiring stdin to the provided reader.
 // Use this to deliver secrets to a process without placing them on argv.
 func (r *ExecRunner) RunWithStdin(ctx context.Context, stdin io.Reader, name string, args ...string) (Result, error) {

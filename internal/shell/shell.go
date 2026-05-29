@@ -42,4 +42,9 @@ type Runner interface {
 	// until the user authenticates. Output is NOT captured; only the exit
 	// status is returned.
 	RunInteractive(ctx context.Context, name string, args ...string) error
+	// RunWithEnv executes name with args, merging env (KEY=VALUE pairs) into the
+	// inherited process environment. Use when a subprocess spawns git or other
+	// tools that need environment overrides (e.g. GIT_TERMINAL_PROMPT=0) to
+	// prevent interactive credential prompts.
+	RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (Result, error)
 }
