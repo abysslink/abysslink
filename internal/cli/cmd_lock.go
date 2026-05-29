@@ -21,6 +21,7 @@ import (
 	"log/slog"
 
 	"github.com/abysslink/abysslink/internal/tailscale"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -94,16 +95,11 @@ func newLockInitCmd() *cobra.Command {
 				return fmt.Errorf("lock init: %w", err)
 			}
 
-			// Print the disablement secrets ONCE. Abysslink never stores them.
+			// SECURITY: res.DisablementSecrets flows ONLY into tui.SecretBox→Printer.
+			// It is NEVER passed to slog, deps.Audit, or any os.WriteFile call.
+			// Violating this invariant would constitute a secret leak (T-10-14).
 			printerInfo(p, "")
-			printerInfo(p, styleWarn.Render("Tailnet Lock is now ENABLED. Disablement secrets (shown ONCE):"))
-			printerInfo(p, "")
-			for i, s := range res.DisablementSecrets {
-				printerInfo(p, fmt.Sprintf("    %d. %s", i+1, styleBold.Render(s)))
-			}
-			printerInfo(p, "")
-			printerInfo(p, styleMuted.Render("Abysslink does NOT store these. Paste them into your password manager"))
-			printerInfo(p, styleMuted.Render("AND print at least one on paper. Losing all of them can permanently lock you out."))
+			renderSecretsToBox(p, res.DisablementSecrets)
 			printerInfo(p, "")
 
 			return attestSecretsStored(ctx, cc, p)
@@ -111,14 +107,34 @@ func newLockInitCmd() *cobra.Command {
 	}
 }
 
-// attestSecretsStored requires the operator to confirm they recorded the
-// disablement secrets, unless --yes was passed (with a loud warning).
+// renderSecretsToBox prints the disablement secrets as a once-only red SecretBox
+// through the Printer. The secret slice MUST NOT be passed to slog, audit, or any
+// file-write call — only this function is the sanctioned output path (T-10-14).
+func renderSecretsToBox(p Printer, secrets []string) {
+	box := tui.SecretBox("Tailnet Lock disablement secrets (shown ONCE — Tailnet Lock is now ENABLED)", secrets)
+	printerInfo(p, box)
+}
+
+// attestSecretsStored requires the operator to type "I HAVE PRINTED IT" to
+// confirm they have stored the disablement secrets. This replaces the plain y/N
+// confirm with a typed-phrase gate (T-10-15: strengthens, never weakens, the gate).
+// --yes bypasses with a loud slog.Warn; it does NOT print the success message.
+// Non-interactive (no TTY, no --yes): returns the "not confirmed" error immediately
+// to avoid hanging on a form that cannot receive input.
 func attestSecretsStored(ctx context.Context, cc *cmdContext, p Printer) error {
 	if cc.yes {
-		slog.Warn("lock init: --yes set — skipped disablement-secret attestation; ensure the secrets above are stored or you risk permanent lockout")
+		slog.Warn("lock init: --yes set — skipped disablement-secret attestation (I HAVE PRINTED IT gate); ensure the secrets above are stored or you risk permanent lockout")
 		return nil
 	}
-	ok, err := confirmAction(ctx, cc, "Have you stored AND paper-printed the disablement secrets above?")
+	// Non-interactive guard: do not attempt to open /dev/tty in CI/pipe contexts.
+	if !interactive(cc.yes, cc.jsonOut) {
+		printerError(p, "Tailnet Lock is enabled but you did NOT confirm storing the secrets — record them NOW to avoid lockout.")
+		return fmt.Errorf("lock init: disablement secrets not confirmed stored")
+	}
+	ok, err := tui.ConfirmTyped(ctx,
+		"Type I HAVE PRINTED IT to confirm you have stored these",
+		"I HAVE PRINTED IT",
+		cc.yes)
 	if err != nil {
 		return err
 	}
