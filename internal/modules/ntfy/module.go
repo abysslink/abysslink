@@ -17,6 +17,7 @@ package ntfy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -184,32 +185,74 @@ func (m *Module) installNtfyBinary(ctx context.Context) error {
 	return m.plat.InstallPackage(ctx, "ntfy")
 }
 
-// buildNtfyServerDarwin builds and installs the ntfy server binary from source
-// using `go install heckel.io/ntfy/v2@latest` with GOBIN set to
-// ~/.local/bin. This produces a full server binary (with 'serve', 'user', etc.)
-// because the Go toolchain on macOS has CGO available via Xcode CLT.
+// buildNtfyServerDarwin builds and installs the ntfy server binary from source.
 //
-// Build time: ~1 minute on first run (dependencies are cached afterward).
+// `go install` is rejected for ntfy because ntfy's go.mod contains replace
+// directives (forbidden for external `go install`). We download the source
+// tarball instead and run `go build -C <srcdir>`, which allows replace
+// directives because the source becomes the main module.
+//
+// Build time: ~2 min on first run; subsequent runs skip if binary already has
+// the 'serve' subcommand.
 func (m *Module) buildNtfyServerDarwin(ctx context.Context) error {
-	home, err := os.UserHomeDir()
+	// Resolve latest release tag.
+	apiRes, err := m.runner.Run(ctx, "curl", "-sf", "--max-time", "30",
+		"https://api.github.com/repos/binwiederhier/ntfy/releases/latest")
 	if err != nil {
-		return fmt.Errorf("get home dir: %w", err)
+		return fmt.Errorf("fetch ntfy release info: %w", err)
 	}
-	gobinDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(gobinDir, 0o755); err != nil {
-		return fmt.Errorf("create install dir %s: %w", gobinDir, err)
+	if apiRes.ExitCode != 0 {
+		return fmt.Errorf("fetch ntfy release info exited %d: %s", apiRes.ExitCode, strings.TrimSpace(apiRes.Stderr))
 	}
-	slog.Info("ntfy: building server from source via go install (first run ~1 min)", "gobin", gobinDir)
-	res, err := m.runner.RunWithEnv(ctx,
-		map[string]string{"GOBIN": gobinDir},
-		"go", "install", "heckel.io/ntfy/v2@latest",
-	)
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal([]byte(apiRes.Stdout), &release); err != nil {
+		return fmt.Errorf("parse ntfy release JSON: %w", err)
+	}
+	tag := release.TagName              // e.g. "v2.23.0"
+	ver := strings.TrimPrefix(tag, "v") // e.g. "2.23.0"
+
+	// Download source tarball — avoids git credentials and go install restrictions.
+	archiveURL := fmt.Sprintf("https://github.com/binwiederhier/ntfy/archive/refs/tags/%s.tar.gz", tag)
+	tmpTar := filepath.Join(os.TempDir(), fmt.Sprintf("ntfy-src-%s.tar.gz", ver))
+	defer func() { _ = os.Remove(tmpTar) }()
+	dlRes, err := m.runner.Run(ctx, "curl", "-sfL", "--max-time", "120", archiveURL, "-o", tmpTar)
 	if err != nil {
-		return fmt.Errorf("go install ntfy: %w", err)
+		return fmt.Errorf("download ntfy source: %w", err)
 	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("go install ntfy exited %d: %s — install ntfy manually: https://docs.ntfy.sh/install/",
-			res.ExitCode, strings.TrimSpace(res.Stderr))
+	if dlRes.ExitCode != 0 {
+		return fmt.Errorf("download ntfy source exited %d: %s", dlRes.ExitCode, strings.TrimSpace(dlRes.Stderr))
+	}
+
+	// Extract — use --strip-components=1 so contents land directly in tmpDir.
+	tmpDir, err := os.MkdirTemp("", "ntfy-build-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tarRes, err := m.runner.Run(ctx, "tar", "xzf", tmpTar, "--strip-components=1", "-C", tmpDir)
+	if err != nil {
+		return fmt.Errorf("extract ntfy source: %w", err)
+	}
+	if tarRes.ExitCode != 0 {
+		return fmt.Errorf("extract ntfy source exited %d: %s", tarRes.ExitCode, strings.TrimSpace(tarRes.Stderr))
+	}
+
+	// Build from extracted source. `-C` sets the working dir (Go 1.21+).
+	// CGO is on by default on macOS with Xcode CLT → SQLite compiles → server included.
+	installPath := m.ntfyBinPath()
+	if err := os.MkdirAll(filepath.Dir(installPath), 0o755); err != nil {
+		return fmt.Errorf("create install dir: %w", err)
+	}
+	slog.Info("ntfy: building server from source (first run ~2 min)", "src", tmpDir, "out", installPath)
+	buildRes, err := m.runner.Run(ctx, "go", "build", "-C", tmpDir, "-o", installPath, ".")
+	if err != nil {
+		return fmt.Errorf("go build ntfy: %w", err)
+	}
+	if buildRes.ExitCode != 0 {
+		return fmt.Errorf("go build ntfy exited %d: %s — install ntfy manually: https://docs.ntfy.sh/install/",
+			buildRes.ExitCode, strings.TrimSpace(buildRes.Stderr))
 	}
 	return nil
 }
