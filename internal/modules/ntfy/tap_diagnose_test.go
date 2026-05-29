@@ -100,11 +100,11 @@ func TestCloneNtfyTap_CallsGitDirectly(t *testing.T) {
 	}
 	assert.True(t, foundURL, "git clone URL must be the ntfy Homebrew tap")
 
-	// Destination must be the standard Homebrew tap directory.
+	// Destination must be the standard Homebrew tap directory for ntfy-sh/ntfy.
 	dest := args[len(args)-1]
-	wantSuffix := filepath.Join("Library", "Taps", "ntfy", "homebrew-ntfy")
+	wantSuffix := filepath.Join("Library", "Taps", "ntfy-sh", "homebrew-ntfy")
 	assert.True(t, strings.HasSuffix(dest, wantSuffix),
-		"git clone destination %q must end with %q", dest, wantSuffix)
+		"git clone destination %q must end with %q — ntfy/homebrew-ntfy does not exist as a public GitHub repo; ntfy-sh is the correct org", dest, wantSuffix)
 
 	// GIT_TERMINAL_PROMPT=0 in the RunWithEnv call (belt-and-suspenders for
 	// our own git invocation; no effect on brew-internal git calls).
@@ -115,7 +115,7 @@ func TestCloneNtfyTap_CallsGitDirectly(t *testing.T) {
 // directory already exists the function returns nil without calling git.
 func TestCloneNtfyTap_SkipsIfAlreadyPresent(t *testing.T) {
 	fakeBrewRoot := t.TempDir()
-	tapDir := filepath.Join(fakeBrewRoot, "Library", "Taps", "ntfy", "homebrew-ntfy")
+	tapDir := filepath.Join(fakeBrewRoot, "Library", "Taps", "ntfy-sh", "homebrew-ntfy")
 	require.NoError(t, os.MkdirAll(tapDir, 0o755))
 
 	runner := shell.NewMockRunner(
