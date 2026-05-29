@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // ExecRunner is the production Runner that invokes real binaries via os/exec.
@@ -68,17 +69,29 @@ func (r *ExecRunner) RunInteractive(ctx context.Context, name string, args ...st
 	return cmd.Run()
 }
 
-// RunWithEnv executes name with args, extending the current process environment
-// with the provided key→value pairs. Existing env vars not in the map are
-// inherited unchanged.
+// RunWithEnv executes name with args, replacing the specified key→value pairs in
+// the inherited process environment. Keys present in env take precedence over
+// any existing value in the inherited environment — duplicates are removed so
+// that the new value is the only occurrence (most libc getenv implementations
+// return the first match, so appending-only leaves the old value in effect).
 func (r *ExecRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
-	inherited := os.Environ()
-	extra := make([]string, 0, len(env))
-	for k, v := range env {
-		extra = append(extra, k+"="+v)
+	override := make(map[string]bool, len(env))
+	for k := range env {
+		override[k] = true
 	}
-	cmd.Env = append(inherited, extra...)
+	base := os.Environ()
+	merged := make([]string, 0, len(base)+len(env))
+	for _, e := range base {
+		k, _, _ := strings.Cut(e, "=")
+		if !override[k] {
+			merged = append(merged, e)
+		}
+	}
+	for k, v := range env {
+		merged = append(merged, k+"="+v)
+	}
+	cmd.Env = merged
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

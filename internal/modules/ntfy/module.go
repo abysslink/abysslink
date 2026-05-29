@@ -133,15 +133,62 @@ func hasWildcardListen(cfgContent string) bool {
 // correct package is in the ntfy tap: brew tap ntfy/ntfy + brew install ntfy/ntfy/ntfy.
 func (m *Module) installNtfyBinary(ctx context.Context) error {
 	if m.plat.OS() == "darwin" {
-		// GIT_TERMINAL_PROMPT=0 prevents git (invoked internally by brew tap)
-		// from blocking on a GitHub credential prompt when cloning the tap repo.
-		noPrompt := map[string]string{"GIT_TERMINAL_PROMPT": "0"}
-		if _, err := m.runner.RunWithEnv(ctx, noPrompt, "brew", "tap", "ntfy/ntfy"); err != nil {
-			slog.Warn("ntfy apply: brew tap ntfy/ntfy failed — proceeding anyway", "err", err)
-		}
-		return m.plat.InstallPackage(ctx, "ntfy/ntfy/ntfy")
+		return m.installNtfyBinaryDarwin(ctx)
 	}
 	return m.plat.InstallPackage(ctx, "ntfy")
+}
+
+// installNtfyBinaryDarwin taps ntfy/ntfy and installs the ntfy push server on
+// macOS.
+//
+// Why a git wrapper instead of GIT_TERMINAL_PROMPT / GIT_CONFIG_COUNT env vars:
+// brew's Ruby runtime may strip or override GIT_* env vars before it forks git
+// (observed: the "Username for 'https://github.com':" prompt still appears even
+// when GIT_TERMINAL_PROMPT=0 and GIT_CONFIG_COUNT=1 are set in the parent env).
+// The -c flag on the git binary itself is processed by git before any external
+// config and cannot be stripped by an intermediary, so a wrapper script that
+// prepends -c credential.helper= -c http.prompt=false is the only approach that
+// reliably suppresses auth prompts across all git versions and all brew layouts.
+func (m *Module) installNtfyBinaryDarwin(ctx context.Context) error {
+	// Find the real git binary so the wrapper can exec it directly.
+	gitBin := "/usr/bin/git"
+	if res, err := m.runner.Run(ctx, "which", "git"); err == nil && res.ExitCode == 0 {
+		if p := strings.TrimSpace(res.Stdout); p != "" {
+			gitBin = p
+		}
+	}
+
+	tmpDir, err := os.MkdirTemp("", "abysslink-ntfy-*")
+	if err != nil {
+		return fmt.Errorf("ntfy install: create tmp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Write a minimal git wrapper that forces -c credential.helper= on every
+	// git invocation brew makes. The wrapper uses exec (not sh -c), so there
+	// is no shell-interpolation or command-injection risk — gitBin is a resolved
+	// absolute path, never user-supplied input.
+	wrapperPath := filepath.Join(tmpDir, "git")
+	wrapper := "#!/bin/sh\nexec " + gitBin + " -c credential.helper= -c http.prompt=false \"$@\"\n"
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil { //nolint:gosec
+		return fmt.Errorf("ntfy install: write git wrapper: %w", err)
+	}
+
+	// Prepend the wrapper dir to PATH so brew picks up our git first.
+	// HOMEBREW_NO_AUTO_UPDATE=1 (set at startup) prevents tap refresh on install.
+	noPromptEnv := map[string]string{
+		"PATH":                tmpDir + ":" + os.Getenv("PATH"),
+		"GIT_TERMINAL_PROMPT": "0",
+		"GIT_ASKPASS":         "/usr/bin/false",
+	}
+
+	if _, err := m.runner.RunWithEnv(ctx, noPromptEnv, "brew", "tap", "ntfy/ntfy"); err != nil {
+		slog.Warn("ntfy apply: brew tap ntfy/ntfy failed — proceeding anyway", "err", err)
+	}
+	if _, err := m.runner.RunWithEnv(ctx, noPromptEnv, "brew", "install", "ntfy/ntfy/ntfy"); err != nil {
+		return fmt.Errorf("ntfy apply: brew install ntfy: %w", err)
+	}
+	return nil
 }
 
 // generateServerConfig returns the ntfy server.yml contents bound to tailnetIP.
