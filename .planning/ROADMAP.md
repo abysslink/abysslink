@@ -188,7 +188,12 @@ Plans:
   3. Config YAML with the v1 `tailnet:` key loads without error and is transparently aliased to `backend.type: tailscale`; new `backend:`, `server:`, and `rig:` stanzas parse with strict-mode YAML
   4. All modules outside `internal/backend/` call only `Deps.Backend` (the `Client` interface); `go build ./...` fails if any module imports a concrete adapter package directly
   5. `make lint test` stays green; `abysslink up --dry-run` behaviour on a v1 config is byte-for-byte identical before and after the refactor
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 11-01-PLAN.md — Capture pre-refactor `up --dry-run` parity golden + behavior-neutral runner-injection seam (BKND-05)
+- [ ] 11-02-PLAN.md — Create internal/backend package (Client interface, neutral types, Capabilities, factory, adapter, contract + lockstep tests) + config backend/server/rig stanzas & tailnet: alias (BKND-01, BKND-02, BKND-03)
+- [ ] 11-03-PLAN.md — Migrate acl module + 6 CLI files to backend interfaces, wire Deps.Backend, enable depguard guard, assert byte-for-byte parity (BKND-04, BKND-05)
 
 ### Phase 12: Headscale Backend
 **Goal**: Users running a self-hosted Headscale control plane can point Abysslink at it with `backend.type: headscale`; Abysslink provisions and hardens the Headscale server, manages ACLs in HuJSON, and surfaces all Headscale-specific doctor checks — while the absence of Tailnet Lock is permanently and loudly flagged
