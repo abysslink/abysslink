@@ -17,10 +17,14 @@ package acl
 
 import (
 	"bytes"
+	"context"
+	"path/filepath"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -79,4 +83,55 @@ func TestSSHUserFallback(t *testing.T) {
 	cfg.Identity.UnixUser = ""
 	t.Setenv("USER", "envuser")
 	assert.Equal(t, "envuser", m.sshUser())
+}
+
+// TestApplyManual_PausesBeforeAndAfterOpenURL asserts that applyManual calls
+// m.prompt at least twice: once before opening the browser (the pre-open
+// instruction notice) and once after (the post-paste confirmation).
+// This is the regression guard for the fix in plan 260530-8mf.
+func TestApplyManual_PausesBeforeAndAfterOpenURL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	auditLog := filepath.Join(dir, "audit.log")
+	a := audit.New(auditLog)
+
+	// MockRunner handles two shell calls applyManual issues in order:
+	//   1. RunWithStdin(..., "pbcopy"|"wl-copy"|"xclip", ...) — clipboard copy
+	//   2. Run(..., "open"|"xdg-open", aclEditorURL) — browser open
+	// Both succeed with zero exit code so applyManual proceeds normally.
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // clipboard
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // openURL
+	)
+
+	promptCount := 0
+	countingPrompt := func(_ context.Context, _ string) error {
+		promptCount++
+		return nil
+	}
+
+	cfg := config.Defaults()
+	cfg.Identity.Email = "owner@example.com"
+	cfg.Identity.UnixUser = "testuser"
+	cfg.Mobile.SSHCheckPeriod = "12h"
+
+	m := New(modules.Deps{
+		Cfg:    cfg,
+		Runner: r,
+		Audit:  a,
+		Prompt: countingPrompt,
+	})
+
+	// Build a valid desired ACL the same way applyManual does internally so we
+	// can confirm the function reaches the prompt calls and does not bail early.
+	owner := cfg.Identity.Email
+	user := cfg.Identity.UnixUser
+	checkPeriod := cfg.Mobile.SSHCheckPeriod
+
+	err := m.applyManual(context.Background(), owner, user, checkPeriod)
+	require.NoError(t, err, "applyManual must succeed with valid config and a mock runner")
+
+	assert.GreaterOrEqual(t, promptCount, 2,
+		"applyManual must call m.prompt at least twice: once before openURL (pre-open notice) and once after (post-paste confirmation); got %d", promptCount)
 }
