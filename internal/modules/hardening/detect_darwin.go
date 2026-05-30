@@ -107,7 +107,7 @@ func checkFirewall(ctx context.Context, m *Module) ([]modules.Finding, error) {
 				Module:   m.Name(),
 				Check:    "firewall",
 				Severity: modules.SeverityWarning,
-				Message:  "Application Firewall is disabled",
+				Message:  "Application Firewall is disabled — abysslink does NOT auto-enable it; turn it on in System Settings → Network → Firewall, or run: sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on",
 			}}, nil
 		}
 	}
