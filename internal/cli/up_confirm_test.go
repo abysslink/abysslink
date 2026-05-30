@@ -16,10 +16,13 @@
 package cli
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -133,4 +136,15 @@ func TestApplyAnimationEnabled_PerSudoKeyword(t *testing.T) {
 		assert.False(t, applyAnimationEnabled(false, sudo),
 			"apply animation must stay disabled for %q", action.Description)
 	}
+}
+
+// TestRunApply_AbortContract is a compile-time witness that runApply returns
+// four values: ([]modules.Finding, time.Duration, bool, error).
+// If the signature changes, this file will fail to compile, catching regressions
+// before any runtime test is invoked.
+func TestRunApply_AbortContract(t *testing.T) {
+	// This test exists solely to assert the function signature. The variable
+	// assignment below is a zero-cost compile check — it does not invoke runApply.
+	var _ func(context.Context, *cobra.Command, Printer, *modules.Runner, []modules.Action, *cmdContext) ([]modules.Finding, time.Duration, bool, error) = runApply
+	t.Log("runApply signature is (ctx, cmd, Printer, *Runner, []Action, *cmdContext) ([]Finding, Duration, bool, error)")
 }
