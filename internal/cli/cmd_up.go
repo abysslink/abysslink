@@ -92,11 +92,17 @@ func newUpCmd() *cobra.Command {
 			var applyErr error
 			var applyElapsed time.Duration
 			if !cc.dryRun {
-				applyFindings, applyElapsed, applyErr = runApply(ctx, cmd, p, r, actions, cc)
+				var aborted bool
+				applyFindings, applyElapsed, aborted, applyErr = runApply(ctx, cmd, p, r, actions, cc)
+				if aborted {
+					// User explicitly declined ConfirmBlast — "Aborted." already
+					// printed inside runApply. Skip all success/next-steps output.
+					return nil
+				}
 				printFinalSummary(p, actions, applyFindings, applyElapsed)
 			}
 
-			// Pass 3 — Next steps + success summary (always runs).
+			// Pass 3 — Next steps + success summary (always runs when not aborted).
 			allFindings := append(findings, applyFindings...)
 			printNextSteps(p, allFindings, cc.cfg)
 			if !cc.dryRun && applyErr == nil {
@@ -186,9 +192,9 @@ func applyAnimationEnabled(jsonOut bool, sudoLines []string) bool {
 }
 
 // runApply runs the Apply phase, wrapping with a ConfirmBlast gate and choosing
-// between animated and plain output paths. Returns findings, elapsed time, and error.
-// If the user aborts via ConfirmBlast, findings and elapsed are zero and error is nil.
-func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Runner, actions []modules.Action, cc *cmdContext) ([]modules.Finding, time.Duration, error) {
+// between animated and plain output paths. Returns findings, elapsed time, aborted flag,
+// and error. When the user declines ConfirmBlast, aborted=true and findings/elapsed are zero.
+func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Runner, actions []modules.Action, cc *cmdContext) (findings []modules.Finding, elapsed time.Duration, aborted bool, err error) {
 	unique := uniqueActions(actions)
 	sudoLines := sudoActionsFromActions(unique)
 
@@ -205,13 +211,13 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	// ConfirmBlast — the last gate before mutation (after fail-closed gates).
 	// Skipped when cc.yes=true (ConfirmBlast handles that internally).
 	// Never reached in dry-run (caller guards).
-	ok, err := tui.ConfirmBlast(cmd.Context(), summary, len(unique), cc.yes)
-	if err != nil {
-		return nil, 0, fmt.Errorf("up: confirm: %w", err)
+	ok, confirmErr := tui.ConfirmBlast(cmd.Context(), summary, len(unique), cc.yes)
+	if confirmErr != nil {
+		return nil, 0, false, fmt.Errorf("up: confirm: %w", confirmErr)
 	}
 	if !ok {
 		printerInfo(p, "  Aborted.")
-		return nil, 0, nil
+		return nil, 0, true, nil
 	}
 
 	// Proceed with apply.
@@ -225,16 +231,16 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	// applyAnimationEnabled for the full rationale.
 	animate := applyAnimationEnabled(cc.jsonOut, sudoLines)
 	if animate {
-		findings, applyErr := runApplyAnimated(ctx, r)
-		return findings, 0, applyErr
+		applyFindings, applyErr := runApplyAnimated(ctx, r)
+		return applyFindings, 0, false, applyErr
 	}
 
 	// Plain path.
 	start := time.Now()
-	findings, applyErr := r.ApplyAll(ctx, func(evt modules.ModuleEvent) {
+	applyFindings, applyErr := r.ApplyAll(ctx, func(evt modules.ModuleEvent) {
 		printerInfo(p, applyRowStr(evt))
 	})
-	return findings, time.Since(start), applyErr
+	return applyFindings, time.Since(start), false, applyErr
 }
 
 // runApplyAnimated drives a live tui.LiveTable for the apply phase.
