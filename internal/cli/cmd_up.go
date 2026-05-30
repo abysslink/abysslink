@@ -168,6 +168,23 @@ func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modu
 	return res.actions, res.findings, res.err
 }
 
+// applyAnimationEnabled decides whether the apply phase may use the live
+// Bubble Tea table. Animation is disabled — independent of TTY/color/jsonOut
+// — when ANY planned action requires sudo. Rationale: tea.NewProgram in
+// internal/tui.RunLiveTable owns os.Stdin while running. If apply spawns an
+// interactive child (sudo password prompt via shell.ExecRunner.RunInteractive,
+// which also wires cmd.Stdin = os.Stdin), the two race for stdin bytes, the
+// password reads garbage, sudo fails, and Ctrl-C is swallowed by the tea
+// event loop. Falling back to the plain Printer-callback path returns stdin
+// ownership to the child process so sudo can read the password normally.
+// Scan-phase animation is unaffected — there is no sudo on the scan path.
+func applyAnimationEnabled(jsonOut bool, sudoLines []string) bool {
+	if len(sudoLines) > 0 {
+		return false
+	}
+	return animationEnabled(jsonOut)
+}
+
 // runApply runs the Apply phase, wrapping with a ConfirmBlast gate and choosing
 // between animated and plain output paths. Returns findings, elapsed time, and error.
 // If the user aborts via ConfirmBlast, findings and elapsed are zero and error is nil.
@@ -203,7 +220,10 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	printerInfo(p, "  "+styleBold.Render(fmt.Sprintf("Applying %d changes...", len(unique))))
 	printerInfo(p, "")
 
-	animate := animationEnabled(cc.jsonOut)
+	// Animation is force-disabled when any module requires sudo so the tea
+	// program does not race with the password prompt for stdin. See
+	// applyAnimationEnabled for the full rationale.
+	animate := applyAnimationEnabled(cc.jsonOut, sudoLines)
 	if animate {
 		findings, applyErr := runApplyAnimated(ctx, r)
 		return findings, 0, applyErr

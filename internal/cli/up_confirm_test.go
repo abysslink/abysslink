@@ -81,3 +81,56 @@ func TestScanRenderRow_ContainsModuleName(t *testing.T) {
 	out := scanRowStr(evt)
 	assert.Contains(t, out, "ssh")
 }
+
+// TestApplyAnimationEnabled_DisabledWhenSudoPresent is the Phase 10 stdin-race
+// regression guard. Before the fix, the apply phase chose between the live tea
+// table and the plain Printer path purely from jsonOut + TTY. When a module
+// required sudo (`pmset`, `socketfilterfw`, …) the tea program owned os.Stdin
+// while sudo also wired cmd.Stdin = os.Stdin, racing for password bytes.
+//
+// The fix gates apply animation on the absence of sudo: if any planned action
+// requires sudo, force the plain Printer path so the password prompt can read
+// stdin unmolested. Scan-phase animation is unaffected.
+func TestApplyAnimationEnabled_DisabledWhenSudoPresent(t *testing.T) {
+	sudo := []string{"power              set pmset hibernation mode"}
+	// Even with jsonOut=false (the case where animation would otherwise be
+	// considered), the presence of any sudo line forces the plain path.
+	assert.False(t, applyAnimationEnabled(false, sudo),
+		"apply animation must be disabled whenever sudo is required")
+}
+
+// TestApplyAnimationEnabled_DisabledInJSONMode asserts JSON mode always wins —
+// even with no sudo lines we never animate when emitting structured output.
+func TestApplyAnimationEnabled_DisabledInJSONMode(t *testing.T) {
+	assert.False(t, applyAnimationEnabled(true, nil),
+		"apply animation must be disabled in JSON mode")
+}
+
+// TestApplyAnimationEnabled_DisabledWhenNotTTY asserts the predicate defers to
+// the underlying animationEnabled() gate when no sudo is required. In test
+// environments stdout is not a TTY, so animation is disabled — matching
+// TestAnimationEnabled_NotInTest in term_test.go.
+func TestApplyAnimationEnabled_DisabledWhenNotTTY(t *testing.T) {
+	// Headless test environment: animationEnabled(false) returns false,
+	// so applyAnimationEnabled returns false too.
+	assert.False(t, applyAnimationEnabled(false, nil),
+		"apply animation requires both no-sudo AND animationEnabled()=true")
+}
+
+// TestApplyAnimationEnabled_PerSudoKeyword exhaustively asserts that any
+// non-empty sudo list — regardless of which keyword matched — forces the plain
+// path. Keeps the predicate from being accidentally narrowed to one keyword.
+func TestApplyAnimationEnabled_PerSudoKeyword(t *testing.T) {
+	allKeywords := []modules.Action{
+		{Module: "power", Description: "pmset something"},
+		{Module: "linuxd", Description: "systemctl enable foo"},
+		{Module: "hardening", Description: "socketfilterfw blockall"},
+	}
+	for _, action := range allKeywords {
+		sudo := sudoActionsFromActions([]modules.Action{action})
+		assert.NotEmpty(t, sudo,
+			"sudoActionsFromActions must classify %q as sudo", action.Description)
+		assert.False(t, applyAnimationEnabled(false, sudo),
+			"apply animation must stay disabled for %q", action.Description)
+	}
+}
