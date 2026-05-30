@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-26)
 Phase: 10
 Plan: Not started
 Status: Milestone complete
-Last activity: 2026-05-29
+Last activity: 2026-05-30 - Completed quick task 260530-nl4: claudecode disable command
 
 Progress: [██████████] 100%
 
@@ -87,6 +87,7 @@ None.
 | 260528-s4a | Security hardening Slice 4 — ACL + Lock spine: acl Apply (admin-API push w/ ETag or manual clipboard+editor fallback) via tested ACLEditor; config Tailnet.Admin (secret via env, off-disk); cmd_lock init/status/sign/rotate with print-once secrets + attestation gate; checkPeriod>12h gate (--accept-checkperiod-extension); checkPeriod bounds in Validate | 2026-05-28 | d6f82b0 | [260528-s4a-acl-lock](.planning/quick/260528-s4a-acl-lock/) |
 | 260530-8mf | fix(up): skip success summary when user declines ConfirmBlast; fix(acl): post-paste pause in applyManual so the flow waits for the user to save the ACL in the admin editor before returning | 2026-05-30 | a44bfd4 | [260530-8mf-fix-up-rune-so-user-no-on-confirmblast-a](.planning/quick/260530-8mf-fix-up-rune-so-user-no-on-confirmblast-a/) |
 | 260530-8uz | fix(hardening) + fix(power): rewrite scan warnings to be honest about which findings abysslink auto-fixes — hardening firewall is report-only (manual fix paths provided); pmset auto-fix only runs when `power.closed_lid_ac: keep-awake` is set in abysslink.yaml | 2026-05-30 | 53c3199 | [260530-8uz-make-hardening-power-scan-warnings-hones](.planning/quick/260530-8uz-make-hardening-power-scan-warnings-hones/) |
+| 260530-nl4 | feat(claudecode): add `abysslink claudecode disable` command that strips the abysslink notify hooks from ~/.claude/settings.json on demand (Stop + Notification), preserving all other hooks; dry-run default + --apply, writes via internal/audit | 2026-05-30 | 76aa21b | [260530-nl4-add-abysslink-claudecode-disable-command](.planning/quick/260530-nl4-add-abysslink-claudecode-disable-command/) |
 
 ## Deferred Items
 
