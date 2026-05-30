@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v2.0.0
 milestone_name: Self-Hosted Backends & Fleet
-status: planning
-last_updated: "2026-05-30T19:38:32.738Z"
-last_activity: 2026-05-30 — v2.0.0 roadmap created (phases 11-14)
+status: executing
+last_updated: "2026-05-30T20:14:11.222Z"
+last_activity: 2026-05-30 -- Phase 11 planning complete
 progress:
   total_phases: 14
   completed_phases: 2
-  total_plans: 12
+  total_plans: 15
   completed_plans: 9
   percent: 14
 ---
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-05-30)
 
 Phase: 11 — Backend Abstraction Refactor
 Plan: —
-Status: Planning (roadmap created; awaiting first plan)
-Last activity: 2026-05-30 — v2.0.0 roadmap created (phases 11-14)
+Status: Ready to execute
+Last activity: 2026-05-30 -- Phase 11 planning complete
 
 ```
 v2.0.0 progress: [                    ] 0%
