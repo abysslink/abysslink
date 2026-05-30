@@ -98,8 +98,22 @@ func (t *LiveTable) listenForRow() tea.Cmd {
 }
 
 // Update implements tea.Model.
+//
+// Key handling: only Ctrl-C (and Ctrl-D / Esc as common cancel synonyms) maps
+// to tea.Quit so the user can always abort. Every other key event is dropped
+// (`return t, nil`) so stray characters typed while the spinner is running do
+// NOT bubble up as "advance the step" gestures. This is critical: without this
+// branch, tea silently consumes keystrokes, which the user perceives as Enter
+// advancing the loader.
 func (t *LiveTable) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyEsc:
+			return t, tea.Quit
+		default:
+			return t, nil
+		}
 	case tableRowMsg:
 		t.rows = append(t.rows, msg.evt)
 		return t, tea.Batch(t.spinner.Tick, t.listenForRow())

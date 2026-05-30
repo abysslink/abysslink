@@ -19,7 +19,9 @@ import (
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/tui"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestRenderRows_ContainsBothModuleNames asserts that RenderRows of two
@@ -72,4 +74,58 @@ func TestTableModel_ImplementsTeaModel(t *testing.T) {
 func TestNoInternalModulesImport(_ *testing.T) {
 	// Documented acceptance criterion: package tui must not import internal/modules.
 	// Verified via: grep -r "internal/modules" internal/tui/ → should produce no output.
+}
+
+// TestLiveTable_Update_CtrlCQuits is the Phase 10 stdin-race regression guard.
+// Pre-fix, LiveTable.Update only handled tea.QuitMsg, so Ctrl-C in a running
+// tea program was silently dropped — the user could not abort the loader. The
+// fix adds a tea.KeyMsg branch that returns tea.Quit for KeyCtrlC. Invoking
+// the returned tea.Cmd must produce a tea.QuitMsg.
+func TestLiveTable_Update_CtrlCQuits(t *testing.T) {
+	m := tui.NewLiveTable()
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	require.NotNil(t, cmd, "Ctrl-C must yield a non-nil tea.Cmd (tea.Quit)")
+	assert.IsType(t, tea.QuitMsg{}, cmd(), "Ctrl-C cmd must produce tea.QuitMsg")
+}
+
+// TestLiveTable_Update_CtrlDQuits asserts Ctrl-D is treated as a cancel
+// synonym, matching shell-prompt convention.
+func TestLiveTable_Update_CtrlDQuits(t *testing.T) {
+	m := tui.NewLiveTable()
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	require.NotNil(t, cmd, "Ctrl-D must yield a non-nil tea.Cmd (tea.Quit)")
+	assert.IsType(t, tea.QuitMsg{}, cmd(), "Ctrl-D cmd must produce tea.QuitMsg")
+}
+
+// TestLiveTable_Update_EscQuits asserts Esc cancels the program.
+func TestLiveTable_Update_EscQuits(t *testing.T) {
+	m := tui.NewLiveTable()
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	require.NotNil(t, cmd, "Esc must yield a non-nil tea.Cmd (tea.Quit)")
+	assert.IsType(t, tea.QuitMsg{}, cmd(), "Esc cmd must produce tea.QuitMsg")
+}
+
+// TestLiveTable_Update_OtherKeysDropped asserts that non-cancel keys (including
+// Enter, which the user reported as "appears to advance to the next step")
+// produce a nil tea.Cmd — i.e. they do not advance state or emit any side
+// effect. Without the explicit drop, tea silently buffered keystrokes inside
+// the event loop, causing the perceived "Enter steps the loader" misbehavior.
+func TestLiveTable_Update_OtherKeysDropped(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
+		{"space", tea.KeyMsg{Type: tea.KeySpace}},
+		{"runes", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}},
+		{"up arrow", tea.KeyMsg{Type: tea.KeyUp}},
+		{"tab", tea.KeyMsg{Type: tea.KeyTab}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := tui.NewLiveTable()
+			_, cmd := m.Update(tc.msg)
+			assert.Nil(t, cmd, "%s must produce no tea.Cmd (silently dropped)", tc.name)
+		})
+	}
 }
