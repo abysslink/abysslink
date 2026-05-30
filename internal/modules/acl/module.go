@@ -217,6 +217,16 @@ func (m *Module) applyManual(ctx context.Context, owner, user, checkPeriod strin
 	if err := m.openURL(ctx, aclEditorURL); err != nil {
 		slog.Warn("acl apply: could not open the admin ACL editor; visit it manually", "url", aclEditorURL)
 	}
+
+	// Second pause: wait for the user to paste and save before returning.
+	// In non-interactive contexts (non-TTY, --yes), the prompt implementation
+	// returns nil immediately so this never blocks automated runs.
+	if m.prompt != nil {
+		if err := m.prompt(ctx, "\n  ✦  Press [Enter] once you have pasted and SAVED the ACL in the Tailscale admin editor.\n"); err != nil {
+			slog.Warn("acl apply: post-paste prompt interrupted", "err", err)
+		}
+	}
+
 	return nil
 }
 
