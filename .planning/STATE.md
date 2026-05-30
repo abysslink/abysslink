@@ -1,44 +1,46 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0.0
-milestone_name: milestone
-status: milestone_complete
-last_updated: 2026-05-29T21:23:48.340Z
-last_activity: 2026-05-29
+milestone: v2.0.0
+milestone_name: Self-Hosted Backends & Fleet
+status: planning
+last_updated: "2026-05-30T00:00:00.000Z"
+last_activity: 2026-05-30
 progress:
-  total_phases: 10
-  completed_phases: 10
-  total_plans: 33
-  completed_plans: 33
-  percent: 100
-stopped_at: Milestone complete (Phase 10 was final phase)
+  total_phases: 4
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-05-26)
+See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Milestone complete
+**Current focus:** Milestone v2.0.0 — Phase 11: Backend Abstraction Refactor
 
 ## Current Position
 
-Phase: 10
-Plan: Not started
-Status: Milestone complete
-Last activity: 2026-05-30 - Completed quick task 260530-nl4: claudecode disable command
+Phase: 11 — Backend Abstraction Refactor
+Plan: —
+Status: Planning (roadmap created; awaiting first plan)
+Last activity: 2026-05-30 — v2.0.0 roadmap created (phases 11-14)
 
-Progress: [██████████] 100%
+```
+v2.0.0 progress: [                    ] 0%
+Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
+```
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 33
+- Total plans completed: 33 (v1.0.0)
 - Average duration: -
-- Total execution time: 2026-05-26 (single session)
+- Total execution time: 2026-05-26 (v1 single session)
 
 **By Phase:**
 
@@ -54,6 +56,10 @@ Progress: [██████████] 100%
 | 8. Release Infrastructure | 3 | Complete |
 | 9. Verification & Polish | 3 | Complete |
 | 10. Journey & Rich TUI | 6 | Complete |
+| 11. Backend Abstraction Refactor | TBD | Not started |
+| 12. Headscale Backend | TBD | Not started |
+| 13. NetBird Backend | TBD | Not started |
+| 14. Multi-Rig Fleet | TBD | Not started |
 
 ## Accumulated Context
 
@@ -66,7 +72,12 @@ Progress: [██████████] 100%
 - Tailscale: CLI-based integration (shell.Runner) not heavy tailscale.com SDK — stays under 50MB binary budget
 - Module naming: type `Module` not `<Pkg>Module` per revive stutter rule
 - dry-run default: if neither --apply nor --dry-run set → dry-run=true in loadCmdContext
-- [Phase ?]: journey-orchestrator-design
+- v2.0.0: Backend abstraction uses adapter pattern — v1 tailscale code wrapped unchanged, new backends implement same interface
+- v2.0.0: No new Go library deps for v2 — Headscale and NetBird driven via shell.Runner + net/http only
+- v2.0.0: NetBird AGPLv3 server packages permanently excluded from Go imports; CI linter enforces this
+- v2.0.0: Tailnet Lock absence on Headscale/NetBird is a permanent doctor WARN (hs-lock, nb-lock), never PASS
+- v2.0.0: Phase order is abstraction → Headscale → NetBird → Fleet (research-validated; coarse granularity combines client+server per backend)
+- v2.0.0: Security hardening (TLS gate, non-root, port binding) is acceptance criteria in each provisioning phase — no separate hardening phase
 
 ### Pending Todos
 
@@ -74,7 +85,9 @@ None.
 
 ### Blockers/Concerns
 
-None.
+- Phase 12 planning: ACME + embedded DERP port interaction needs targeted research sub-task (Caddy/nginx WebSocket forwarding config for DERP alongside Let's Encrypt ACME is MEDIUM confidence)
+- Phase 13 planning: NetBird combined binary (non-Docker) config format stability across patch releases needs direct v0.71.4 deploy verification
+- Phase 14 planning: Whether `abysslinkd` HTTP-over-socket protocol requires extension for fleet peer status polling is undetermined — address in Phase 14 planning
 
 ### Quick Tasks Completed
 
@@ -93,13 +106,16 @@ None.
 
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
-| v2 | enroll rig (multi-rig fleet) | Deferred | Roadmap |
-| v2 | Headscale / NetBird backend | Deferred | Roadmap |
-| v2 | Vaultwarden secrets module | Deferred | Roadmap |
-| v2 | upsnap, atuin, sandbox, asciinema | Deferred | Roadmap |
+| v2.x | NetBird posture-check management | Deferred | v2.0.0 roadmap |
+| v2.x | Fleet daily digest | Deferred | v2.0.0 roadmap |
+| v2.x | Headscale PostgreSQL HA | Deferred | v2.0.0 roadmap |
+| v2.x | `netbird events` tail | Deferred | v2.0.0 roadmap |
+| v2.x | SCIM | Deferred | v2.0.0 roadmap |
+| v3 | Vaultwarden secrets module | Deferred | Roadmap |
+| v3 | upsnap, atuin, sandbox, asciinema | Deferred | Roadmap |
 
 ## Session Continuity
 
-Last session: 2026-05-29T20:28:33.793Z
-Stopped at: Phase 9 complete; all 9 phases done; milestone ready for v1.0.0 tag
+Last session: 2026-05-30
+Stopped at: v2.0.0 roadmap created — phases 11-14 defined; ready for Phase 11 planning
 Resume file: None

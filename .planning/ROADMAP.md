@@ -23,6 +23,15 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 9: Verification & Polish** - Conformance tool, security audit, and performance budget validation
 - [x] **Phase 10: Journey & Rich TUI** - One guided, resumable, rich-TUI user journey with explicit stop points, full security callouts, and complete non-interactive/JSON parity (completed 2026-05-29)
 
+---
+
+## v2.0.0 — Self-Hosted Backends & Fleet
+
+- [ ] **Phase 11: Backend Abstraction Refactor** - Generic `internal/backend.Client` interface with contract tests; Tailscale adapter wrapping v1; all modules migrated; zero v1 regression
+- [ ] **Phase 12: Headscale Backend** - Full Headscale backend: client adapter (HuJSON reuse, deny-all baseline, lock WARN), server provisioning (TLS gate, non-root, cosign, embedded DERP), all hs-* doctor checks
+- [ ] **Phase 13: NetBird Backend** - Full NetBird backend: REST-only client adapter (Groups-as-tags, SSHCheck graceful degradation, AGPLv3 CI guard), server provisioning (v0.57.0 floor, ZITADEL CVE gate, non-root), all nb-* doctor checks
+- [ ] **Phase 14: Multi-Rig Fleet** - `abysslink enroll rig`, fan-out status/doctor/notify/panic, per-rig keychain namespaces and ntfy topics, rig-to-rig ACL deny, multi-rig doctor checks
+
 ## Phase Details
 
 ### Phase 1: Repo Bootstrap
@@ -165,10 +174,64 @@ Plans:
 - [x] 10-06-PLAN.md — Output parity & polish: exit codes, status/doctor JSON+tables, `--explain`, 12 security notes, panic feedback, conformance (UX-09, UX-10)
 **UI hint**: yes
 
+---
+
+## v2.0.0 Phase Details
+
+### Phase 11: Backend Abstraction Refactor
+**Goal**: All Tailscale-specific call sites in the v1 codebase are moved behind a stable `internal/backend.Client` interface; the Tailscale adapter passes a complete contract test suite; v1 behaviour is 100% preserved with zero observable regression
+**Depends on**: Phase 10 (v1 complete)
+**Requirements**: BKND-01, BKND-02, BKND-03, BKND-04, BKND-05
+**Success Criteria** (what must be TRUE):
+  1. `internal/backend.Client` interface compiles; `backend.Capabilities` struct gates Lock, AdminAPI, SSHCheck, AuthKeys, FunnelRejection; `backend.New(cfg, runner)` factory resolves the correct adapter from config
+  2. `internal/backend/contract_test.go` asserts three invariants against the Tailscale adapter: `IP()` returns non-empty after startup, `SSHConfig().CheckPeriod` is non-zero, `LockCapability()` returns `Full`; test must pass before merge
+  3. Config YAML with the v1 `tailnet:` key loads without error and is transparently aliased to `backend.type: tailscale`; new `backend:`, `server:`, and `rig:` stanzas parse with strict-mode YAML
+  4. All modules outside `internal/backend/` call only `Deps.Backend` (the `Client` interface); `go build ./...` fails if any module imports a concrete adapter package directly
+  5. `make lint test` stays green; `abysslink up --dry-run` behaviour on a v1 config is byte-for-byte identical before and after the refactor
+**Plans**: TBD
+
+### Phase 12: Headscale Backend
+**Goal**: Users running a self-hosted Headscale control plane can point Abysslink at it with `backend.type: headscale`; Abysslink provisions and hardens the Headscale server, manages ACLs in HuJSON, and surfaces all Headscale-specific doctor checks — while the absence of Tailnet Lock is permanently and loudly flagged
+**Depends on**: Phase 11
+**Requirements**: HS-01, HS-02, HS-03
+**Success Criteria** (what must be TRUE):
+  1. `abysslink init` wizard accepts `backend.type: headscale` + login server URL; `abysslink up --apply` enrolls the node against the Headscale server and pushes a deny-all baseline HuJSON ACL policy before the first node is admitted
+  2. `abysslink server headscale init --apply` downloads a cosign-verified Headscale binary, writes a hardened `config.yaml` (TLS gate enforced — command refuses without a valid cert, `verify_client_url_fail_open: false`, embedded DERP), installs a systemd unit running as `User=headscale`, and creates a pre-auth key with an explicit short RFC3339 expiry
+  3. Every pre-auth key creation call asserts a non-zero expiry in the API response; `doctor` check `hs-key-expiry` fails if any active key has no expiry (closes upstream Headscale issue #1579 vector)
+  4. `abysslink doctor` emits `WARN: server-trust model only — Tailnet Lock (TKA) is not available on Headscale` for the `hs-lock` check; this check can never return PASS regardless of configuration
+  5. All nine hs-* checks (`hs-tls`, `hs-bind`, `hs-api-auth`, `hs-key-expiry`, `hs-db-perms`, `hs-lock`, `hs-oidc-filter`, `hs-proc-user`, `hs-derp-failclosed`) report correct PASS/WARN/FAIL status; `make lint test` green with mock Headscale API fixtures
+**Plans**: TBD
+
+### Phase 13: NetBird Backend
+**Goal**: Users running a self-hosted NetBird control plane can point Abysslink at it with `backend.type: netbird`; Abysslink provisions the NetBird server at a safe version floor, verifies the ZITADEL CVE remediation, manages policies via REST JSON, and surfaces all NetBird doctor checks — with graceful degradation warnings for missing SSH check and lock capabilities; no NetBird AGPLv3 server packages are ever imported as Go dependencies
+**Depends on**: Phase 11
+**Requirements**: NB-01, NB-02, NB-03, NB-04
+**Success Criteria** (what must be TRUE):
+  1. `abysslink up --apply` with `backend.type: netbird` enrolls the node, removes the default "All" group policy, and pushes an initial deny-all policy via REST; `doctor` emits `WARN: SSHCheck not available on NetBird — checkPeriod enforcement disabled` at every run
+  2. `abysslink server netbird init --apply` refuses to proceed if the downloaded binary version is below v0.57.0; after provisioning, it verifies that the default ZITADEL admin credential is rejected (POST with known defaults returns 401); management ports are bound to loopback or overlay IP only; systemd unit runs non-root
+  3. After every ACL policy push, Abysslink re-reads the policy from the NetBird backend and diffs against the intended rule count; a mismatch (silently dropped rule) is a `FAIL`, not a warning
+  4. CI linter (`golangci-lint` custom rule or `go vet` analysis pass) fails the build if any `github.com/netbirdio/netbird/management/...` package is imported; the v2.0.0 release checklist contains an explicit AGPLv3 legal review item
+  5. All seven nb-* checks (`nb-tls`, `nb-version`, `nb-zitadel`, `nb-mgmt-bind`, `nb-key-type`, `nb-api-auth`, `nb-proc-user`) report correct status; `make lint test` green with mock NetBird API fixtures
+**Plans**: TBD
+
+### Phase 14: Multi-Rig Fleet
+**Goal**: A user controlling multiple rigs from one phone can enroll each rig by name, target any single rig or all rigs with one command, and receive aggregated status and notifications; each rig is cryptographically isolated at the keychain, ntfy topic, and ACL layers
+**Depends on**: Phase 13
+**Requirements**: FLEET-01, FLEET-02, FLEET-03
+**Success Criteria** (what must be TRUE):
+  1. `abysslink enroll rig <name> --apply` adds the rig to `abysslink.yaml` under `rig:`, creates an isolated OS keychain namespace for it, creates a dedicated ntfy topic (cross-topic notification delivery is rejected at enrollment time), and enforces a rig-to-rig ACL deny rule; `abysslink rig ls` lists all enrolled rigs with backend and last-seen status
+  2. `abysslink status --all-rigs` fans out to all enrolled rigs concurrently via `errgroup`; each rig respects its per-rig timeout; an offline rig is reported as `UNREACHABLE` without causing the command to fail; `--strict` opt-in makes any `UNREACHABLE` rig exit 1
+  3. `abysslink doctor --all-rigs` and `abysslink notify --all-rigs` fan out identically to status; `abysslink panic --all-rigs` executes revocations on all rigs and completes within 10 seconds per rig
+  4. `abysslink doctor` passes the three multi-rig isolation checks: `mr-rig-isolation` (rig-to-rig ACL deny present), `mr-topic-isolation` (no two rigs share an ntfy topic), `mr-key-uniqueness` (no two rigs share a keychain credential namespace)
+  5. A notification event originating from Rig A is provably never delivered to Rig B's ntfy topic; fan-out notify includes a rig-identity header validated by the receiving subscriber
+**Plans**: TBD
+
+---
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -181,4 +244,8 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 7. Optional Modules | 2/2 | Complete | 2026-05-26 |
 | 8. Release Infrastructure | 3/3 | Complete | 2026-05-26 |
 | 9. Verification & Polish | 3/3 | Complete | 2026-05-26 |
-| 10. Journey & Rich TUI | 6/6 | Complete    | 2026-05-29 |
+| 10. Journey & Rich TUI | 6/6 | Complete | 2026-05-29 |
+| 11. Backend Abstraction Refactor | 0/0 | Not started | - |
+| 12. Headscale Backend | 0/0 | Not started | - |
+| 13. NetBird Backend | 0/0 | Not started | - |
+| 14. Multi-Rig Fleet | 0/0 | Not started | - |
