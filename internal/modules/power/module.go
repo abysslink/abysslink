@@ -81,7 +81,7 @@ func (m *Module) detectDarwin(ctx context.Context) []modules.Finding {
 				Module:   m.Name(),
 				Check:    "sleep_disabled",
 				Severity: modules.SeverityWarning,
-				Message:  "pmset sleep is not 0 — system may sleep while on AC; run: sudo pmset -c sleep 0 disksleep 0",
+				Message:  "pmset sleep is not 0 — system may sleep while on AC. abysslink only auto-fixes this when `power.closed_lid_ac: keep-awake` is set in abysslink.yaml; otherwise enable manually: sudo pmset -c sleep 0 disksleep 0",
 			})
 		}
 	}
