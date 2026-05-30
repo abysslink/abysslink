@@ -104,12 +104,14 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 }
 
 // newPrinter returns the appropriate Printer based on --json flag.
+// It routes output through cmd.OutOrStdout() / cmd.ErrOrStderr() so that
+// tests can capture command output by calling cmd.SetOut / cmd.SetErr.
 func newPrinter(cmd *cobra.Command) Printer {
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	if jsonOut {
-		return NewJSONPrinter()
+		return NewJSONPrinterTo(cmd.OutOrStdout(), cmd.ErrOrStderr())
 	}
-	return NewHumanPrinter()
+	return NewHumanPrinterTo(cmd.OutOrStdout(), cmd.ErrOrStderr())
 }
 
 // printerInfo calls p.Print for informational messages.

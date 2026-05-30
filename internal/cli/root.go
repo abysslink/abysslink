@@ -118,6 +118,7 @@ Run 'abysslink <command> --help' for details on any command.`,
 	}
 
 	advancedCmds := []*cobra.Command{
+		newClaudeCodeCmd(),
 		newEnableCmd(),
 		newDisableCmd(),
 		newThreatModelCmd(),

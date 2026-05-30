@@ -402,6 +402,150 @@ func (m *Module) storeAPIKey(ctx context.Context) {
 	slog.Info("claudecode: stored Anthropic API key in keychain")
 }
 
+// RemoveHooks strips only the abysslink notify entries from
+// ~/.claude/settings.json. It is the inverse of Apply for the hook writes only.
+//
+// Returns the list of human-readable descriptors for removed entries, or nil if
+// no abysslink hooks were present (or the file/dir is missing).
+// If dryRun is true, descriptors are computed but no file is written.
+// Returns a non-nil error if settings.json contains invalid JSON — the file is
+// never overwritten in that case.
+//
+// context.Context is accepted for forward-compatibility; not yet used internally.
+func (m *Module) RemoveHooks(ctx context.Context, dryRun bool) ([]string, error) {
+	_ = ctx // reserved for future cancellation support
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: home dir: %w", err)
+	}
+
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	raw, err := readSettingsForRemoval(home, settingsPath)
+	if err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return nil, nil // missing dir or file — graceful no-op
+	}
+
+	var settings map[string]interface{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return nil, fmt.Errorf("claudecode: settings.json is not valid JSON (%w); "+
+			"back it up and remove it, then re-run to reset", err)
+	}
+
+	existingHooks, _ := settings["hooks"].(map[string]interface{})
+	if existingHooks == nil {
+		return nil, nil // no hooks key — nothing to remove
+	}
+
+	removed := pruneAbysslinkHooks(existingHooks)
+	if len(removed) == 0 {
+		return nil, nil // already clean, no write needed
+	}
+
+	if len(existingHooks) == 0 {
+		delete(settings, "hooks")
+	} else {
+		settings["hooks"] = existingHooks
+	}
+
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: marshal settings: %w", err)
+	}
+	data = append(data, '\n')
+
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: audit log path: %w", err)
+	}
+	if err := audit.New(logPath).WriteFile(settingsPath, data, 0o600, dryRun); err != nil {
+		return nil, fmt.Errorf("claudecode: write settings.json: %w", err)
+	}
+
+	if !dryRun {
+		slog.Info("claudecode: removed abysslink notify hooks from settings.json",
+			"path", settingsPath, "count", len(removed))
+	}
+
+	return removed, nil
+}
+
+// readSettingsForRemoval reads ~/.claude/settings.json for the removal path.
+// Returns (nil, nil) when the directory or file does not exist (graceful no-op).
+func readSettingsForRemoval(home, settingsPath string) ([]byte, error) {
+	if _, statErr := os.Stat(filepath.Join(home, ".claude")); os.IsNotExist(statErr) {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(settingsPath) //nolint:gosec
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("claudecode: read settings.json: %w", err)
+	}
+	return raw, nil
+}
+
+// pruneAbysslinkHooks removes abysslink notify entries from the given hooks map
+// (mutates in place) for the "Stop" and "Notification" event keys.
+// Returns human-readable descriptors for each removed entry.
+// Event keys whose arrays become empty are deleted from the map.
+func pruneAbysslinkHooks(hooks map[string]interface{}) []string {
+	var removed []string
+	for _, eventKey := range []string{"Stop", "Notification"} {
+		entries, ok := hooks[eventKey].([]interface{})
+		if !ok {
+			continue
+		}
+		kept, descs := partitionHookEntries(eventKey, entries)
+		removed = append(removed, descs...)
+		if len(kept) == 0 {
+			delete(hooks, eventKey)
+		} else {
+			hooks[eventKey] = kept
+		}
+	}
+	return removed
+}
+
+// partitionHookEntries splits a hook entry list into kept (non-abysslink) entries
+// and a list of descriptors for removed (abysslink) entries.
+func partitionHookEntries(eventKey string, entries []interface{}) (kept []interface{}, removed []string) {
+	for _, entry := range entries {
+		if hookEntryIsAbysslink(entry) {
+			removed = append(removed, hookEntryDescriptor(eventKey, entry))
+		} else {
+			kept = append(kept, entry)
+		}
+	}
+	return kept, removed
+}
+
+// hookEntryDescriptor builds a human-readable descriptor for an abysslink hook entry.
+func hookEntryDescriptor(eventKey string, entry interface{}) string {
+	entryMap, ok := entry.(map[string]interface{})
+	if !ok {
+		return eventKey + ": abysslink notify"
+	}
+	innerHooks, ok := entryMap["hooks"].([]interface{})
+	if !ok {
+		return eventKey + ": abysslink notify"
+	}
+	for _, h := range innerHooks {
+		hMap, ok := h.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if cmd, ok := hMap["command"].(string); ok {
+			return eventKey + ": " + cmd
+		}
+	}
+	return eventKey + ": abysslink notify"
+}
+
 // Verify re-runs Detect to confirm the hook is in place.
 func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 	return m.Detect(ctx)
