@@ -50,6 +50,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// newRunner is the factory used by loadCmdContext to construct the shell runner.
+// The default returns &shell.ExecRunner{}, which is byte-identical to the
+// previous inline literal. Tests override this var to inject a MockRunner
+// without changing production behavior.
+var newRunner = func() shell.Runner { return &shell.ExecRunner{} }
+
 // cmdContext holds shared state for a command invocation.
 type cmdContext struct {
 	cfg     *config.Config
@@ -93,7 +99,7 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 
 	return &cmdContext{
 		cfg:     cfg,
-		runner:  &shell.ExecRunner{},
+		runner:  newRunner(),
 		dryRun:  dryRun,
 		apply:   apply,
 		yes:     yes,
