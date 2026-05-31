@@ -253,7 +253,7 @@ Plans:
   4. `abysslink doctor` emits `WARN: server-trust model only — Tailnet Lock (TKA) is not available on Headscale` for the `hs-lock` check; this check can never return PASS regardless of configuration
   5. All nine hs-* checks (`hs-tls`, `hs-bind`, `hs-api-auth`, `hs-key-expiry`, `hs-db-perms`, `hs-lock`, `hs-oidc-filter`, `hs-proc-user`, `hs-derp-failclosed`) report correct PASS/WARN/FAIL status; `make lint test` green with mock Headscale API fixtures
 
-**Plans**: 4 plans
+**Plans**: 5 plans
 
 Plans:
 
@@ -261,6 +261,7 @@ Plans:
 - [ ] 12-02-PLAN.md — headscaleAdapter (Client + AdminAPI + ACLManager, not Locker) + factory.go case + contract/invariant tests
 - [ ] 12-03-PLAN.md — headscale_config.go (surgical YAML merge) + headscale_doctor.go (nine hs-* checks)
 - [ ] 12-04-PLAN.md — cmd_server_headscale.go (init/status/upgrade/backup) + root.go wiring + cmd_doctor.go hs-* fix entries
+- [ ] 12-05-PLAN.md — abysslink init wizard extension: backend.type headscale + server_url prompt (SC-1 / D-13)
 
 ### Phase 13: NetBird Backend
 
