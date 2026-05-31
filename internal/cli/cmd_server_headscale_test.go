@@ -427,6 +427,10 @@ func TestInstallHeadscaleMacOS_CreatesAccount(t *testing.T) {
 	allCalls := []shell.Call{
 		// dscl . -read /Users/_headscale → NOT found (exit 1)
 		{Result: shell.Result{ExitCode: 1}},
+		// findFreeMacOSID: dscl -list /Users UniqueID (empty → preferred free)
+		{Result: shell.Result{ExitCode: 0, Stdout: "_someuser 250\n"}},
+		// findFreeMacOSID: dscl -list /Groups PrimaryGroupID
+		{Result: shell.Result{ExitCode: 0, Stdout: "_somegroup 250\n"}},
 	}
 	allCalls = append(allCalls, dscl5User...)
 	allCalls = append(allCalls, dscl3Group...)
@@ -470,6 +474,37 @@ func TestInstallHeadscaleMacOS_CreatesAccount(t *testing.T) {
 	}
 	// 5 user + 2 group -create + 1 -append = 8 dscl mutation calls.
 	assert.GreaterOrEqual(t, createCount, 5, "must call dscl -create at least 5 times for user account")
+}
+
+// TestFindFreeMacOSID_PreferredFree returns the preferred ID when it is free in
+// both the user and group namespaces.
+func TestFindFreeMacOSID_PreferredFree(t *testing.T) {
+	mr := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "_alice 250\n_bob 251\n"}}, // /Users UniqueID
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "_grp 250\nstaff 20\n"}},   // /Groups PrimaryGroupID
+	)
+	var out strings.Builder
+	p := NewHumanPrinterTo(&out, &out)
+	id, err := findFreeMacOSID(context.Background(), mr, p)
+	require.NoError(t, err)
+	assert.Equal(t, macOSHeadscaleUID, id, "preferred UID must be used when free")
+}
+
+// TestFindFreeMacOSID_CollisionFallsBack covers the real bug: GID 399 is owned by
+// com.apple.access_ssh on stock macOS. When the preferred ID collides in EITHER
+// namespace, a different free ID (not 399) must be chosen so the service account
+// never shares a GID with an Apple group.
+func TestFindFreeMacOSID_CollisionFallsBack(t *testing.T) {
+	mr := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "_alice 250\n"}},                         // /Users UniqueID (399 free here)
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "com.apple.access_ssh 399\nstaff 20\n"}}, // /Groups: 399 TAKEN
+	)
+	var out strings.Builder
+	p := NewHumanPrinterTo(&out, &out)
+	id, err := findFreeMacOSID(context.Background(), mr, p)
+	require.NoError(t, err)
+	assert.NotEqual(t, "399", id, "must not reuse GID 399 when com.apple.access_ssh owns it")
+	assert.Equal(t, "499", id, "must allocate the highest free id in the service range")
 }
 
 // TestInstallHeadscaleMacOS_DryRunMutatesNothing verifies that in dry-run mode,
