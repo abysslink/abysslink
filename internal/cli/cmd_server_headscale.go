@@ -383,7 +383,14 @@ func installHeadscaleMacOS(
 // ensureMacOSServiceAccount creates the _headscale OS account + group if absent.
 // Idempotent: checks existence via dscl read before running create commands.
 func ensureMacOSServiceAccount(ctx context.Context, runner shell.Runner, p Printer, dryRun bool) error {
-	existsRes, _ := runner.Run(ctx, "dscl", ".", "-read", "/Users/"+macOSHeadscaleUser)
+	// A non-zero exit from `dscl -read` means the account does not exist (the
+	// normal create path). An err != nil means the command could not run at all
+	// (binary missing, context cancelled) — distinguish it so we don't mistake an
+	// exec failure (which returns a zero-value Result, ExitCode 0) for "exists".
+	existsRes, err := runner.Run(ctx, "dscl", ".", "-read", "/Users/"+macOSHeadscaleUser)
+	if err != nil {
+		return fmt.Errorf("headscale init (macOS): dscl read /Users/%s: %w", macOSHeadscaleUser, err)
+	}
 	if existsRes.ExitCode == 0 {
 		printerInfo(p, "  ✓  service account "+macOSHeadscaleUser+" already exists (idempotent)")
 		return nil
@@ -965,19 +972,26 @@ func ensureHeadscaleUser(ctx context.Context, baseURL, apiKey, userName string) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusOK {
-		var result struct {
-			Users []struct {
-				Name string `json:"name"`
-			} `json:"users"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
-			for _, u := range result.Users {
-				if u.Name == userName {
-					// User already exists — nothing to do.
-					return nil
-				}
-			}
+	if resp.StatusCode != http.StatusOK {
+		// A non-200 GET (e.g. 401 stale key) must surface here rather than being
+		// masked by a later, less specific POST failure (WR-04).
+		return fmt.Errorf("user-ensure GET: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Users []struct {
+			Name string `json:"name"`
+		} `json:"users"`
+	}
+	// A 200 body that fails to decode means we cannot reliably tell whether the
+	// user exists; returning an error here avoids a spurious recreate attempt.
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("user-ensure GET: decode user list: %w", err)
+	}
+	for _, u := range result.Users {
+		if u.Name == userName {
+			// User already exists — nothing to do.
+			return nil
 		}
 	}
 
