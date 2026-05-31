@@ -29,7 +29,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## v2.0.0 — Self-Hosted Backends & Fleet
 
 - [x] **Phase 11: Backend Abstraction Refactor** - Generic `internal/backend.Client` interface with contract tests; Tailscale adapter wrapping v1; all modules migrated; zero v1 regression (completed 2026-05-31)
-- [ ] **Phase 12: Headscale Backend** - Full Headscale backend: client adapter (HuJSON reuse, deny-all baseline, lock WARN), server provisioning (TLS gate, non-root, cosign, embedded DERP), all hs-* doctor checks
+- [x] **Phase 12: Headscale Backend** - Full Headscale backend: client adapter (HuJSON reuse, deny-all baseline, lock WARN), server provisioning (TLS gate, non-root, cosign, embedded DERP), all hs-* doctor checks (completed 2026-05-31)
 - [ ] **Phase 13: NetBird Backend** - Full NetBird backend: REST-only client adapter (Groups-as-tags, SSHCheck graceful degradation, AGPLv3 CI guard), server provisioning (v0.57.0 floor, ZITADEL CVE gate, non-root), all nb-* doctor checks
 - [ ] **Phase 14: Multi-Rig Fleet** - `abysslink enroll rig`, fan-out status/doctor/notify/panic, per-rig keychain namespaces and ntfy topics, rig-to-rig ACL deny, multi-rig doctor checks
 
@@ -269,11 +269,11 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 12-04-PLAN.md — cmd_server_headscale.go (init/status/upgrade/backup) + root.go wiring + cmd_doctor.go hs-* fix entries
+- [x] 12-04-PLAN.md — cmd_server_headscale.go (init/status/upgrade/backup) + root.go wiring + cmd_doctor.go hs-* fix entries
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 12-05-PLAN.md — abysslink init wizard extension: backend.type headscale + server_url prompt (SC-1 / D-13)
+- [x] 12-05-PLAN.md — abysslink init wizard extension: backend.type headscale + server_url prompt (SC-1 / D-13)
 
 ### Phase 13: NetBird Backend
 
@@ -325,6 +325,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 9. Verification & Polish | 3/3 | Complete | 2026-05-26 |
 | 10. Journey & Rich TUI | 6/6 | Complete | 2026-05-29 |
 | 11. Backend Abstraction Refactor | 3/3 | Complete    | 2026-05-31 |
-| 12. Headscale Backend | 3/5 | In Progress|  |
+| 12. Headscale Backend | 5/5 | Complete    | 2026-05-31 |
 | 13. NetBird Backend | 0/0 | Not started | - |
 | 14. Multi-Rig Fleet | 0/0 | Not started | - |
