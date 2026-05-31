@@ -197,6 +197,9 @@ func (a *headscaleAdapter) Capabilities() Capabilities {
 // After enrollment, Up pushes the deny-all ACL baseline before returning (HS-01 SC-1).
 func (a *headscaleAdapter) Up(ctx context.Context, opts UpOpts) error {
 	preAuthKey := os.Getenv(headscalePreAuthKeyEnv)
+	if preAuthKey == "" {
+		return fmt.Errorf("headscale: up: %s is empty — mint a pre-auth key first (server headscale init --apply)", headscalePreAuthKeyEnv)
+	}
 
 	hostname := opts.Hostname
 	if hostname == "" {
@@ -225,8 +228,11 @@ func (a *headscaleAdapter) Up(ctx context.Context, opts UpOpts) error {
 		return fmt.Errorf("headscale: up: tailscale up: %w", err)
 	}
 
-	// HS-01: Push deny-all ACL baseline before returning.
-	// No window exists where a node is admitted without policy.
+	// HS-01: Push deny-all ACL baseline before returning. The deny-all policy is
+	// guaranteed to be in place before Up returns; a brief window exists between
+	// enrollment (the tailscale up above) and this policy push during which the
+	// node is admitted under Headscale's current/empty policy. Do not remove this
+	// push — it is the safeguard that closes that window before control returns.
 	denyAll := a.DefaultACL("", "")
 	slog.Debug("headscale: up: pushing deny-all ACL baseline")
 	if err := a.SetACL(ctx, denyAll, ""); err != nil {

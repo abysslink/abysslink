@@ -269,9 +269,12 @@ func TestHeadscaleDenyAllOnUp(t *testing.T) {
 	var policyPushed atomic.Int32
 	srv := newHeadscaleMockServer(t, &policyPushed, nil)
 
+	// Up() fails fast when ABYSSLINK_HS_PREAUTHKEY is empty (WR-01), so seed a
+	// non-empty pre-auth key for the enrollment shell call.
+	t.Setenv("ABYSSLINK_HS_PREAUTHKEY", "tskey-auth-test-fixture")
+
 	// Seed the MockRunner for "tailscale up --login-server ... --hostname ...".
-	// We set TS_AUTHKEY env to empty via the env var; MockRunner accepts any
-	// RunWithEnv call and returns success.
+	// MockRunner accepts any RunWithEnv call and returns success.
 	runner := shell.NewMockRunner(shell.Call{
 		Result: shell.Result{ExitCode: 0},
 	})
