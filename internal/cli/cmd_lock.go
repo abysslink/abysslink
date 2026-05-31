@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/abysslink/abysslink/internal/tailscale"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -47,7 +47,15 @@ func newLockStatusCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
-			st, err := tailscale.NewLockClient(cc.runner).Status(ctx)
+			b, err := cc.backend()
+			if err != nil {
+				return fmt.Errorf("lock status: %w", err)
+			}
+			lc, ok := b.(backend.Locker)
+			if !ok {
+				return fmt.Errorf("lock status: backend %q has no Tailnet Lock support", cc.cfg.Backend.Type)
+			}
+			st, err := lc.LockStatus(ctx)
 			if err != nil {
 				return fmt.Errorf("lock status: %w", err)
 			}
@@ -77,9 +85,16 @@ func newLockInitCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
-			lc := tailscale.NewLockClient(cc.runner)
+			b, err := cc.backend()
+			if err != nil {
+				return fmt.Errorf("lock init: %w", err)
+			}
+			lc, ok := b.(backend.Locker)
+			if !ok {
+				return fmt.Errorf("lock init: backend %q has no Tailnet Lock support", cc.cfg.Backend.Type)
+			}
 
-			if st, sErr := lc.Status(ctx); sErr == nil && st.Enabled {
+			if st, sErr := lc.LockStatus(ctx); sErr == nil && st.Enabled {
 				printerInfo(p, styleSuccess.Render("Tailnet Lock is already enabled — nothing to do."))
 				printerInfo(p, "")
 				printerInfo(p, styleMuted.Render("To generate fresh disablement secrets, rotate instead:"))
@@ -97,7 +112,7 @@ func newLockInitCmd() *cobra.Command {
 				return nil
 			}
 
-			res, err := lc.Init(ctx, n, cc.cfg.Tailnet.Lock.ShareWithSupport)
+			res, err := lc.LockInit(ctx, n, cc.cfg.Tailnet.Lock.ShareWithSupport)
 			if err != nil {
 				return fmt.Errorf("lock init: %w", err)
 			}
@@ -177,7 +192,15 @@ func newLockSignCmd() *cobra.Command {
 				printerInfo(p, fmt.Sprintf("[plan] would run: tailscale lock sign %s  (re-run with --apply)", args[0]))
 				return nil
 			}
-			if err := tailscale.NewLockClient(cc.runner).Sign(ctx, args[0]); err != nil {
+			b, err := cc.backend()
+			if err != nil {
+				return fmt.Errorf("lock sign: %w", err)
+			}
+			lc, ok := b.(backend.Locker)
+			if !ok {
+				return fmt.Errorf("lock sign: backend %q has no Tailnet Lock support", cc.cfg.Backend.Type)
+			}
+			if err := lc.LockSign(ctx, args[0]); err != nil {
 				return fmt.Errorf("lock sign: %w", err)
 			}
 			printerInfo(p, styleSuccess.Render("Node key signed into Tailnet Lock."))

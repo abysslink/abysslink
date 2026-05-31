@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/shell"
-	tslocal "github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/spf13/cobra"
 )
 
@@ -57,15 +57,18 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			r := cc.runner
-			tsClient := tslocal.NewLocalClient(r)
+			b, bErr := cc.backend()
+			if bErr != nil {
+				return fmt.Errorf("status: %w", bErr)
+			}
 
 			tsRunning := "not running"
 			tsIP := ""
 			hostname := ""
 
-			st, tsErr := tsClient.Status(ctx)
+			st, tsErr := b.Status(ctx)
 			if tsErr == nil {
-				if st.BackendState == tslocal.StateRunning {
+				if st.BackendState == backend.StateRunning {
 					tsRunning = "running"
 				} else {
 					tsRunning = strings.ToLower(string(st.BackendState))
