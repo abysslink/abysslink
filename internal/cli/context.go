@@ -21,6 +21,7 @@ import (
 	"log/slog"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/modules/acl"
@@ -66,6 +67,12 @@ type cmdContext struct {
 	jsonOut bool
 	verbose bool
 	explain bool // gates per-action rationale rendering (--explain flag)
+}
+
+// backend constructs a backend.Client for this cmdContext. It is a convenience
+// helper for CLI command files that do not receive a modules.Deps bundle.
+func (cc *cmdContext) backend() (backend.Client, error) {
+	return backend.New(cc.cfg, cc.runner)
 }
 
 // loadCmdContext loads config and resolves flags from the root command.
@@ -132,6 +139,11 @@ func printerError(p Printer, msg string) { p.Error(msg) }
 // non-fatal — modules that need a secret surface a clear error at point of use
 // rather than panicking.
 func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
+	b, err := backend.New(cc.cfg, cc.runner)
+	if err != nil {
+		return modules.Deps{}, fmt.Errorf("backend init: %w", err)
+	}
+
 	plat, err := platformauto.New(cc.runner)
 	if err != nil {
 		return modules.Deps{}, fmt.Errorf("platform init: %w", err)
@@ -151,6 +163,7 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 	return modules.Deps{
 		Cfg:      cc.cfg,
 		Runner:   cc.runner,
+		Backend:  b,
 		Platform: plat,
 		Keychain: kc,
 		Audit:    audit.New(logPath),

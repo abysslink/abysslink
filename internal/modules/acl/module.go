@@ -25,10 +25,10 @@ import (
 	"runtime"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
-	"github.com/abysslink/abysslink/internal/tailscale"
 )
 
 // oauthSecretEnv is the environment variable holding the Tailscale admin OAuth
@@ -40,15 +40,16 @@ const aclEditorURL = "https://login.tailscale.com/admin/acls/file"
 
 // Module implements the acl module.
 type Module struct {
-	runner shell.Runner
-	cfg    *config.Config
-	audit  *audit.Audit
-	prompt func(ctx context.Context, msg string) error
+	runner  shell.Runner
+	cfg     *config.Config
+	bknd    backend.Client
+	audit   *audit.Audit
+	prompt  func(ctx context.Context, msg string) error
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit, prompt: d.Prompt}
+	return &Module{runner: d.Runner, cfg: d.Cfg, bknd: d.Backend, audit: d.Audit, prompt: d.Prompt}
 }
 
 // Name returns the module name.
@@ -56,16 +57,6 @@ func (m *Module) Name() string { return "acl" }
 
 // Deps returns the module's dependencies.
 func (m *Module) Deps() []string { return []string{"tailscale"} }
-
-// adminClient builds an admin API client from config + the env-provided secret.
-// In manual mode (no client ID/secret) the returned client degrades gracefully.
-func (m *Module) adminClient() *tailscale.AdminClient {
-	return tailscale.NewAdminClient(
-		m.cfg.Tailnet.Admin.Tailnet,
-		m.cfg.Tailnet.Admin.OAuthClientID,
-		os.Getenv(oauthSecretEnv),
-	)
-}
 
 // hasAdminCreds reports whether full admin-API automation is available.
 func (m *Module) hasAdminCreds() bool {
@@ -109,6 +100,15 @@ func (m *Module) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
 	if m.cfg.Identity.Email == "" {
 		return nil, nil
 	}
+	// Gate on ACLManager capability: if the backend does not support ACL management,
+	// emit a WARN finding and skip the plan entry (mirrors Detect WARN idiom :96-103).
+	if m.bknd != nil {
+		if _, ok := m.bknd.(backend.ACLManager); !ok {
+			slog.Warn("acl: backend does not support ACL management — skipping ACL plan entry",
+				"backend", m.cfg.Backend.Type)
+			return nil, nil
+		}
+	}
 	mode := "push via admin API"
 	if !m.hasAdminCreds() {
 		mode = "copy to clipboard + open admin editor (manual)"
@@ -141,13 +141,16 @@ func (m *Module) Apply(ctx context.Context) error {
 // applyAdmin pulls the current ACL, applies the desired changes idempotently,
 // and pushes the result with optimistic-concurrency (ETag).
 func (m *Module) applyAdmin(ctx context.Context, owner, user, checkPeriod string) error {
-	admin := m.adminClient()
-	cur, etag, err := admin.GetACL(ctx)
+	aclMgr, ok := m.bknd.(backend.ACLManager)
+	if !ok {
+		return fmt.Errorf("acl apply: backend %q has no ACL management support", m.cfg.Backend.Type)
+	}
+	cur, etag, err := aclMgr.GetACL(ctx)
 	if err != nil {
 		return fmt.Errorf("acl apply: pull current ACL: %w", err)
 	}
 
-	editor, err := tailscale.NewACLEditor(cur)
+	editor, err := aclMgr.NewACLEditor(cur)
 	if err != nil {
 		return fmt.Errorf("acl apply: parse current ACL: %w", err)
 	}
@@ -160,7 +163,7 @@ func (m *Module) applyAdmin(ctx context.Context, owner, user, checkPeriod string
 		return nil
 	}
 
-	if err := admin.SetACL(ctx, editor.Bytes(), etag); err != nil {
+	if err := aclMgr.SetACL(ctx, editor.Bytes(), etag); err != nil {
 		return fmt.Errorf("acl apply: push ACL: %w", err)
 	}
 	slog.Info("acl apply: pushed updated tailnet ACL via admin API")
@@ -170,9 +173,13 @@ func (m *Module) applyAdmin(ctx context.Context, owner, user, checkPeriod string
 // applyManual writes the desired ACL to the generated dir, copies it to the
 // clipboard, and opens the admin editor for the user to paste and save.
 func (m *Module) applyManual(ctx context.Context, owner, user, checkPeriod string) error {
-	desired := tailscale.DefaultACL(owner, user)
+	aclMgr, ok := m.bknd.(backend.ACLManager)
+	if !ok {
+		return fmt.Errorf("acl apply: backend %q has no ACL management support", m.cfg.Backend.Type)
+	}
+	desired := aclMgr.DefaultACL(owner, user)
 	if checkPeriod != "" && checkPeriod != "12h" {
-		editor, err := tailscale.NewACLEditor(desired)
+		editor, err := aclMgr.NewACLEditor(desired)
 		if err == nil {
 			if err := editor.EnsureSSHRule(owner, user, checkPeriod); err == nil {
 				desired = editor.Bytes()
@@ -235,8 +242,16 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 	if m.cfg.Identity.Email == "" || !m.hasAdminCreds() {
 		return nil, nil // cannot verify without admin API; manual mode is user-attested
 	}
-	admin := m.adminClient()
-	cur, _, err := admin.GetACL(ctx)
+	aclMgr, ok := m.bknd.(backend.ACLManager)
+	if !ok {
+		return []modules.Finding{{
+			Module:   m.Name(),
+			Check:    "acl_manager",
+			Severity: modules.SeverityWarning,
+			Message:  fmt.Sprintf("backend %q has no ACL management support — cannot verify ACL", m.cfg.Backend.Type),
+		}}, nil
+	}
+	cur, _, err := aclMgr.GetACL(ctx)
 	if err != nil {
 		return []modules.Finding{{
 			Module:   m.Name(),
@@ -245,7 +260,7 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 			Message:  fmt.Sprintf("could not pull ACL to verify: %v", err),
 		}}, nil
 	}
-	editor, err := tailscale.NewACLEditor(cur)
+	editor, err := aclMgr.NewACLEditor(cur)
 	if err != nil {
 		return nil, fmt.Errorf("acl verify: parse ACL: %w", err)
 	}
@@ -270,7 +285,7 @@ func (m *Module) Repair(ctx context.Context) error {
 }
 
 // applyDesired applies abysslink's required ACL edits idempotently.
-func applyDesired(editor *tailscale.ACLEditor, owner, user, checkPeriod string) error {
+func applyDesired(editor backend.ACLEditor, owner, user, checkPeriod string) error {
 	if checkPeriod == "" {
 		checkPeriod = "12h"
 	}

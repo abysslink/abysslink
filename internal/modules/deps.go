@@ -19,6 +19,7 @@ import (
 	"context"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/secrets"
@@ -34,6 +35,7 @@ import (
 type Deps struct {
 	Cfg      *config.Config
 	Runner   shell.Runner
+	Backend  backend.Client
 	Platform platform.Platform
 	Keychain secrets.KeychainStore
 	Audit    *audit.Audit
