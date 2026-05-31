@@ -224,55 +224,24 @@ func headscaleInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, 
 
 // completeInit implements init steps 7-11: service install + start, health-check,
 // API key bootstrap, user-ensure, and pre-auth key mint.
-// On macOS the service-install steps are deferred to the checkpoint:human-verify
-// gate (Task 2) — this function returns early with a slog.Info on darwin.
+// macOS: creates _headscale service account via dscl, writes launchd plist, and
+// loads the service via launchctl. Requires sudo; approved via checkpoint:human-verify
+// (Task 2 of Plan 12-04, user response "approved").
 func completeInit(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, p Printer) error {
 	// ── Step 7: Service install + start ───────────────────────────────────────
-	if runtime.GOOS == "darwin" {
-		// macOS service-account creation (dscl) and launchd plist installation
-		// require sudo and have MEDIUM confidence (R-03). This code path is only
-		// exercised after the checkpoint:human-verify gate (Task 2 of Plan 12-04).
-		slog.InfoContext(ctx, "headscale init: macOS service install deferred — awaiting checkpoint:human-verify (Task 2)")
-		printerInfo(p, styleWarn.Render("  !  macOS service install requires human verification (run `abysslink server headscale init --apply` after checkpoint approval)"))
-		return nil
-	}
-
-	// Linux: systemd service install.
 	binPath := headscaleBinaryPath(cfg)
 	cfgPath := headscaleConfigPath(cfg)
 
-	unitContent := fmt.Sprintf(`[Unit]
-Description=Headscale VPN control server
-After=network.target
-
-[Service]
-Type=simple
-User=headscale
-ExecStart=%s serve --config %s
-Restart=on-failure
-RestartSec=5s
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-`, binPath, cfgPath)
-
-	unitPath := "/etc/systemd/system/headscale.service"
-	logPath, err := audit.DefaultLogPath()
-	if err != nil {
-		return fmt.Errorf("headscale init: audit log path: %w", err)
-	}
-	if err := audit.New(logPath).WriteFile(unitPath, []byte(unitContent), 0o644, cc.dryRun); err != nil {
-		return fmt.Errorf("headscale init: write systemd unit: %w", err)
-	}
-
-	for _, args := range [][]string{
-		{"systemctl", "daemon-reload"},
-		{"systemctl", "enable", "headscale"},
-		{"systemctl", "start", "headscale"},
-	} {
-		if _, err := runner.Run(ctx, args[0], args[1:]...); err != nil {
-			return fmt.Errorf("headscale init: %s: %w", strings.Join(args, " "), err)
+	if runtime.GOOS == "darwin" {
+		// macOS service-account creation (dscl) and launchd plist installation.
+		// Approved via checkpoint:human-verify (Task 2 of Plan 12-04, R-03).
+		if err := installHeadscaleMacOS(ctx, cfg, runner, p, binPath, cfgPath, cc.dryRun); err != nil {
+			return err
+		}
+	} else {
+		// Linux: systemd service install.
+		if err := installHeadscaleLinux(ctx, cfg, runner, p, binPath, cfgPath, cc.dryRun); err != nil {
+			return err
 		}
 	}
 
@@ -317,6 +286,255 @@ WantedBy=multi-user.target
 	// SECURITY: pre-auth key routed ONLY to Printer (T-12-04-02 / T-12-04-03).
 	printerInfo(p, styleSuccess.Render("  ✓  Pre-auth key minted and stored in keychain"))
 
+	return nil
+}
+
+// ── Service install helpers ────────────────────────────────────────────────────
+
+// installHeadscaleLinux writes a systemd unit file and starts the service.
+// All file mutations go through audit.WriteFile. All exec calls go through runner.
+func installHeadscaleLinux(
+	ctx context.Context,
+	cfg *config.Config,
+	runner shell.Runner,
+	p Printer,
+	binPath, cfgPath string,
+	dryRun bool,
+) error {
+	unitContent := fmt.Sprintf(`[Unit]
+Description=Headscale VPN control server
+After=network.target
+
+[Service]
+Type=simple
+User=headscale
+ExecStart=%s serve --config %s
+Restart=on-failure
+RestartSec=5s
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+`, binPath, cfgPath)
+
+	unitPath := "/etc/systemd/system/headscale.service"
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("headscale init: audit log path: %w", err)
+	}
+	if err := audit.New(logPath).WriteFile(unitPath, []byte(unitContent), 0o644, dryRun); err != nil {
+		return fmt.Errorf("headscale init: write systemd unit: %w", err)
+	}
+
+	for _, args := range [][]string{
+		{"systemctl", "daemon-reload"},
+		{"systemctl", "enable", "headscale"},
+		{"systemctl", "start", "headscale"},
+	} {
+		if _, err := runner.Run(ctx, args[0], args[1:]...); err != nil {
+			return fmt.Errorf("headscale init: %s: %w", strings.Join(args, " "), err)
+		}
+	}
+
+	printerInfo(p, styleSuccess.Render("  ✓  headscale systemd service installed and started"))
+	return nil
+}
+
+// macOS service account and plist constants (T-12-04-05, RF-2).
+const (
+	macOSHeadscaleUser   = "_headscale"
+	macOSHeadscaleGroup  = "_headscale"
+	macOSHeadscaleUID    = "399"
+	macOSHeadscaleGID    = "399"
+	macOSHeadscaleHome   = "/var/lib/headscale"
+	macOSHeadscaleLogDir = "/var/log/headscale"
+	macOSHeadscalePlist  = "/Library/LaunchDaemons/net.abysslink.headscale.plist"
+	macOSHeadscaleLabel  = "net.abysslink.headscale"
+)
+
+// installHeadscaleMacOS creates the _headscale service account via dscl (idempotent),
+// sets up directory ownership, writes the launchd plist, and loads the service.
+// Approved via checkpoint:human-verify (Task 2 of Plan 12-04, R-03).
+//
+// Security: runs as _headscale (UID 399), not root (T-12-04-05). listen_addr uses
+// ":443" (all interfaces) — macOS non-root port <1024 only works for 0.0.0.0 (RF-2).
+func installHeadscaleMacOS(
+	ctx context.Context,
+	cfg *config.Config,
+	runner shell.Runner,
+	p Printer,
+	binPath, cfgPath string,
+	dryRun bool,
+) error {
+	// Ensure service account exists (idempotent dscl check).
+	if err := ensureMacOSServiceAccount(ctx, runner, p, dryRun); err != nil {
+		return err
+	}
+
+	// Create and chown required directories.
+	if err := ensureMacOSDirs(ctx, runner, p, dryRun); err != nil {
+		return err
+	}
+
+	// Write launchd plist and load service.
+	return writeMacOSPlistAndLoad(ctx, cfg, runner, p, binPath, cfgPath, dryRun)
+}
+
+// ensureMacOSServiceAccount creates the _headscale OS account + group if absent.
+// Idempotent: checks existence via dscl read before running create commands.
+func ensureMacOSServiceAccount(ctx context.Context, runner shell.Runner, p Printer, dryRun bool) error {
+	existsRes, _ := runner.Run(ctx, "dscl", ".", "-read", "/Users/"+macOSHeadscaleUser)
+	if existsRes.ExitCode == 0 {
+		printerInfo(p, "  ✓  service account "+macOSHeadscaleUser+" already exists (idempotent)")
+		return nil
+	}
+
+	if dryRun {
+		printerInfo(p, "[plan] would create macOS service account "+macOSHeadscaleUser+" (UID "+macOSHeadscaleUID+")")
+		return nil
+	}
+
+	printerInfo(p, "  →  creating macOS service account "+macOSHeadscaleUser)
+	userCmds := [][]string{
+		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser},
+		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "UserShell", "/usr/bin/false"},
+		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "NFSHomeDirectory", macOSHeadscaleHome},
+		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "UniqueID", macOSHeadscaleUID},
+		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "PrimaryGroupID", macOSHeadscaleGID},
+	}
+	for _, args := range userCmds {
+		if _, err := runner.Run(ctx, args[0], args[1:]...); err != nil {
+			return fmt.Errorf("headscale init (macOS): %s: %w", strings.Join(args[2:], " "), err)
+		}
+	}
+
+	groupCmds := [][]string{
+		{"dscl", ".", "-create", "/Groups/" + macOSHeadscaleGroup},
+		{"dscl", ".", "-create", "/Groups/" + macOSHeadscaleGroup, "PrimaryGroupID", macOSHeadscaleGID},
+		{"dscl", ".", "-append", "/Groups/" + macOSHeadscaleGroup, "GroupMembership", macOSHeadscaleUser},
+	}
+	for _, args := range groupCmds {
+		if _, err := runner.Run(ctx, args[0], args[1:]...); err != nil {
+			return fmt.Errorf("headscale init (macOS): %s: %w", strings.Join(args[2:], " "), err)
+		}
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  service account "+macOSHeadscaleUser+" created (UID "+macOSHeadscaleUID+")"))
+	return nil
+}
+
+// ensureMacOSDirs creates /var/lib/headscale, /etc/headscale, /var/log/headscale
+// and chowns them to _headscale:_headscale.
+func ensureMacOSDirs(ctx context.Context, runner shell.Runner, p Printer, dryRun bool) error {
+	dirs := []string{macOSHeadscaleHome, "/etc/headscale", macOSHeadscaleLogDir}
+	for _, dir := range dirs {
+		if dryRun {
+			printerInfo(p, "[plan] would mkdir -p "+dir)
+			continue
+		}
+		if _, err := runner.Run(ctx, "mkdir", "-p", dir); err != nil {
+			return fmt.Errorf("headscale init (macOS): mkdir %s: %w", dir, err)
+		}
+		if _, err := runner.Run(ctx, "chown", "-R", macOSHeadscaleUser+":"+macOSHeadscaleGroup, dir); err != nil {
+			return fmt.Errorf("headscale init (macOS): chown %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+// writeMacOSPlistAndLoad writes the launchd plist and loads it with launchctl.
+// listen_addr ":443" (0.0.0.0:443) — non-root port <1024 on macOS only works for
+// all interfaces, not a specific IP (RF-2 / Pitfall 5).
+func writeMacOSPlistAndLoad(
+	ctx context.Context,
+	cfg *config.Config,
+	runner shell.Runner,
+	p Printer,
+	binPath, cfgPath string,
+	dryRun bool,
+) error {
+	plistContent := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>            <string>%s</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>%s</string>
+        <string>serve</string>
+        <string>--config</string>
+        <string>%s</string>
+    </array>
+    <key>UserName</key>         <string>%s</string>
+    <key>GroupName</key>        <string>%s</string>
+    <key>InitGroups</key>       <true/>
+    <key>RunAtLoad</key>        <true/>
+    <key>KeepAlive</key>        <true/>
+    <key>WorkingDirectory</key> <string>%s</string>
+    <key>StandardOutPath</key>  <string>%s/headscale.log</string>
+    <key>StandardErrorPath</key><string>%s/headscale.err</string>
+</dict>
+</plist>
+`, macOSHeadscaleLabel, binPath, cfgPath,
+		macOSHeadscaleUser, macOSHeadscaleGroup,
+		macOSHeadscaleHome, macOSHeadscaleLogDir, macOSHeadscaleLogDir)
+
+	if dryRun {
+		printerInfo(p, "[plan] would write launchd plist → "+macOSHeadscalePlist)
+		printerInfo(p, "[plan] would launchctl load "+macOSHeadscalePlist)
+		return nil
+	}
+
+	logAuditPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("headscale init (macOS): audit log path: %w", err)
+	}
+	if err := audit.New(logAuditPath).WriteFile(macOSHeadscalePlist, []byte(plistContent), 0o644, false); err != nil {
+		return fmt.Errorf("headscale init (macOS): write launchd plist: %w", err)
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  launchd plist written → "+macOSHeadscalePlist))
+
+	// launchctl load is idempotent: already-loaded services print a message but exit 0.
+	if _, err := runner.Run(ctx, "launchctl", "load", macOSHeadscalePlist); err != nil {
+		return fmt.Errorf("headscale init (macOS): launchctl load: %w", err)
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  launchd service loaded: "+macOSHeadscaleLabel))
+
+	// Assert service runs as _headscale, not root (T-12-04-05).
+	if err := assertHeadscaleRunsAsUser(ctx, runner, macOSHeadscaleUser); err != nil {
+		slog.WarnContext(ctx, "headscale init (macOS): process user assertion failed — hs-proc-user will report WARN",
+			"err", err)
+		printerInfo(p, styleWarn.Render("  !  could not verify process user (may still be starting): "+err.Error()))
+	} else {
+		printerInfo(p, styleSuccess.Render("  ✓  headscale running as "+macOSHeadscaleUser+" (not root)"))
+	}
+
+	_ = cfg // retained for future config-driven overrides
+	return nil
+}
+
+// assertHeadscaleRunsAsUser checks that the headscale process is running as the
+// expected user (not root). Uses pgrep to find the PID, then ps to get the user.
+// T-12-04-05: launchd UserName key is ASSUMED to work (A1); this probe detects if
+// the assumption fails.
+func assertHeadscaleRunsAsUser(ctx context.Context, runner shell.Runner, expectedUser string) error {
+	pgrepRes, err := runner.Run(ctx, "pgrep", "-x", "headscale")
+	if err != nil || strings.TrimSpace(pgrepRes.Stdout) == "" {
+		return fmt.Errorf("pgrep headscale: process not found (may still be starting)")
+	}
+	pid := strings.TrimSpace(pgrepRes.Stdout)
+	// Take only the first PID if multiple.
+	if idx := strings.IndexAny(pid, "\n "); idx >= 0 {
+		pid = pid[:idx]
+	}
+
+	psRes, err := runner.Run(ctx, "ps", "-o", "user=", "-p", pid)
+	if err != nil {
+		return fmt.Errorf("ps -o user= -p %s: %w", pid, err)
+	}
+	actualUser := strings.TrimSpace(psRes.Stdout)
+	if actualUser != expectedUser {
+		return fmt.Errorf("headscale is running as %q, expected %q — hs-proc-user will FAIL", actualUser, expectedUser)
+	}
 	return nil
 }
 
