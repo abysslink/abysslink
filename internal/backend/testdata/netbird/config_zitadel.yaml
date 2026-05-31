@@ -1,0 +1,14 @@
+# ZITADEL-variant netbird-server config.yaml fixture.
+# Used to trigger nb-zitadel detect-then-probe logic in tests (D-02).
+# The server.auth.issuer contains "zitadel" — this is the detection signal.
+disableAnonymousMetrics: true
+disableGeoliteUpdate: true
+metricsPort: 9090
+server:
+  listenAddress: "127.0.0.1:443"
+  auth:
+    issuer: "https://zitadel.example.com"
+    audience:
+      - "netbird-client"
+    pkce:
+      enabled: true
