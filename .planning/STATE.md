@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v2.0.0
 milestone_name: Self-Hosted Backends & Fleet
-status: ready_to_plan
-last_updated: 2026-05-31T15:49:23.140Z
+status: planning
+last_updated: "2026-05-31T19:16:52.703Z"
 last_activity: 2026-05-31
 progress:
   total_phases: 14
@@ -11,7 +11,6 @@ progress:
   total_plans: 15
   completed_plans: 12
   percent: 21
-stopped_at: Phase 11 complete (3/3) — ready to discuss Phase 12
 ---
 
 # Project State
@@ -120,6 +119,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-05-31T15:34:03.645Z
-Stopped at: Phase 11 context gathered
-Resume file: None
+Last session: 2026-05-31T19:16:52.697Z
+Stopped at: Phase 12 context gathered
+Resume file: .planning/phases/12-headscale-backend/12-CONTEXT.md
