@@ -344,8 +344,7 @@ WantedBy=multi-user.target
 const (
 	macOSHeadscaleUser   = "_headscale"
 	macOSHeadscaleGroup  = "_headscale"
-	macOSHeadscaleUID    = "399"
-	macOSHeadscaleGID    = "399"
+	macOSHeadscaleUID    = "399" // preferred UID/GID; findFreeMacOSID falls back if taken
 	macOSHeadscaleHome   = "/var/lib/headscale"
 	macOSHeadscaleLogDir = "/var/log/headscale"
 	macOSHeadscalePlist  = "/Library/LaunchDaemons/net.abysslink.headscale.plist"
@@ -396,18 +395,27 @@ func ensureMacOSServiceAccount(ctx context.Context, runner shell.Runner, p Print
 		return nil
 	}
 
+	// The preferred ID (399) collides with Apple-allocated GIDs on stock macOS
+	// (e.g. com.apple.access_ssh owns GID 399), so creating a second group with
+	// the same GID produces a duplicate-GID conflict. Pick an ID that is free in
+	// BOTH the user and group namespaces, preferring the default when available.
+	idStr, err := findFreeMacOSID(ctx, runner, p)
+	if err != nil {
+		return fmt.Errorf("headscale init (macOS): allocate uid/gid: %w", err)
+	}
+
 	if dryRun {
-		printerInfo(p, "[plan] would create macOS service account "+macOSHeadscaleUser+" (UID "+macOSHeadscaleUID+")")
+		printerInfo(p, "[plan] would create macOS service account "+macOSHeadscaleUser+" (UID/GID "+idStr+")")
 		return nil
 	}
 
-	printerInfo(p, "  →  creating macOS service account "+macOSHeadscaleUser)
+	printerInfo(p, "  →  creating macOS service account "+macOSHeadscaleUser+" (UID/GID "+idStr+")")
 	userCmds := [][]string{
 		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser},
 		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "UserShell", "/usr/bin/false"},
 		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "NFSHomeDirectory", macOSHeadscaleHome},
-		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "UniqueID", macOSHeadscaleUID},
-		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "PrimaryGroupID", macOSHeadscaleGID},
+		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "UniqueID", idStr},
+		{"dscl", ".", "-create", "/Users/" + macOSHeadscaleUser, "PrimaryGroupID", idStr},
 	}
 	for _, args := range userCmds {
 		if _, err := runner.Run(ctx, args[0], args[1:]...); err != nil {
@@ -417,7 +425,7 @@ func ensureMacOSServiceAccount(ctx context.Context, runner shell.Runner, p Print
 
 	groupCmds := [][]string{
 		{"dscl", ".", "-create", "/Groups/" + macOSHeadscaleGroup},
-		{"dscl", ".", "-create", "/Groups/" + macOSHeadscaleGroup, "PrimaryGroupID", macOSHeadscaleGID},
+		{"dscl", ".", "-create", "/Groups/" + macOSHeadscaleGroup, "PrimaryGroupID", idStr},
 		{"dscl", ".", "-append", "/Groups/" + macOSHeadscaleGroup, "GroupMembership", macOSHeadscaleUser},
 	}
 	for _, args := range groupCmds {
@@ -425,8 +433,63 @@ func ensureMacOSServiceAccount(ctx context.Context, runner shell.Runner, p Print
 			return fmt.Errorf("headscale init (macOS): %s: %w", strings.Join(args[2:], " "), err)
 		}
 	}
-	printerInfo(p, styleSuccess.Render("  ✓  service account "+macOSHeadscaleUser+" created (UID "+macOSHeadscaleUID+")"))
+	printerInfo(p, styleSuccess.Render("  ✓  service account "+macOSHeadscaleUser+" created (UID/GID "+idStr+")"))
 	return nil
+}
+
+// findFreeMacOSID returns an ID that is unused in BOTH the macOS user and group
+// namespaces, suitable for a service account's UniqueID and PrimaryGroupID. It
+// prefers macOSHeadscaleUID when that value is free in both; otherwise it scans
+// downward through the hidden service-account range (200–499, the convention for
+// macOS daemon accounts) and returns the first free value. This avoids the
+// duplicate-GID conflict that a hardcoded 399 hits on stock macOS, where
+// com.apple.access_ssh already owns GID 399.
+func findFreeMacOSID(ctx context.Context, runner shell.Runner, p Printer) (string, error) {
+	usedUID, err := listUsedMacOSIDs(ctx, runner, "/Users", "UniqueID")
+	if err != nil {
+		return "", err
+	}
+	usedGID, err := listUsedMacOSIDs(ctx, runner, "/Groups", "PrimaryGroupID")
+	if err != nil {
+		return "", err
+	}
+
+	preferred, _ := strconv.Atoi(macOSHeadscaleUID)
+	if preferred != 0 && !usedUID[preferred] && !usedGID[preferred] {
+		return macOSHeadscaleUID, nil
+	}
+
+	for id := 499; id >= 200; id-- {
+		if !usedUID[id] && !usedGID[id] {
+			printerInfo(p, fmt.Sprintf("  →  default ID %s is in use; allocating free UID/GID %d", macOSHeadscaleUID, id))
+			return strconv.Itoa(id), nil
+		}
+	}
+	return "", fmt.Errorf("no free uid/gid available in range 200-499")
+}
+
+// listUsedMacOSIDs returns the set of numeric IDs already assigned in a dscl
+// namespace, e.g. `dscl . -list /Users UniqueID`. Output lines look like
+// "_name    399"; the trailing field is the numeric ID.
+func listUsedMacOSIDs(ctx context.Context, runner shell.Runner, path, key string) (map[int]bool, error) {
+	res, err := runner.Run(ctx, "dscl", ".", "-list", path, key)
+	if err != nil {
+		return nil, fmt.Errorf("dscl -list %s %s: %w", path, key, err)
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("dscl -list %s %s exited %d", path, key, res.ExitCode)
+	}
+	used := make(map[int]bool)
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if n, convErr := strconv.Atoi(fields[len(fields)-1]); convErr == nil {
+			used[n] = true
+		}
+	}
+	return used, nil
 }
 
 // ensureMacOSDirs creates /var/lib/headscale, /etc/headscale, /var/log/headscale
