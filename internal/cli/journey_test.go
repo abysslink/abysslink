@@ -22,19 +22,21 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestJourneyStageCount asserts that journeyStages returns exactly 7 stages.
 func TestJourneyStageCount(t *testing.T) {
-	stages := journeyStages(false)
+	stages := journeyStages(false, config.Defaults(), &shell.ExecRunner{})
 	assert.Len(t, stages, 7, "journey must have exactly 7 stages")
 }
 
 // TestJourneyStageLabels asserts that the 7 stage labels match the specified names.
 func TestJourneyStageLabels(t *testing.T) {
-	stages := journeyStages(false)
+	stages := journeyStages(false, config.Defaults(), &shell.ExecRunner{})
 	require.Len(t, stages, 7)
 
 	expectedLabels := []string{

@@ -79,7 +79,12 @@ func journeyLabels() []string {
 // journeyStages returns the ordered slice of the 7 journey stages. Each stage's
 // run function CALLS the existing command function for that step — it never
 // reimplements the step logic, keeping every stage independently runnable.
-func journeyStages(jsonOut bool) []journeyStage {
+//
+// cfg is the config the user just wrote in init; it is threaded into stage 4
+// (Lock) so the "already enabled?" probe queries the backend the user
+// configured rather than synthesizing config.Defaults() (which would always
+// resolve to the tailscale adapter once a second backend exists — WR-05).
+func journeyStages(jsonOut bool, cfg *config.Config, runner shell.Runner) []journeyStage {
 	return []journeyStage{
 		{
 			index: 1,
@@ -135,8 +140,7 @@ func journeyStages(jsonOut bool) []journeyStage {
 			// §7 note 6 (Tailnet Lock secrets) fires here.
 			run: func(ctx context.Context, p Printer) error {
 				emitSecurityNote(p, jsonOut, "tailnet-lock-secrets") // §7 note 6
-				runner := &shell.ExecRunner{}
-				b, bErr := backend.New(config.Defaults(), runner)
+				b, bErr := backend.New(cfg, runner)
 				if bErr == nil {
 					if locker, ok := b.(backend.Locker); ok {
 						if st, err := locker.LockStatus(ctx); err == nil && st.Enabled {
