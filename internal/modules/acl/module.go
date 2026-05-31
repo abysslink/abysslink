@@ -128,23 +128,23 @@ func (m *Module) Apply(ctx context.Context) error {
 	if m.cfg.Identity.Email == "" {
 		return fmt.Errorf("acl apply: identity.email is required to generate the ACL")
 	}
+	aclMgr, ok := m.bknd.(backend.ACLManager)
+	if !ok {
+		return fmt.Errorf("acl apply: backend %q has no ACL management support", m.cfg.Backend.Type)
+	}
 	owner := m.cfg.Identity.Email
 	user := m.sshUser()
 	checkPeriod := m.cfg.Mobile.SSHCheckPeriod
 
 	if !m.hasAdminCreds() {
-		return m.applyManual(ctx, owner, user, checkPeriod)
+		return m.applyManual(ctx, aclMgr, owner, user, checkPeriod)
 	}
-	return m.applyAdmin(ctx, owner, user, checkPeriod)
+	return m.applyAdmin(ctx, aclMgr, owner, user, checkPeriod)
 }
 
 // applyAdmin pulls the current ACL, applies the desired changes idempotently,
 // and pushes the result with optimistic-concurrency (ETag).
-func (m *Module) applyAdmin(ctx context.Context, owner, user, checkPeriod string) error {
-	aclMgr, ok := m.bknd.(backend.ACLManager)
-	if !ok {
-		return fmt.Errorf("acl apply: backend %q has no ACL management support", m.cfg.Backend.Type)
-	}
+func (m *Module) applyAdmin(ctx context.Context, aclMgr backend.ACLManager, owner, user, checkPeriod string) error {
 	cur, etag, err := aclMgr.GetACL(ctx)
 	if err != nil {
 		return fmt.Errorf("acl apply: pull current ACL: %w", err)
@@ -172,11 +172,7 @@ func (m *Module) applyAdmin(ctx context.Context, owner, user, checkPeriod string
 
 // applyManual writes the desired ACL to the generated dir, copies it to the
 // clipboard, and opens the admin editor for the user to paste and save.
-func (m *Module) applyManual(ctx context.Context, owner, user, checkPeriod string) error {
-	aclMgr, ok := m.bknd.(backend.ACLManager)
-	if !ok {
-		return fmt.Errorf("acl apply: backend %q has no ACL management support", m.cfg.Backend.Type)
-	}
+func (m *Module) applyManual(ctx context.Context, aclMgr backend.ACLManager, owner, user, checkPeriod string) error {
 	desired := aclMgr.DefaultACL(owner, user)
 	if checkPeriod != "" && checkPeriod != "12h" {
 		editor, err := aclMgr.NewACLEditor(desired)

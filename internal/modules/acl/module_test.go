@@ -135,7 +135,10 @@ func TestApplyManual_PausesBeforeAndAfterOpenURL(t *testing.T) {
 	user := cfg.Identity.UnixUser
 	checkPeriod := cfg.Mobile.SSHCheckPeriod
 
-	err = m.applyManual(context.Background(), owner, user, checkPeriod)
+	aclMgr, ok := bknd.(backend.ACLManager)
+	require.True(t, ok, "tailscale adapter must implement ACLManager")
+
+	err = m.applyManual(context.Background(), aclMgr, owner, user, checkPeriod)
 	require.NoError(t, err, "applyManual must succeed with valid config and a mock runner")
 
 	assert.GreaterOrEqual(t, promptCount, 2,
