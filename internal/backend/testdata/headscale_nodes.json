@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    {
+      "id": "1",
+      "name": "my-laptop",
+      "givenName": "my-laptop",
+      "user": {"id": "1", "name": "user@example.com"},
+      "lastSeen": "2026-05-31T12:00:00Z",
+      "online": true,
+      "ipAddresses": ["100.64.0.1"],
+      "validTags": ["tag:laptop"]
+    }
+  ]
+}

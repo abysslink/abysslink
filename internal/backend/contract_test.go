@@ -82,12 +82,14 @@ func TestContract_TailscaleAdapter(t *testing.T) {
 
 // TestContract_UnknownBackend asserts that New() returns a non-nil error
 // when cfg.Backend.Type is an unknown value (T-11-04: fails closed).
+// Note: "headscale" is no longer unknown — it is handled by Wave 2. Using
+// "netbird" as the next unimplemented backend to keep the fails-closed invariant.
 func TestContract_UnknownBackend(t *testing.T) {
 	cfg := tailscaleCfg()
-	cfg.Backend.Type = "headscale" // not yet implemented
+	cfg.Backend.Type = "netbird" // not yet implemented
 	_, err := backend.New(cfg, shell.NewMockRunner())
 	require.Error(t, err, "New() must return an error for unknown backend type")
-	require.Contains(t, err.Error(), "headscale")
+	require.Contains(t, err.Error(), "netbird")
 }
 
 // TestContract_EmptyTypeDefaultsTailscale verifies that backend.Type="" works
