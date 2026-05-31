@@ -388,11 +388,19 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("config: claudecode.notify_on.stop_after %q must be at least 30s to avoid chatty notifications", cfg.ClaudeCode.NotifyOn.StopAfter)
 		}
 	}
-	// Headscale backend: the API key and minted pre-auth key flow in the
-	// Authorization: Bearer header on every REST call. server_url MUST be https://
-	// so those secrets are never sent in cleartext (CR-04). This guards
-	// hand-written configs and the --yes / non-TTY init paths that bypass the
-	// interactive HTTPS prompt.
+	if err := validateBackend(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateBackend enforces backend-specific config invariants.
+//
+// Headscale: the API key and minted pre-auth key flow in the Authorization:
+// Bearer header on every REST call, so server_url MUST be https:// — plaintext
+// http would leak those secrets (CR-04). This guards hand-written configs and
+// the --yes / non-TTY init paths that bypass the interactive HTTPS prompt.
+func validateBackend(cfg *Config) error {
 	if cfg.Backend.Type == "headscale" {
 		if !strings.HasPrefix(cfg.Server.Headscale.ServerURL, "https://") {
 			return fmt.Errorf("config: server.headscale.server_url %q must use https:// — plaintext http would leak the API key and pre-auth key", cfg.Server.Headscale.ServerURL)
