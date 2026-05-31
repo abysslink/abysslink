@@ -596,26 +596,75 @@ func checkACSleepDisabled(ctx context.Context, runner shell.Runner) bool {
 	return false
 }
 
+// initFormResult holds the collected values from the interactive init form before
+// they are applied to a Config. Separating collection from application allows tests
+// to exercise applyInitFormResult without needing a TTY.
+type initFormResult struct {
+	email              string
+	hostname           string
+	enableSSH          bool
+	enableTmux         bool
+	enableMosh         bool
+	enableNtfy         bool
+	ntfyPort           int
+	backendType        string // "tailscale" or "headscale"
+	headscaleServerURL string // non-empty only when backendType == "headscale"
+}
+
+// applyInitFormResult converts a collected initFormResult into a *config.Config.
+// All non-interactive defaults are established here so that tests can call this
+// directly without running the huh form.
+func applyInitFormResult(r initFormResult) (*config.Config, error) {
+	cfg := config.Defaults()
+	cfg.Identity.Email = r.email
+	cfg.Identity.UnixUser = currentUnixUser()
+	cfg.Tailnet.Hostname = r.hostname
+	cfg.Tailnet.SSH = r.enableSSH
+	cfg.Modules.SSH.Enabled = r.enableSSH
+	cfg.Modules.SSH.Mode = "tailscale"
+	cfg.Modules.Tmux.Enabled = r.enableTmux
+	cfg.Modules.Mosh.Enabled = r.enableMosh
+	cfg.Modules.Ntfy.Enabled = r.enableNtfy
+	cfg.Modules.Ntfy.Port = r.ntfyPort
+	cfg.Modules.Notify.Enabled = r.enableNtfy
+	// Backend type: "tailscale" is the default; "headscale" populates Headscale fields.
+	cfg.Backend.Type = r.backendType
+	if r.backendType == "headscale" {
+		cfg.Server.Headscale.ServerURL = r.headscaleServerURL
+		cfg.Server.Headscale.User = "abysslink" // stable default per D-13
+	}
+	return cfg, nil
+}
+
 // runInitForm runs the interactive questionnaire and returns the resulting Config.
 func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
-	var (
-		email      string
-		hostname   string
-		enableSSH  = true
-		enableTmux = true
-		enableMosh = true
-		enableNtfy = true
-	)
-	ntfyPort := 2586
-	hostname, _ = os.Hostname()
+	r := initFormResult{
+		enableSSH:   true,
+		enableTmux:  true,
+		enableMosh:  true,
+		enableNtfy:  true,
+		ntfyPort:    2586,
+		backendType: "tailscale", // default — changed to "headscale" only when user selects it
+	}
+	r.hostname, _ = os.Hostname()
 
 	if !autoYes {
 		form := huh.NewForm(
 			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Backend type").
+					Description("Which Tailscale-compatible control server to use").
+					Options(
+						huh.NewOption("Tailscale (cloud, requires account)", "tailscale"),
+						huh.NewOption("Headscale (self-hosted)", "headscale"),
+					).
+					Value(&r.backendType),
+			),
+			huh.NewGroup(
 				huh.NewInput().
 					Title("Tailscale account email").
 					Description("The email you signed into Tailscale with").
-					Value(&email).
+					Value(&r.email).
 					Validate(func(s string) error {
 						if !strings.Contains(s, "@") {
 							return fmt.Errorf("must be a valid email address")
@@ -625,32 +674,50 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 				huh.NewInput().
 					Title("Rig hostname").
 					Description("This machine's Tailscale hostname (pre-filled from OS)").
-					Value(&hostname),
+					Value(&r.hostname),
 			),
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title("Enable Tailscale SSH?").
 					Description("Replaces macOS Remote Login with Tailscale's cryptographically-verified SSH — no open ports, no password auth").
-					Value(&enableSSH),
+					Value(&r.enableSSH),
 				huh.NewConfirm().
 					Title("Enable tmux?").
 					Description("Keeps your terminal session alive on the rig — reconnect from your phone and pick up exactly where you left off").
-					Value(&enableTmux),
+					Value(&r.enableTmux),
 				huh.NewConfirm().
 					Title("Enable mosh?").
 					Description("Roaming shell that survives network switches on your phone (WiFi↔LTE), timeouts, and sleep — reconnects automatically").
-					Value(&enableMosh),
+					Value(&r.enableMosh),
 				huh.NewConfirm().
 					Title("Enable ntfy push notifications?").
 					Description("Sends a buzz to your phone when Claude stops, a build finishes, or any terminal task completes — no polling needed").
-					Value(&enableNtfy),
+					Value(&r.enableNtfy),
 			),
 		)
 		if err := form.Run(); err != nil {
 			return nil, fmt.Errorf("init: %w", err)
 		}
-		if enableNtfy {
-			portStr := fmt.Sprintf("%d", ntfyPort)
+		// Conditional headscale server URL prompt — same pattern as the ntfyPort prompt below.
+		if r.backendType == "headscale" {
+			if err := huh.NewInput().
+				Title("Headscale server URL").
+				Description("Public HTTPS URL of your Headscale instance (e.g. https://headscale.example.com)").
+				Value(&r.headscaleServerURL).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("server URL is required for headscale backend")
+					}
+					if !strings.HasPrefix(s, "https://") {
+						return fmt.Errorf("server URL must start with https://")
+					}
+					return nil
+				}).Run(); err != nil {
+				return nil, fmt.Errorf("init: headscale server url: %w", err)
+			}
+		}
+		if r.enableNtfy {
+			portStr := fmt.Sprintf("%d", r.ntfyPort)
 			if err := huh.NewInput().
 				Title("ntfy listen port").
 				Description("Port for the notification server on your tailnet.\nDefault 2586 avoids conflicts with local dev servers (8080, 3000, etc.).").
@@ -665,24 +732,12 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 				return nil, fmt.Errorf("init: ntfy port: %w", err)
 			}
 			if n, err := strconv.Atoi(strings.TrimSpace(portStr)); err == nil {
-				ntfyPort = n
+				r.ntfyPort = n
 			}
 		}
 	}
 
-	cfg := config.Defaults()
-	cfg.Identity.Email = email
-	cfg.Identity.UnixUser = currentUnixUser()
-	cfg.Tailnet.Hostname = hostname
-	cfg.Tailnet.SSH = enableSSH
-	cfg.Modules.SSH.Enabled = enableSSH
-	cfg.Modules.SSH.Mode = "tailscale"
-	cfg.Modules.Tmux.Enabled = enableTmux
-	cfg.Modules.Mosh.Enabled = enableMosh
-	cfg.Modules.Ntfy.Enabled = enableNtfy
-	cfg.Modules.Ntfy.Port = ntfyPort
-	cfg.Modules.Notify.Enabled = enableNtfy
-	return cfg, nil
+	return applyInitFormResult(r)
 }
 
 // currentUnixUser returns the current UNIX login name from the environment.
