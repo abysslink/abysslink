@@ -1,0 +1,1010 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abysslink Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/secrets"
+	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/spf13/cobra"
+)
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const (
+	headscaleDefaultVersion = "v0.28.0"
+	headscaleMinVersion     = "v0.23.0"
+	headscaleBaseURL        = "https://github.com/juanfont/headscale/releases/download"
+	headscaleAPIKeyService  = "abysslink"
+	headscaleAPIKeyAccount  = "headscale-api-key" //nolint:gosec // service name for keychain lookup, not a credential
+	headscalePreAuthService = "abysslink"
+	headscalePreAuthAccount = "headscale-preauth-key" //nolint:gosec // service name for keychain lookup, not a credential
+	// preAuthKeyExpiry is the default pre-auth key lifetime (D-11: explicit expiry required).
+	preAuthKeyExpiry = 1 * time.Hour
+)
+
+// ── Command tree ──────────────────────────────────────────────────────────────
+
+// newServerCmd returns the "server" parent command. It is registered in root.go
+// opsCmds so it appears under the Operations group.
+func newServerCmd() *cobra.Command {
+	srv := &cobra.Command{
+		Use:   "server",
+		Short: "Manage self-hosted backend server (Headscale, NetBird)",
+	}
+	srv.AddCommand(newServerHeadscaleCmd())
+	return srv
+}
+
+// newServerHeadscaleCmd returns the "server headscale" sub-group with four
+// subcommands: init, status, upgrade, backup.
+func newServerHeadscaleCmd() *cobra.Command {
+	hs := &cobra.Command{
+		Use:   "headscale",
+		Short: "Manage a locally-provisioned Headscale control server",
+	}
+	hs.AddCommand(
+		newServerHeadscaleInitCmd(),
+		newServerHeadscaleStatusCmd(),
+		newServerHeadscaleUpgradeCmd(),
+		newServerHeadscaleBackupCmd(),
+	)
+	return hs
+}
+
+// ── init subcommand ────────────────────────────────────────────────────────────
+
+func newServerHeadscaleInitCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "init",
+		Short: "Download, configure, and start Headscale (dry-run by default)",
+		Example: `  # Preview what init would do (dry-run — no changes)
+  abysslink server headscale init
+
+  # Execute the full provisioning sequence
+  abysslink server headscale init --apply`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+			runner := cc.runner
+			return headscaleInitRunE(cmd.Context(), cc.cfg, cc, runner)
+		},
+	}
+}
+
+// headscaleInitRunE is the testable implementation of "server headscale init".
+// The init sequence follows the security-safe order from the plan:
+//
+//	Step 0: TLS gate — backend.ValidateHeadscaleTLS (fail-closed, before any mutation)
+//	Step 1-2: Download binary + verify SHA-256 checksum (R-01)
+//	Step 3: macOS xattr quarantine clear (ignore error)
+//	Step 4: Version floor check (>= v0.23.0) on temp binary
+//	Step 5: Write binary via audit.WriteFile mode 0o755
+//	Step 6: MergeHeadscaleConfig (hardened config.yaml)
+//	Step 7-11: Service install + health-check + API key + user-ensure + pre-auth key
+//	           (delegated to completeInit — skipped in dryRun mode)
+func headscaleInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner) error {
+	p := newHumanPrinterStdout()
+
+	// ── Step 0: TLS gate (fail-closed, before any mutation) ───────────────────
+	// This call imports internal/backend (cli→backend direction — no cycle).
+	// TLS gate always runs, even in dry-run mode.
+	if err := backend.ValidateHeadscaleTLS(ctx, cfg); err != nil {
+		return fmt.Errorf("headscale init: TLS validation failed: %w", err)
+	}
+
+	// ── Dry-run gate ──────────────────────────────────────────────────────────
+	if cc.dryRun {
+		slog.InfoContext(ctx, "headscale init [dry-run]",
+			"binary_path", headscaleBinaryPath(cfg),
+			"config_path", headscaleConfigPath(cfg),
+			"version", headscaleVersion(cfg),
+			"acme", cfg.Server.Headscale.ACME,
+		)
+		printerInfo(p, "[plan] headscale init:")
+		printerInfo(p, "  1. Download headscale "+headscaleVersion(cfg)+" + checksums.txt (HTTPS)")
+		printerInfo(p, "  2. Verify SHA-256 checksum")
+		printerInfo(p, "  3. Clear macOS quarantine (if darwin)")
+		printerInfo(p, "  4. Check version floor >= "+headscaleMinVersion)
+		printerInfo(p, "  5. Write binary to "+headscaleBinaryPath(cfg))
+		printerInfo(p, "  6. Merge hardened config.yaml → "+headscaleConfigPath(cfg))
+		printerInfo(p, "  7. Install + start service (systemd/launchd)")
+		printerInfo(p, "  8. Health-check (30s timeout)")
+		printerInfo(p, "  9. Bootstrap API key")
+		printerInfo(p, " 10. Ensure 'abysslink' user via REST GET/POST /api/v1/user")
+		printerInfo(p, " 11. Mint pre-auth key via POST /api/v1/preauthkey")
+		printerInfo(p, "Re-run with --apply to execute.")
+		return nil
+	}
+
+	ver := headscaleVersion(cfg)
+	binPath := headscaleBinaryPath(cfg)
+	cfgPath := headscaleConfigPath(cfg)
+
+	// ── Step 1: Download binary + checksums.txt ────────────────────────────────
+	goos := runtime.GOOS
+	goarch := runtime.GOARCH
+	verNum := strings.TrimPrefix(ver, "v")
+	artifactName := fmt.Sprintf("headscale_%s_%s_%s", verNum, goos, goarch)
+	checksumsName := "checksums.txt"
+
+	downloadURL := headscaleBaseURL + "/" + ver + "/" + artifactName
+	checksumsURL := headscaleBaseURL + "/" + ver + "/" + checksumsName
+
+	tmpDir, err := os.MkdirTemp("", "abysslink-headscale-*")
+	if err != nil {
+		return fmt.Errorf("headscale init: create temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	tmpBinPath := filepath.Join(tmpDir, artifactName)
+	tmpChksPath := filepath.Join(tmpDir, checksumsName)
+
+	printerInfo(p, "  ↓  "+artifactName)
+	if err := downloadFile(ctx, downloadURL, tmpBinPath); err != nil {
+		return fmt.Errorf("headscale init: download binary: %w", err)
+	}
+
+	printerInfo(p, "  ↓  "+checksumsName)
+	if err := downloadFile(ctx, checksumsURL, tmpChksPath); err != nil {
+		return fmt.Errorf("headscale init: download checksums: %w", err)
+	}
+
+	// ── Step 2: Verify SHA-256 checksum ───────────────────────────────────────
+	printerInfo(p, "  ✦  verifying checksum...")
+	if err := verifyChecksum(tmpChksPath, artifactName, tmpBinPath); err != nil {
+		return fmt.Errorf("headscale init: checksum FAILED — refusing to install: %w", err)
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  checksum verified"))
+
+	// ── Step 3: Clear macOS quarantine (ignore error) ─────────────────────────
+	if runtime.GOOS == "darwin" {
+		_, _ = runner.Run(ctx, "xattr", "-d", "com.apple.quarantine", tmpBinPath)
+	}
+
+	// ── Step 4: Version floor check ───────────────────────────────────────────
+	if err := checkHeadscaleVersionFloor(ctx, runner, tmpBinPath); err != nil {
+		return fmt.Errorf("headscale init: %w", err)
+	}
+
+	// ── Step 5: Write binary via audit.WriteFile ───────────────────────────────
+	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("headscale init: read temp binary: %w", err)
+	}
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("headscale init: audit log path: %w", err)
+	}
+	if err := audit.New(logPath).WriteFile(binPath, binData, 0o755, false); err != nil {
+		return fmt.Errorf("headscale init: write binary: %w", err)
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  binary installed → "+binPath))
+
+	// ── Step 6: Merge hardened config.yaml ────────────────────────────────────
+	if err := backend.MergeHeadscaleConfig(ctx, cfgPath, cfg.Server.Headscale, false); err != nil {
+		return fmt.Errorf("headscale init: config merge: %w", err)
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  config.yaml merged → "+cfgPath))
+
+	// ── Steps 7-11: Service + secrets (completeInit) ──────────────────────────
+	return completeInit(ctx, cfg, cc, runner, p)
+}
+
+// completeInit implements init steps 7-11: service install + start, health-check,
+// API key bootstrap, user-ensure, and pre-auth key mint.
+// On macOS the service-install steps are deferred to the checkpoint:human-verify
+// gate (Task 2) — this function returns early with a slog.Info on darwin.
+func completeInit(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, p Printer) error {
+	// ── Step 7: Service install + start ───────────────────────────────────────
+	if runtime.GOOS == "darwin" {
+		// macOS service-account creation (dscl) and launchd plist installation
+		// require sudo and have MEDIUM confidence (R-03). This code path is only
+		// exercised after the checkpoint:human-verify gate (Task 2 of Plan 12-04).
+		slog.InfoContext(ctx, "headscale init: macOS service install deferred — awaiting checkpoint:human-verify (Task 2)")
+		printerInfo(p, styleWarn.Render("  !  macOS service install requires human verification (run `abysslink server headscale init --apply` after checkpoint approval)"))
+		return nil
+	}
+
+	// Linux: systemd service install.
+	binPath := headscaleBinaryPath(cfg)
+	cfgPath := headscaleConfigPath(cfg)
+
+	unitContent := fmt.Sprintf(`[Unit]
+Description=Headscale VPN control server
+After=network.target
+
+[Service]
+Type=simple
+User=headscale
+ExecStart=%s serve --config %s
+Restart=on-failure
+RestartSec=5s
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+`, binPath, cfgPath)
+
+	unitPath := "/etc/systemd/system/headscale.service"
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("headscale init: audit log path: %w", err)
+	}
+	if err := audit.New(logPath).WriteFile(unitPath, []byte(unitContent), 0o644, cc.dryRun); err != nil {
+		return fmt.Errorf("headscale init: write systemd unit: %w", err)
+	}
+
+	for _, args := range [][]string{
+		{"systemctl", "daemon-reload"},
+		{"systemctl", "enable", "headscale"},
+		{"systemctl", "start", "headscale"},
+	} {
+		if _, err := runner.Run(ctx, args[0], args[1:]...); err != nil {
+			return fmt.Errorf("headscale init: %s: %w", strings.Join(args, " "), err)
+		}
+	}
+
+	// ── Step 8: Health-check (30s timeout, before any REST admin calls) ───────
+	baseURL := cfg.Server.Headscale.ServerURL
+	if err := doHeadscaleHealthCheck(ctx, baseURL+"/api/v1/node"); err != nil {
+		return fmt.Errorf("headscale init: health-check: %w", err)
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  Headscale is responding"))
+
+	// ── Step 9: API key bootstrap ─────────────────────────────────────────────
+	kc, err := loadKeychainForInit(ctx, cc)
+	if err != nil {
+		return fmt.Errorf("headscale init: keychain unavailable: %w", err)
+	}
+
+	apiKey, err := ensureAPIKey(ctx, cfg, runner, kc, binPath, baseURL)
+	if err != nil {
+		return fmt.Errorf("headscale init: API key: %w", err)
+	}
+	// SECURITY: apiKey is printed ONLY through Printer — never via slog or audit.
+	printerInfo(p, styleSuccess.Render("  ✓  API key obtained"))
+
+	// ── Step 10: D-13 user-ensure ─────────────────────────────────────────────
+	userName := headscaleUserName(cfg)
+	if err := ensureHeadscaleUser(ctx, baseURL, apiKey, userName); err != nil {
+		return fmt.Errorf("headscale init: user-ensure: %w", err)
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  Headscale user '"+userName+"' ensured"))
+
+	// ── Step 11: Pre-auth key mint ────────────────────────────────────────────
+	keyExpiry := headscalePreAuthKeyExpiry(cfg)
+	preAuthKey, err := mintPreAuthKey(ctx, baseURL, apiKey, userName, keyExpiry)
+	if err != nil {
+		return fmt.Errorf("headscale init: pre-auth key: %w", err)
+	}
+
+	// Store pre-auth key in keychain — never on argv, never in audit log.
+	if err := kc.Set(ctx, headscalePreAuthService, headscalePreAuthAccount, preAuthKey); err != nil {
+		return fmt.Errorf("headscale init: store pre-auth key: %w", err)
+	}
+	// SECURITY: pre-auth key routed ONLY to Printer (T-12-04-02 / T-12-04-03).
+	printerInfo(p, styleSuccess.Render("  ✓  Pre-auth key minted and stored in keychain"))
+
+	return nil
+}
+
+// ── upgrade subcommand ─────────────────────────────────────────────────────────
+
+func newServerHeadscaleUpgradeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "upgrade",
+		Short: "Upgrade the Headscale binary (dry-run by default)",
+		Example: `  # Preview the upgrade
+  abysslink server headscale upgrade
+
+  # Execute the upgrade
+  abysslink server headscale upgrade --apply`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+			ver, _ := cmd.Flags().GetString("version")
+			if ver == "" {
+				ver = headscaleDefaultVersion
+			}
+			return headscaleUpgradeRunE(cmd.Context(), cc.cfg, cc, cc.runner, ver)
+		},
+	}
+	cmd.Flags().String("version", "", "Target version (default: "+headscaleDefaultVersion+")")
+	return cmd
+}
+
+// headscaleUpgradeRunE is the testable implementation of "server headscale upgrade".
+// Sequence: check installed version → refuse downgrade → download + verify → swap binary → restart.
+func headscaleUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, targetVer string) error {
+	binPath := headscaleBinaryPath(cfg)
+
+	// Check installed version first (before download).
+	installed, err := headscaleInstalledVersion(ctx, runner, binPath)
+	if err != nil {
+		return fmt.Errorf("headscale upgrade: get installed version: %w", err)
+	}
+
+	// Compare versions — refuse downgrade (T-12-04-04).
+	if semverLT(targetVer, installed) {
+		return fmt.Errorf("headscale upgrade: refusing downgrade from %s to %s — use a higher version", installed, targetVer)
+	}
+
+	if cc.dryRun {
+		slog.InfoContext(ctx, "headscale upgrade [dry-run]", "installed", installed, "target", targetVer)
+		return nil
+	}
+
+	// Download, verify, and check version floor on the new binary.
+	tmpBinPath, tmpDir, err := downloadAndVerifyHeadscale(ctx, runner, targetVer)
+	if tmpDir != "" {
+		defer func() { _ = os.RemoveAll(tmpDir) }()
+	}
+	if err != nil {
+		return fmt.Errorf("headscale upgrade: %w", err)
+	}
+
+	// Swap binary: backup DB → stop → write → start → health-check.
+	return headscaleSwapBinary(ctx, cfg, runner, binPath, tmpBinPath)
+}
+
+// downloadAndVerifyHeadscale downloads the headscale binary for targetVer, verifies
+// its SHA-256 checksum, and runs the version floor check. Returns the temp binary
+// path and the temp dir (caller must remove the dir). Extracted to keep upgrade
+// cyclomatic complexity below gocyclo limit of 15.
+func downloadAndVerifyHeadscale(ctx context.Context, runner shell.Runner, targetVer string) (tmpBinPath, tmpDir string, err error) {
+	goos := runtime.GOOS
+	goarch := runtime.GOARCH
+	verNum := strings.TrimPrefix(targetVer, "v")
+	artifactName := fmt.Sprintf("headscale_%s_%s_%s", verNum, goos, goarch)
+	checksumsName := "checksums.txt"
+
+	downloadURL := headscaleBaseURL + "/" + targetVer + "/" + artifactName
+	checksumsURL := headscaleBaseURL + "/" + targetVer + "/" + checksumsName
+
+	tmpDir, err = os.MkdirTemp("", "abysslink-headscale-upgrade-*")
+	if err != nil {
+		return "", "", fmt.Errorf("create temp dir: %w", err)
+	}
+
+	tmpBinPath = filepath.Join(tmpDir, artifactName)
+	tmpChksPath := filepath.Join(tmpDir, checksumsName)
+
+	if err = downloadFile(ctx, downloadURL, tmpBinPath); err != nil {
+		return "", tmpDir, fmt.Errorf("download binary: %w", err)
+	}
+	if err = downloadFile(ctx, checksumsURL, tmpChksPath); err != nil {
+		return "", tmpDir, fmt.Errorf("download checksums: %w", err)
+	}
+	if err = verifyChecksum(tmpChksPath, artifactName, tmpBinPath); err != nil {
+		return "", tmpDir, fmt.Errorf("checksum FAILED: %w", err)
+	}
+	if err = checkHeadscaleVersionFloor(ctx, runner, tmpBinPath); err != nil {
+		return "", tmpDir, err
+	}
+	return tmpBinPath, tmpDir, nil
+}
+
+// headscaleSwapBinary performs the atomic binary swap: backup DB → stop service →
+// write new binary → start service → health-check. Extracted to keep upgrade
+// cyclomatic complexity below gocyclo limit of 15.
+func headscaleSwapBinary(ctx context.Context, cfg *config.Config, runner shell.Runner, binPath, tmpBinPath string) error {
+	// Backup DB before any mutation (D-04).
+	if dbPath := cfg.Server.Headscale.DBPath; dbPath != "" {
+		if _, err := audit.Backup(dbPath); err != nil {
+			return fmt.Errorf("headscale upgrade: backup DB: %w", err)
+		}
+	}
+
+	// Stop service.
+	if err := headscaleServiceControl(ctx, runner, "stop"); err != nil {
+		return fmt.Errorf("headscale upgrade: stop service: %w", err)
+	}
+
+	// Write new binary via audit.WriteFile.
+	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("headscale upgrade: read new binary: %w", err)
+	}
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("headscale upgrade: audit log path: %w", err)
+	}
+	if err := audit.New(logPath).WriteFile(binPath, binData, 0o755, false); err != nil {
+		return fmt.Errorf("headscale upgrade: write binary: %w", err)
+	}
+
+	// Start service + health-check.
+	if err := headscaleServiceControl(ctx, runner, "start"); err != nil {
+		return fmt.Errorf("headscale upgrade: start service: %w", err)
+	}
+	baseURL := cfg.Server.Headscale.ServerURL
+	if err := doHeadscaleHealthCheck(ctx, baseURL+"/api/v1/node"); err != nil {
+		return fmt.Errorf("headscale upgrade: health-check after restart: %w", err)
+	}
+	return nil
+}
+
+// ── status subcommand ──────────────────────────────────────────────────────────
+
+func newServerHeadscaleStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Report Headscale service state and API reachability",
+		Example: `  # Show Headscale service status and API reachability
+  abysslink server headscale status
+
+  # Machine-readable JSON output
+  abysslink --json server headscale status`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+			p := newPrinter(cmd)
+			return headscaleStatusRunE(cmd.Context(), cc, p)
+		},
+	}
+}
+
+func headscaleStatusRunE(ctx context.Context, cc *cmdContext, p Printer) error {
+	runner := cc.runner
+	cfg := cc.cfg
+	binPath := headscaleBinaryPath(cfg)
+
+	// Get installed version.
+	ver, err := headscaleInstalledVersion(ctx, runner, binPath)
+	if err != nil {
+		ver = "unknown"
+	}
+
+	// Check service state.
+	serviceActive := headscaleServiceIsActive(ctx, runner)
+
+	// Check API reachability.
+	baseURL := cfg.Server.Headscale.ServerURL
+	apiReachable := false
+	if baseURL != "" {
+		ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		req, reqErr := http.NewRequestWithContext(ctxTimeout, http.MethodGet, baseURL+"/api/v1/node", nil)
+		if reqErr == nil {
+			resp, doErr := http.DefaultClient.Do(req)
+			if doErr == nil {
+				_ = resp.Body.Close()
+				apiReachable = resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusUnauthorized
+			}
+		}
+	}
+
+	type statusReport struct {
+		Version      string `json:"version"`
+		ServiceState string `json:"service_state"`
+		APIReachable bool   `json:"api_reachable"`
+		ServerURL    string `json:"server_url,omitempty"`
+	}
+	report := statusReport{
+		Version:      ver,
+		ServiceState: map[bool]string{true: "active", false: "inactive"}[serviceActive],
+		APIReachable: apiReachable,
+		ServerURL:    baseURL,
+	}
+
+	if cc.jsonOut {
+		p.PrintJSON(report)
+		return nil
+	}
+
+	printerInfo(p, styleBold.Render("Headscale status"))
+	printerInfo(p, "")
+	printerInfo(p, "  Version:       "+report.Version)
+	printerInfo(p, "  Service:       "+report.ServiceState)
+	printerInfo(p, "  API reachable: "+fmt.Sprintf("%v", report.APIReachable))
+	if report.ServerURL != "" {
+		printerInfo(p, "  Server URL:    "+report.ServerURL)
+	}
+	return nil
+}
+
+// ── backup subcommand ─────────────────────────────────────────────────────────
+
+func newServerHeadscaleBackupCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "backup",
+		Short: "Backup the Headscale SQLite database",
+		Example: `  # Preview the backup (dry-run — no changes)
+  abysslink server headscale backup
+
+  # Execute the backup
+  abysslink server headscale backup --apply`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+			p := newPrinter(cmd)
+			return headscaleBackupRunE(cmd.Context(), cc, p)
+		},
+	}
+}
+
+func headscaleBackupRunE(ctx context.Context, cc *cmdContext, p Printer) error {
+	dbPath := cc.cfg.Server.Headscale.DBPath
+	if dbPath == "" {
+		dbPath = "/var/lib/headscale/db.sqlite"
+	}
+
+	if cc.dryRun {
+		printerInfo(p, fmt.Sprintf("[plan] would backup %s (re-run with --apply)", dbPath))
+		return nil
+	}
+
+	slog.InfoContext(ctx, "headscale backup", "db_path", dbPath)
+	backupPath, err := audit.Backup(dbPath)
+	if err != nil {
+		return fmt.Errorf("headscale backup: %w", err)
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  database backed up → "+backupPath))
+	return nil
+}
+
+// ── Helper functions ───────────────────────────────────────────────────────────
+
+// doHeadscaleHealthCheck polls the given URL until it receives a response
+// indicating the server is up (200, 401, or 403 — any response that is NOT a
+// connection error). Retries every 2s for up to 30s (or context deadline).
+// Fail-closed: returns error on timeout to prevent REST calls against a
+// non-running server (T-12-04-10).
+func doHeadscaleHealthCheck(ctx context.Context, url string) error {
+	hcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	// Try immediately, then every 2s.
+	for {
+		req, err := http.NewRequestWithContext(hcCtx, http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("headscale health-check: build request: %w", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			// Any HTTP response (even 401/403) means the server is listening.
+			switch resp.StatusCode {
+			case http.StatusOK, http.StatusUnauthorized, http.StatusForbidden:
+				return nil
+			}
+			// Non-connection-error non-ready status: keep trying.
+		}
+		// err != nil means connection error (server not yet up) — keep retrying.
+
+		select {
+		case <-hcCtx.Done():
+			return fmt.Errorf("headscale: health-check timed out after 30s — service may not have started")
+		case <-ticker.C:
+			// retry
+		}
+	}
+}
+
+// ensureAPIKey retrieves or bootstraps the Headscale API key.
+// First install (no key in keychain): invokes runner with "apikeys create" (one-time
+// bootstrap only — headscale binary invoked once to obtain the initial API key;
+// no REST auth key exists yet; all subsequent admin ops use REST per D-08).
+// Re-init (key in keychain but stale): uses REST POST /api/v1/apikey to rotate.
+// The key value is never written to disk directly — only via keychain.
+func ensureAPIKey(
+	ctx context.Context,
+	cfg *config.Config,
+	runner shell.Runner,
+	kc secrets.KeychainStore,
+	binaryPath string,
+	baseURL string,
+) (string, error) {
+	// Check keychain for existing key.
+	existingKey, keychainErr := kc.Get(ctx, headscaleAPIKeyService, headscaleAPIKeyAccount)
+	if keychainErr == nil && existingKey != "" {
+		// Probe REST to see if the existing key is still valid.
+		if probeAPIKey(ctx, baseURL, existingKey) {
+			return existingKey, nil
+		}
+		// Key in keychain but REST probe failed — rotate via REST.
+		return rotateAPIKeyREST(ctx, baseURL, existingKey, kc)
+	}
+
+	// First-time bootstrap only — headscale binary invoked once to obtain the initial
+	// API key; no REST auth key exists yet; all subsequent admin ops use REST per D-08.
+	res, err := runner.Run(ctx, binaryPath, "apikeys", "create", "--expiration", "90d")
+	if err != nil {
+		return "", fmt.Errorf("apikeys create: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("apikeys create exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stdout+res.Stderr))
+	}
+
+	apiKey := strings.TrimSpace(res.Stdout)
+	if apiKey == "" {
+		return "", fmt.Errorf("apikeys create returned empty key")
+	}
+
+	// Store in keychain immediately — never on disk or in audit log (T-12-04-02).
+	if err := kc.Set(ctx, headscaleAPIKeyService, headscaleAPIKeyAccount, apiKey); err != nil {
+		return "", fmt.Errorf("store API key in keychain: %w", err)
+	}
+
+	return apiKey, nil
+}
+
+// probeAPIKey checks whether apiKey is still valid by calling GET /api/v1/apikey.
+// Returns true if HTTP 200 is received.
+func probeAPIKey(ctx context.Context, baseURL, apiKey string) bool {
+	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctxTimeout, http.MethodGet, baseURL+"/api/v1/apikey", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// rotateAPIKeyREST uses the existing API key to mint a new one via REST POST /api/v1/apikey.
+// Stores the new key in keychain. This is the steady-state re-init path (D-08).
+func rotateAPIKeyREST(ctx context.Context, baseURL, oldKey string, kc secrets.KeychainStore) (string, error) {
+	expiry := time.Now().UTC().Add(90 * 24 * time.Hour).Format(time.RFC3339)
+	body := map[string]string{"expiration": expiry}
+	bodyBytes, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/apikey", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("rotate API key: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+oldKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("rotate API key: request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("rotate API key: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		APIKey string `json:"apiKey"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("rotate API key: decode response: %w", err)
+	}
+	if result.APIKey == "" {
+		return "", fmt.Errorf("rotate API key: empty key in response")
+	}
+
+	// Store new key in keychain — never on disk (T-12-04-02).
+	if err := kc.Set(ctx, headscaleAPIKeyService, headscaleAPIKeyAccount, result.APIKey); err != nil {
+		return "", fmt.Errorf("rotate API key: store in keychain: %w", err)
+	}
+	return result.APIKey, nil
+}
+
+// ensureHeadscaleUser ensures the named user exists in Headscale via REST.
+// GET /api/v1/user — if user found → return nil.
+// POST /api/v1/user — if not found (409 Conflict = already exists = success). (D-13)
+func ensureHeadscaleUser(ctx context.Context, baseURL, apiKey, userName string) error {
+	// GET /api/v1/user — list all users.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/user", nil)
+	if err != nil {
+		return fmt.Errorf("user-ensure GET: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("user-ensure GET: request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusOK {
+		var result struct {
+			Users []struct {
+				Name string `json:"name"`
+			} `json:"users"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+			for _, u := range result.Users {
+				if u.Name == userName {
+					// User already exists — nothing to do.
+					return nil
+				}
+			}
+		}
+	}
+
+	// User not found — create via POST /api/v1/user.
+	createBody := map[string]string{"name": userName}
+	bodyBytes, _ := json.Marshal(createBody)
+
+	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/user", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("user-ensure POST: build request: %w", err)
+	}
+	postReq.Header.Set("Authorization", "Bearer "+apiKey)
+	postReq.Header.Set("Content-Type", "application/json")
+
+	postResp, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		return fmt.Errorf("user-ensure POST: request: %w", err)
+	}
+	defer func() { _ = postResp.Body.Close() }()
+
+	// 200 or 409 Conflict (already exists — idempotent, T-12-04-09) = success.
+	if postResp.StatusCode != http.StatusOK && postResp.StatusCode != http.StatusConflict {
+		return fmt.Errorf("user-ensure POST: HTTP %d", postResp.StatusCode)
+	}
+	return nil
+}
+
+// mintPreAuthKey calls POST /api/v1/preauthkey and returns the key string.
+// The key has explicit expiry (D-11 / T-12-04-03 / issue #1579).
+// NEVER log the returned key value — only route through Printer.
+func mintPreAuthKey(ctx context.Context, baseURL, apiKey, userName string, expiry time.Duration) (string, error) {
+	expiryTime := time.Now().UTC().Add(expiry)
+	body := map[string]any{
+		"user":       userName,
+		"reusable":   false,
+		"ephemeral":  true,
+		"expiration": expiryTime.Format(time.RFC3339),
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/preauthkey", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("mint pre-auth key: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("mint pre-auth key: request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return "", fmt.Errorf("mint pre-auth key: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result struct {
+		PreAuthKey struct {
+			Key string `json:"key"`
+		} `json:"preAuthKey"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("mint pre-auth key: decode response: %w", err)
+	}
+	if result.PreAuthKey.Key == "" {
+		return "", fmt.Errorf("mint pre-auth key: empty key in response")
+	}
+	return result.PreAuthKey.Key, nil
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+// headscaleBinaryPath returns the configured binary path or the default.
+func headscaleBinaryPath(cfg *config.Config) string {
+	if p := cfg.Server.Headscale.BinaryPath; p != "" {
+		return p
+	}
+	return "/usr/local/bin/headscale"
+}
+
+// headscaleConfigPath returns the configured config path or the default.
+func headscaleConfigPath(cfg *config.Config) string {
+	if p := cfg.Server.Headscale.ConfigPath; p != "" {
+		return p
+	}
+	return "/etc/headscale/config.yaml"
+}
+
+// headscaleVersion returns the configured target version or the pinned default.
+func headscaleVersion(cfg *config.Config) string {
+	// For now, the version is always the pinned default. A future flag/config key
+	// may override this.
+	_ = cfg
+	return headscaleDefaultVersion
+}
+
+// headscaleUserName returns the configured headscale user name or "abysslink".
+func headscaleUserName(cfg *config.Config) string {
+	if u := cfg.Server.Headscale.User; u != "" {
+		return u
+	}
+	return "abysslink"
+}
+
+// headscalePreAuthKeyExpiry returns the configured pre-auth key expiry or 1h.
+func headscalePreAuthKeyExpiry(cfg *config.Config) time.Duration {
+	if s := cfg.Server.Headscale.PreAuthKeyExpiry; s != "" {
+		d, err := time.ParseDuration(s)
+		if err == nil {
+			return d
+		}
+	}
+	return preAuthKeyExpiry
+}
+
+// checkHeadscaleVersionFloor runs the binary at tmpBinPath and checks that the
+// reported version is >= headscaleMinVersion (v0.23.0). T-12-04-07.
+func checkHeadscaleVersionFloor(ctx context.Context, runner shell.Runner, tmpBinPath string) error {
+	res, err := runner.Run(ctx, tmpBinPath, "version")
+	if err != nil {
+		return fmt.Errorf("version check: %w", err)
+	}
+	// Parse version: "headscale version v0.28.0" or just "v0.28.0".
+	reportedVer := parseVersionFromOutput(res.Stdout)
+	if reportedVer == "" {
+		return fmt.Errorf("version check: could not parse version from output: %q", res.Stdout)
+	}
+	if semverLT(reportedVer, headscaleMinVersion) {
+		return fmt.Errorf("headscale: version %s is below minimum supported %s", reportedVer, headscaleMinVersion)
+	}
+	return nil
+}
+
+// headscaleInstalledVersion queries the installed binary for its version string.
+func headscaleInstalledVersion(ctx context.Context, runner shell.Runner, binPath string) (string, error) {
+	res, err := runner.Run(ctx, binPath, "version")
+	if err != nil {
+		return "", fmt.Errorf("get version: %w", err)
+	}
+	ver := parseVersionFromOutput(res.Stdout)
+	if ver == "" {
+		return "", fmt.Errorf("could not parse version from: %q", res.Stdout)
+	}
+	return ver, nil
+}
+
+// parseVersionFromOutput extracts the vX.Y.Z token from headscale version output.
+func parseVersionFromOutput(output string) string {
+	for _, token := range strings.Fields(output) {
+		if strings.HasPrefix(token, "v") && strings.Contains(token, ".") {
+			return token
+		}
+	}
+	return ""
+}
+
+// semverLT returns true if version a is strictly less than b.
+// Both a and b may have a leading "v" prefix.
+// Only major.minor.patch comparison is performed (no pre-release suffixes).
+func semverLT(a, b string) bool {
+	aParts := semverParts(a)
+	bParts := semverParts(b)
+	for i := 0; i < 3; i++ {
+		if aParts[i] < bParts[i] {
+			return true
+		}
+		if aParts[i] > bParts[i] {
+			return false
+		}
+	}
+	return false // equal
+}
+
+// semverParts returns [major, minor, patch] integers for a version string.
+func semverParts(v string) [3]int {
+	v = strings.TrimPrefix(v, "v")
+	// Strip any pre-release suffix (e.g., "0.29.0-beta.2" → "0.29.0").
+	if idx := strings.IndexAny(v, "-+"); idx >= 0 {
+		v = v[:idx]
+	}
+	parts := strings.SplitN(v, ".", 3)
+	var result [3]int
+	for i := 0; i < 3 && i < len(parts); i++ {
+		n, _ := strconv.Atoi(parts[i])
+		result[i] = n
+	}
+	return result
+}
+
+// headscaleServiceControl starts or stops the Headscale service via
+// systemctl (Linux) or launchctl (macOS).
+func headscaleServiceControl(ctx context.Context, runner shell.Runner, action string) error {
+	switch runtime.GOOS {
+	case "linux":
+		_, err := runner.Run(ctx, "systemctl", action, "headscale")
+		return err
+	case "darwin":
+		label := "net.abysslink.headscale"
+		plist := "/Library/LaunchDaemons/net.abysslink.headscale.plist"
+		switch action {
+		case "stop":
+			_, err := runner.Run(ctx, "launchctl", "unload", plist)
+			return err
+		case "start":
+			_, err := runner.Run(ctx, "launchctl", "load", plist)
+			return err
+		default:
+			_ = label
+			return fmt.Errorf("unsupported launchctl action: %s", action)
+		}
+	default:
+		return fmt.Errorf("headscale service control: unsupported OS %s", runtime.GOOS)
+	}
+}
+
+// headscaleServiceIsActive returns true if the headscale service is running.
+func headscaleServiceIsActive(ctx context.Context, runner shell.Runner) bool {
+	switch runtime.GOOS {
+	case "linux":
+		res, err := runner.Run(ctx, "systemctl", "is-active", "headscale")
+		return err == nil && strings.TrimSpace(res.Stdout) == "active"
+	case "darwin":
+		res, err := runner.Run(ctx, "launchctl", "list", "net.abysslink.headscale")
+		return err == nil && res.ExitCode == 0
+	default:
+		return false
+	}
+}
+
+// loadKeychainForInit constructs a secrets.KeychainStore for use during init.
+// We import secrets via the context mechanism to avoid pulling in all of
+// buildDeps overhead for a focused provisioning command.
+func loadKeychainForInit(ctx context.Context, cc *cmdContext) (secrets.KeychainStore, error) {
+	kc, err := secrets.NewStore(ctx, cc.runner)
+	if err != nil {
+		return nil, fmt.Errorf("keychain: %w", err)
+	}
+	return kc, nil
+}
+
+// newHumanPrinterStdout returns a human-readable Printer writing to os.Stdout.
+// Used by headscaleInitRunE when a cobra.Command Printer is not yet available
+// (the function is called directly in tests or wired via RunE).
+func newHumanPrinterStdout() Printer {
+	return NewHumanPrinterTo(os.Stdout, os.Stderr)
+}
