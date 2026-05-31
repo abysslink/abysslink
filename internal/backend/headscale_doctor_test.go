@@ -31,7 +31,6 @@ import (
 
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
-	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -110,18 +109,18 @@ func preAuthKeyFixture(t *testing.T) map[string]any {
 	return m
 }
 
-// findingByCheck finds the first Finding with the given check name.
-func findingByCheck(findings []modules.Finding, check string) (modules.Finding, bool) {
+// findingByCheck finds the first DoctorFinding with the given check name.
+func findingByCheck(findings []backend.DoctorFinding, check string) (backend.DoctorFinding, bool) {
 	for _, f := range findings {
 		if f.Check == check {
 			return f, true
 		}
 	}
-	return modules.Finding{}, false
+	return backend.DoctorFinding{}, false
 }
 
 // allCheckNames collects all unique check names from a slice of findings.
-func allCheckNames(findings []modules.Finding) []string {
+func allCheckNames(findings []backend.DoctorFinding) []string {
 	seen := make(map[string]bool)
 	var names []string
 	for _, f := range findings {
@@ -200,7 +199,7 @@ func TestHsLockPermanentWarn(t *testing.T) {
 
 	f, found := findingByCheck(findings, "hs-lock")
 	require.True(t, found, "hs-lock must always be present in findings")
-	assert.Equal(t, modules.SeverityWarning, f.Severity, "hs-lock must always be SeverityWarning")
+	assert.Equal(t, backend.DoctorWarning, f.Severity, "hs-lock must always be SeverityWarning")
 	assert.NotEmpty(t, f.Message, "hs-lock message must not be empty")
 	assert.Contains(t, f.Message, "server-trust model only",
 		"hs-lock must contain exact ROADMAP text 'server-trust model only'")
@@ -236,7 +235,7 @@ func TestHsKeyExpiry_ZeroExpiry(t *testing.T) {
 
 	f, found := findingByCheck(findings, "hs-key-expiry")
 	require.True(t, found, "hs-key-expiry must be present in findings")
-	assert.Equal(t, modules.SeverityFatal, f.Severity,
+	assert.Equal(t, backend.DoctorFatal, f.Severity,
 		"hs-key-expiry must be SeverityFatal for zero-expiry key (issue #1579)")
 }
 
@@ -275,7 +274,7 @@ func TestHsDerpFailclosed_OpenRelay(t *testing.T) {
 
 	f, found := findingByCheck(findings, "hs-derp-failclosed")
 	require.True(t, found)
-	assert.Equal(t, modules.SeverityFatal, f.Severity,
+	assert.Equal(t, backend.DoctorFatal, f.Severity,
 		"embedded DERP with verify_clients=false is an open relay (SeverityFatal)")
 }
 
@@ -306,7 +305,7 @@ func TestHsOidcFilter_SkipWhenAbsent(t *testing.T) {
 	f, found := findingByCheck(findings, "hs-oidc-filter")
 	if found {
 		// If present, must not be FAIL (should be PASS or absent)
-		assert.NotEqual(t, modules.SeverityFatal, f.Severity,
+		assert.NotEqual(t, backend.DoctorFatal, f.Severity,
 			"hs-oidc-filter must not FAIL when OIDC is not configured")
 	}
 }
@@ -346,7 +345,7 @@ func TestHsOidcFilter_FailWhenOpen(t *testing.T) {
 
 	f, found := findingByCheck(findings, "hs-oidc-filter")
 	require.True(t, found, "hs-oidc-filter must be present when OIDC is configured")
-	assert.Equal(t, modules.SeverityFatal, f.Severity,
+	assert.Equal(t, backend.DoctorFatal, f.Severity,
 		"hs-oidc-filter must FAIL when issuer set with all filter lists empty (D-12)")
 }
 
@@ -407,6 +406,6 @@ func TestHsBindFail_MetricsExposed(t *testing.T) {
 
 	f, found := findingByCheck(findings, "hs-bind")
 	require.True(t, found)
-	assert.Equal(t, modules.SeverityFatal, f.Severity,
+	assert.Equal(t, backend.DoctorFatal, f.Severity,
 		"metrics_listen_addr=0.0.0.0 exposes metrics publicly (SeverityFatal)")
 }
