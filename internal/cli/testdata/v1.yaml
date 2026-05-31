@@ -1,0 +1,6 @@
+version: 1
+
+tailnet:
+  hostname: test-rig
+  ssh: true
+

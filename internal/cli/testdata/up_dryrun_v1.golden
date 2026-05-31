@@ -1,0 +1,48 @@
+╭──────────────────────────────────────────────────────╮
+│  abysslink up  preview only — run with --apply to    │
+│  make changes                                        │
+╰──────────────────────────────────────────────────────╯
+
+  ◌  Scanning 20 modules...
+  →  tailscale         1 change: install tailscale
+  →  tmux              2 changes
+  ✓  power             up to date
+  ✓  hardening         up to date
+  ✓  atuin             up to date
+  ✓  sandbox           up to date
+  ✓  asciinema         up to date
+  ✓  ssh               up to date
+  →  mosh              1 change: install mosh
+  ✓  acl               up to date
+  ✓  lock              up to date
+  →  ntfy              1 change: ACTION REQUIRED: install Docker Desktop or configure ntfy.sh in abysslink.yaml
+  ✓  code-server       up to date
+  ✓  ttyd              up to date
+  ✓  eternal-terminal  up to date
+  ✓  syncthing         up to date
+  ✓  upsnap            up to date
+  ✓  notify            up to date
+  →  watch             1 change: configure pane watchers
+  ✓  claudecode        up to date
+  ────────────────────────────────────────────────
+  6 changes planned
+
+  →  tailscale     install tailscale
+  →  tmux          install tmux
+  →  tmux          write ~/.tmux.conf if changed
+  →  mosh          install mosh
+  →  ntfy          ACTION REQUIRED: install Docker Desktop or configure ntfy.sh in abysslink.yaml
+  →  watch         configure pane watchers
+
+  Run   abysslink up --apply   to apply 6 changes.
+╭──────────────────────────────────────────────────────╮
+│                                                      │
+│  Next steps                                          │
+│                                                      │
+│  Tailscale is not installed                          │
+│                                                      │
+│  Install from:  https://tailscale.com/download       │
+│  Then re-run:  abysslink up --apply                  │
+│                                                      │
+╰──────────────────────────────────────────────────────╯
+
