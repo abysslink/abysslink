@@ -129,11 +129,11 @@ func headscaleInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, 
 		slog.InfoContext(ctx, "headscale init [dry-run]",
 			"binary_path", headscaleBinaryPath(cfg),
 			"config_path", headscaleConfigPath(cfg),
-			"version", headscaleVersion(cfg),
+			"version", headscaleVersion(),
 			"acme", cfg.Server.Headscale.ACME,
 		)
 		printerInfo(p, "[plan] headscale init:")
-		printerInfo(p, "  1. Download headscale "+headscaleVersion(cfg)+" + checksums.txt (HTTPS)")
+		printerInfo(p, "  1. Download headscale "+headscaleVersion()+" + checksums.txt (HTTPS)")
 		printerInfo(p, "  2. Verify SHA-256 checksum")
 		printerInfo(p, "  3. Clear macOS quarantine (if darwin)")
 		printerInfo(p, "  4. Check version floor >= "+headscaleMinVersion)
@@ -148,7 +148,7 @@ func headscaleInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, 
 		return nil
 	}
 
-	ver := headscaleVersion(cfg)
+	ver := headscaleVersion()
 	binPath := headscaleBinaryPath(cfg)
 	cfgPath := headscaleConfigPath(cfg)
 
@@ -1082,11 +1082,12 @@ func headscaleConfigPath(cfg *config.Config) string {
 	return "/etc/headscale/config.yaml"
 }
 
-// headscaleVersion returns the configured target version or the pinned default.
-func headscaleVersion(cfg *config.Config) string {
-	// For now, the version is always the pinned default. A future flag/config key
-	// may override this.
-	_ = cfg
+// headscaleVersion returns the version installed by `init`. This is always the
+// pinned compile-time default: init does not (yet) accept a version override.
+// The `upgrade` command is the supported path for installing a different
+// version via its --version flag. Taking no cfg parameter keeps that limitation
+// explicit rather than implying a config key that is silently ignored (WR-06).
+func headscaleVersion() string {
 	return headscaleDefaultVersion
 }
 
