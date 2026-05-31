@@ -107,6 +107,14 @@ func NewHeadscaleDoRequest(cfg *config.Config, runner shell.Runner) func(ctx con
 func ValidateHeadscaleTLS(ctx context.Context, cfg *config.Config) error {
 	hs := cfg.Server.Headscale
 
+	// CR-04: defense-in-depth scheme gate. server_url MUST be https:// so the
+	// Bearer API key and minted pre-auth key are never sent over cleartext HTTP.
+	// config.Validate enforces this too; re-checking here covers callers that
+	// reach the REST path through ValidateHeadscaleTLS without a full re-validate.
+	if !strings.HasPrefix(hs.ServerURL, "https://") {
+		return fmt.Errorf("headscale tls: server_url %q must use https:// — plaintext http would leak the API key and pre-auth key", hs.ServerURL)
+	}
+
 	if hs.ACME {
 		return validateACMETLS(hs)
 	}
