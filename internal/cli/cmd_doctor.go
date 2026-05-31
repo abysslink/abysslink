@@ -183,7 +183,8 @@ Exit codes:
 
 			// Headscale backend: append hs-* doctor findings.
 			if cc.cfg.Backend.Type == "headscale" {
-				hsFindingsRaw, hsErr := backend.HeadscaleDoctorChecks(ctx, cc.cfg, cc.runner, nil)
+				doReq := backend.NewHeadscaleDoRequest(cc.cfg, cc.runner)
+				hsFindingsRaw, hsErr := backend.HeadscaleDoctorChecks(ctx, cc.cfg, cc.runner, doReq)
 				if hsErr == nil {
 					for _, hf := range hsFindingsRaw {
 						findings = append(findings, modules.Finding{
