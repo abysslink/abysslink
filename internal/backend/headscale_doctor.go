@@ -497,24 +497,41 @@ func checkHsProcUserLinux(ctx context.Context, runner shell.Runner, check, mod s
 		}
 	}
 	out := strings.TrimSpace(res.Stdout)
-	if out == "User=headscale" || strings.HasPrefix(out, "User=") && !strings.Contains(out, "=root") && !strings.Contains(out, "=0") {
-		return DoctorFinding{Module: mod, Check: check, Severity: DoctorOK,
-			Message: fmt.Sprintf("Headscale service runs as expected user (%s)", strings.TrimPrefix(out, "User="))}
+	if !strings.HasPrefix(out, "User=") {
+		// Service not found or unexpected output.
+		return DoctorFinding{
+			Module:   mod,
+			Check:    check,
+			Severity: DoctorWarning,
+			Message:  fmt.Sprintf("hs-proc-user: unexpected systemctl output %q — cannot confirm non-root user", out),
+		}
 	}
-	if strings.Contains(out, "User=root") || out == "User=" || out == "User=0" {
+	// systemd reports an empty User= when no User= directive is set, which means
+	// the service runs as root. Parse the value rather than substring-matching so
+	// the empty/root/0 cases are treated as Fatal (security check must not invert).
+	user := strings.TrimPrefix(out, "User=")
+	switch user {
+	case "", "root", "0":
 		return DoctorFinding{
 			Module:   mod,
 			Check:    check,
 			Severity: DoctorFatal,
-			Message:  fmt.Sprintf("Headscale service runs as root (%s) — must run as a dedicated non-root user", out),
+			Message:  "Headscale service runs as root — must run as a dedicated non-root user",
 		}
-	}
-	// Service not found or unexpected output.
-	return DoctorFinding{
-		Module:   mod,
-		Check:    check,
-		Severity: DoctorWarning,
-		Message:  fmt.Sprintf("hs-proc-user: unexpected systemctl output %q — cannot confirm non-root user", out),
+	case "headscale":
+		return DoctorFinding{
+			Module:   mod,
+			Check:    check,
+			Severity: DoctorOK,
+			Message:  "Headscale service runs as expected user (headscale)",
+		}
+	default:
+		return DoctorFinding{
+			Module:   mod,
+			Check:    check,
+			Severity: DoctorWarning,
+			Message:  fmt.Sprintf("Headscale service runs as %q — cannot confirm intended non-root user", user),
+		}
 	}
 }
 
