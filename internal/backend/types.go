@@ -20,22 +20,23 @@ import (
 	"time"
 )
 
-// BackendState is the state reported by tailscaled.
-// Moved verbatim from internal/tailscale/types.go:21-28.
-type BackendState string
+// State is the daemon state reported by tailscaled (formerly BackendState in
+// the concrete internal/tailscale package; renamed to avoid stutter as
+// backend.State).
+type State string
 
-// BackendState values.
+// State values.
 const (
-	StateRunning    BackendState = "Running"
-	StateNeedsLogin BackendState = "NeedsLogin"
-	StateStopped    BackendState = "Stopped"
-	StateUnknown    BackendState = "Unknown"
+	StateRunning    State = "Running"
+	StateNeedsLogin State = "NeedsLogin"
+	StateStopped    State = "Stopped"
+	StateUnknown    State = "Unknown"
 )
 
 // Status mirrors the fields we care about from `tailscale status --json`.
 // Moved verbatim from internal/tailscale/types.go:31-38.
 type Status struct {
-	BackendState   BackendState
+	BackendState   State
 	Self           *PeerStatus
 	Health         []string
 	MagicDNSSuffix string
