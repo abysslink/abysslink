@@ -72,10 +72,37 @@ type HeadscaleServer struct {
 	User string `yaml:"user,omitempty"`
 }
 
+// NetBirdServer holds configuration for a locally-provisioned NetBird server (v2+).
+// All fields carry yaml: tags so KnownFields(true) strict-mode YAML accepts them.
+// API key and setup key are NOT stored here — they live in the OS keychain only.
+type NetBirdServer struct {
+	// ServerURL is the management server base URL (e.g. https://nb.example.com).
+	ServerURL string `yaml:"server_url"`
+	// MgmtBindAddr is the management listen address. Paranoid default: 127.0.0.1:443.
+	MgmtBindAddr string `yaml:"mgmt_bind_addr,omitempty"`
+	// MetricsAddr is the metrics bind address. Paranoid default: 127.0.0.1:9090.
+	MetricsAddr string `yaml:"metrics_addr,omitempty"`
+	// BinaryPath is the path to the user-supplied netbird-server binary (PR-B).
+	// Empty means not configured (Linux only; macOS uses container path per PR-A).
+	BinaryPath string `yaml:"binary_path,omitempty"`
+	// SetupKeyExpiry is the duration string for setup key TTL. Paranoid default: 24h.
+	SetupKeyExpiry string `yaml:"setup_key_expiry,omitempty"`
+	// AcceptNoSSHCheck is the persisted one-time opt-in for D-04 (--accept-no-sshcheck).
+	// Default false — must be explicitly set to acknowledge SSHCheck degradation.
+	AcceptNoSSHCheck bool `yaml:"accept_no_sshcheck,omitempty"`
+	// TLSCertFile is the path to the BYO TLS certificate.
+	TLSCertFile string `yaml:"tls_cert_file,omitempty"`
+	// TLSKeyFile is the path to the BYO TLS private key.
+	TLSKeyFile string `yaml:"tls_key_file,omitempty"`
+	// ConfigPath is the path to netbird-server config.yaml. Default: /etc/netbird/config.yaml.
+	ConfigPath string `yaml:"config_path,omitempty"`
+}
+
 // Server holds configuration for a self-hosted backend server (v2+).
 type Server struct {
 	Hostname  string          `yaml:"hostname"` // FQDN of the Headscale / NetBird server (kept for compat)
 	Headscale HeadscaleServer `yaml:"headscale"`
+	NetBird   NetBirdServer   `yaml:"netbird"`
 }
 
 // Rig holds per-rig fleet metadata (v2+ / Phase 14).
@@ -247,6 +274,12 @@ func Defaults() *Config {
 				CertExpiryWarnDays: 30,
 				PreAuthKeyExpiry:   "1h",
 			},
+			NetBird: NetBirdServer{
+				MgmtBindAddr:   "127.0.0.1:443",
+				MetricsAddr:    "127.0.0.1:9090",
+				SetupKeyExpiry: "24h",
+				ConfigPath:     "/etc/netbird/config.yaml",
+			},
 		},
 		Tailnet: Tailnet{
 			SSH: true,
@@ -400,10 +433,18 @@ func Validate(cfg *Config) error {
 // Bearer header on every REST call, so server_url MUST be https:// — plaintext
 // http would leak those secrets (CR-04). This guards hand-written configs and
 // the --yes / non-TTY init paths that bypass the interactive HTTPS prompt.
+//
+// NetBird: server_url is required when backend.type == "netbird"; without it
+// the adapter cannot construct any REST endpoint URL (NB-01/NB-02).
 func validateBackend(cfg *Config) error {
 	if cfg.Backend.Type == "headscale" {
 		if !strings.HasPrefix(cfg.Server.Headscale.ServerURL, "https://") {
 			return fmt.Errorf("config: server.headscale.server_url %q must use https:// — plaintext http would leak the API key and pre-auth key", cfg.Server.Headscale.ServerURL)
+		}
+	}
+	if cfg.Backend.Type == "netbird" {
+		if cfg.Server.NetBird.ServerURL == "" {
+			return fmt.Errorf("config: server.netbird.server_url is required when backend.type is %q", cfg.Backend.Type)
 		}
 	}
 	return nil
