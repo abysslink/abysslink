@@ -89,13 +89,12 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 
 			logPanic := panicAuditLogger()
 
-			// Step 1: disconnect tailnet.
-			if res, runErr := cc.runner.Run(ctx, "tailscale", "down"); runErr != nil || res.ExitCode != 0 {
-				panicStep(p, "disconnect tailnet", errPanicStepFailed{"tailscale down failed — disconnect manually"})
-			} else {
-				panicStep(p, "tailnet disconnected", nil)
-				logPanic("tailscale_down")
-			}
+			// Step 1: disconnect tailnet via the backend abstraction. Prefer the
+			// backend-neutral Down(ctx) so a future backend's adapter can perform
+			// its own disconnect; fall back to the raw `tailscale down` shellout
+			// only if backend construction fails (best-effort, like the rest of
+			// panic) (WR-03).
+			panicDisconnect(ctx, cc, p, logPanic)
 
 			// Steps 2+: revoke phone devices and destroy local API key.
 			revokePhoneDevicesWithStep(ctx, cc, p, logPanic)
@@ -118,6 +117,31 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			emitSecurityNote(p, cc.jsonOut, "panic-reversible")
 			return nil
 		},
+	}
+}
+
+// panicDisconnect disconnects the node from the tailnet. It prefers the
+// backend-neutral backend.Client.Down(ctx) so the kill switch stays generic
+// across backends; if backend construction fails it falls back to the raw
+// `tailscale down` shellout so the emergency disconnect still happens
+// best-effort (WR-03). Either path emits a ✓/✕ step marker and audits success.
+func panicDisconnect(ctx context.Context, cc *cmdContext, p Printer, logPanic func(string)) {
+	if b, err := cc.backend(); err == nil {
+		if err := b.Down(ctx); err != nil {
+			panicStep(p, "disconnect tailnet", errPanicStepFailed{"backend disconnect failed — disconnect manually: " + err.Error()})
+		} else {
+			panicStep(p, "tailnet disconnected", nil)
+			logPanic("tailscale_down")
+		}
+		return
+	}
+	// Fallback: backend could not be constructed (e.g. config load failed and
+	// the synthesized defaults context cannot build one). Use the raw shellout.
+	if res, runErr := cc.runner.Run(ctx, "tailscale", "down"); runErr != nil || res.ExitCode != 0 {
+		panicStep(p, "disconnect tailnet", errPanicStepFailed{"tailscale down failed — disconnect manually"})
+	} else {
+		panicStep(p, "tailnet disconnected", nil)
+		logPanic("tailscale_down")
 	}
 }
 
