@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -131,10 +132,23 @@ func (a *headscaleAdapter) IP(ctx context.Context) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("headscale: ip: decode: %w", err)
 	}
+	// Select the IPv4 address explicitly rather than IPAddresses[0]: Headscale's
+	// ordering is not guaranteed, and downstream consumers follow the tailscale
+	// adapter convention of an IPv4 address. Fall back to the first address only
+	// if no IPv4 entry is present (IPv6-only node).
+	var firstIP string
 	for _, n := range result.Nodes {
-		if len(n.IPAddresses) > 0 {
-			return n.IPAddresses[0], nil
+		for _, ip := range n.IPAddresses {
+			if firstIP == "" {
+				firstIP = ip
+			}
+			if !strings.Contains(ip, ":") {
+				return ip, nil
+			}
 		}
+	}
+	if firstIP != "" {
+		return firstIP, nil
 	}
 	return "", fmt.Errorf("headscale: ip: no enrolled nodes with IP addresses: %w", ErrUnsupported)
 }
