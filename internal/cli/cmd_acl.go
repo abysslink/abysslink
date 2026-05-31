@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"os"
 
-	aclmod "github.com/abysslink/abysslink/internal/modules/acl"
 	"github.com/abysslink/abysslink/internal/backend"
+	aclmod "github.com/abysslink/abysslink/internal/modules/acl"
 	"github.com/spf13/cobra"
 )
 
