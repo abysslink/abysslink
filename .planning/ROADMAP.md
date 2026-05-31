@@ -288,7 +288,25 @@ Plans:
   4. CI linter (`golangci-lint` custom rule or `go vet` analysis pass) fails the build if any `github.com/netbirdio/netbird/management/...` package is imported; the v2.0.0 release checklist contains an explicit AGPLv3 legal review item
   5. All seven nb-* checks (`nb-tls`, `nb-version`, `nb-zitadel`, `nb-mgmt-bind`, `nb-key-type`, `nb-api-auth`, `nb-proc-user`) report correct status; `make lint test` green with mock NetBird API fixtures
 
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+**Wave 1** (no dependencies)
+
+- [ ] 13-01-PLAN.md — AGPLv3 depguard rule (NB-04) + config schema for NetBird server provisioning + testdata fixtures
+
+**Wave 2** (parallel, both depend on 13-01)
+
+- [ ] 13-02-PLAN.md — netbirdAdapter (Client + AdminAPI + ACLManager) + netbirdEditor (policy CRUD + Groups-as-tags + Validate()) + factory.go case (NB-01)
+- [ ] 13-03-PLAN.md — MergeNetBirdConfig() surgical YAML merge + NetBirdDoctorChecks() all 8 nb-* checks (NB-02, NB-03)
+
+**Wave 3** (depends on 13-02 and 13-03)
+
+- [ ] 13-04-PLAN.md — cmd_server_netbird.go provisioner (init/status/upgrade/backup) + cmd_doctor.go nb-* wiring (NB-02, NB-03)
+
+**Wave 4** (depends on 13-02 and 13-04)
+
+- [ ] 13-05-PLAN.md — init wizard netbird option + --accept-no-sshcheck up gate (D-04) + final audit (NB-01, NB-02, NB-03)
 
 ### Phase 14: Multi-Rig Fleet
 
