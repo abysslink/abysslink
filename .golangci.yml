@@ -38,6 +38,17 @@ linters-settings:
         deny:
           - pkg: "github.com/abysslink/abysslink/internal/tailscale"
             desc: "import internal/backend (Client interface) instead — concrete adapters are off-limits outside internal/backend (the backend-adapter architecture rule)"
+      no-netbird-agpl:
+        list-mode: lax
+        deny:
+          - pkg: "github.com/netbirdio/netbird/management"
+            desc: "NetBird management server packages are AGPLv3 — importing them taints the abysslink binary; use REST + net/http only (NB-04)"
+          - pkg: "github.com/netbirdio/netbird/combined"
+            desc: "NetBird combined server packages are AGPLv3 — same restriction as management (NB-04)"
+          - pkg: "github.com/netbirdio/netbird/relay"
+            desc: "NetBird relay packages are AGPLv3 (NB-04)"
+          - pkg: "github.com/netbirdio/netbird/signal"
+            desc: "NetBird signal packages are AGPLv3 (NB-04)"
 
 issues:
   exclusions:
