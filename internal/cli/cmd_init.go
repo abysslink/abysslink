@@ -144,7 +144,7 @@ func newInitCmd() *cobra.Command {
 				}
 			}
 
-			stages := journeyStages(jsonOut)
+			stages := journeyStages(jsonOut, cfg, runner)
 			if err := runJourney(ctx, p, stages, resumeFrom, stateFile, autoYes); err != nil {
 				return fmt.Errorf("init: journey: %w", err)
 			}
