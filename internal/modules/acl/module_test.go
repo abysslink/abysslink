@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -116,11 +117,16 @@ func TestApplyManual_PausesBeforeAndAfterOpenURL(t *testing.T) {
 	cfg.Identity.UnixUser = "testuser"
 	cfg.Mobile.SSHCheckPeriod = "12h"
 
+	// Build a backend.Client (tailscale adapter) so ACLManager assertions succeed.
+	bknd, err := backend.New(cfg, r)
+	require.NoError(t, err)
+
 	m := New(modules.Deps{
-		Cfg:    cfg,
-		Runner: r,
-		Audit:  a,
-		Prompt: countingPrompt,
+		Cfg:     cfg,
+		Runner:  r,
+		Backend: bknd,
+		Audit:   a,
+		Prompt:  countingPrompt,
 	})
 
 	// Build a valid desired ACL the same way applyManual does internally so we
@@ -129,7 +135,7 @@ func TestApplyManual_PausesBeforeAndAfterOpenURL(t *testing.T) {
 	user := cfg.Identity.UnixUser
 	checkPeriod := cfg.Mobile.SSHCheckPeriod
 
-	err := m.applyManual(context.Background(), owner, user, checkPeriod)
+	err = m.applyManual(context.Background(), owner, user, checkPeriod)
 	require.NoError(t, err, "applyManual must succeed with valid config and a mock runner")
 
 	assert.GreaterOrEqual(t, promptCount, 2,
