@@ -257,15 +257,15 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 12-01-PLAN.md — Config schema extension (HeadscaleServer struct + Defaults) + test fixtures + contract_test.go update
+- [x] 12-01-PLAN.md — Config schema extension (HeadscaleServer struct + Defaults) + test fixtures + contract_test.go update
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 12-02-PLAN.md — headscaleAdapter (Client + AdminAPI + ACLManager, not Locker) + factory.go case + contract/invariant tests
+- [x] 12-02-PLAN.md — headscaleAdapter (Client + AdminAPI + ACLManager, not Locker) + factory.go case + contract/invariant tests
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 12-03-PLAN.md — headscale_config.go (surgical YAML merge) + headscale_doctor.go (nine hs-* checks)
+- [x] 12-03-PLAN.md — headscale_config.go (surgical YAML merge) + headscale_doctor.go (nine hs-* checks)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -325,6 +325,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 9. Verification & Polish | 3/3 | Complete | 2026-05-26 |
 | 10. Journey & Rich TUI | 6/6 | Complete | 2026-05-29 |
 | 11. Backend Abstraction Refactor | 3/3 | Complete    | 2026-05-31 |
-| 12. Headscale Backend | 0/0 | Not started | - |
+| 12. Headscale Backend | 3/5 | In Progress|  |
 | 13. NetBird Backend | 0/0 | Not started | - |
 | 14. Multi-Rig Fleet | 0/0 | Not started | - |

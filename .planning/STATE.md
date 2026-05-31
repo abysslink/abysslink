@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v2.0.0
 milestone_name: Self-Hosted Backends & Fleet
 status: executing
-last_updated: "2026-05-31T20:24:12.032Z"
-last_activity: 2026-05-31 -- Phase 12 planning complete
+last_updated: "2026-05-31T20:55:52.348Z"
+last_activity: 2026-05-31
 progress:
   total_phases: 14
   completed_phases: 3
   total_plans: 20
-  completed_plans: 12
+  completed_plans: 15
   percent: 21
 ---
 
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Phase 12 — headscale backend
+**Current focus:** Phase 12 — headscale-backend
 
 ## Current Position
 
-Phase: 12
-Plan: Not started
+Phase: 12 (headscale-backend) — EXECUTING
+Plan: 4 of 5
 Status: Ready to execute
-Last activity: 2026-05-31 -- Phase 12 planning complete
+Last activity: 2026-05-31
 
 ```
 v2.0.0 progress: [                    ] 0%
@@ -63,6 +63,8 @@ Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
 | Phase 11 P01 | 7m | 2 tasks | 4 files |
 | Phase 11-backend-abstraction-refactor P02 | ~50 minutes | 3 tasks | 11 files |
 | Phase 11 P03 | 60m | 3 tasks | 11 files |
+| Phase 12-headscale-backend P02 | 5m | 2 tasks | 3 files |
+| Phase 12 P03 | 12m | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -81,6 +83,7 @@ Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
 - v2.0.0: Tailnet Lock absence on Headscale/NetBird is a permanent doctor WARN (hs-lock, nb-lock), never PASS
 - v2.0.0: Phase order is abstraction → Headscale → NetBird → Fleet (research-validated; coarse granularity combines client+server per backend)
 - v2.0.0: Security hardening (TLS gate, non-root, port binding) is acceptance criteria in each provisioning phase — no separate hardening phase
+- [Phase ?]: Config schema + fixture foundation for Headscale backend
 
 ### Pending Todos
 
@@ -119,6 +122,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-05-31T19:16:52.697Z
+Last session: 2026-05-31T20:55:52.343Z
 Stopped at: Phase 12 context gathered
-Resume file: .planning/phases/12-headscale-backend/12-CONTEXT.md
+Resume file: None
