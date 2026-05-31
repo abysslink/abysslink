@@ -105,7 +105,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 			}
 
 			// ntfy subscription QR (best-effort — needs the tailnet IP).
-			printNtfyQR(ctx, p, cc)
+			printNtfyQR(ctx, p, cc, b)
 
 			// Printable runbook for the remaining manual steps.
 			// §7 note 10 (lock-screen hygiene) fires here alongside the runbook.
@@ -166,42 +166,37 @@ func enrollWithAdminKey(ctx context.Context, p Printer, admin backend.AdminAPI, 
 	return nil
 }
 
-// printNtfyQR shows a QR for the ntfy subscription URL when the tailnet IP is known.
-func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext) {
+// printNtfyQR shows a QR for the ntfy subscription URL when the tailnet IP is
+// known. It uses the backend.Client already in scope (Status) rather than
+// re-shelling `tailscale ip`/`tailscale status --json`, so it stays
+// backend-neutral and avoids the fragile hand-rolled JSON line parser (WR-01).
+func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext, b backend.Client) {
 	if !cc.cfg.Modules.Ntfy.Enabled {
 		return
 	}
-	res, err := cc.runner.Run(ctx, "tailscale", "ip", "--4")
-	if err != nil || res.ExitCode != 0 {
-		printerInfo(p, styleWarn.Render("⚠  Could not get tailnet IP — ntfy subscription QR skipped."))
+	st, err := b.Status(ctx)
+	if err != nil || st.Self == nil {
+		printerInfo(p, styleWarn.Render("⚠  Could not get tailnet status — ntfy subscription QR skipped."))
 		printerInfo(p, styleMuted.Render("  Run `tailscale up` then re-run `abysslink enroll phone` to get the QR."))
 		return
 	}
-	ip := strings.TrimSpace(res.Stdout)
-	if ip == "" {
-		printerInfo(p, styleWarn.Render("⚠  tailscale ip returned empty — ntfy subscription QR skipped."))
+
+	// Prefer MagicDNS hostname — survives IP changes. Fall back to the first
+	// tailnet IP when DNSName is empty.
+	hostname := strings.TrimRight(st.Self.DNSName, ".")
+	if hostname == "" && len(st.Self.TailscaleIPs) > 0 {
+		hostname = st.Self.TailscaleIPs[0].String()
+	}
+	if hostname == "" {
+		printerInfo(p, styleWarn.Render("⚠  No tailnet hostname or IP available — ntfy subscription QR skipped."))
 		return
 	}
+
 	topic := cc.cfg.Modules.Notify.DefaultTopic
 	if topic == "" {
 		topic = "rig"
 	}
 	port := cc.cfg.Modules.Ntfy.ListenPort()
-
-	// Prefer MagicDNS hostname — survives IP changes.
-	hostname := ip
-	if statusRes, err := cc.runner.Run(ctx, "tailscale", "status", "--json"); err == nil && statusRes.ExitCode == 0 {
-		for _, line := range strings.Split(statusRes.Stdout, "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, `"DNSName"`) {
-				parts := strings.SplitN(line, `"`, 4)
-				if len(parts) >= 4 {
-					hostname = strings.TrimRight(parts[3], `".,`)
-				}
-				break
-			}
-		}
-	}
 
 	deepLink := fmt.Sprintf("ntfy://%s:%d/%s", hostname, port, topic)
 	printerInfo(p, "")
