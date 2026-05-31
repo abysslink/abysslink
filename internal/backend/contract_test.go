@@ -82,14 +82,23 @@ func TestContract_TailscaleAdapter(t *testing.T) {
 
 // TestContract_UnknownBackend asserts that New() returns a non-nil error
 // when cfg.Backend.Type is an unknown value (T-11-04: fails closed).
-// Note: "headscale" is no longer unknown — it is handled by Wave 2. Using
-// "netbird" as the next unimplemented backend to keep the fails-closed invariant.
+// Note: "headscale" and "netbird" are implemented backends; using "wireguard"
+// as the truly unknown type to keep the fails-closed invariant.
 func TestContract_UnknownBackend(t *testing.T) {
 	cfg := tailscaleCfg()
-	cfg.Backend.Type = "netbird" // not yet implemented
+	cfg.Backend.Type = "wireguard" // unknown — not implemented
 	_, err := backend.New(cfg, shell.NewMockRunner())
 	require.Error(t, err, "New() must return an error for unknown backend type")
-	require.Contains(t, err.Error(), "netbird")
+	require.Contains(t, err.Error(), "wireguard")
+}
+
+// TestNetBirdAdapterPlaceholder is a placeholder for the full netbird adapter
+// contract tests. The netbird adapter will be implemented in wave 2 (plan 13-02).
+//
+// This test exists to ensure the test file compiles cleanly and to document
+// where the netbird contract tests will live.
+func TestNetBirdAdapterPlaceholder(t *testing.T) {
+	t.Skip("netbird adapter not yet implemented — wave 2")
 }
 
 // TestContract_EmptyTypeDefaultsTailscale verifies that backend.Type="" works

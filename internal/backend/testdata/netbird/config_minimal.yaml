@@ -1,0 +1,14 @@
+# Minimal valid netbird-server config.yaml fixture for surgical-merge tests.
+# This represents the Dex-based (embedded IdP) configuration — NOT ZITADEL.
+# TLS keys are intentionally absent; tests inject them via surgical merge.
+disableAnonymousMetrics: true
+disableGeoliteUpdate: true
+metricsPort: 9090
+server:
+  listenAddress: "127.0.0.1:443"
+  auth:
+    issuer: "http://localhost:5556/dex"
+    audience:
+      - "netbird-client"
+    pkce:
+      enabled: true
