@@ -145,8 +145,8 @@ func TestMergeHeadscaleConfig_PreservesUserKeys(t *testing.T) {
 	// Write a config with user-controlled keys that must survive the merge.
 	writeMinimalHeadscaleYAML(t, cfgPath, map[string]any{
 		"oidc": map[string]any{
-			"issuer":       "https://idp.example.com",
-			"client_id":    "my-client",
+			"issuer":        "https://idp.example.com",
+			"client_id":     "my-client",
 			"client_secret": "supersecret",
 		},
 		"node_update_check_interval": "24h",
