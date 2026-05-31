@@ -39,9 +39,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/abysslink/abysslink/internal/backend"
+	"github.com/abysslink/abysslink/internal/config"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/shell"
-	"github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/abysslink/abysslink/internal/tui"
 )
 
@@ -135,10 +136,14 @@ func journeyStages(jsonOut bool) []journeyStage {
 			run: func(ctx context.Context, p Printer) error {
 				emitSecurityNote(p, jsonOut, "tailnet-lock-secrets") // §7 note 6
 				runner := &shell.ExecRunner{}
-				lc := tailscale.NewLockClient(runner)
-				if st, err := lc.Status(ctx); err == nil && st.Enabled {
-					printerInfo(p, styleSuccess.Render("Tailnet Lock is already enabled."))
-					return nil
+				b, bErr := backend.New(config.Defaults(), runner)
+				if bErr == nil {
+					if locker, ok := b.(backend.Locker); ok {
+						if st, err := locker.LockStatus(ctx); err == nil && st.Enabled {
+							printerInfo(p, styleSuccess.Render("Tailnet Lock is already enabled."))
+							return nil
+						}
+					}
 				}
 				printerInfo(p, styleBold.Render("Enable Tailnet Lock:"))
 				printerInfo(p, "  "+styleCode.Render("abysslink lock init --apply"))

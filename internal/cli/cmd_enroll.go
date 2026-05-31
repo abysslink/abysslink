@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/qr"
-	"github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -70,13 +70,15 @@ func newEnrollPhoneCmd() *cobra.Command {
 			p := newPrinter(cmd)
 			tag := "tag:" + cc.cfg.Mobile.Tag
 
-			admin := tailscale.NewAdminClient(
-				cc.cfg.Tailnet.Admin.Tailnet,
-				cc.cfg.Tailnet.Admin.OAuthClientID,
-				os.Getenv(oauthSecretEnv),
-			)
-			hasCreds := cc.cfg.Tailnet.Admin.Tailnet != "" &&
-				cc.cfg.Tailnet.Admin.OAuthClientID != "" && os.Getenv(oauthSecretEnv) != ""
+			b, err := cc.backend()
+			if err != nil {
+				return fmt.Errorf("enroll phone: backend init: %w", err)
+			}
+			adminAPI, hasAdmin := b.(backend.AdminAPI)
+			hasCreds := hasAdmin &&
+				cc.cfg.Tailnet.Admin.Tailnet != "" &&
+				cc.cfg.Tailnet.Admin.OAuthClientID != "" &&
+				os.Getenv(oauthSecretEnv) != ""
 
 			printerInfo(p, styleBold.Render("Enroll phone"))
 			printerInfo(p, "")
@@ -98,7 +100,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 				printerInfo(p, "Create a single-use, pre-authorized key tagged "+styleCode.Render(tag)+" at:")
 				printerInfo(p, "  "+styleCode.Render("https://login.tailscale.com/admin/settings/keys"))
 				printerInfo(p, "Then sign in on the phone with that key.")
-			} else if err := enrollWithAdminKey(ctx, p, admin, tag); err != nil {
+			} else if err := enrollWithAdminKey(ctx, p, adminAPI, tag); err != nil {
 				return fmt.Errorf("enroll phone: %w", err)
 			}
 
@@ -130,7 +132,7 @@ func enrollPhoneInstallPause(ctx context.Context, p Printer, autoYes bool) error
 
 // enrollWithAdminKey mints a tagged auth key, shows its QR, and polls for the
 // phone to appear on the tailnet with the expected tag.
-func enrollWithAdminKey(ctx context.Context, p Printer, admin *tailscale.AdminClient, tag string) error {
+func enrollWithAdminKey(ctx context.Context, p Printer, admin backend.AdminAPI, tag string) error {
 	key, err := admin.CreateAuthKey(ctx, []string{tag})
 	if err != nil {
 		return fmt.Errorf("mint auth key: %w", err)

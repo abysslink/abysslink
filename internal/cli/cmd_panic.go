@@ -23,9 +23,9 @@ import (
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/shell"
-	"github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/spf13/cobra"
 )
 
@@ -139,7 +139,16 @@ func revokePhoneDevicesWithStep(ctx context.Context, cc *cmdContext, p Printer, 
 		panicStep(p, "revoke phone devices", errPanicStepFailed{"no admin credentials — cannot auto-revoke (see manual steps)"})
 		return
 	}
-	admin := tailscale.NewAdminClient(cc.cfg.Tailnet.Admin.Tailnet, cc.cfg.Tailnet.Admin.OAuthClientID, os.Getenv(oauthSecretEnv))
+	b, err := cc.backend()
+	if err != nil {
+		panicStep(p, "revoke phone devices", errPanicStepFailed{"backend init failed: " + err.Error()})
+		return
+	}
+	admin, ok := b.(backend.AdminAPI)
+	if !ok {
+		panicStep(p, "revoke phone devices", errPanicStepFailed{"backend has no admin API — cannot auto-revoke (see manual steps)"})
+		return
+	}
 	devices, err := admin.Devices(ctx)
 	if err != nil {
 		panicStep(p, "list devices to revoke", errPanicStepFailed{err.Error()})
