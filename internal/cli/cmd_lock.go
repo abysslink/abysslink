@@ -188,10 +188,6 @@ func newLockSignCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
-			if cc.dryRun {
-				printerInfo(p, fmt.Sprintf("[plan] would run: tailscale lock sign %s  (re-run with --apply)", args[0]))
-				return nil
-			}
 			b, err := cc.backend()
 			if err != nil {
 				return fmt.Errorf("lock sign: %w", err)
@@ -199,6 +195,10 @@ func newLockSignCmd() *cobra.Command {
 			lc, ok := b.(backend.Locker)
 			if !ok {
 				return fmt.Errorf("lock sign: backend %q has no Tailnet Lock support", cc.cfg.Backend.Type)
+			}
+			if cc.dryRun {
+				printerInfo(p, fmt.Sprintf("[plan] would run: tailscale lock sign %s  (re-run with --apply)", args[0]))
+				return nil
 			}
 			if err := lc.LockSign(ctx, args[0]); err != nil {
 				return fmt.Errorf("lock sign: %w", err)
