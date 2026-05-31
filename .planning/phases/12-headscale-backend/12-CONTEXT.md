@@ -108,8 +108,11 @@ never PASS.
   Plan 12-01) so operators can override it. Pre-auth keys (`POST /api/v1/preauthkey`)
   and the deny-all baseline are created under this user. Both REST calls use the
   same `doRequest` pattern (D-08). The init sequence order is: TLS gate → binary
-  download/verify → version floor check → config merge → user ensure (D-13) →
-  API key mint → pre-auth key mint → service install.
+  download/verify → version floor check → write binary → config merge → service
+  install + start → health-check (poll until ready, 30s timeout) → API key
+  bootstrap → user ensure (D-13) → pre-auth key mint. Service install and
+  health-check MUST precede all REST admin calls because the Headscale HTTP
+  server is not running until after service start.
 
 ### abysslink init wizard extension
 - **SC-1:** The existing `abysslink init` wizard (`internal/cli/cmd_init.go`

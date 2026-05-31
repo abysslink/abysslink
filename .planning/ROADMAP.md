@@ -254,13 +254,25 @@ Plans:
   5. All nine hs-* checks (`hs-tls`, `hs-bind`, `hs-api-auth`, `hs-key-expiry`, `hs-db-perms`, `hs-lock`, `hs-oidc-filter`, `hs-proc-user`, `hs-derp-failclosed`) report correct PASS/WARN/FAIL status; `make lint test` green with mock Headscale API fixtures
 
 **Plans**: 5 plans
-
 Plans:
+**Wave 1**
 
 - [ ] 12-01-PLAN.md — Config schema extension (HeadscaleServer struct + Defaults) + test fixtures + contract_test.go update
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 12-02-PLAN.md — headscaleAdapter (Client + AdminAPI + ACLManager, not Locker) + factory.go case + contract/invariant tests
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 12-03-PLAN.md — headscale_config.go (surgical YAML merge) + headscale_doctor.go (nine hs-* checks)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 12-04-PLAN.md — cmd_server_headscale.go (init/status/upgrade/backup) + root.go wiring + cmd_doctor.go hs-* fix entries
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 12-05-PLAN.md — abysslink init wizard extension: backend.type headscale + server_url prompt (SC-1 / D-13)
 
 ### Phase 13: NetBird Backend

@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v2.0.0
 milestone_name: Self-Hosted Backends & Fleet
-status: planning
-last_updated: "2026-05-31T19:16:52.703Z"
-last_activity: 2026-05-31
+status: executing
+last_updated: "2026-05-31T20:24:12.032Z"
+last_activity: 2026-05-31 -- Phase 12 planning complete
 progress:
   total_phases: 14
   completed_phases: 3
-  total_plans: 15
+  total_plans: 20
   completed_plans: 12
   percent: 21
 ---
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-05-30)
 
 Phase: 12
 Plan: Not started
-Status: Ready to plan
-Last activity: 2026-05-31
+Status: Ready to execute
+Last activity: 2026-05-31 -- Phase 12 planning complete
 
 ```
 v2.0.0 progress: [                    ] 0%
