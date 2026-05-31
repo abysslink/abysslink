@@ -1088,7 +1088,10 @@ func headscaleUserName(cfg *config.Config) string {
 func headscalePreAuthKeyExpiry(cfg *config.Config) time.Duration {
 	if s := cfg.Server.Headscale.PreAuthKeyExpiry; s != "" {
 		d, err := time.ParseDuration(s)
-		if err == nil {
+		// D-11: pre-auth keys MUST have a non-zero, future expiry. A non-positive
+		// duration (e.g. "0s", "-5h") would mint an already-/never-expired key, so
+		// reject it and fall back to the paranoid-safe default.
+		if err == nil && d > 0 {
 			return d
 		}
 	}
