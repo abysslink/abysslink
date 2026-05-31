@@ -40,11 +40,11 @@ const aclEditorURL = "https://login.tailscale.com/admin/acls/file"
 
 // Module implements the acl module.
 type Module struct {
-	runner  shell.Runner
-	cfg     *config.Config
-	bknd    backend.Client
-	audit   *audit.Audit
-	prompt  func(ctx context.Context, msg string) error
+	runner shell.Runner
+	cfg    *config.Config
+	bknd   backend.Client
+	audit  *audit.Audit
+	prompt func(ctx context.Context, msg string) error
 }
 
 // New returns a new Module.
