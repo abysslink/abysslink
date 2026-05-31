@@ -50,9 +50,8 @@ func requireAdmin(cmd *cobra.Command) (context.Context, *cmdContext, backend.Adm
 	admin, hasAdmin := b.(backend.AdminAPI)
 	aclMgr, hasACL := b.(backend.ACLManager)
 	if !hasAdmin || !hasACL {
-		return ctx, cc, nil, nil, fmt.Errorf("no Tailscale admin OAuth client configured " +
-			"(set tailnet.admin.* in abysslink.yaml and export " + oauthSecretEnv + "), " +
-			"or manage the ACL at https://login.tailscale.com/admin/acls/file")
+		return ctx, cc, nil, nil, fmt.Errorf(
+			"backend %q has no ACL/admin-API support", cc.cfg.Backend.Type)
 	}
 	// Check that admin credentials are present in config/env.
 	a := cc.cfg.Tailnet.Admin
