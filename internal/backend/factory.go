@@ -30,7 +30,10 @@ func New(cfg *config.Config, runner shell.Runner) (Client, error) {
 	case "tailscale", "":
 		// "" is a defensive fallback; config.Load normalizes tailnet:→"tailscale".
 		return newTailscaleAdapter(cfg, runner), nil
+	case "headscale":
+		return newHeadscaleAdapter(cfg, runner), nil
 	default:
+		// Unknown types fail closed — T-11-04 (factory fails closed on unknown types).
 		return nil, fmt.Errorf("backend: unknown type %q", cfg.Backend.Type)
 	}
 }
