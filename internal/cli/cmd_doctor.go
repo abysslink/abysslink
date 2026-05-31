@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/spf13/cobra"
 )
@@ -180,6 +181,21 @@ Exit codes:
 				return fmt.Errorf("doctor: %w", err)
 			}
 
+			// Headscale backend: append hs-* doctor findings.
+			if cc.cfg.Backend.Type == "headscale" {
+				hsFindingsRaw, hsErr := backend.HeadscaleDoctorChecks(ctx, cc.cfg, cc.runner, nil)
+				if hsErr == nil {
+					for _, hf := range hsFindingsRaw {
+						findings = append(findings, modules.Finding{
+							Module:   hf.Module,
+							Check:    hf.Check,
+							Severity: modules.Severity(hf.Severity),
+							Message:  hf.Message,
+						})
+					}
+				}
+			}
+
 			// --json: emit structured ANSI-free records.
 			if cc.jsonOut {
 				p.PrintJSON(buildDoctorFindings(findings))
@@ -249,6 +265,16 @@ func findingFix(check string) string {
 		"panes_configured":     "add panes to modules.watch.panes in abysslink.yaml",
 		"claude_dir_exists":    "install Claude Code: npm i -g @anthropic-ai/claude-code",
 		"settings_json_exists": "abysslink up --apply",
+		// Headscale backend (hs-* checks).
+		"hs-tls":             "Renew or replace the TLS certificate; ensure key file is 0600 owned by the service user",
+		"hs-bind":            "Set metrics_listen_addr: 127.0.0.1:9090 and grpc_allow_insecure: false in Headscale config.yaml",
+		"hs-api-auth":        "Rotate the Headscale API key: abysslink server headscale init --apply (re-init mints a new key)",
+		"hs-key-expiry":      "Expire affected pre-auth keys via the Headscale admin panel or REST API; re-mint with explicit expiry",
+		"hs-db-perms":        "chmod 0600 /var/lib/headscale/db.sqlite && chown headscale:headscale /var/lib/headscale/db.sqlite",
+		"hs-lock":            "", // permanent WARN — Tailnet Lock (TKA) is not available on Headscale; no fix possible
+		"hs-oidc-filter":     "Set oidc.allowed_domains or oidc.allowed_users in Headscale config.yaml to restrict OIDC registration",
+		"hs-proc-user":       "Ensure Headscale runs as the dedicated service user: check systemd User= or launchd UserName= in the service unit",
+		"hs-derp-failclosed": "Set derp.server.verify_clients: true in Headscale config.yaml (R-02 correct key)",
 	}
 	return fixes[check]
 }

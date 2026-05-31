@@ -111,6 +111,7 @@ Run 'abysslink <command> --help' for details on any command.`,
 		newUpgradeCmd(),
 		newVersionCmd(),
 		newDaemonCmd(),
+		newServerCmd(),
 	}
 	for _, c := range opsCmds {
 		c.GroupID = "ops"
