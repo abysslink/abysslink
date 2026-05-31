@@ -70,7 +70,7 @@ func (a *tailscaleAdapter) Status(ctx context.Context) (*Status, error) {
 	}
 	// Convert internal/tailscale.Status → backend.Status (same field layout, repackaged).
 	bst := &Status{
-		BackendState:   BackendState(st.BackendState),
+		BackendState:   State(st.BackendState),
 		Health:         st.Health,
 		MagicDNSSuffix: st.MagicDNSSuffix,
 	}
