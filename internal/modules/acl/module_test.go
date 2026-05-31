@@ -26,16 +26,30 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
-	"github.com/abysslink/abysslink/internal/tailscale"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// newTestACLManager builds an ACLManager (via the tailscale adapter) using a
+// mock runner. This is the test-layer boundary: tests use backend.ACLManager
+// rather than importing internal/tailscale directly (depguard).
+func newTestACLManager(t *testing.T) (backend.ACLManager, shell.Runner) {
+	t.Helper()
+	r := shell.NewMockRunner()
+	cfg := config.Defaults()
+	b, err := backend.New(cfg, r)
+	require.NoError(t, err)
+	aclMgr, ok := b.(backend.ACLManager)
+	require.True(t, ok, "tailscale adapter must implement ACLManager")
+	return aclMgr, r
+}
+
 func TestApplyDesired_Idempotent(t *testing.T) {
+	aclMgr, _ := newTestACLManager(t)
 	owner := "owner@example.com"
 	user := "alice"
 
-	editor, err := tailscale.NewACLEditor(tailscale.DefaultACL(owner, user))
+	editor, err := aclMgr.NewACLEditor(aclMgr.DefaultACL(owner, user))
 	require.NoError(t, err)
 
 	// First application against the default ACL is a no-op (default already has it).
@@ -50,7 +64,9 @@ func TestApplyDesired_Idempotent(t *testing.T) {
 }
 
 func TestApplyDesired_AddsToEmptyACL(t *testing.T) {
-	editor, err := tailscale.NewACLEditor([]byte(`{}`))
+	aclMgr, _ := newTestACLManager(t)
+
+	editor, err := aclMgr.NewACLEditor([]byte(`{}`))
 	require.NoError(t, err)
 
 	before := append([]byte(nil), editor.Bytes()...)

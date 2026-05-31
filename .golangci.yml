@@ -14,6 +14,7 @@ linters:
     - ineffassign
     - unused
     - staticcheck
+    - depguard
 
 linters-settings:
   gocyclo:
@@ -27,6 +28,16 @@ linters-settings:
   gosec:
     excludes:
       - G304  # file path from variable — audit package legitimately reads paths from vars for backup/restore
+  depguard:
+    rules:
+      no-concrete-backend:
+        list-mode: lax
+        files:
+          - "!**/internal/backend/**"
+          - "!**/internal/tailscale/**"
+        deny:
+          - pkg: "github.com/abysslink/abysslink/internal/tailscale"
+            desc: "import internal/backend (Client interface) instead — concrete adapters are off-limits outside internal/backend (the backend-adapter architecture rule)"
 
 issues:
   exclusions:
