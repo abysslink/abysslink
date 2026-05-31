@@ -72,6 +72,20 @@ type DoctorFinding struct {
 // its method directly and tests can pass a mock.
 type doRequestFunc func(ctx context.Context, method, path string, body any) (*http.Response, error)
 
+// NewHeadscaleDoRequest builds a real REST helper for the Headscale doctor REST
+// checks (hs-api-auth, hs-key-expiry) from the given config and runner. The CLI
+// layer passes the result into HeadscaleDoctorChecks so those checks execute
+// against the live control server instead of being skipped. The returned closure
+// is the headscaleAdapter.doRequest method bound to a freshly-constructed adapter;
+// the API key flows only into the Authorization: Bearer header, never to argv or
+// logs (D-10). Returns nil only if cfg is nil.
+func NewHeadscaleDoRequest(cfg *config.Config, runner shell.Runner) func(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	if cfg == nil {
+		return nil
+	}
+	return newHeadscaleAdapter(cfg, runner).doRequest
+}
+
 // ValidateHeadscaleTLS is the single source of truth for TLS validation used by
 // both the hs-tls doctor check (called from HeadscaleDoctorChecks) and by the
 // Plan 12-04 init command (called from internal/cli — cli→backend direction).
@@ -572,6 +586,15 @@ func checkHsAPIAuth(ctx context.Context, doReq doRequestFunc) DoctorFinding {
 	const check = "hs-api-auth"
 	const mod = "headscale"
 
+	if doReq == nil {
+		return DoctorFinding{
+			Module:   mod,
+			Check:    check,
+			Severity: DoctorWarning,
+			Message:  "hs-api-auth: skipped — no API client available",
+		}
+	}
+
 	resp, err := doReq(ctx, http.MethodGet, "/api/v1/apikey", nil)
 	if err != nil {
 		return DoctorFinding{
@@ -647,6 +670,15 @@ func checkAPIKeyExpiry(resp *http.Response) string {
 func checkHsKeyExpiry(ctx context.Context, doReq doRequestFunc) DoctorFinding {
 	const check = "hs-key-expiry"
 	const mod = "headscale"
+
+	if doReq == nil {
+		return DoctorFinding{
+			Module:   mod,
+			Check:    check,
+			Severity: DoctorWarning,
+			Message:  "hs-key-expiry: skipped — no API client available",
+		}
+	}
 
 	resp, err := doReq(ctx, http.MethodGet, "/api/v1/preauthkey", nil)
 	if err != nil {
