@@ -47,10 +47,35 @@ type Backend struct {
 	Type string `yaml:"type"` // "tailscale" is the default; set by Load normalizer
 }
 
+// HeadscaleServer holds configuration for a locally-provisioned Headscale server (v2+).
+// All fields carry yaml: tags so KnownFields(true) strict-mode YAML accepts them.
+type HeadscaleServer struct {
+	// ServerURL is the public HTTPS URL of the Headscale instance (used in config.yaml server_url).
+	ServerURL string `yaml:"server_url"`
+	// BinaryPath is the install path for the headscale binary. Default: /usr/local/bin/headscale.
+	BinaryPath string `yaml:"binary_path,omitempty"`
+	// ConfigPath is the path to headscale's config.yaml. Default: /etc/headscale/config.yaml.
+	ConfigPath string `yaml:"config_path,omitempty"`
+	// DBPath is the path to headscale's SQLite database. Default: /var/lib/headscale/db.sqlite.
+	DBPath string `yaml:"db_path,omitempty"`
+	// ACME enables Let's Encrypt automatic cert (opt-in, D-05).
+	ACME bool `yaml:"acme,omitempty"`
+	// TLSCertPath is the path to the BYO TLS certificate (D-06).
+	TLSCertPath string `yaml:"tls_cert_path,omitempty"`
+	// TLSKeyPath is the path to the BYO TLS private key (D-06).
+	TLSKeyPath string `yaml:"tls_key_path,omitempty"`
+	// CertExpiryWarnDays is the days-before-expiry threshold for the hs-tls WARN check. Default: 30.
+	CertExpiryWarnDays int `yaml:"cert_expiry_warn_days,omitempty"`
+	// PreAuthKeyExpiry is the duration for newly-minted pre-auth keys. Default: "1h" (paranoid-safe, D-11).
+	PreAuthKeyExpiry string `yaml:"pre_auth_key_expiry,omitempty"`
+	// User is the Headscale user for pre-auth key creation.
+	User string `yaml:"user,omitempty"`
+}
+
 // Server holds configuration for a self-hosted backend server (v2+).
-// Fields are parsed but not yet consumed in v1 (forward-compat stub).
 type Server struct {
-	Hostname string `yaml:"hostname"` // FQDN of the Headscale / NetBird server
+	Hostname  string          `yaml:"hostname"` // FQDN of the Headscale / NetBird server (kept for compat)
+	Headscale HeadscaleServer `yaml:"headscale"`
 }
 
 // Rig holds per-rig fleet metadata (v2+ / Phase 14).
@@ -214,6 +239,15 @@ type Hardening struct {
 func Defaults() *Config {
 	return &Config{
 		Version: 1,
+		Server: Server{
+			Headscale: HeadscaleServer{
+				BinaryPath:         "/usr/local/bin/headscale",
+				ConfigPath:         "/etc/headscale/config.yaml",
+				DBPath:             "/var/lib/headscale/db.sqlite",
+				CertExpiryWarnDays: 30,
+				PreAuthKeyExpiry:   "1h",
+			},
+		},
 		Tailnet: Tailnet{
 			SSH: true,
 			Lock: TailnetLock{
