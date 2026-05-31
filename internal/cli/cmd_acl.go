@@ -22,7 +22,7 @@ import (
 	"os"
 
 	aclmod "github.com/abysslink/abysslink/internal/modules/acl"
-	"github.com/abysslink/abysslink/internal/tailscale"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/spf13/cobra"
 )
 
@@ -35,30 +35,34 @@ func newACLCmd() *cobra.Command {
 	return acl
 }
 
-// adminClientFor builds an admin client from config + the env secret, reporting
-// whether full credentials are present.
-func adminClientFor(cc *cmdContext) (*tailscale.AdminClient, bool) {
-	a := cc.cfg.Tailnet.Admin
-	secret := os.Getenv(oauthSecretEnv)
-	has := a.Tailnet != "" && a.OAuthClientID != "" && secret != ""
-	return tailscale.NewAdminClient(a.Tailnet, a.OAuthClientID, secret), has
-}
-
-// requireAdmin loads context and returns a credentialed admin client, or an
-// error directing the user to configure OAuth.
-func requireAdmin(cmd *cobra.Command) (context.Context, *cmdContext, *tailscale.AdminClient, error) {
+// requireAdmin loads context and returns a credentialed admin + ACL-manager handle,
+// or an error directing the user to configure OAuth.
+func requireAdmin(cmd *cobra.Command) (context.Context, *cmdContext, backend.AdminAPI, backend.ACLManager, error) {
 	ctx := cmd.Context()
 	cc, err := loadCmdContext(cmd)
 	if err != nil {
-		return ctx, nil, nil, err
+		return ctx, nil, nil, nil, err
 	}
-	admin, has := adminClientFor(cc)
-	if !has {
-		return ctx, cc, nil, fmt.Errorf("no Tailscale admin OAuth client configured " +
+	b, err := cc.backend()
+	if err != nil {
+		return ctx, cc, nil, nil, fmt.Errorf("acl: backend init: %w", err)
+	}
+	admin, hasAdmin := b.(backend.AdminAPI)
+	aclMgr, hasACL := b.(backend.ACLManager)
+	if !hasAdmin || !hasACL {
+		return ctx, cc, nil, nil, fmt.Errorf("no Tailscale admin OAuth client configured " +
 			"(set tailnet.admin.* in abysslink.yaml and export " + oauthSecretEnv + "), " +
 			"or manage the ACL at https://login.tailscale.com/admin/acls/file")
 	}
-	return ctx, cc, admin, nil
+	// Check that admin credentials are present in config/env.
+	a := cc.cfg.Tailnet.Admin
+	secret := os.Getenv(oauthSecretEnv)
+	if a.Tailnet == "" || a.OAuthClientID == "" || secret == "" {
+		return ctx, cc, nil, nil, fmt.Errorf("no Tailscale admin OAuth client configured " +
+			"(set tailnet.admin.* in abysslink.yaml and export " + oauthSecretEnv + "), " +
+			"or manage the ACL at https://login.tailscale.com/admin/acls/file")
+	}
+	return ctx, cc, admin, aclMgr, nil
 }
 
 func newACLPullCmd() *cobra.Command {
@@ -68,11 +72,11 @@ func newACLPullCmd() *cobra.Command {
 		Example: `  # Print the current tailnet ACL (requires admin credentials)
   abysslink acl pull`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, _, admin, err := requireAdmin(cmd)
+			ctx, _, _, aclMgr, err := requireAdmin(cmd)
 			if err != nil {
 				return err
 			}
-			cur, _, err := admin.GetACL(ctx)
+			cur, _, err := aclMgr.GetACL(ctx)
 			if err != nil {
 				return fmt.Errorf("acl pull: %w", err)
 			}
@@ -117,16 +121,16 @@ func newACLValidateCmd() *cobra.Command {
 		Example: `  # Validate the tailnet ACL against abysslink's required rules
   abysslink acl validate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, cc, admin, err := requireAdmin(cmd)
+			ctx, cc, _, aclMgr, err := requireAdmin(cmd)
 			if err != nil {
 				return err
 			}
 			p := newPrinter(cmd)
-			cur, _, err := admin.GetACL(ctx)
+			cur, _, err := aclMgr.GetACL(ctx)
 			if err != nil {
 				return fmt.Errorf("acl validate: %w", err)
 			}
-			editor, err := tailscale.NewACLEditor(cur)
+			editor, err := aclMgr.NewACLEditor(cur)
 			if err != nil {
 				return fmt.Errorf("acl validate: ACL is not valid HuJSON: %w", err)
 			}
@@ -151,16 +155,16 @@ func newACLDiffCmd() *cobra.Command {
 		Example: `  # Show a diff of ACL changes abysslink would apply
   abysslink acl diff`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, cc, admin, err := requireAdmin(cmd)
+			ctx, cc, _, aclMgr, err := requireAdmin(cmd)
 			if err != nil {
 				return err
 			}
 			p := newPrinter(cmd)
-			cur, _, err := admin.GetACL(ctx)
+			cur, _, err := aclMgr.GetACL(ctx)
 			if err != nil {
 				return fmt.Errorf("acl diff: %w", err)
 			}
-			editor, err := tailscale.NewACLEditor(cur)
+			editor, err := aclMgr.NewACLEditor(cur)
 			if err != nil {
 				return fmt.Errorf("acl diff: %w", err)
 			}
@@ -168,7 +172,7 @@ func newACLDiffCmd() *cobra.Command {
 			if err := convergeACL(editor, cc); err != nil {
 				return fmt.Errorf("acl diff: %w", err)
 			}
-			diff := tailscale.Diff(before, editor.Bytes())
+			diff := aclMgr.Diff(before, editor.Bytes())
 			if diff == "" {
 				printerInfo(p, "No changes — ACL already converged.")
 				return nil
@@ -180,7 +184,7 @@ func newACLDiffCmd() *cobra.Command {
 }
 
 // convergeACL applies abysslink's required rules to editor using config identity.
-func convergeACL(editor *tailscale.ACLEditor, cc *cmdContext) error {
+func convergeACL(editor backend.ACLEditor, cc *cmdContext) error {
 	owner := cc.cfg.Identity.Email
 	if owner == "" {
 		return fmt.Errorf("identity.email is required")
