@@ -29,6 +29,9 @@ import (
 // Config is the top-level abysslink.yaml structure.
 type Config struct {
 	Version    int        `yaml:"version"`
+	Backend    Backend    `yaml:"backend"`
+	Server     Server     `yaml:"server"`
+	Rig        Rig        `yaml:"rig"`
 	Identity   Identity   `yaml:"identity"`
 	Tailnet    Tailnet    `yaml:"tailnet"`
 	Mobile     Mobile     `yaml:"mobile"`
@@ -36,6 +39,24 @@ type Config struct {
 	ClaudeCode ClaudeCode `yaml:"claudecode"`
 	Power      Power      `yaml:"power"`
 	Hardening  Hardening  `yaml:"hardening"`
+}
+
+// Backend holds backend-selection settings (v2+). The Type field is
+// "tailscale" for v1; future backends include "headscale" and "netbird".
+type Backend struct {
+	Type string `yaml:"type"` // "tailscale" is the default; set by Load normalizer
+}
+
+// Server holds configuration for a self-hosted backend server (v2+).
+// Fields are parsed but not yet consumed in v1 (forward-compat stub).
+type Server struct {
+	Hostname string `yaml:"hostname"` // FQDN of the Headscale / NetBird server
+}
+
+// Rig holds per-rig fleet metadata (v2+ / Phase 14).
+// Fields are parsed but not yet consumed in v1 (forward-compat stub).
+type Rig struct {
+	Name string `yaml:"name"` // logical rig name used in fleet commands
 }
 
 // Identity holds the user's Tailscale and UNIX identifiers.
@@ -249,6 +270,11 @@ func Load(path string) (*Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("config: decode %s: %w", path, err)
+	}
+	// Normalize: a v1 tailnet:-only config has no backend: stanza, so
+	// Backend.Type is "". Default it to "tailscale" (Pitfall 4 alias).
+	if cfg.Backend.Type == "" {
+		cfg.Backend.Type = "tailscale"
 	}
 	return cfg, nil
 }
