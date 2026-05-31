@@ -2,15 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0.0
 milestone_name: Self-Hosted Backends & Fleet
-status: executing
-last_updated: "2026-05-30T20:14:11.222Z"
-last_activity: 2026-05-30 -- Phase 11 planning complete
+status: ready_to_plan
+last_updated: 2026-05-31T15:49:23.140Z
+last_activity: 2026-05-31
 progress:
   total_phases: 14
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 15
-  completed_plans: 9
-  percent: 14
+  completed_plans: 12
+  percent: 21
+stopped_at: Phase 11 complete (3/3) — ready to discuss Phase 12
 ---
 
 # Project State
@@ -20,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Milestone v2.0.0 — Phase 11: Backend Abstraction Refactor
+**Current focus:** Phase 12 — headscale backend
 
 ## Current Position
 
-Phase: 11 — Backend Abstraction Refactor
-Plan: —
-Status: Ready to execute
-Last activity: 2026-05-30 -- Phase 11 planning complete
+Phase: 12
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-05-31
 
 ```
 v2.0.0 progress: [                    ] 0%
@@ -38,7 +39,7 @@ Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
 
 **Velocity:**
 
-- Total plans completed: 33 (v1.0.0)
+- Total plans completed: 36 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 
@@ -60,6 +61,9 @@ Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
 | 12. Headscale Backend | TBD | Not started |
 | 13. NetBird Backend | TBD | Not started |
 | 14. Multi-Rig Fleet | TBD | Not started |
+| Phase 11 P01 | 7m | 2 tasks | 4 files |
+| Phase 11-backend-abstraction-refactor P02 | ~50 minutes | 3 tasks | 11 files |
+| Phase 11 P03 | 60m | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -116,6 +120,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-05-30T19:38:32.732Z
+Last session: 2026-05-31T15:34:03.645Z
 Stopped at: Phase 11 context gathered
-Resume file: .planning/phases/11-backend-abstraction-refactor/11-CONTEXT.md
+Resume file: None

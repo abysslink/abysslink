@@ -28,7 +28,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 ## v2.0.0 — Self-Hosted Backends & Fleet
 
-- [ ] **Phase 11: Backend Abstraction Refactor** - Generic `internal/backend.Client` interface with contract tests; Tailscale adapter wrapping v1; all modules migrated; zero v1 regression
+- [x] **Phase 11: Backend Abstraction Refactor** - Generic `internal/backend.Client` interface with contract tests; Tailscale adapter wrapping v1; all modules migrated; zero v1 regression (completed 2026-05-31)
 - [ ] **Phase 12: Headscale Backend** - Full Headscale backend: client adapter (HuJSON reuse, deny-all baseline, lock WARN), server provisioning (TLS gate, non-root, cosign, embedded DERP), all hs-* doctor checks
 - [ ] **Phase 13: NetBird Backend** - Full NetBird backend: REST-only client adapter (Groups-as-tags, SSHCheck graceful degradation, AGPLv3 CI guard), server provisioning (v0.57.0 floor, ZITADEL CVE gate, non-root), all nb-* doctor checks
 - [ ] **Phase 14: Multi-Rig Fleet** - `abysslink enroll rig`, fan-out status/doctor/notify/panic, per-rig keychain namespaces and ntfy topics, rig-to-rig ACL deny, multi-rig doctor checks
@@ -230,15 +230,15 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 11-01-PLAN.md — Capture pre-refactor `up --dry-run` parity golden + behavior-neutral runner-injection seam (BKND-05)
+- [x] 11-01-PLAN.md — Capture pre-refactor `up --dry-run` parity golden + behavior-neutral runner-injection seam (BKND-05)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 11-02-PLAN.md — Create internal/backend package (Client interface, neutral types, Capabilities, factory, adapter, contract + lockstep tests) + config backend/server/rig stanzas & tailnet: alias (BKND-01, BKND-02, BKND-03)
+- [x] 11-02-PLAN.md — Create internal/backend package (Client interface, neutral types, Capabilities, factory, adapter, contract + lockstep tests) + config backend/server/rig stanzas & tailnet: alias (BKND-01, BKND-02, BKND-03)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 11-03-PLAN.md — Migrate acl module + 6 CLI files to backend interfaces, wire Deps.Backend, enable depguard guard, assert byte-for-byte parity (BKND-04, BKND-05)
+- [x] 11-03-PLAN.md — Migrate acl module + 6 CLI files to backend interfaces, wire Deps.Backend, enable depguard guard, assert byte-for-byte parity (BKND-04, BKND-05)
 
 ### Phase 12: Headscale Backend
 
@@ -304,7 +304,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8. Release Infrastructure | 3/3 | Complete | 2026-05-26 |
 | 9. Verification & Polish | 3/3 | Complete | 2026-05-26 |
 | 10. Journey & Rich TUI | 6/6 | Complete | 2026-05-29 |
-| 11. Backend Abstraction Refactor | 0/0 | Not started | - |
+| 11. Backend Abstraction Refactor | 3/3 | Complete    | 2026-05-31 |
 | 12. Headscale Backend | 0/0 | Not started | - |
 | 13. NetBird Backend | 0/0 | Not started | - |
 | 14. Multi-Rig Fleet | 0/0 | Not started | - |
