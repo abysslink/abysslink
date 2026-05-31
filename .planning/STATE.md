@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v2.0.0
 milestone_name: Self-Hosted Backends & Fleet
-status: ready_to_plan
-last_updated: 2026-05-31T22:37:39.420Z
+status: planning
+last_updated: "2026-05-31T22:57:44.920Z"
 last_activity: 2026-05-31
 progress:
   total_phases: 14
@@ -11,7 +11,6 @@ progress:
   total_plans: 20
   completed_plans: 17
   percent: 29
-stopped_at: Phase 12 complete (5/5) — ready to discuss Phase 13
 ---
 
 # Project State
@@ -126,6 +125,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-05-31T21:33:08.332Z
-Stopped at: Phase 12 context gathered
-Resume file: None
+Last session: 2026-05-31T22:57:44.914Z
+Stopped at: Phase 13 context gathered
+Resume file: .planning/phases/13-netbird-backend/13-CONTEXT.md
