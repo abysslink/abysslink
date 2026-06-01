@@ -138,6 +138,13 @@ None.
 | v2.x | SCIM | Deferred | v2.0.0 roadmap |
 | v3 | Vaultwarden secrets module | Deferred | Roadmap |
 | v3 | upsnap, atuin, sandbox, asciinema | Deferred | Roadmap |
+| uat | phase-10 HUMAN-UAT (6 pending scenarios) | Deferred | v2.0.0 close 2026-06-02 |
+| uat | phase-12 HUMAN-UAT (1 pending scenario) | Deferred | v2.0.0 close 2026-06-02 |
+| verification | phase-10 VERIFICATION human_needed | Deferred | v2.0.0 close 2026-06-02 |
+| verification | phase-12 VERIFICATION human_needed | Deferred | v2.0.0 close 2026-06-02 |
+| quick-task | 4 dangling quick-task slugs (no files on disk; 260526-l51, 260530-8mf/8uz/nl4) | Deferred | v2.0.0 close 2026-06-02 |
+| context | phase-11 CONTEXT 3 open questions (answered during planning) | Deferred | v2.0.0 close 2026-06-02 |
+| tech-debt | TestUpDryRunParity environment-dependent golden (not a regression) | Deferred | v2.0.0 close 2026-06-02 |
 
 ## Session Continuity
 
