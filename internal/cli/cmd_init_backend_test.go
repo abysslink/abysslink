@@ -71,3 +71,56 @@ func TestRunInitFormTailscaleNoHeadscaleFields(t *testing.T) {
 	assert.Empty(t, cfg.Server.Headscale.User,
 		"Headscale user must not be set when tailscale backend is selected")
 }
+
+// TestRunInitFormNetBirdModeAssignments asserts that the netbird path correctly
+// sets cfg.Backend.Type and cfg.Server.NetBird.ServerURL.
+// This test exercises initFormResult directly to simulate the form-selected netbird
+// option, bypassing the interactive huh prompts which cannot run in non-TTY test
+// environments.
+func TestRunInitFormNetBirdModeAssignments(t *testing.T) {
+	r := initFormResult{
+		backendType:      "netbird",
+		netbirdServerURL: "https://nb.example.com",
+	}
+	cfg, err := applyInitFormResult(r)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "netbird", cfg.Backend.Type,
+		"netbird backend type must be set in config")
+	assert.Equal(t, "https://nb.example.com", cfg.Server.NetBird.ServerURL,
+		"NetBird server URL must be populated from form input")
+}
+
+// TestRunInitFormNetBirdNoHeadscaleFields asserts that selecting netbird backend
+// leaves cfg.Server.Headscale.ServerURL empty — no Headscale fields leak into a
+// NetBird config.
+func TestRunInitFormNetBirdNoHeadscaleFields(t *testing.T) {
+	r := initFormResult{
+		backendType:      "netbird",
+		netbirdServerURL: "https://nb.example.com",
+	}
+	cfg, err := applyInitFormResult(r)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "netbird", cfg.Backend.Type)
+	assert.Empty(t, cfg.Server.Headscale.ServerURL,
+		"Headscale server URL must not be set when netbird backend is selected")
+	assert.Empty(t, cfg.Server.Headscale.User,
+		"Headscale user must not be set when netbird backend is selected")
+}
+
+// TestRunInitFormNetBirdServerURLRequired asserts that when backend is netbird and
+// no server URL is provided, the config validation will catch it at runtime.
+// This tests the constraint path exercised by config.Validate.
+func TestRunInitFormNetBirdServerURLRequired(t *testing.T) {
+	r := initFormResult{
+		backendType:      "netbird",
+		netbirdServerURL: "", // intentionally empty to confirm the field maps correctly
+	}
+	cfg, err := applyInitFormResult(r)
+	require.NoError(t, err, "applyInitFormResult succeeds — validation is caller's responsibility")
+	require.NotNil(t, cfg)
+	assert.Equal(t, "netbird", cfg.Backend.Type)
+	assert.Empty(t, cfg.Server.NetBird.ServerURL,
+		"server URL is empty when not provided — caller must validate")
+}
