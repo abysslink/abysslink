@@ -35,6 +35,7 @@ import (
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
+	"github.com/tailscale/hujson"
 )
 
 // rigNameRe validates rig names: lowercase alphanumeric and hyphens, 1–63 chars.
@@ -206,7 +207,18 @@ func enrollRigDeriveTopic(opts enrollRigOpts, cfg *config.Config) (string, error
 }
 
 // enrollRigWriteConfig appends the RigConfig and persists via config.Write (audit).
+// Refuses re-enrollment of an existing rig name (CR-02: silent duplicate creation
+// causes mr-key-uniqueness FATAL and silently destroys the existing HMAC key).
 func enrollRigWriteConfig(opts enrollRigOpts, cfg *config.Config, topic string, out io.Writer) error {
+	// Guard against duplicate-name enrollment (CR-02, T-14-15).
+	// Fail unconditionally — both dry-run and apply must surface this error so
+	// the operator knows the name is already enrolled before any mutations occur.
+	for _, existing := range cfg.Rigs {
+		if existing.Name == opts.name {
+			return fmt.Errorf("enroll rig: rig %q is already enrolled; use a unique name or remove the existing entry first (re-enrolling silently destroys the HMAC key)", opts.name)
+		}
+	}
+
 	hostname := opts.hostname
 	if hostname == "" {
 		h, hErr := os.Hostname()
@@ -281,17 +293,26 @@ func enforceRigToRigACLDeny(ctx context.Context, mgr aclManagerFace, apply bool,
 	return nil
 }
 
-// assertNoRigRigGrant parses the ACL JSON/HuJSON and returns an error if any grant
-// has tag:laptop in both Src and Dst (bidirectional check). This implements the
+// assertNoRigRigGrant parses the ACL HuJSON (or plain JSON) and returns an error
+// if any grant has tag:laptop in both Src and Dst. This implements the
 // absence-of-grant security invariant for rig-to-rig isolation (Decision A1).
+//
+// CR-03: Uses hujson.Standardize before json.Unmarshal so that Tailscale ACL
+// documents containing C-style comments or trailing commas (which the Tailscale
+// admin UI preserves and GetACL returns verbatim) are parsed correctly. A parse
+// failure is FATAL — we cannot assert safety if the document is unreadable.
 func assertNoRigRigGrant(raw []byte) error {
-	// Strip HuJSON comments and trailing commas by tolerating parse errors on
-	// unknown tokens — we only need the "grants" array.
+	// Standardize HuJSON → plain JSON (strips comments and trailing commas).
+	// github.com/tailscale/hujson is a direct dep in go.mod (not transitive).
+	std, err := hujson.Standardize(append([]byte(nil), raw...))
+	if err != nil {
+		return fmt.Errorf("cannot standardize HuJSON ACL (CR-03): %w", err)
+	}
+
 	var doc enrollACLDoc
-	// Best-effort JSON parse (HuJSON comments will cause issues, but in practice
-	// the backend returns the standardized form after a GetACL round-trip).
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		// If we can't parse, we cannot assert safety — return error.
+	if err := json.Unmarshal(std, &doc); err != nil {
+		// Parse failure is fatal — we cannot assert the absence-of-grant without
+		// a successfully parsed document (fail closed, never downgrade to WARN).
 		return fmt.Errorf("cannot parse ACL document: %w", err)
 	}
 
