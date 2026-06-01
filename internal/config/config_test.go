@@ -146,3 +146,96 @@ func TestValidate_InvalidAPIKeySource(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api_key_source")
 }
+
+// TestRigConfig_UnmarshalRigs verifies that a YAML document with a rigs: list
+// unmarshals into []RigConfig with all fields populated (D-FS-01).
+func TestRigConfig_UnmarshalRigs(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "rigs.yaml")
+	content := `version: 1
+identity:
+  email: you@example.com
+  unix_user: you
+tailnet:
+  hostname: mac-dev
+  ssh: true
+rigs:
+  - name: laptop
+    hostname: laptop.tailnet
+    ntfy_topic: abysslink-laptop-a1b2c3d4
+    backend: tailscale
+    last_seen: "2026-06-01T12:00:00Z"
+  - name: workstation
+    hostname: ws.tailnet
+    ntfy_topic: abysslink-ws-e5f6a7b8
+    backend: tailscale
+`
+	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+	cfg, err := config.Load(p)
+	require.NoError(t, err)
+	require.Len(t, cfg.Rigs, 2)
+	assert.Equal(t, "laptop", cfg.Rigs[0].Name)
+	assert.Equal(t, "laptop.tailnet", cfg.Rigs[0].Hostname)
+	assert.Equal(t, "abysslink-laptop-a1b2c3d4", cfg.Rigs[0].NtfyTopic)
+	assert.Equal(t, "tailscale", cfg.Rigs[0].Backend)
+	assert.Equal(t, "2026-06-01T12:00:00Z", cfg.Rigs[0].LastSeen)
+	assert.Equal(t, "workstation", cfg.Rigs[1].Name)
+	assert.Equal(t, "", cfg.Rigs[1].LastSeen) // omitempty — absent
+}
+
+// TestRigConfig_LegacyScalarRig verifies that a YAML document that still uses
+// the legacy scalar rig: key parses without a strict-mode KnownFields error
+// (Open Question 3 backward-compat alias).
+func TestRigConfig_LegacyScalarRig(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "legacy.yaml")
+	content := `version: 1
+identity:
+  email: you@example.com
+  unix_user: you
+tailnet:
+  hostname: mac-dev
+  ssh: true
+rig:
+  name: myrig
+`
+	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+	cfg, err := config.Load(p)
+	require.NoError(t, err, "legacy rig: key must parse under strict mode")
+	assert.Equal(t, "myrig", cfg.Rig.Name)
+}
+
+// TestRigConfig_RoundTrip verifies that Marshal(cfg) then Load() preserves the
+// Rigs slice contents (order + fields).
+func TestRigConfig_RoundTrip(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Identity.Email = "you@example.com"
+	cfg.Identity.UnixUser = "you"
+	cfg.Tailnet.Hostname = "mac-dev"
+	cfg.Rigs = []config.RigConfig{
+		{Name: "rig-a", Hostname: "rig-a.ts", NtfyTopic: "topic-a", Backend: "tailscale"},
+		{Name: "rig-b", Hostname: "rig-b.ts", NtfyTopic: "topic-b", Backend: "headscale", LastSeen: "2026-06-01T00:00:00Z"},
+	}
+
+	data, err := config.Marshal(cfg)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "rt.yaml")
+	require.NoError(t, os.WriteFile(p, data, 0o600))
+
+	loaded, err := config.Load(p)
+	require.NoError(t, err)
+	require.Len(t, loaded.Rigs, 2)
+	assert.Equal(t, "rig-a", loaded.Rigs[0].Name)
+	assert.Equal(t, "rig-b.ts", loaded.Rigs[1].Hostname)
+	assert.Equal(t, "headscale", loaded.Rigs[1].Backend)
+	assert.Equal(t, "2026-06-01T00:00:00Z", loaded.Rigs[1].LastSeen)
+}
+
+// TestRigConfig_DefaultsEmpty verifies that Defaults() returns a nil/empty Rigs
+// slice (no rigs enrolled by default).
+func TestRigConfig_DefaultsEmpty(t *testing.T) {
+	cfg := config.Defaults()
+	assert.Empty(t, cfg.Rigs, "Defaults() must return an empty Rigs slice")
+}
