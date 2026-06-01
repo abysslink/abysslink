@@ -1,0 +1,23 @@
+[
+  {
+    "module": "tailscale",
+    "check": "ts-running",
+    "severity": "ok",
+    "message": "Tailscale is running",
+    "fix": ""
+  },
+  {
+    "module": "tailscale",
+    "check": "ts-lock",
+    "severity": "ok",
+    "message": "Tailnet Lock is enabled",
+    "fix": ""
+  },
+  {
+    "module": "ntfy",
+    "check": "ntfy-running",
+    "severity": "warn",
+    "message": "ntfy not running",
+    "fix": "abysslink up --apply"
+  }
+]
