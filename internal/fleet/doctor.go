@@ -35,7 +35,7 @@ var v1LegacyAccounts = []string{
 	"code-server-password",
 }
 
-// FleetDoctorChecks returns []backend.DoctorFinding for the three mr-* fleet
+// DoctorChecks returns []backend.DoctorFinding for the three mr-* fleet
 // isolation invariant checks. It mirrors the signature and append-each-check
 // shape of backend.NetBirdDoctorChecks (PATTERNS §internal/fleet/doctor.go).
 //
@@ -47,7 +47,7 @@ var v1LegacyAccounts = []string{
 //
 // Backend-neutral: imports only stdlib + internal/config + internal/secrets +
 // internal/backend interfaces — no concrete adapter (BKND-04 constraint).
-func FleetDoctorChecks(
+func DoctorChecks(
 	ctx context.Context,
 	cfg *config.Config,
 	kc secrets.KeychainStore,
