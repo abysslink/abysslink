@@ -360,4 +360,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 11. Backend Abstraction Refactor | 3/3 | Complete    | 2026-05-31 |
 | 12. Headscale Backend | 5/5 | Complete    | 2026-05-31 |
 | 13. NetBird Backend | 5/5 | Complete   | 2026-06-01 |
-| 14. Multi-Rig Fleet | 5/5 | Complete   | 2026-06-01 |
+| 14. Multi-Rig Fleet | 5/5 | Complete    | 2026-06-01 |
