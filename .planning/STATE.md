@@ -1,16 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v2.0.0
-milestone_name: Self-Hosted Backends & Fleet
-status: planning
-last_updated: "2026-05-31T22:57:44.920Z"
-last_activity: 2026-05-31
+milestone_name: — Self-Hosted Backends & Fleet
+status: completed
+stopped_at: SC-3 gap closure — SetACL/PushPolicy Validate-after-push (commit 4e2cf8d)
+last_updated: "2026-06-01T01:05:02.382Z"
+last_activity: 2026-06-01 -- Phase 13 marked complete
 progress:
-  total_phases: 14
-  completed_phases: 4
-  total_plans: 20
-  completed_plans: 17
-  percent: 29
+  total_phases: 10
+  completed_phases: 2
+  total_plans: 12
+  completed_plans: 9
+  percent: 20
 ---
 
 # Project State
@@ -20,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Phase 13 — netbird backend
+**Current focus:** Phase 13 — netbird-backend
 
 ## Current Position
 
-Phase: 13
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-05-31
+Phase: 13 — COMPLETE
+Plan: 5 of 5
+Status: Phase 13 complete
+Last activity: 2026-06-01 -- Phase 13 marked complete
 
 ```
 v2.0.0 progress: [                    ] 0%
@@ -67,6 +68,11 @@ Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
 | Phase 12 P03 | 12m | 2 tasks | 4 files |
 | Phase 12 P04 | 35 | 4 tasks | 4 files |
 | Phase 12-headscale-backend P05 | 5m | 1 tasks | 2 files |
+| Phase 13 P01 | 12m | 3 tasks | 7 files |
+| Phase 13 P02 | 25m | 2 tasks | 6 files |
+| Phase 13 P03 | 22m | 2 tasks | 7 files |
+| Phase 13 P04 | 25m | 1 tasks | 4 files |
+| Phase 13 P04 | 25m | 1 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -87,6 +93,9 @@ Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
 - v2.0.0: Security hardening (TLS gate, non-root, port binding) is acceptance criteria in each provisioning phase — no separate hardening phase
 - [Phase ?]: Config schema + fixture foundation for Headscale backend
 - [Phase ?]: macOS launchd _headscale service account (UID 399) + plist provisioning enabled after checkpoint approval
+- [Phase ?]: setNestedKey refactored to shared config_helpers.go
+- [Phase ?]: ZITADEL probe auth separation
+- [Phase ?]: ZITADEL probe auth separation: admin API Bearer token (management/v1/users/_search) NOT NetBird Token header — prevents false PASS on non-ZITADEL deployments
 
 ### Pending Todos
 
@@ -95,6 +104,7 @@ None.
 ### Blockers/Concerns
 
 - Phase 12 planning: ACME + embedded DERP port interaction needs targeted research sub-task (Caddy/nginx WebSocket forwarding config for DERP alongside Let's Encrypt ACME is MEDIUM confidence)
+- Phase 13 SC-3 gap closed (commit 4e2cf8d): SetACL/PushPolicy now validates after every push — Phase 13 score 17/17
 - Phase 13 planning: NetBird combined binary (non-Docker) config format stability across patch releases needs direct v0.71.4 deploy verification
 - Phase 14 planning: Whether `abysslinkd` HTTP-over-socket protocol requires extension for fleet peer status polling is undetermined — address in Phase 14 planning
 
@@ -125,6 +135,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-05-31T22:57:44.914Z
-Stopped at: Phase 13 context gathered
-Resume file: .planning/phases/13-netbird-backend/13-CONTEXT.md
+Last session: 2026-06-01T00:57:05Z
+Stopped at: SC-3 gap closure — SetACL/PushPolicy Validate-after-push (commit 4e2cf8d)
+Resume file: None

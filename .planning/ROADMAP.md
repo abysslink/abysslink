@@ -30,7 +30,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 11: Backend Abstraction Refactor** - Generic `internal/backend.Client` interface with contract tests; Tailscale adapter wrapping v1; all modules migrated; zero v1 regression (completed 2026-05-31)
 - [x] **Phase 12: Headscale Backend** - Full Headscale backend: client adapter (HuJSON reuse, deny-all baseline, lock WARN), server provisioning (TLS gate, non-root, cosign, embedded DERP), all hs-* doctor checks (completed 2026-05-31)
-- [ ] **Phase 13: NetBird Backend** - Full NetBird backend: REST-only client adapter (Groups-as-tags, SSHCheck graceful degradation, AGPLv3 CI guard), server provisioning (v0.57.0 floor, ZITADEL CVE gate, non-root), all nb-* doctor checks
+- [x] **Phase 13: NetBird Backend** - Full NetBird backend: REST-only client adapter (Groups-as-tags, SSHCheck graceful degradation, AGPLv3 CI guard), server provisioning (v0.57.0 floor, ZITADEL CVE gate, non-root), all nb-* doctor checks (completed 2026-06-01)
 - [ ] **Phase 14: Multi-Rig Fleet** - `abysslink enroll rig`, fan-out status/doctor/notify/panic, per-rig keychain namespaces and ntfy topics, rig-to-rig ACL deny, multi-rig doctor checks
 
 ## Phase Details
@@ -293,20 +293,20 @@ Plans:
 Plans:
 **Wave 1** (no dependencies)
 
-- [ ] 13-01-PLAN.md — AGPLv3 depguard rule (NB-04) + config schema for NetBird server provisioning + testdata fixtures
+- [x] 13-01-PLAN.md — AGPLv3 depguard rule (NB-04) + config schema for NetBird server provisioning + testdata fixtures
 
 **Wave 2** (parallel, both depend on 13-01)
 
-- [ ] 13-02-PLAN.md — netbirdAdapter (Client + AdminAPI + ACLManager) + netbirdEditor (policy CRUD + Groups-as-tags + Validate()) + factory.go case (NB-01)
-- [ ] 13-03-PLAN.md — MergeNetBirdConfig() surgical YAML merge + NetBirdDoctorChecks() all 8 nb-* checks (NB-02, NB-03)
+- [x] 13-02-PLAN.md — netbirdAdapter (Client + AdminAPI + ACLManager) + netbirdEditor (policy CRUD + Groups-as-tags + Validate()) + factory.go case (NB-01)
+- [x] 13-03-PLAN.md — MergeNetBirdConfig() surgical YAML merge + NetBirdDoctorChecks() all 8 nb-* checks (NB-02, NB-03)
 
 **Wave 3** (depends on 13-02 and 13-03)
 
-- [ ] 13-04-PLAN.md — cmd_server_netbird.go provisioner (init/status/upgrade/backup) + cmd_doctor.go nb-* wiring (NB-02, NB-03)
+- [x] 13-04-PLAN.md — cmd_server_netbird.go provisioner (init/status/upgrade/backup) + cmd_doctor.go nb-* wiring (NB-02, NB-03)
 
 **Wave 4** (depends on 13-02 and 13-04)
 
-- [ ] 13-05-PLAN.md — init wizard netbird option + --accept-no-sshcheck up gate (D-04) + final audit (NB-01, NB-02, NB-03)
+- [x] 13-05-PLAN.md — init wizard netbird option + --accept-no-sshcheck up gate (D-04) + final audit (NB-01, NB-02, NB-03)
 
 ### Phase 14: Multi-Rig Fleet
 
@@ -344,5 +344,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 10. Journey & Rich TUI | 6/6 | Complete | 2026-05-29 |
 | 11. Backend Abstraction Refactor | 3/3 | Complete    | 2026-05-31 |
 | 12. Headscale Backend | 5/5 | Complete    | 2026-05-31 |
-| 13. NetBird Backend | 0/0 | Not started | - |
+| 13. NetBird Backend | 5/5 | Complete   | 2026-06-01 |
 | 14. Multi-Rig Fleet | 0/0 | Not started | - |
