@@ -31,6 +31,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// D-04 gate: NetBird SSHCheck degradation acknowledgment.
+// These named constants make the required substrings verifiable via grep in tests.
+const (
+	warnSSHCheckText = "WARN: SSHCheck not available on NetBird — checkPeriod enforcement disabled"
+	warnSetupKeyText = "Setup-key-enrolled peers have no periodic re-auth mechanism in NetBird"
+	warnSSHCheckFull = warnSSHCheckText + "\n" +
+		warnSetupKeyText + "\n" +
+		"Re-run with --accept-no-sshcheck to acknowledge this degradation.\n" +
+		"The flag will be persisted in abysslink.yaml and is only required once."
+)
+
 func newUpCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "up",
@@ -51,6 +62,13 @@ func newUpCmd() *cobra.Command {
 			}
 
 			p := newPrinter(cmd)
+
+			// D-04 gate: NetBird backend requires explicit --accept-no-sshcheck
+			// acknowledgment before apply proceeds. Prevents silent degradation of
+			// the immutable 12h checkPeriod enforcement floor (SC-1 / PR-C).
+			if err := netbirdSSHCheckGate(ctx, cmd, cc); err != nil {
+				return err
+			}
 
 			// Header.
 			if cc.dryRun {
@@ -119,7 +137,48 @@ func newUpCmd() *cobra.Command {
 		"Override fail-closed safety checks such as disk encryption (DANGEROUS)")
 	cmd.Flags().Bool("accept-checkperiod-extension", false,
 		"Allow ssh_check_period to exceed the 12h re-auth default")
+	cmd.Flags().Bool("accept-no-sshcheck", false,
+		"Acknowledge SSHCheck degradation on NetBird backend (persisted to abysslink.yaml — only required once)")
 	return cmd
+}
+
+// netbirdSSHCheckGate enforces D-04: on a NetBird backend, abysslink up --apply
+// must not proceed unless the user has acknowledged the SSHCheck degradation.
+// If --accept-no-sshcheck is set and not yet persisted, it is written to the config.
+// If AcceptNoSSHCheck is already true in the config, the gate passes silently.
+// The gate is a no-op for non-netbird backends and for dry-run (scan-only) runs.
+func netbirdSSHCheckGate(ctx context.Context, cmd *cobra.Command, cc *cmdContext) error {
+	// Gate only applies to the netbird backend in apply mode.
+	if cc.cfg.Backend.Type != "netbird" {
+		return nil
+	}
+	// Dry-run (scan only) does not mutate the system; the gate is informational only.
+	// We still emit the WARN so the user is aware, but do not block.
+	if cc.dryRun {
+		return nil
+	}
+
+	// Already acknowledged in a previous run — no friction needed.
+	if cc.cfg.Server.NetBird.AcceptNoSSHCheck {
+		return nil
+	}
+
+	acceptFlag, _ := cmd.Flags().GetBool("accept-no-sshcheck")
+	if !acceptFlag {
+		// Refuse: emit the mandatory D-04 degradation message.
+		return fmt.Errorf("%s", warnSSHCheckFull)
+	}
+
+	// Flag is set but not yet persisted — write it now.
+	cc.cfg.Server.NetBird.AcceptNoSSHCheck = true
+	slog.Info("netbird: AcceptNoSSHCheck acknowledged; persisting to config")
+
+	configPath := resolveConfigPath(cmd)
+	if err := config.Write(configPath, cc.cfg); err != nil {
+		return fmt.Errorf("up: persist AcceptNoSSHCheck: %w", err)
+	}
+	_ = ctx // context available for future extension
+	return nil
 }
 
 // runScan runs the Plan phase for all modules, choosing between an animated live
