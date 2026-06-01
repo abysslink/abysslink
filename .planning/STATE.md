@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.0.0
-milestone_name: — Self-Hosted Backends & Fleet
-status: milestone_complete
-last_updated: 2026-06-01T21:24:39.285Z
+milestone: v3.0.0
+milestone_name: Harden, Observe & Control
+status: planning
+last_updated: "2026-06-01T22:28:15.286Z"
 last_activity: 2026-06-01
 progress:
-  total_phases: 14
-  completed_phases: 6
-  total_plans: 30
-  completed_plans: 27
-  percent: 43
-stopped_at: Milestone complete (Phase 14 was final phase)
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -25,15 +24,10 @@ See: .planning/PROJECT.md (updated 2026-05-30)
 
 ## Current Position
 
-Phase: 14
-Plan: Not started
-Status: Milestone complete
-Last activity: 2026-06-01
-
-```
-v2.0.0 progress: [                    ] 0%
-Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
-```
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-06-01 — Milestone v3.0.0 started
 
 ## Performance Metrics
 
