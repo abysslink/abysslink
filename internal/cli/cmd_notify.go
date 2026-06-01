@@ -31,6 +31,7 @@ import (
 	notifymod "github.com/abysslink/abysslink/internal/modules/notify"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 // notifyCmdBaseURL is a test seam: when non-empty, all --all-rigs per-rig POSTs
@@ -106,38 +107,77 @@ func newNotifyCmd() *cobra.Command {
 // rig's own ntfy topic. Each POST carries:
 //   - X-Abysslink-Rig:    the rig's logical name
 //   - X-Abysslink-Rig-Ts: epoch-seconds timestamp (so the verifier can recompute)
-//   - X-Abysslink-Rig-Sig: hex(HMAC-SHA256(rigName+"."+ts+"."+message)) signed
-//     with the per-rig keychain key (SC-5, D-NI-03)
+//   - X-Abysslink-Rig-Sig: hex(HMAC-SHA256(rigName+"."+ts+"."+title+"."+message))
+//     signed with the per-rig keychain key (SC-5, D-NI-03, WR-02)
 //
 // Security invariants (T-14-17 / T-14-18 / T-14-19 / T-14-20):
 //   - HMAC key fetched from per-rig keychain namespace (fleet.RigService), never argv/yaml/log.
 //   - Each rig's notification targets only its own NtfyTopic (no cross-topic delivery).
 //   - Timestamp transmitted so verifier can reconstruct the canonical string (Pitfall 6).
 //   - If a rig has no enrolled signing key, it is skipped with a WARN, not a crash.
+//   - Title is included in the HMAC canonical string (WR-02) so a relay cannot alter
+//     the displayed subject without breaking the signature.
+//   - If a rig has no NtfyTopic, the send fails with an error rather than falling
+//     back to a shared topic (CR-04, T-14-14, D-NI-01: no cross-tenant leakage).
+//
+// Concurrency (WR-04, D-FT-04): all rigs are notified concurrently via errgroup,
+// mirroring fleet.FanOut. A per-rig timeout is enforced. UNREACHABLE rigs are
+// recorded as errors but do not cancel sibling rigs (SC-2 / Pitfall 1). The
+// http.Client is safe for concurrent use and is shared across goroutines.
 func sendNotifyAllRigs(
 	ctx context.Context,
 	rigs []config.RigConfig,
 	kc secrets.KeychainStore,
 	title, message string,
 ) error {
-	client := &http.Client{Timeout: 10 * time.Second}
+	const perRigTimeout = 10 * time.Second
 
-	// Build the signed timestamp once — same second for all rigs in the batch.
+	// http.Client is goroutine-safe; share it across concurrent rig calls.
+	client := &http.Client{Timeout: perRigTimeout}
+
+	// Build the signed timestamp once — same epoch-second for all rigs in the batch.
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 
-	var firstErr error
-	for _, rig := range rigs {
-		if err := sendRigNotify(ctx, client, rig, kc, title, message, ts); err != nil {
-			slog.Warn("notify --all-rigs: failed to send to rig", "rig", rig.Name, "err", err)
-			if firstErr == nil {
-				firstErr = err
+	// Pre-size results so we can collect per-rig errors without a mutex.
+	rigErrs := make([]error, len(rigs))
+
+	g, gctx := errgroup.WithContext(ctx) // D-FT-04: errgroup for concurrent fan-out
+
+	for i, rig := range rigs {
+		i, rig := i, rig // capture loop variables
+
+		g.Go(func() error {
+			// Per-rig timeout: wraps gctx (Pitfall 2) so parent cancellation propagates.
+			rctx, cancel := context.WithTimeout(gctx, perRigTimeout)
+			defer cancel()
+
+			if err := sendRigNotify(rctx, client, rig, kc, title, message, ts); err != nil {
+				slog.Warn("notify --all-rigs: failed to send to rig", "rig", rig.Name, "err", err)
+				// SC-2: store the error but return nil so the errgroup does NOT cancel
+				// sibling rigs — an unreachable rig is a RESULT VALUE, not a fatal abort.
+				rigErrs[i] = err
 			}
+			return nil
+		})
+	}
+
+	// g.Wait() always returns nil (goroutines never return a non-nil error above).
+	// We surface the first per-rig error to the caller for logging / exit-code purposes.
+	_ = g.Wait()
+
+	for _, e := range rigErrs {
+		if e != nil {
+			return e // return the first rig error (consistent with prior sequential behaviour)
 		}
 	}
-	return firstErr
+	return nil
 }
 
 // sendRigNotify sends a single HMAC-signed notification to one rig's ntfy topic.
+//
+// CR-04: an empty NtfyTopic is an error — we never fall back to a shared topic.
+// WR-02: the HMAC canonical string covers rigName+"."+ts+"."+title+"."+message
+// so a relay cannot alter the displayed X-Title without breaking the signature.
 func sendRigNotify(
 	ctx context.Context,
 	client *http.Client,
@@ -147,7 +187,9 @@ func sendRigNotify(
 ) error {
 	topic := rig.NtfyTopic
 	if topic == "" {
-		topic = "rig"
+		// CR-04: refuse to route to a shared default topic — this would violate
+		// per-rig isolation (T-14-14, D-NI-01, SC-1). Surface as a hard error.
+		return fmt.Errorf("notify rig %q: ntfy_topic is not configured; re-enroll with --apply to assign a unique topic", rig.Name)
 	}
 
 	// Determine the ntfy base URL: test seam > config > localhost default.
@@ -175,7 +217,10 @@ func sendRigNotify(
 			// Rig not enrolled with a signing key — surface as WARN, skip signing.
 			slog.Warn("notify --all-rigs: rig has no signing key; sending unsigned", "rig", rig.Name)
 		} else {
-			sig, sigErr := fleet.SignRigMessage(hexKey, rig.Name, ts, message)
+			// WR-02: include title in the signed canonical string so a relay cannot
+			// alter the displayed subject (X-Title) without invalidating the HMAC.
+			// New canonical: rigName + "." + ts + "." + title + "." + message
+			sig, sigErr := fleet.SignRigMessage(hexKey, rig.Name, ts, title, message)
 			if sigErr != nil {
 				slog.Warn("notify --all-rigs: HMAC sign failed", "rig", rig.Name, "err", sigErr)
 			} else {
