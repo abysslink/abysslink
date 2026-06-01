@@ -84,7 +84,7 @@ func journeyLabels() []string {
 // (Lock) so the "already enabled?" probe queries the backend the user
 // configured rather than synthesizing config.Defaults() (which would always
 // resolve to the tailscale adapter once a second backend exists — WR-05).
-func journeyStages(jsonOut bool, cfg *config.Config, runner shell.Runner) []journeyStage {
+func journeyStages(jsonOut bool, cfg *config.Config, runner shell.Runner, autoYes bool) []journeyStage {
 	return []journeyStage{
 		{
 			index: 1,
@@ -94,7 +94,7 @@ func journeyStages(jsonOut bool, cfg *config.Config, runner shell.Runner) []jour
 			run: func(ctx context.Context, p Printer) error {
 				emitSecurityNote(p, jsonOut, "sso-hardening")   // §7 note 1
 				emitSecurityNote(p, jsonOut, "dry-run-default") // §7 note 2
-				return ensureTailscaleAccount(p)
+				return ensureTailscaleAccount(p, autoYes)
 			},
 		},
 		{
