@@ -18,15 +18,22 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/modules/notify"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/require"
 )
+
+// errProbeUnreachable is the deterministic ntfy-unreachable signal injected into
+// the parity test so the golden never depends on whether a live ntfy service
+// happens to be listening on localhost (see notify.HealthProbe).
+var errProbeUnreachable = errors.New("parity: ntfy probe forced unreachable")
 
 // noopRunner is a shell.Runner that returns a non-zero exit code (1) and no
 // error for every command. It is used for the parity golden capture so that
@@ -87,6 +94,15 @@ func TestUpDryRunParity(t *testing.T) {
 	origNewRunner := newRunner
 	newRunner = func() shell.Runner { return &noopRunner{} }
 	t.Cleanup(func() { newRunner = origNewRunner })
+
+	// Force the ntfy health probe to a deterministic "unreachable" result. The
+	// probe is a live network dial that bypasses noopRunner, so without this the
+	// golden would flip between "up to date" and "start ntfy service" depending
+	// on whether a real ntfy service is listening on localhost (the historical
+	// source of this test's flakiness). Restore in Cleanup.
+	origProbe := notify.HealthProbe
+	notify.HealthProbe = func(_ context.Context, _ string) error { return errProbeUnreachable }
+	t.Cleanup(func() { notify.HealthProbe = origProbe })
 
 	// Config path — relative to this test file's package directory.
 	cfgPath := filepath.Join("testdata", "v1.yaml")

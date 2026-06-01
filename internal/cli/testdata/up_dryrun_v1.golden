@@ -21,20 +21,21 @@
   ✓  eternal-terminal  up to date
   ✓  syncthing         up to date
   ✓  upsnap            up to date
-  ✓  notify            up to date
+  →  notify            1 change: start ntfy service
   →  watch             1 change: configure pane watchers
   ✓  claudecode        up to date
   ────────────────────────────────────────────────
-  6 changes planned
+  7 changes planned
 
   →  tailscale     install tailscale
   →  tmux          install tmux
   →  tmux          write ~/.tmux.conf if changed
   →  mosh          install mosh
   →  ntfy          ACTION REQUIRED: install Docker Desktop or configure ntfy.sh in abysslink.yaml
+  →  notify        start ntfy service
   →  watch         configure pane watchers
 
-  Run   abysslink up --apply   to apply 6 changes.
+  Run   abysslink up --apply   to apply 7 changes.
 ╭──────────────────────────────────────────────────────╮
 │                                                      │
 │  Next steps                                          │
