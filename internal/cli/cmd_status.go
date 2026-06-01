@@ -24,12 +24,15 @@ import (
 	"time"
 
 	"github.com/abysslink/abysslink/internal/backend"
+	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
 
 // statusReport is the JSON-serialisable status summary.
+// RigName is populated only on fleet fan-out results (rig_name field, FLEET-02).
 type statusReport struct {
+	RigName      string `json:"rig_name,omitempty"` // populated by --all-rigs fan-out
 	Tailscale    string `json:"tailscale"`
 	TailscaleIP  string `json:"tailscale_ip,omitempty"`
 	Hostname     string `json:"hostname,omitempty"`
@@ -54,6 +57,17 @@ func newStatusCmd() *cobra.Command {
 			cc, err := loadCmdContext(cmd)
 			if err != nil {
 				return err
+			}
+
+			p := newPrinter(cmd)
+
+			// Read persistent fan-out flags (registered in Plan 03 / root.go).
+			allRigs, _ := cmd.Flags().GetBool("all-rigs")
+			strict, _ := cmd.Flags().GetBool("strict")
+
+			// --all-rigs branch: fan out to every enrolled rig, aggregate results.
+			if allRigs && len(cc.cfg.Rigs) > 0 {
+				return statusAllRigs(ctx, cc, p, strict)
 			}
 
 			r := cc.runner
@@ -109,8 +123,6 @@ func newStatusCmd() *cobra.Command {
 				Timestamp:    time.Now().Format("2006-01-02 15:04"),
 			}
 
-			p := newPrinter(cmd)
-
 			if cc.jsonOut {
 				// Emit a typed, ANSI-free record via PrintJSON (T-10-18).
 				p.PrintJSON(rep)
@@ -121,6 +133,73 @@ func newStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// statusAllRigs fans out `abysslink status --json` to every enrolled rig and
+// aggregates the results into a per-rig slice. Offline rigs appear as UNREACHABLE
+// rows (SC-2); --strict maps to exit 1 when any rig is offline (T-14-21).
+func statusAllRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool) error {
+	const perRigTimeout = 10 * time.Second
+
+	results, fanErr := fleet.FanOut(ctx, cc.runner, cc.cfg.Rigs, perRigTimeout, strict, []string{"status", "--json"})
+
+	var aggregate []statusReport
+	for _, r := range results {
+		if !r.Reachable {
+			// UNREACHABLE is a result value, not a fatal error (SC-2 / FLEET-02).
+			aggregate = append(aggregate, statusReport{
+				RigName:   r.Rig.Name,
+				Tailscale: "UNREACHABLE",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+			continue
+		}
+		var rep statusReport
+		if err := json.Unmarshal([]byte(r.Stdout), &rep); err != nil {
+			// Degraded-but-reachable: surface with a DEGRADED marker so the user
+			// knows the rig responded but its output could not be decoded.
+			aggregate = append(aggregate, statusReport{
+				RigName:   r.Rig.Name,
+				Tailscale: "DEGRADED",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+			continue
+		}
+		rep.RigName = r.Rig.Name
+		aggregate = append(aggregate, rep)
+	}
+
+	if cc.jsonOut {
+		// ANSI-free JSON array (UX-04).
+		p.PrintJSON(aggregate)
+	} else {
+		printStatusAllRigsTable(p, aggregate)
+	}
+
+	// Fan-out error is non-nil only under --strict (one or more rigs unreachable).
+	if fanErr != nil {
+		return &exitError{code: exitCodeFatal}
+	}
+	return nil
+}
+
+// printStatusAllRigsTable renders a human-readable table of per-rig status rows.
+func printStatusAllRigsTable(p Printer, rows []statusReport) {
+	printerInfo(p, styleBold.Render("Fleet Status")+"\n")
+	header := fmt.Sprintf("  %-20s %-14s %-12s %-10s", "RIG", "TAILSCALE", "DISK", "NTFY")
+	printerInfo(p, styleMuted.Render(header))
+	for _, r := range rows {
+		disk := r.DiskEncrypt
+		if disk == "" {
+			disk = "-"
+		}
+		ntfy := r.Ntfy
+		if ntfy == "" {
+			ntfy = "-"
+		}
+		printerInfo(p, fmt.Sprintf("  %-20s %-14s %-12s %-10s", r.RigName, r.Tailscale, disk, ntfy))
+	}
+	printerInfo(p, "")
 }
 
 // luksDevice is a minimal lsblk JSON device entry used by diskEncryptionStatus.
