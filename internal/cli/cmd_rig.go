@@ -196,6 +196,35 @@ func runRigExport(cfgPath string, out io.Writer) error {
 //   - rig.Hostname: validated against safeImportHostname (T-14-04 argv injection).
 //   - rig.NtfyTopic: checked for collision against existing topics (SC-1, D-NI-02).
 //   - Name collision: duplicate names rejected (mirrors enrollRigWriteConfig, CR-02).
+//
+// validateImportRigs enforces name + hostname + ntfy-topic invariants on an
+// import batch before any config mutation (CR-01/CR-02, SC-1, T-14-04, D-NI-02).
+func validateImportRigs(existing, incoming []config.RigConfig) error {
+	existingNames := make(map[string]bool, len(existing))
+	existingTopics := make(map[string]string, len(existing)) // topic → rig name
+	for _, r := range existing {
+		existingNames[r.Name] = true
+		if r.NtfyTopic != "" {
+			existingTopics[r.NtfyTopic] = r.Name
+		}
+	}
+	for _, inc := range incoming {
+		if existingNames[inc.Name] {
+			return fmt.Errorf("rig import: name collision for rig %q — use a unique name or remove the existing entry first (D-NI-02)", inc.Name)
+		}
+		if !safeImportHostname.MatchString(inc.Hostname) {
+			return fmt.Errorf("rig import: invalid hostname %q for rig %q: must be a valid DNS name (no spaces or shell metacharacters)", inc.Hostname, inc.Name)
+		}
+		if inc.NtfyTopic != "" {
+			if owner, ok := existingTopics[inc.NtfyTopic]; ok {
+				return fmt.Errorf("rig import: ntfy topic %q already used by rig %q — each rig must have a unique topic (SC-1, D-NI-02)", inc.NtfyTopic, owner)
+			}
+			existingTopics[inc.NtfyTopic] = inc.Name
+		}
+	}
+	return nil
+}
+
 func runRigImport(cfgPath, importPath string, apply bool, out io.Writer) error {
 	// Read import file.
 	data, err := os.ReadFile(importPath) //nolint:gosec
@@ -217,37 +246,9 @@ func runRigImport(cfgPath, importPath string, apply bool, out io.Writer) error {
 		cfg = config.Defaults()
 	}
 
-	// Build O(1) lookup sets from existing rigs.
-	existingNames := make(map[string]bool, len(cfg.Rigs))
-	existingTopics := make(map[string]string, len(cfg.Rigs)) // topic → rig name
-	for _, r := range cfg.Rigs {
-		existingNames[r.Name] = true
-		if r.NtfyTopic != "" {
-			existingTopics[r.NtfyTopic] = r.Name
-		}
-	}
-
 	// Validate each incoming rig before mutating state.
-	for _, inc := range incoming.Rigs {
-		// Name uniqueness (CR-02 part A mirror — import must enforce same invariant
-		// as enrollRigWriteConfig, because both paths land in cfg.Rigs).
-		if existingNames[inc.Name] {
-			return fmt.Errorf("rig import: name collision for rig %q — use a unique name or remove the existing entry first (D-NI-02)", inc.Name)
-		}
-		// Hostname charset (CR-01, T-14-04: hostname is used in SSH argv by FanOut).
-		if !safeImportHostname.MatchString(inc.Hostname) {
-			return fmt.Errorf("rig import: invalid hostname %q for rig %q: must be a valid DNS name (no spaces or shell metacharacters)", inc.Hostname, inc.Name)
-		}
-		// NtfyTopic uniqueness (CR-02 part B, SC-1, D-NI-02).
-		if inc.NtfyTopic != "" {
-			if owner, ok := existingTopics[inc.NtfyTopic]; ok {
-				return fmt.Errorf("rig import: ntfy topic %q already used by rig %q — each rig must have a unique topic (SC-1, D-NI-02)", inc.NtfyTopic, owner)
-			}
-		}
-		// Track topics within the import batch itself (duplicate within the file).
-		if inc.NtfyTopic != "" {
-			existingTopics[inc.NtfyTopic] = inc.Name
-		}
+	if err := validateImportRigs(cfg.Rigs, incoming.Rigs); err != nil {
+		return err
 	}
 
 	if !apply {
