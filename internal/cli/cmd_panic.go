@@ -25,6 +25,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
@@ -115,9 +116,43 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 
 			// §7 note 12: panic is reversible via repair.
 			emitSecurityNote(p, cc.jsonOut, "panic-reversible")
+
+			// --all-rigs: fan the panic command out to every enrolled rig with a
+			// 10s per-rig timeout (SC-3 / D-FT-02). UNREACHABLE rigs are reported,
+			// not fatal, unless --strict is set. Executed AFTER the local panic
+			// steps so the local machine is secured first.
+			allRigs, _ := cmd.Flags().GetBool("all-rigs")
+			strict, _ := cmd.Flags().GetBool("strict")
+			if allRigs && len(cc.cfg.Rigs) > 0 {
+				fanErr := panicAllRigs(ctx, cc, p, strict)
+				if fanErr != nil {
+					return &exitError{code: exitCodeFatal}
+				}
+			}
+
 			return nil
 		},
 	}
+}
+
+// panicAllRigs fans the `abysslink panic` command out to every enrolled rig with
+// a 10s per-rig timeout (SC-3). UNREACHABLE rigs are logged and reported as
+// per the best-effort contract; --strict maps to exit 1.
+func panicAllRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool) error {
+	const perRigPanicTimeout = 10 * time.Second
+
+	printerError(p, "")
+	printerError(p, styleBold.Render("Fleet panic — fanning out to enrolled rigs:"))
+
+	results, err := fleet.FanOut(ctx, cc.runner, cc.cfg.Rigs, perRigPanicTimeout, strict, []string{"panic"})
+	for _, r := range results {
+		if !r.Reachable {
+			panicStep(p, "rig "+r.Rig.Name+" panic", errPanicStepFailed{"UNREACHABLE"})
+			continue
+		}
+		panicStep(p, "rig "+r.Rig.Name+" panic", nil)
+	}
+	return err
 }
 
 // panicDisconnect disconnects the node from the tailnet. It prefers the
