@@ -197,6 +197,20 @@ Exit codes:
 				}
 			}
 
+			// NetBird backend: append nb-* doctor findings.
+			if cc.cfg.Backend.Type == "netbird" {
+				doReq := backend.NewNetBirdDoRequest(cc.cfg)
+				nbFindingsRaw := backend.NetBirdDoctorChecks(ctx, cc.cfg, cc.runner, doReq)
+				for _, nf := range nbFindingsRaw {
+					findings = append(findings, modules.Finding{
+						Module:   nf.Module,
+						Check:    nf.Check,
+						Severity: modules.Severity(nf.Severity),
+						Message:  nf.Message,
+					})
+				}
+			}
+
 			// --json: emit structured ANSI-free records.
 			if cc.jsonOut {
 				p.PrintJSON(buildDoctorFindings(findings))
@@ -276,6 +290,16 @@ func findingFix(check string) string {
 		"hs-oidc-filter":     "Set oidc.allowed_domains or oidc.allowed_users in Headscale config.yaml to restrict OIDC registration",
 		"hs-proc-user":       "Ensure Headscale runs as the dedicated service user: check systemd User= or launchd UserName= in the service unit",
 		"hs-derp-failclosed": "Set derp.server.verify_clients: true in Headscale config.yaml (R-02 correct key)",
+		// NetBird backend (nb-* checks).
+		"nb-tls":       "Renew or replace the TLS certificate; ensure server.tls.certFile and server.tls.keyFile are set in NetBird config.yaml",
+		"nb-version":   "Upgrade netbird-server to >= v0.57.0 (CVE-2025-10678 fix): abysslink server netbird upgrade --binary-path /path/to/new-binary --apply",
+		"nb-zitadel":   "Remove the default ZITADEL admin account: run the ZITADEL cleanup script to delete zitadel-admin@ user",
+		"nb-mgmt-bind": "Set metricsListenAddress: 127.0.0.1:9090 in NetBird config.yaml to prevent public metrics exposure",
+		"nb-key-type":  "Revoke reusable or expired setup keys via the NetBird dashboard; re-mint one-off keys with explicit expiry",
+		"nb-api-auth":  "Set or rotate the NetBird API key: abysslink server netbird init --apply (re-init prints the new key)",
+		"nb-proc-user": "Ensure netbird-server runs as a non-root service user: check systemd User= in the unit file",
+		"nb-runtime":   "Install a container runtime: brew install --cask docker  (or colima: brew install colima && colima start)",
+		"nb-sshcheck":  "", // permanent WARN — SSHCheck not available on NetBird; no fix possible
 	}
 	return fixes[check]
 }

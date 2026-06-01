@@ -62,6 +62,7 @@ func newServerCmd() *cobra.Command {
 		Short: "Manage self-hosted backend server (Headscale, NetBird)",
 	}
 	srv.AddCommand(newServerHeadscaleCmd())
+	srv.AddCommand(newServerNetBirdCmd())
 	return srv
 }
 
