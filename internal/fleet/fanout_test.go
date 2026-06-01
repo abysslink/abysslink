@@ -42,24 +42,64 @@ func makeRigs(names ...string) []config.RigConfig {
 	return rigs
 }
 
+// hostEntry is the scripted response for a single hostname in hostnameDispatchRunner.
+type hostEntry struct {
+	res shell.Result
+	err error
+}
+
+// hostnameDispatchRunner is a shell.Runner that dispatches Run results based
+// on the first argument (SSH hostname). This avoids the sequential-call-order
+// assumption of MockRunner, which breaks under concurrent fan-out goroutines.
+type hostnameDispatchRunner struct {
+	responses map[string]hostEntry
+}
+
+func newHostnameRunner(m map[string]hostEntry) *hostnameDispatchRunner {
+	return &hostnameDispatchRunner{responses: m}
+}
+
+func (h *hostnameDispatchRunner) Run(_ context.Context, _ string, args ...string) (shell.Result, error) {
+	// args[0] is the SSH hostname (rig.Hostname passed as first arg by FanOut).
+	hostname := ""
+	if len(args) > 0 {
+		hostname = args[0]
+	}
+	if v, ok := h.responses[hostname]; ok {
+		return v.res, v.err
+	}
+	return shell.Result{ExitCode: 1}, fmt.Errorf("hostnameRunner: unexpected hostname %q", hostname)
+}
+
+func (h *hostnameDispatchRunner) RunWithStdin(_ context.Context, _ io.Reader, _ string, args ...string) (shell.Result, error) {
+	return h.Run(context.Background(), "", args...)
+}
+
+func (h *hostnameDispatchRunner) RunInteractive(_ context.Context, _ string, _ ...string) error {
+	return nil
+}
+
+func (h *hostnameDispatchRunner) RunWithEnv(_ context.Context, _ map[string]string, _ string, args ...string) (shell.Result, error) {
+	return h.Run(context.Background(), "", args...)
+}
+
 // TestFanOut_UnreachableContinues verifies SC-2: one offline rig does not abort
 // the others. The command returns 3 results with rig[1] UNREACHABLE, but no error.
 func TestFanOut_UnreachableContinues(t *testing.T) {
 	rigs := makeRigs("rig0", "rig1", "rig2")
-	mock := shell.NewMockRunner(
-		// rig0 succeeds
-		shell.Call{Result: shell.Result{Stdout: `{"tailscale":"up"}`, ExitCode: 0}},
-		// rig1 fails (connection refused / offline)
-		shell.Call{Result: shell.Result{ExitCode: 1}, Err: errors.New("ssh: connection refused")},
-		// rig2 succeeds
-		shell.Call{Result: shell.Result{Stdout: `{"tailscale":"up"}`, ExitCode: 0}},
-	)
 
-	results, err := FanOut(context.Background(), mock, rigs, 5*time.Second, false, []string{"status", "--json"})
+	runner := newHostnameRunner(map[string]hostEntry{
+		"rig0.example.ts.net": {res: shell.Result{Stdout: `{"tailscale":"up"}`, ExitCode: 0}},
+		"rig1.example.ts.net": {res: shell.Result{ExitCode: 1}, err: errors.New("ssh: connection refused")},
+		"rig2.example.ts.net": {res: shell.Result{Stdout: `{"tailscale":"up"}`, ExitCode: 0}},
+	})
+
+	results, err := FanOut(context.Background(), runner, rigs, 5*time.Second, false, []string{"status", "--json"})
 
 	require.NoError(t, err, "SC-2: one offline rig must not return an error in non-strict mode")
 	require.Len(t, results, 3)
 
+	// Results are in deterministic rig-slice order (disjoint pre-sized indices).
 	assert.True(t, results[0].Reachable, "rig0 should be reachable")
 	assert.Equal(t, `{"tailscale":"up"}`, results[0].Stdout)
 
@@ -74,14 +114,13 @@ func TestFanOut_UnreachableContinues(t *testing.T) {
 // into a non-nil error returned from FanOut (caller maps to exit 1).
 func TestFanOut_StrictFailsFast(t *testing.T) {
 	rigs := makeRigs("rig0", "rig1")
-	mock := shell.NewMockRunner(
-		// rig0 succeeds
-		shell.Call{Result: shell.Result{Stdout: `{"tailscale":"up"}`, ExitCode: 0}},
-		// rig1 is offline
-		shell.Call{Result: shell.Result{ExitCode: 1}, Err: errors.New("ssh: timeout")},
-	)
 
-	_, err := FanOut(context.Background(), mock, rigs, 5*time.Second, true, []string{"status", "--json"})
+	runner := newHostnameRunner(map[string]hostEntry{
+		"rig0.example.ts.net": {res: shell.Result{Stdout: `{"tailscale":"up"}`, ExitCode: 0}},
+		"rig1.example.ts.net": {res: shell.Result{ExitCode: 1}, err: errors.New("ssh: timeout")},
+	})
+
+	_, err := FanOut(context.Background(), runner, rigs, 5*time.Second, true, []string{"status", "--json"})
 
 	require.Error(t, err, "--strict must return a non-nil error when any rig is UNREACHABLE")
 }
@@ -108,8 +147,8 @@ func (b *blockingRunner) RunInteractive(ctx context.Context, _ string, _ ...stri
 	return ctx.Err()
 }
 
-func (b *blockingRunner) RunWithEnv(ctx context.Context, _ map[string]string, _ string, _ ...string) (shell.Result, error) {
-	return b.Run(ctx)
+func (b *blockingRunner) RunWithEnv(ctx context.Context, _ map[string]string, name string, args ...string) (shell.Result, error) {
+	return b.Run(ctx, name, args...)
 }
 
 // TestFanOut_PerRigTimeout verifies that a blocking rig is cancelled by the
