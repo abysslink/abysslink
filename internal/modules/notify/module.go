@@ -36,6 +36,37 @@ import (
 // ntfyBaseURL is overridden in tests to point at httptest.Server.
 var ntfyBaseURL = "" //nolint:gochecknoglobals
 
+// HealthProbe performs the ntfy reachability check used by Detect. It is a
+// package-level seam so deterministic fixtures — notably the `up --dry-run`
+// parity golden — do not depend on whether a live ntfy service happens to be
+// listening on localhost (the probe is a real network dial that bypasses the
+// injected shell.Runner). Returns nil when ntfy is reachable and healthy, a
+// non-nil error otherwise. Overridden in tests; restore in cleanup.
+var HealthProbe = defaultHealthProbe //nolint:gochecknoglobals
+
+// defaultHealthProbe issues an HTTP GET against the ntfy health endpoint.
+func defaultHealthProbe(ctx context.Context, url string) error {
+	client := &http.Client{
+		Timeout: httpTimeout,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("notify detect: build request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ntfy health endpoint returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 const (
 	ntfyHealthPath = "/v1/health"
 	ntfyMsgPath    = "/v1/message"
@@ -83,36 +114,17 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		return nil, nil
 	}
 
-	// Try an HTTP GET to ntfy health endpoint. Context is passed so the
-	// request is cancelled if the parent context times out or is cancelled.
-	client := &http.Client{
-		Timeout: httpTimeout,
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
-		},
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL()+ntfyHealthPath, nil)
-	if err != nil {
-		return findings, fmt.Errorf("notify detect: build request: %w", err)
-	}
-	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		msg := fmt.Sprintf("ntfy service is not reachable at localhost:%d", m.cfg.Modules.Ntfy.ListenPort())
-		if err != nil {
-			msg = fmt.Sprintf("ntfy service unreachable: %v", err)
-		}
+	// Probe the ntfy health endpoint via the HealthProbe seam. Context is passed
+	// so the request is cancelled if the parent context times out or is cancelled.
+	if err := HealthProbe(ctx, m.baseURL()+ntfyHealthPath); err != nil {
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "ntfy_running",
 			Severity: modules.SeverityWarning,
-			Message:  msg,
+			Message:  fmt.Sprintf("ntfy service is not reachable at localhost:%d", m.cfg.Modules.Ntfy.ListenPort()),
 		})
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
 		return findings, nil
 	}
-	defer resp.Body.Close() //nolint:errcheck
 
 	slog.Debug("ntfy health check passed")
 	return findings, nil
