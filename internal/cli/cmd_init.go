@@ -144,7 +144,7 @@ func newInitCmd() *cobra.Command {
 				}
 			}
 
-			stages := journeyStages(jsonOut, cfg, runner)
+			stages := journeyStages(jsonOut, cfg, runner, autoYes)
 			if err := runJourney(ctx, p, stages, resumeFrom, stateFile, autoYes); err != nil {
 				return fmt.Errorf("init: journey: %w", err)
 			}
@@ -164,7 +164,9 @@ func newInitCmd() *cobra.Command {
 // ensureTailscaleAccount confirms the user has a Tailscale account before proceeding.
 // Tailscale uses SSO only (Google, GitHub, Microsoft, Apple — no username/password).
 // If the user doesn't have an account yet, we show the signup URL and wait.
-func ensureTailscaleAccount(p Printer) error {
+// When headless is true (--yes flag or non-TTY stdin), the function prints the
+// informational signup-URL note and returns nil immediately — no huh, no /dev/tty.
+func ensureTailscaleAccount(p Printer, headless bool) error {
 	const signupURL = "https://login.tailscale.com/start"
 
 	printerInfo(p, "  "+styleBold.Render("Tailscale account"))
@@ -177,6 +179,13 @@ func ensureTailscaleAccount(p Printer) error {
 	printerInfo(p, "")
 	printerInfo(p, "  Sign up or log in → "+styleCode.Render(signupURL))
 	printerInfo(p, "")
+
+	// Headless guard: skip TTY-blocking huh prompts when running non-interactively.
+	// stdinIsTTY() is also checked here to catch the case where headless=false but
+	// stdin is a pipe/redirect (e.g. `abysslink init </dev/null`).
+	if headless || !stdinIsTTY() {
+		return nil
+	}
 
 	var hasAccount bool
 	if err := huh.NewConfirm().
