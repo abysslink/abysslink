@@ -17,6 +17,8 @@ package backend_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -92,13 +94,71 @@ func TestContract_UnknownBackend(t *testing.T) {
 	require.Contains(t, err.Error(), "wireguard")
 }
 
-// TestNetBirdAdapterPlaceholder is a placeholder for the full netbird adapter
-// contract tests. The netbird adapter will be implemented in wave 2 (plan 13-02).
+// TestContractNetBird asserts the core NB-01 invariants against the netbirdAdapter:
+//   - Capabilities().Lock==false (no Tailnet Lock on NetBird)
+//   - Capabilities().SSHCheck==false (no checkPeriod enforcement on NetBird, D-03)
+//   - Capabilities().ACL==true (ACLManager sub-interface available)
+//   - Capabilities().AdminAPI==true (AdminAPI sub-interface available)
+//   - LockCapability()==LockNone (permanent; no TKA)
+//   - factory.New returns a non-nil Client for type="netbird"
+//   - SSHConfig().CheckPeriod is non-zero (contract invariant #2 applies to all backends)
 //
-// This test exists to ensure the test file compiles cleanly and to document
-// where the netbird contract tests will live.
-func TestNetBirdAdapterPlaceholder(t *testing.T) {
-	t.Skip("netbird adapter not yet implemented — wave 2")
+// All assertions use an httptest.Server — no real NetBird instance required.
+func TestContractNetBird(t *testing.T) {
+	// Create a minimal mock server so factory.New can construct the adapter.
+	// The contract assertions themselves do not make network calls (Capabilities,
+	// LockCapability, SSHConfig are all pure local computations).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]")) //nolint:errcheck // test mock
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := config.Defaults()
+	cfg.Backend.Type = "netbird"
+	cfg.Server.NetBird.ServerURL = srv.URL
+	cfg.Server.NetBird.AcceptNoSSHCheck = true
+
+	b, err := backend.New(cfg, shell.NewMockRunner())
+	require.NoError(t, err, "factory.New must not error for type=netbird")
+	require.NotNil(t, b, "factory.New must return a non-nil Client for type=netbird")
+
+	caps := b.Capabilities()
+
+	// NB-01 capability invariants.
+	require.False(t, caps.Lock,
+		"Capabilities().Lock must be false on NetBird (no Tailnet Lock / TKA)")
+	require.False(t, caps.SSHCheck,
+		"Capabilities().SSHCheck must be false on NetBird (D-03: checkPeriod not enforceable)")
+	require.True(t, caps.ACL,
+		"Capabilities().ACL must be true on NetBird (ACLManager implemented)")
+	require.True(t, caps.AdminAPI,
+		"Capabilities().AdminAPI must be true on NetBird (AdminAPI implemented)")
+	require.True(t, caps.AuthKeys,
+		"Capabilities().AuthKeys must be true on NetBird (setup key creation implemented)")
+
+	// LockCapability permanent invariant.
+	require.Equal(t, backend.LockNone, b.LockCapability(),
+		"LockCapability() must be LockNone on NetBird")
+
+	// Contract invariant #2: SSHConfig().CheckPeriod is non-zero (all backends).
+	require.NotZero(t, b.SSHConfig().CheckPeriod,
+		"SSHConfig().CheckPeriod must be non-zero even when SSHCheck=false (contract invariant #2)")
+
+	// Lockstep: caps.Lock ⟺ implements Locker.
+	_, isLocker := b.(backend.Locker)
+	require.False(t, isLocker,
+		"netbirdAdapter must NOT implement backend.Locker (caps.Lock=false)")
+
+	// Lockstep: caps.AdminAPI ⟺ implements AdminAPI.
+	_, isAdmin := b.(backend.AdminAPI)
+	require.True(t, isAdmin,
+		"netbirdAdapter must implement backend.AdminAPI (caps.AdminAPI=true)")
+
+	// Lockstep: caps.ACL ⟺ implements ACLManager.
+	_, isACL := b.(backend.ACLManager)
+	require.True(t, isACL,
+		"netbirdAdapter must implement backend.ACLManager (caps.ACL=true)")
 }
 
 // TestContract_EmptyTypeDefaultsTailscale verifies that backend.Type="" works

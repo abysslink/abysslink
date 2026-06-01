@@ -531,12 +531,12 @@ type nbCreateSetupKeyRequest struct {
 
 // nbSetupKeyResponse is the response from POST /api/setup-keys.
 type nbSetupKeyResponse struct {
-	ID         string `json:"id"`
-	Key        string `json:"key"` // NEVER log this field
-	Type       string `json:"type"`
-	Expires    string `json:"expires"`
-	Used       bool   `json:"used"`
-	Revoked    bool   `json:"revoked"`
-	UsageLimit int    `json:"usage_limit"`
+	ID         string   `json:"id"`
+	Key        string   `json:"key"` // NEVER log this field
+	Type       string   `json:"type"`
+	Expires    string   `json:"expires"`
+	Used       bool     `json:"used"`
+	Revoked    bool     `json:"revoked"`
+	UsageLimit int      `json:"usage_limit"`
 	AutoGroups []string `json:"auto_groups"`
 }
