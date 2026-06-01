@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.0.0
 milestone_name: — Self-Hosted Backends & Fleet
-status: completed
-last_updated: "2026-06-01T19:06:31.147Z"
-last_activity: 2026-06-01 -- Phase 13 marked complete
+status: verifying
+last_updated: "2026-06-01T20:37:58.918Z"
+last_activity: 2026-06-01
 progress:
   total_phases: 14
-  completed_phases: 5
-  total_plans: 25
-  completed_plans: 22
-  percent: 36
+  completed_phases: 6
+  total_plans: 30
+  completed_plans: 27
+  percent: 43
 ---
 
 # Project State
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Phase 13 — netbird-backend
+**Current focus:** Phase 14 — multi-rig-fleet
 
 ## Current Position
 
-Phase: 13 — COMPLETE
+Phase: 14 (multi-rig-fleet) — EXECUTING
 Plan: 5 of 5
-Status: Phase 13 complete
-Last activity: 2026-06-01 -- Phase 13 marked complete
+Status: Phase complete — ready for verification
+Last activity: 2026-06-01
 
 ```
 v2.0.0 progress: [                    ] 0%
@@ -72,6 +72,9 @@ Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
 | Phase 13 P03 | 22m | 2 tasks | 7 files |
 | Phase 13 P04 | 25m | 1 tasks | 4 files |
 | Phase 13 P04 | 25m | 1 tasks | 4 files |
+| Phase 14-multi-rig-fleet P01 | 12m | 2 tasks | 5 files |
+| Phase 14-multi-rig-fleet P02 | 6m | 2 tasks | 6 files |
+| Phase 14-multi-rig-fleet P03 | 40m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -95,6 +98,9 @@ Phase 11 of 14 (v2 phases 11-14 = 0/4 complete)
 - [Phase ?]: setNestedKey refactored to shared config_helpers.go
 - [Phase ?]: ZITADEL probe auth separation
 - [Phase ?]: ZITADEL probe auth separation: admin API Bearer token (management/v1/users/_search) NOT NetBird Token header — prevents false PASS on non-ZITADEL deployments
+- [Phase ?]: Backward compat for existing rig: yaml keys
+- [Phase ?]: Prevents timing side-channel attacks
+- [Phase ?]: Decision A1 (confirmed): Tailscale/Headscale HuJSON isolation = absence-of-grant; no explicit deny construct
 
 ### Pending Todos
 
@@ -134,6 +140,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-01T19:06:31.142Z
+Last session: 2026-06-01T20:37:58.913Z
 Stopped at: Phase 14 context gathered
-Resume file: .planning/phases/14-multi-rig-fleet/14-CONTEXT.md
+Resume file: None

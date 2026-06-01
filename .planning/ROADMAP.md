@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 11: Backend Abstraction Refactor** - Generic `internal/backend.Client` interface with contract tests; Tailscale adapter wrapping v1; all modules migrated; zero v1 regression (completed 2026-05-31)
 - [x] **Phase 12: Headscale Backend** - Full Headscale backend: client adapter (HuJSON reuse, deny-all baseline, lock WARN), server provisioning (TLS gate, non-root, cosign, embedded DERP), all hs-* doctor checks (completed 2026-05-31)
 - [x] **Phase 13: NetBird Backend** - Full NetBird backend: REST-only client adapter (Groups-as-tags, SSHCheck graceful degradation, AGPLv3 CI guard), server provisioning (v0.57.0 floor, ZITADEL CVE gate, non-root), all nb-* doctor checks (completed 2026-06-01)
-- [ ] **Phase 14: Multi-Rig Fleet** - `abysslink enroll rig`, fan-out status/doctor/notify/panic, per-rig keychain namespaces and ntfy topics, rig-to-rig ACL deny, multi-rig doctor checks
+- [x] **Phase 14: Multi-Rig Fleet** - `abysslink enroll rig`, fan-out status/doctor/notify/panic, per-rig keychain namespaces and ntfy topics, rig-to-rig ACL deny, multi-rig doctor checks (completed 2026-06-01)
 
 ## Phase Details
 
@@ -326,17 +326,17 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 14-01-PLAN.md — Config RigConfig+Rigs schema + internal/fleet HMAC identity primitives (FLEET-01, SC-5)
+- [x] 14-01-PLAN.md — Config RigConfig+Rigs schema + internal/fleet HMAC identity primitives (FLEET-01, SC-5)
 
 **Wave 2** *(both depend on 14-01; no file overlap = parallel)*
 
-- [ ] 14-02-PLAN.md — internal/fleet errgroup FanOut runner + SSH/JSON decode (FLEET-02, SC-2/SC-3)
-- [ ] 14-03-PLAN.md — enroll rig (key+migration+topic+ACL deny+audit) + rig ls/export/import + --rig/--all-rigs/--strict flags; A1 deny-construct checkpoint (FLEET-01, FLEET-03, SC-1)
+- [x] 14-02-PLAN.md — internal/fleet errgroup FanOut runner + SSH/JSON decode (FLEET-02, SC-2/SC-3)
+- [x] 14-03-PLAN.md — enroll rig (key+migration+topic+ACL deny+audit) + rig ls/export/import + --rig/--all-rigs/--strict flags; A1 deny-construct checkpoint (FLEET-01, FLEET-03, SC-1)
 
 **Wave 3** *(parallel; 14-04 depends on 14-01+14-03, 14-05 on 14-01+14-02+14-03)*
 
-- [ ] 14-04-PLAN.md — FleetDoctorChecks (mr-rig-isolation/mr-topic-isolation/mr-key-uniqueness) + cmd_doctor wiring + doctor --all-rigs (FLEET-03)
-- [ ] 14-05-PLAN.md — status/notify/panic --all-rigs fan-out + HMAC rig-identity headers + verifier runbook (FLEET-02, SC-5)
+- [x] 14-04-PLAN.md — FleetDoctorChecks (mr-rig-isolation/mr-topic-isolation/mr-key-uniqueness) + cmd_doctor wiring + doctor --all-rigs (FLEET-03)
+- [x] 14-05-PLAN.md — status/notify/panic --all-rigs fan-out + HMAC rig-identity headers + verifier runbook (FLEET-02, SC-5)
 
 ---
 
@@ -360,4 +360,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 11. Backend Abstraction Refactor | 3/3 | Complete    | 2026-05-31 |
 | 12. Headscale Backend | 5/5 | Complete    | 2026-05-31 |
 | 13. NetBird Backend | 5/5 | Complete   | 2026-06-01 |
-| 14. Multi-Rig Fleet | 0/0 | Not started | - |
+| 14. Multi-Rig Fleet | 5/5 | Complete   | 2026-06-01 |
