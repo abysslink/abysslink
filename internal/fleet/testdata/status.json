@@ -1,0 +1,10 @@
+{
+  "tailscale": "up",
+  "tailscale_ip": "100.64.1.1",
+  "hostname": "test-rig",
+  "tailscale_ssh": "enabled",
+  "tailnet_lock": "enabled",
+  "ntfy": "running",
+  "disk_encrypt": "encrypted",
+  "timestamp": "2026-06-01T19:00:00Z"
+}
