@@ -85,7 +85,7 @@ func TestFanOut_DegradedVsUnreachable(t *testing.T) {
 
 	r := RigResult{
 		Rig:       config.RigConfig{Name: "test-rig", Hostname: "test-rig.ts.net"},
-		Reachable: true,  // SSH succeeded — rig is online
+		Reachable: true, // SSH succeeded — rig is online
 		Stdout:    motdOutput,
 	}
 
