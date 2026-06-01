@@ -198,6 +198,28 @@ func TestDoctor_TopicIsolation(t *testing.T) {
 		assert.Equal(t, backend.DoctorFatal, topicF.Severity,
 			"must be FATAL when two rigs share a topic")
 	})
+
+	// CR-04: a rig with empty NtfyTopic must be FATAL, never silently skipped.
+	t.Run("FATAL when a rig has no ntfy_topic", func(t *testing.T) {
+		cfg := config.Defaults()
+		cfg.Rigs = []config.RigConfig{
+			{Name: "alpha", NtfyTopic: "abysslink-alpha-aabb1122"},
+			{Name: "beta", NtfyTopic: ""}, // no topic → cannot prove isolation
+		}
+		findings := DoctorChecks(ctx, cfg, nil, mgr)
+		var topicF *backend.DoctorFinding
+		for i := range findings {
+			if findings[i].Check == "mr-topic-isolation" {
+				topicF = &findings[i]
+				break
+			}
+		}
+		require.NotNil(t, topicF)
+		assert.Equal(t, backend.DoctorFatal, topicF.Severity,
+			"CR-04: empty NtfyTopic must be FATAL (cannot prove isolation)")
+		assert.Contains(t, topicF.Message, "beta",
+			"error message must identify the misconfigured rig")
+	})
 }
 
 // ── TestDoctor_KeyUniqueness ──────────────────────────────────────────────────
