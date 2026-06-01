@@ -24,6 +24,7 @@ import (
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/secrets"
+	"github.com/tailscale/hujson"
 )
 
 // v1LegacyAccounts is the known set of account names stored under
@@ -131,12 +132,25 @@ type fleetACLGrant struct {
 	Dst []string `json:"dst"`
 }
 
-// assertNoRigRigGrantFleet parses the ACL JSON and returns an error if any
-// grant has tag:laptop in both Src and Dst (bidirectional). Mirrors
+// assertNoRigRigGrantFleet parses the ACL HuJSON (or plain JSON) and returns an
+// error if any grant has tag:laptop in both Src and Dst (bidirectional). Mirrors
 // assertNoRigRigGrant in cmd_enroll.go (Decision A1).
+//
+// CR-03: Uses hujson.Standardize before json.Unmarshal so that Tailscale ACL
+// documents containing C-style comments or trailing commas are handled correctly.
+// A parse failure is FATAL — the caller must not downgrade to WARN on parse error;
+// returning an error ensures checkMrRigIsolation surfaces DoctorFatal (fail closed).
 func assertNoRigRigGrantFleet(raw []byte) error {
+	// Standardize HuJSON → plain JSON (strips comments and trailing commas).
+	std, err := hujson.Standardize(append([]byte(nil), raw...))
+	if err != nil {
+		return fmt.Errorf("cannot standardize HuJSON ACL (CR-03): %w", err)
+	}
+
 	var doc fleetACLDoc
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	if err := json.Unmarshal(std, &doc); err != nil {
+		// Parse failure is fatal — we cannot assert the absence-of-grant without
+		// a successfully parsed document (fail closed, never downgrade to WARN).
 		return fmt.Errorf("cannot parse ACL document: %w", err)
 	}
 	const laptopTag = "tag:laptop"
@@ -174,8 +188,20 @@ func checkMrTopicIsolation(cfg *config.Config) backend.DoctorFinding {
 
 	seen := make(map[string]string) // topic → rig name
 	for _, rig := range cfg.Rigs {
+		// CR-04: rigs with an empty NtfyTopic cannot be proven isolated — they
+		// fall back to the shared "rig" topic in sendRigNotify, causing cross-tenant
+		// notification leakage (T-14-14, D-NI-01). Fail FATAL, never skip silently.
 		if rig.NtfyTopic == "" {
-			continue
+			return backend.DoctorFinding{
+				Module:   mod,
+				Check:    check,
+				Severity: backend.DoctorFatal,
+				Message: fmt.Sprintf(
+					"mr-topic-isolation: rig %q has no ntfy_topic configured — "+
+						"isolation cannot be verified; re-enroll with --apply to assign a unique topic (D-NI-01, T-14-14)",
+					rig.Name,
+				),
+			}
 		}
 		if prev, ok := seen[rig.NtfyTopic]; ok {
 			return backend.DoctorFinding{
