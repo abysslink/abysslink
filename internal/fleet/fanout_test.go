@@ -204,5 +204,34 @@ func TestFanOut_RejectsUnsafeRigNames(t *testing.T) {
 
 	require.Error(t, err, "unsafe rig name must be rejected")
 	assert.Contains(t, err.Error(), "invalid rig name")
-	fmt.Println("error:", err) // for test visibility
+	t.Log("rejected with error:", err) // WR-03: t.Log instead of fmt.Println
+}
+
+// TestFanOut_RejectsUnsafeHostnames verifies that rig hostnames outside the safe
+// DNS-name charset are rejected with an error before any SSH call (CR-01, T-14-04).
+func TestFanOut_RejectsUnsafeHostnames(t *testing.T) {
+	cases := []struct {
+		hostname string
+		desc     string
+	}{
+		{"", "empty hostname"},
+		{"evil host", "space in hostname"},
+		{"evil;rm -rf /", "shell metacharacter in hostname"},
+		{"-leading-dash.ts.net", "leading dash"},
+		{"a", "single-character (too short for 2-char min)"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.desc, func(t *testing.T) {
+			rigs := []config.RigConfig{
+				{Name: "safe-rig", Hostname: tc.hostname},
+			}
+			mock := shell.NewMockRunner() // no calls expected
+
+			_, err := FanOut(context.Background(), mock, rigs, 5*time.Second, false, []string{"status"})
+			require.Error(t, err, "unsafe hostname %q must be rejected", tc.hostname)
+			assert.Contains(t, err.Error(), "invalid rig hostname", "desc=%q", tc.desc)
+		})
+	}
 }
