@@ -31,6 +31,12 @@ import (
 // against command injection even though Runner uses discrete argv, no sh -c).
 var safeRigName = regexp.MustCompile(`^[a-z0-9-]+$`)
 
+// safeHostname matches hostnames that are safe SSH target tokens (T-14-04).
+// Requires at least 2 chars (first and last must be alphanumeric), allows
+// lowercase letters, digits, hyphens, and dots in the middle. Rejects empty
+// strings, leading/trailing hyphens or dots, and any shell-special characters.
+var safeHostname = regexp.MustCompile(`^[a-z0-9][a-z0-9\-.]{0,252}[a-z0-9]$`)
+
 // RigResult is the per-rig outcome from a FanOut call.
 // UNREACHABLE is represented as Reachable=false — it is a result VALUE, not a
 // returned error, so sibling rigs keep running (SC-2 / Pitfall 1).
@@ -53,8 +59,8 @@ type RigResult struct {
 // Per-rig timeout wraps gctx, not the parent ctx (Pitfall 2) so that
 // --strict cancellation propagates through the per-rig deadline too.
 //
-// Rig names are validated against [a-z0-9-] before use as argv tokens
-// (defense-in-depth: T-14-04 command injection).
+// Rig names and hostnames are validated against safe charsets before use as
+// argv tokens (defense-in-depth: T-14-04 command injection).
 func FanOut(
 	ctx context.Context,
 	runner shell.Runner,
@@ -63,10 +69,15 @@ func FanOut(
 	strict bool,
 	subArgs []string,
 ) ([]RigResult, error) {
-	// Validate all rig names before launching any goroutines.
+	// Validate all rig names and hostnames before launching any goroutines.
+	// Both are used as SSH argv tokens — charset validation is defense-in-depth
+	// against command injection even though Runner uses discrete argv (T-14-04).
 	for _, rig := range rigs {
 		if !safeRigName.MatchString(rig.Name) {
 			return nil, fmt.Errorf("invalid rig name %q: only [a-z0-9-] are allowed", rig.Name)
+		}
+		if !safeHostname.MatchString(rig.Hostname) {
+			return nil, fmt.Errorf("invalid rig hostname %q for rig %q: must be a valid DNS name (no spaces, semicolons, or shell metacharacters)", rig.Hostname, rig.Name)
 		}
 	}
 
