@@ -85,6 +85,10 @@ Run 'abysslink <command> --help' for details on any command.`,
 	pf.Bool("json", false, "output as JSON")
 	pf.BoolP("verbose", "v", false, "enable debug logging")
 	pf.Bool("explain", false, "show per-action rationale alongside each planned change")
+	// Fleet targeting flags (Phase 14, Plan 03): consumed by fan-out commands (Plan 05).
+	pf.String("rig", "", "target a single enrolled rig by name")
+	pf.Bool("all-rigs", false, "fan out to all enrolled rigs")
+	pf.Bool("strict", false, "fail (exit 1) if any rig is UNREACHABLE")
 
 	// Register all subcommands with groups.
 	setupCmds := []*cobra.Command{
@@ -112,6 +116,7 @@ Run 'abysslink <command> --help' for details on any command.`,
 		newVersionCmd(),
 		newDaemonCmd(),
 		newServerCmd(),
+		newRigCmd(),
 	}
 	for _, c := range opsCmds {
 		c.GroupID = "ops"
