@@ -141,14 +141,20 @@ func TestNotifyAllRigs_Headers(t *testing.T) {
 	require.NotEmpty(t, sigA, "X-Abysslink-Rig-Sig must be set (SC-5)")
 
 	// Recompute the HMAC and verify it matches (round-trip: origin provable).
+	// WR-02: canonical string is now rigName+"."+ts+"."+title+"."+message.
 	assert.True(t,
-		fleet.VerifyRigMessage(keyA, rigA, tsA, msgBody, sigA),
+		fleet.VerifyRigMessage(keyA, rigA, tsA, title, msgBody, sigA),
 		"HMAC recompute+VerifyRigMessage for Rig A must return true (SC-5)")
 
 	// Tampering the body must make the signature fail.
 	assert.False(t,
-		fleet.VerifyRigMessage(keyA, rigA, tsA, "tampered body", sigA),
+		fleet.VerifyRigMessage(keyA, rigA, tsA, title, "tampered body", sigA),
 		"Tampering the message body must make VerifyRigMessage return false")
+
+	// WR-02: tampering the title must also fail (title is now in the HMAC).
+	assert.False(t,
+		fleet.VerifyRigMessage(keyA, rigA, tsA, "tampered title", msgBody, sigA),
+		"Tampering the title must make VerifyRigMessage return false (WR-02)")
 
 	// ── Rig B assertions ──
 
@@ -163,7 +169,7 @@ func TestNotifyAllRigs_Headers(t *testing.T) {
 
 	// Rig A's key must not verify Rig B's signature (per-rig key isolation).
 	assert.False(t,
-		fleet.VerifyRigMessage(keyA, rigB, tsB, msgBody, sigB),
+		fleet.VerifyRigMessage(keyA, rigB, tsB, title, msgBody, sigB),
 		"Rig A's key must not verify Rig B's signature (per-rig key isolation)")
 
 	// ── Cross-topic isolation assertion ──
@@ -250,7 +256,8 @@ func TestNotifyAllRigs_PerRigTopic(t *testing.T) {
 }
 
 // TestNotifyAllRigs_HMACCanonicalString verifies that the signed canonical
-// string is rigName + "." + ts + "." + message, matching the verifier recipe.
+// string is rigName + "." + ts + "." + title + "." + message, matching the
+// verifier recipe (WR-02: title is now included in the signed payload).
 func TestNotifyAllRigs_HMACCanonicalString(t *testing.T) {
 	var mu sync.Mutex
 	var received []capturedRequest
@@ -274,11 +281,14 @@ func TestNotifyAllRigs_HMACCanonicalString(t *testing.T) {
 	require.NoError(t, kc.Set(context.Background(), fleet.RigService(rigName), "hmac-signing-key", key))
 
 	rigs := []config.RigConfig{{Name: rigName, NtfyTopic: "topic-canonical"}}
-	const msg = "canonical message body"
+	const (
+		titleStr = "Canonical Title"
+		msgStr   = "canonical message body"
+	)
 
 	// Capture a known timestamp by recording before/after the call.
 	before := strconv.FormatInt(time.Now().Unix(), 10)
-	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, "title", msg))
+	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, titleStr, msgStr))
 	after := strconv.FormatInt(time.Now().Unix(), 10)
 
 	require.Len(t, received, 1)
@@ -293,7 +303,11 @@ func TestNotifyAllRigs_HMACCanonicalString(t *testing.T) {
 	assert.GreaterOrEqual(t, tsInt, beforeInt)
 	assert.LessOrEqual(t, tsInt, afterInt)
 
-	// Verify HMAC using the canonical string.
-	assert.True(t, fleet.VerifyRigMessage(key, rigName, ts, msg, sig),
-		"VerifyRigMessage must return true using canonical string rigName+.+ts+.+message")
+	// Verify HMAC using the full canonical string: rigName+.+ts+.+title+.+message (WR-02).
+	assert.True(t, fleet.VerifyRigMessage(key, rigName, ts, titleStr, msgStr, sig),
+		"VerifyRigMessage must return true using canonical string rigName+.+ts+.+title+.+message")
+
+	// Tampering the title alone must fail (WR-02 coverage).
+	assert.False(t, fleet.VerifyRigMessage(key, rigName, ts, "tampered title", msgStr, sig),
+		"VerifyRigMessage must return false when title is tampered (WR-02)")
 }
