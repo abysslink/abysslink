@@ -415,7 +415,11 @@ func (a *netbirdAdapter) GetACL(ctx context.Context) ([]byte, string, error) {
 	return raw, "", nil // ETag is empty for NetBird
 }
 
-// SetACL decodes acl bytes as a policies JSON array and calls editor.PushPolicy for each.
+// SetACL decodes acl bytes as a policies JSON array and calls editor.PushPolicy
+// for each policy.  For every push, PushPolicy re-reads the created policy from
+// the backend and calls Validate() to enforce SC-3 (silently dropped rule is
+// FAIL, not warning).  The intent (rule list) for each policy is decoded from
+// the input JSON so the Validate() call has accurate expected-state.
 func (a *netbirdAdapter) SetACL(ctx context.Context, acl []byte, _ string) error {
 	// Decode as an array of raw JSON objects (policies).
 	var policies []json.RawMessage
@@ -424,7 +428,16 @@ func (a *netbirdAdapter) SetACL(ctx context.Context, acl []byte, _ string) error
 	}
 	editor := newNetBirdEditor(a.doRequest)
 	for i, p := range policies {
-		if err := editor.PushPolicy(ctx, p); err != nil {
+		// Extract the rules from the raw policy body to use as Validate() intent.
+		// Only the rules field is needed; other fields (name, enabled, description)
+		// are not part of the SC-3 content-equality check.
+		var policyBody struct {
+			Rules []NBPolicyRule `json:"rules"`
+		}
+		if err := json.Unmarshal(p, &policyBody); err != nil {
+			return fmt.Errorf("netbird: set acl: decode rules for policy[%d]: %w", i, err)
+		}
+		if err := editor.PushPolicy(ctx, p, policyBody.Rules); err != nil {
 			return fmt.Errorf("netbird: set acl: push policy[%d]: %w", i, err)
 		}
 	}
