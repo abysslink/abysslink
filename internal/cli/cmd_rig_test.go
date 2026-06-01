@@ -18,6 +18,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,7 +134,7 @@ func TestRigImport_Merge(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err := runRigImport(cfgPath, importPath, true)
+	err := runRigImport(cfgPath, importPath, true, io.Discard)
 	require.NoError(t, err)
 
 	// Read back and verify.
@@ -162,8 +163,10 @@ func TestRigImport_DryRun(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err := runRigImport(cfgPath, importPath, false) // dry-run
+	var dryOut bytes.Buffer
+	err := runRigImport(cfgPath, importPath, false, &dryOut) // dry-run
 	require.NoError(t, err)
+	assert.Contains(t, dryOut.String(), "[dry-run]", "dry-run output must go through io.Writer (WR-01)")
 
 	// Nothing must be written.
 	cfg, err := config.Load(cfgPath)
@@ -186,7 +189,7 @@ func TestRigImport_CollisionError(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err := runRigImport(cfgPath, importPath, true)
+	err := runRigImport(cfgPath, importPath, true, io.Discard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "alpha", "error must identify the colliding rig name")
 }
@@ -215,7 +218,7 @@ func TestRigImport_NoOSWriteFile(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err = runRigImport(cfgPath, importPath, true)
+	err = runRigImport(cfgPath, importPath, true, io.Discard)
 	require.NoError(t, err)
 }
 
