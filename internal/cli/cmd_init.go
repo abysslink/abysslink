@@ -607,8 +607,9 @@ type initFormResult struct {
 	enableMosh         bool
 	enableNtfy         bool
 	ntfyPort           int
-	backendType        string // "tailscale" or "headscale"
+	backendType        string // "tailscale", "headscale", or "netbird"
 	headscaleServerURL string // non-empty only when backendType == "headscale"
+	netbirdServerURL   string // non-empty only when backendType == "netbird"
 }
 
 // applyInitFormResult converts a collected initFormResult into a *config.Config.
@@ -627,13 +628,58 @@ func applyInitFormResult(r initFormResult) (*config.Config, error) {
 	cfg.Modules.Ntfy.Enabled = r.enableNtfy
 	cfg.Modules.Ntfy.Port = r.ntfyPort
 	cfg.Modules.Notify.Enabled = r.enableNtfy
-	// Backend type: "tailscale" is the default; "headscale" populates Headscale fields.
+	// Backend type: "tailscale" is the default; "headscale" and "netbird" populate
+	// their respective server sub-struct fields.
 	cfg.Backend.Type = r.backendType
 	if r.backendType == "headscale" {
 		cfg.Server.Headscale.ServerURL = r.headscaleServerURL
 		cfg.Server.Headscale.User = "abysslink" // stable default per D-13
 	}
+	if r.backendType == "netbird" {
+		cfg.Server.NetBird.ServerURL = r.netbirdServerURL
+	}
 	return cfg, nil
+}
+
+// promptBackendServerURL runs the conditional server URL prompts for self-hosted
+// backends (headscale and netbird) after the main form completes. Extracted to
+// keep runInitForm's cyclomatic complexity below the gocyclo limit.
+func promptBackendServerURL(cmd *cobra.Command, r *initFormResult) error {
+	switch r.backendType {
+	case "headscale":
+		return huh.NewInput().
+			Title("Headscale server URL").
+			Description("Public HTTPS URL of your Headscale instance (e.g. https://headscale.example.com)").
+			Value(&r.headscaleServerURL).
+			Validate(func(s string) error {
+				if s == "" {
+					return fmt.Errorf("server URL is required for headscale backend")
+				}
+				if !strings.HasPrefix(s, "https://") {
+					return fmt.Errorf("server URL must start with https://")
+				}
+				return nil
+			}).Run()
+	case "netbird":
+		// Emit degradation warning before prompting — wizard-time D-04 disclosure.
+		printerInfo(newPrinter(cmd), styleWarn.Render(
+			"WARN: NetBird does not support SSH checkPeriod enforcement. "+
+				"You will need to run `abysslink up --accept-no-sshcheck` on first use."))
+		return huh.NewInput().
+			Title("NetBird server URL").
+			Description("Management server base URL (e.g. https://nb.example.com)").
+			Value(&r.netbirdServerURL).
+			Validate(func(s string) error {
+				if s == "" {
+					return fmt.Errorf("server URL is required for netbird backend")
+				}
+				if !strings.HasPrefix(s, "https://") {
+					return fmt.Errorf("server URL must start with https://")
+				}
+				return nil
+			}).Run()
+	}
+	return nil
 }
 
 // runInitForm runs the interactive questionnaire and returns the resulting Config.
@@ -644,7 +690,7 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 		enableMosh:  true,
 		enableNtfy:  true,
 		ntfyPort:    2586,
-		backendType: "tailscale", // default — changed to "headscale" only when user selects it
+		backendType: "tailscale", // default — changed to "headscale" or "netbird" when user selects it
 	}
 	r.hostname, _ = os.Hostname()
 
@@ -657,6 +703,7 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 					Options(
 						huh.NewOption("Tailscale (cloud, requires account)", "tailscale"),
 						huh.NewOption("Headscale (self-hosted)", "headscale"),
+						huh.NewOption("NetBird (self-hosted NetBird control plane (REST-only, SSHCheck degradation — see docs))", "netbird"),
 					).
 					Value(&r.backendType),
 			),
@@ -698,23 +745,9 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 		if err := form.Run(); err != nil {
 			return nil, fmt.Errorf("init: %w", err)
 		}
-		// Conditional headscale server URL prompt — same pattern as the ntfyPort prompt below.
-		if r.backendType == "headscale" {
-			if err := huh.NewInput().
-				Title("Headscale server URL").
-				Description("Public HTTPS URL of your Headscale instance (e.g. https://headscale.example.com)").
-				Value(&r.headscaleServerURL).
-				Validate(func(s string) error {
-					if s == "" {
-						return fmt.Errorf("server URL is required for headscale backend")
-					}
-					if !strings.HasPrefix(s, "https://") {
-						return fmt.Errorf("server URL must start with https://")
-					}
-					return nil
-				}).Run(); err != nil {
-				return nil, fmt.Errorf("init: headscale server url: %w", err)
-			}
+		// Conditional server URL prompts for self-hosted backends.
+		if err := promptBackendServerURL(cmd, &r); err != nil {
+			return nil, err
 		}
 		if r.enableNtfy {
 			portStr := fmt.Sprintf("%d", r.ntfyPort)
