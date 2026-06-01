@@ -58,23 +58,6 @@ func (m *mockACLManager) Diff(_, _ []byte) string {
 	return ""
 }
 
-// aclDocWith builds a minimal ACL JSON with the given grants for test fixtures.
-func aclDocWith(grants [][]string) []byte {
-	type grant struct {
-		Src []string `json:"src"`
-		Dst []string `json:"dst"`
-	}
-	type doc struct {
-		Grants []grant `json:"grants"`
-	}
-	var d doc
-	for i := 0; i+1 < len(grants); i += 2 {
-		d.Grants = append(d.Grants, grant{Src: grants[i], Dst: grants[i+1]})
-	}
-	b, _ := json.Marshal(d)
-	return b
-}
-
 // aclDocSafe returns an ACL with no tag:laptop→tag:laptop grant (only mobile→laptop).
 func aclDocSafe() []byte {
 	type grant struct {
@@ -124,7 +107,7 @@ func TestDoctor_RigIsolation(t *testing.T) {
 
 	t.Run("FATAL when rig-to-rig grant present", func(t *testing.T) {
 		mgr := &mockACLManager{rawACL: aclDocWithRigRigGrant()}
-		findings := FleetDoctorChecks(ctx, cfg, nil, mgr)
+		findings := DoctorChecks(ctx, cfg, nil, mgr)
 		var isolation *backend.DoctorFinding
 		for i := range findings {
 			if findings[i].Check == "mr-rig-isolation" {
@@ -140,7 +123,7 @@ func TestDoctor_RigIsolation(t *testing.T) {
 
 	t.Run("OK when no rig-to-rig grant", func(t *testing.T) {
 		mgr := &mockACLManager{rawACL: aclDocSafe()}
-		findings := FleetDoctorChecks(ctx, cfg, nil, mgr)
+		findings := DoctorChecks(ctx, cfg, nil, mgr)
 		var isolation *backend.DoctorFinding
 		for i := range findings {
 			if findings[i].Check == "mr-rig-isolation" {
@@ -155,7 +138,7 @@ func TestDoctor_RigIsolation(t *testing.T) {
 	})
 
 	t.Run("WARN when ACL backend nil", func(t *testing.T) {
-		findings := FleetDoctorChecks(ctx, cfg, nil, nil)
+		findings := DoctorChecks(ctx, cfg, nil, nil)
 		var isolation *backend.DoctorFinding
 		for i := range findings {
 			if findings[i].Check == "mr-rig-isolation" {
@@ -184,7 +167,7 @@ func TestDoctor_TopicIsolation(t *testing.T) {
 			{Name: "alpha", NtfyTopic: "abysslink-alpha-aabb1122"},
 			{Name: "beta", NtfyTopic: "abysslink-beta-33445566"},
 		}
-		findings := FleetDoctorChecks(ctx, cfg, nil, mgr)
+		findings := DoctorChecks(ctx, cfg, nil, mgr)
 		var topicF *backend.DoctorFinding
 		for i := range findings {
 			if findings[i].Check == "mr-topic-isolation" {
@@ -203,7 +186,7 @@ func TestDoctor_TopicIsolation(t *testing.T) {
 			{Name: "alpha", NtfyTopic: "abysslink-shared-aabb1122"},
 			{Name: "beta", NtfyTopic: "abysslink-shared-aabb1122"}, // duplicate
 		}
-		findings := FleetDoctorChecks(ctx, cfg, nil, mgr)
+		findings := DoctorChecks(ctx, cfg, nil, mgr)
 		var topicF *backend.DoctorFinding
 		for i := range findings {
 			if findings[i].Check == "mr-topic-isolation" {
@@ -234,7 +217,7 @@ func TestDoctor_KeyUniqueness(t *testing.T) {
 			{Name: "beta", NtfyTopic: "abysslink-beta-33445566"},
 		}
 		kc := secrets.NewMockStore()
-		findings := FleetDoctorChecks(ctx, cfg, kc, mgr)
+		findings := DoctorChecks(ctx, cfg, kc, mgr)
 		var keyF *backend.DoctorFinding
 		for i := range findings {
 			if findings[i].Check == "mr-key-uniqueness" {
@@ -255,7 +238,7 @@ func TestDoctor_KeyUniqueness(t *testing.T) {
 			{Name: "alpha", NtfyTopic: "abysslink-alpha-33445566"}, // same name → same service
 		}
 		kc := secrets.NewMockStore()
-		findings := FleetDoctorChecks(ctx, cfg, kc, mgr)
+		findings := DoctorChecks(ctx, cfg, kc, mgr)
 		var keyF *backend.DoctorFinding
 		for i := range findings {
 			if findings[i].Check == "mr-key-uniqueness" {
@@ -276,7 +259,7 @@ func TestDoctor_KeyUniqueness(t *testing.T) {
 		kc := secrets.NewMockStore()
 		// Seed a legacy v1 entry under service="abysslink" to simulate coexistence.
 		require.NoError(t, kc.Set(ctx, "abysslink", "ntfy-password", "legacy-pass"))
-		findings := FleetDoctorChecks(ctx, cfg, kc, mgr)
+		findings := DoctorChecks(ctx, cfg, kc, mgr)
 		var keyF *backend.DoctorFinding
 		for i := range findings {
 			if findings[i].Check == "mr-key-uniqueness" {
@@ -292,7 +275,7 @@ func TestDoctor_KeyUniqueness(t *testing.T) {
 
 // ── TestDoctor_FindingMetadata ────────────────────────────────────────────────
 
-// TestDoctor_FindingMetadata verifies that FleetDoctorChecks returns exactly
+// TestDoctor_FindingMetadata verifies that DoctorChecks returns exactly
 // three findings with Module="fleet" and the three mr-* check names.
 func TestDoctor_FindingMetadata(t *testing.T) {
 	ctx := context.Background()
@@ -303,8 +286,8 @@ func TestDoctor_FindingMetadata(t *testing.T) {
 	kc := secrets.NewMockStore()
 	mgr := &mockACLManager{rawACL: aclDocSafe()}
 
-	findings := FleetDoctorChecks(ctx, cfg, kc, mgr)
-	require.Len(t, findings, 3, "FleetDoctorChecks must return exactly 3 findings")
+	findings := DoctorChecks(ctx, cfg, kc, mgr)
+	require.Len(t, findings, 3, "DoctorChecks must return exactly 3 findings")
 
 	checks := make(map[string]bool)
 	for _, f := range findings {
