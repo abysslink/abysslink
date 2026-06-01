@@ -321,7 +321,22 @@ Plans:
   4. `abysslink doctor` passes the three multi-rig isolation checks: `mr-rig-isolation` (rig-to-rig ACL deny present), `mr-topic-isolation` (no two rigs share an ntfy topic), `mr-key-uniqueness` (no two rigs share a keychain credential namespace)
   5. A notification event originating from Rig A is provably never delivered to Rig B's ntfy topic; fan-out notify includes a rig-identity header validated by the receiving subscriber
 
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 14-01-PLAN.md — Config RigConfig+Rigs schema + internal/fleet HMAC identity primitives (FLEET-01, SC-5)
+
+**Wave 2** *(both depend on 14-01; no file overlap = parallel)*
+
+- [ ] 14-02-PLAN.md — internal/fleet errgroup FanOut runner + SSH/JSON decode (FLEET-02, SC-2/SC-3)
+- [ ] 14-03-PLAN.md — enroll rig (key+migration+topic+ACL deny+audit) + rig ls/export/import + --rig/--all-rigs/--strict flags; A1 deny-construct checkpoint (FLEET-01, FLEET-03, SC-1)
+
+**Wave 3** *(parallel; 14-04 depends on 14-01+14-03, 14-05 on 14-01+14-02+14-03)*
+
+- [ ] 14-04-PLAN.md — FleetDoctorChecks (mr-rig-isolation/mr-topic-isolation/mr-key-uniqueness) + cmd_doctor wiring + doctor --all-rigs (FLEET-03)
+- [ ] 14-05-PLAN.md — status/notify/panic --all-rigs fan-out + HMAC rig-identity headers + verifier runbook (FLEET-02, SC-5)
 
 ---
 
