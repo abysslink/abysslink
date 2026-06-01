@@ -128,10 +128,10 @@ func (e *netbirdEditor) EnsureGroup(ctx context.Context, name string) (string, e
 	return created.ID, nil
 }
 
-// findSystemGroup locates the auto-managed system group by Issued=="system" AND
+// FindSystemGroup locates the auto-managed system group by Issued=="system" AND
 // Name==name. This is the correct way to identify the "All" group (T-13-02-06,
 // RESEARCH Anti-Patterns Pitfall 5).
-func (e *netbirdEditor) findSystemGroup(ctx context.Context, name string) (string, error) {
+func (e *netbirdEditor) FindSystemGroup(ctx context.Context, name string) (string, error) {
 	groups, err := e.listGroups(ctx)
 	if err != nil {
 		return "", err
@@ -141,7 +141,7 @@ func (e *netbirdEditor) findSystemGroup(ctx context.Context, name string) (strin
 			return g.ID, nil
 		}
 	}
-	return "", fmt.Errorf("netbird: findSystemGroup: system group %q not found", name)
+	return "", fmt.Errorf("netbird: FindSystemGroup: system group %q not found", name)
 }
 
 // ── Policy CRUD ───────────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ func (e *netbirdEditor) listPolicies(ctx context.Context) ([]nbPolicy, error) {
 // This implements SC-1: the default NetBird allow-all policy is removed before
 // pushing the deny-all baseline. The "All" group itself is NOT deleted.
 func (e *netbirdEditor) RemoveAllowAllPolicies(ctx context.Context) error {
-	allGroupID, err := e.findSystemGroup(ctx, "All")
+	allGroupID, err := e.FindSystemGroup(ctx, "All")
 	if err != nil {
 		return fmt.Errorf("netbird: remove allow-all: find All group: %w", err)
 	}
@@ -225,7 +225,7 @@ func policyIsAllowAllOnGroup(policy nbPolicy, allGroupID string) bool {
 // Returns the first non-nil error encountered.
 func (e *netbirdEditor) PushDenyAllBaseline(ctx context.Context) error {
 	// Step 1: locate the "All" system group.
-	allGroupID, err := e.findSystemGroup(ctx, "All")
+	allGroupID, err := e.FindSystemGroup(ctx, "All")
 	if err != nil {
 		return fmt.Errorf("netbird: deny-all baseline: %w", err)
 	}
@@ -407,12 +407,17 @@ type nbPolicy struct {
 
 // nbPolicyRule is a single rule within a policy.
 // IDs and names are excluded from content-equality comparison (D-08).
-type nbPolicyRule struct {
+// Exported as NBPolicyRule for use in tests and doctor checks.
+type nbPolicyRule = NBPolicyRule
+
+// NBPolicyRule is the exported form of nbPolicyRule for use in tests and
+// doctor checks that need to construct Validate() intent slices.
+type NBPolicyRule struct {
 	ID            string   `json:"id,omitempty"`
 	Name          string   `json:"name,omitempty"`
 	Enabled       bool     `json:"enabled"`
-	Action        string   `json:"action"`        // "accept" or "drop"
-	Protocol      string   `json:"protocol"`      // "all", "tcp", "udp", "icmp"
+	Action        string   `json:"action"`   // "accept" or "drop"
+	Protocol      string   `json:"protocol"` // "all", "tcp", "udp", "icmp"
 	Bidirectional bool     `json:"bidirectional"`
 	Sources       []string `json:"sources"`
 	Destinations  []string `json:"destinations"`
