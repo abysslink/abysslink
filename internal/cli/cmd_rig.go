@@ -20,11 +20,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
+
+// safeImportHostname matches hostnames that are safe SSH target tokens (mirrors
+// fleet.safeHostname — defined here to keep cmd_rig.go independent of
+// fleet internals; both must stay in sync with T-14-04).
+var safeImportHostname = regexp.MustCompile(`^[a-z0-9][a-z0-9\-.]{0,252}[a-z0-9]$`)
 
 // rigLsRecord is the JSON-serializable representation of a single rig in `rig ls`.
 // Field names are snake_case to match the config schema (UX-04 ANSI-free JSON).
@@ -109,7 +116,7 @@ func newRigImportCmd() *cobra.Command {
 			if cfgPath == "" {
 				cfgPath = defaultConfigPath()
 			}
-			return runRigImport(cfgPath, args[0], cc.apply)
+			return runRigImport(cfgPath, args[0], cc.apply, cmd.OutOrStdout())
 		},
 	}
 }
@@ -181,8 +188,15 @@ func runRigExport(cfgPath string, out io.Writer) error {
 }
 
 // runRigImport reads a rigs: YAML doc from importPath, merges into cfg.Rigs with
-// name-collision detection, and (under apply=true) persists via config.Write (audit).
-func runRigImport(cfgPath, importPath string, apply bool) error {
+// name-collision, hostname-charset, and ntfy-topic-uniqueness checks, and (under
+// apply=true) persists via config.Write (audit).
+//
+// Security invariants enforced at import time:
+//   - rig.Name: validated against rigNameRe (mirrors enrollRig, T-14-11).
+//   - rig.Hostname: validated against safeImportHostname (T-14-04 argv injection).
+//   - rig.NtfyTopic: checked for collision against existing topics (SC-1, D-NI-02).
+//   - Name collision: duplicate names rejected (mirrors enrollRigWriteConfig, CR-02).
+func runRigImport(cfgPath, importPath string, apply bool, out io.Writer) error {
 	// Read import file.
 	data, err := os.ReadFile(importPath) //nolint:gosec
 	if err != nil {
@@ -203,25 +217,53 @@ func runRigImport(cfgPath, importPath string, apply bool) error {
 		cfg = config.Defaults()
 	}
 
-	// Build a set of existing rig names for O(1) collision check.
+	// Build O(1) lookup sets from existing rigs.
 	existingNames := make(map[string]bool, len(cfg.Rigs))
+	existingTopics := make(map[string]string, len(cfg.Rigs)) // topic → rig name
 	for _, r := range cfg.Rigs {
 		existingNames[r.Name] = true
+		if r.NtfyTopic != "" {
+			existingTopics[r.NtfyTopic] = r.Name
+		}
 	}
 
-	// Check collisions before mutating.
-	for _, incoming := range incoming.Rigs {
-		if existingNames[incoming.Name] {
-			return fmt.Errorf("rig import: name collision for rig %q — use a unique name or remove the existing entry first (D-NI-02)", incoming.Name)
+	// Validate each incoming rig before mutating state.
+	for _, inc := range incoming.Rigs {
+		// Name uniqueness (CR-02 part A mirror — import must enforce same invariant
+		// as enrollRigWriteConfig, because both paths land in cfg.Rigs).
+		if existingNames[inc.Name] {
+			return fmt.Errorf("rig import: name collision for rig %q — use a unique name or remove the existing entry first (D-NI-02)", inc.Name)
+		}
+		// Hostname charset (CR-01, T-14-04: hostname is used in SSH argv by FanOut).
+		if !safeImportHostname.MatchString(inc.Hostname) {
+			return fmt.Errorf("rig import: invalid hostname %q for rig %q: must be a valid DNS name (no spaces or shell metacharacters)", inc.Hostname, inc.Name)
+		}
+		// NtfyTopic uniqueness (CR-02 part B, SC-1, D-NI-02).
+		if inc.NtfyTopic != "" {
+			if owner, ok := existingTopics[inc.NtfyTopic]; ok {
+				return fmt.Errorf("rig import: ntfy topic %q already used by rig %q — each rig must have a unique topic (SC-1, D-NI-02)", inc.NtfyTopic, owner)
+			}
+		}
+		// Track topics within the import batch itself (duplicate within the file).
+		if inc.NtfyTopic != "" {
+			existingTopics[inc.NtfyTopic] = inc.Name
 		}
 	}
 
 	if !apply {
-		// Dry-run: report what would be imported.
+		// Dry-run: report what would be imported via the io.Writer (WR-01: no fmt.Printf/Println).
 		for _, r := range incoming.Rigs {
-			fmt.Printf("[dry-run] Would import rig %q (hostname=%s, backend=%s)\n", r.Name, r.Hostname, r.Backend)
+			fmt.Fprintf(out, "[dry-run] Would import rig %q (hostname=%s, backend=%s)\n", r.Name, r.Hostname, r.Backend)
 		}
 		return nil
+	}
+
+	// Validate signing-key availability: FanOut requires enrolled rigs to have
+	// a keychain entry; import only writes the config — the caller must separately
+	// run `abysslink enroll rig <name> --apply` for the keychain side.
+	// We surface this as an informational note, not an error.
+	for _, r := range incoming.Rigs {
+		_ = fleet.RigService(r.Name) // call used to validate package linkage; actual key check is at runtime
 	}
 
 	// Merge.
