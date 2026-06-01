@@ -3,15 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0.0
 milestone_name: — Self-Hosted Backends & Fleet
 status: completed
-stopped_at: SC-3 gap closure — SetACL/PushPolicy Validate-after-push (commit 4e2cf8d)
-last_updated: "2026-06-01T01:05:02.382Z"
+last_updated: "2026-06-01T19:06:31.147Z"
 last_activity: 2026-06-01 -- Phase 13 marked complete
 progress:
-  total_phases: 10
-  completed_phases: 2
-  total_plans: 12
-  completed_plans: 9
-  percent: 20
+  total_phases: 14
+  completed_phases: 5
+  total_plans: 25
+  completed_plans: 22
+  percent: 36
 ---
 
 # Project State
@@ -135,6 +134,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-01T00:57:05Z
-Stopped at: SC-3 gap closure — SetACL/PushPolicy Validate-after-push (commit 4e2cf8d)
-Resume file: None
+Last session: 2026-06-01T19:06:31.142Z
+Stopped at: Phase 14 context gathered
+Resume file: .planning/phases/14-multi-rig-fleet/14-CONTEXT.md
