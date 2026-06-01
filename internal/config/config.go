@@ -28,17 +28,18 @@ import (
 
 // Config is the top-level abysslink.yaml structure.
 type Config struct {
-	Version    int        `yaml:"version"`
-	Backend    Backend    `yaml:"backend"`
-	Server     Server     `yaml:"server"`
-	Rig        Rig        `yaml:"rig"`
-	Identity   Identity   `yaml:"identity"`
-	Tailnet    Tailnet    `yaml:"tailnet"`
-	Mobile     Mobile     `yaml:"mobile"`
-	Modules    Modules    `yaml:"modules"`
-	ClaudeCode ClaudeCode `yaml:"claudecode"`
-	Power      Power      `yaml:"power"`
-	Hardening  Hardening  `yaml:"hardening"`
+	Version    int         `yaml:"version"`
+	Backend    Backend     `yaml:"backend"`
+	Server     Server      `yaml:"server"`
+	Rig        Rig         `yaml:"rig"`
+	Rigs       []RigConfig `yaml:"rigs"`
+	Identity   Identity    `yaml:"identity"`
+	Tailnet    Tailnet     `yaml:"tailnet"`
+	Mobile     Mobile      `yaml:"mobile"`
+	Modules    Modules     `yaml:"modules"`
+	ClaudeCode ClaudeCode  `yaml:"claudecode"`
+	Power      Power       `yaml:"power"`
+	Hardening  Hardening   `yaml:"hardening"`
 }
 
 // Backend holds backend-selection settings (v2+). The Type field is
@@ -105,10 +106,23 @@ type Server struct {
 	NetBird   NetBirdServer   `yaml:"netbird"`
 }
 
-// Rig holds per-rig fleet metadata (v2+ / Phase 14).
-// Fields are parsed but not yet consumed in v1 (forward-compat stub).
+// Rig is the legacy scalar per-rig stub (v1 compat alias).
+// It is retained so that any existing abysslink.yaml with a rig: key continues
+// to parse under KnownFields(true) strict mode (Open Question 3).
+// New configurations should use the Rigs []RigConfig list instead.
 type Rig struct {
 	Name string `yaml:"name"` // logical rig name used in fleet commands
+}
+
+// RigConfig is a per-rig fleet record (Phase 14, D-FS-01).
+// Every field carries a yaml: tag because KnownFields(true) strict mode at
+// config.go:337 rejects untagged keys.
+type RigConfig struct {
+	Name      string `yaml:"name"`                // logical rig name; basis of keychain service + topic
+	Hostname  string `yaml:"hostname"`            // Tailscale hostname (SSH target, D-FT-03)
+	NtfyTopic string `yaml:"ntfy_topic"`          // abysslink-<name>-<8char> (D-NI-01)
+	Backend   string `yaml:"backend"`             // backend type at enrollment
+	LastSeen  string `yaml:"last_seen,omitempty"` // RFC3339 UTC; updated by fan-out status (Plan 05)
 }
 
 // Identity holds the user's Tailscale and UNIX identifiers.
