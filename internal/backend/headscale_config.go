@@ -184,33 +184,6 @@ func applyTLSKeys(m map[string]any, hs config.HeadscaleServer) {
 	}
 }
 
-// setNestedKey sets a dotted-path key inside a map[string]any, creating
-// intermediate maps as needed. This is the safe surgical-merge primitive:
-// it never overwrites a user-owned sub-map's OTHER keys.
-//
-//   - keys: ordered path components, e.g. []string{"derp", "server", "verify_clients"}
-//   - val: the value to set at the leaf
-//
-// Example: setNestedKey(m, []string{"derp","server","verify_clients"}, true)
-// ensures m["derp"]["server"]["verify_clients"] == true while preserving any
-// other keys under m["derp"]["server"].
-func setNestedKey(m map[string]any, keys []string, val any) {
-	if len(keys) == 0 {
-		return
-	}
-	if len(keys) == 1 {
-		m[keys[0]] = val
-		return
-	}
-	// Descend into or create the intermediate map.
-	sub, ok := m[keys[0]].(map[string]any)
-	if !ok {
-		sub = make(map[string]any)
-	}
-	setNestedKey(sub, keys[1:], val)
-	m[keys[0]] = sub
-}
-
 // extractHostname parses rawURL and returns the hostname (without port).
 // Returns empty string on parse error.
 func extractHostname(rawURL string) string {
