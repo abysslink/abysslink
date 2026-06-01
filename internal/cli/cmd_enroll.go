@@ -17,17 +17,289 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/backend"
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/qr"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
+
+// rigNameRe validates rig names: lowercase alphanumeric and hyphens, 1–63 chars.
+// Used as keychain service suffix, ntfy topic component, and SSH host token (T-14-11, ASVS V5).
+var rigNameRe = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
+
+// v1KeychainAccounts is the exhaustive list of account names stored under
+// service="abysslink" in the v1 keychain namespace. This list is the source of
+// truth for non-destructive migration at enroll time (PATTERNS §Keychain migration,
+// RESEARCH Pitfall 4: no keychain List primitive — never use security dump-keychain).
+//
+// Extend this list when a new account is added to the v1 "abysslink" service.
+// Headscale/NetBird keys use separate service names and are NOT migrated.
+var v1KeychainAccounts = []string{
+	"ntfy-password",
+	"anthropic-api-key",
+	"code-server-password",
+}
+
+// aclManagerFace is the internal subset of backend.ACLManager used by enrollRig.
+// It is defined as a narrower interface to allow test injection without pulling
+// in the full backend.ACLManager type assertion chain.
+type aclManagerFace interface {
+	GetACL(ctx context.Context) (raw []byte, etag string, err error)
+	SetACL(ctx context.Context, acl []byte, etag string) error
+}
+
+// enrollRigOpts carries all inputs for enrollRig, enabling clean test injection.
+type enrollRigOpts struct {
+	name          string              // rig name (validated against rigNameRe)
+	cfgPath       string              // path to abysslink.yaml
+	keychain      secrets.KeychainStore
+	apply         bool                // false = dry-run; true = apply
+	overrideTopic string              // optional: override the derived ntfy topic (for tests)
+	aclManager    aclManagerFace      // nil = skip ACL step (no ACL-capable backend)
+	hostname      string              // Tailscale hostname for the rig (empty = use os.Hostname)
+	backendType   string              // backend type string (empty = "tailscale")
+	stdout        io.Writer           // optional: capture stdout (nil = os.Stdout)
+}
+
+// aclGrant mirrors the subset of tailscale/acl.go aclGrant used for rig-to-rig detection.
+// We parse the raw JSON to detect existing grants without importing the tailscale sub-package.
+type enrollACLDoc struct {
+	Grants []enrollACLGrant `json:"grants"`
+}
+
+type enrollACLGrant struct {
+	Src []string `json:"src"`
+	Dst []string `json:"dst"`
+}
+
+// enrollRig implements the core logic of `abysslink enroll rig <name> [--apply]`.
+// It is a pure function over its opts — no global state, no direct os.WriteFile,
+// no fmt.Println. All output goes to opts.stdout (or is suppressed in dry-run).
+//
+// Step order (D-KN/D-NI/D-AI):
+//  1. Validate rig name.
+//  2. Generate HMAC signing key; store in keychain (apply) or preview (dry-run).
+//  3. Migrate v1 keychain entries (non-destructive; dry-run skips Set).
+//  4. Derive ntfy topic; collision-check against existing rigs.
+//  5. Push rig-to-rig ACL deny (absence-of-grant) + validate-after-push (SC-3).
+//  6. Append RigConfig to cfg.Rigs; persist via config.Write (audit).
+func enrollRig(ctx context.Context, opts enrollRigOpts) error {
+	out := opts.stdout
+	if out == nil {
+		out = os.Stdout
+	}
+
+	// ── Step 0: Validate name ───────────────────────────────────────────────
+	if !rigNameRe.MatchString(opts.name) {
+		return fmt.Errorf("enroll rig: invalid rig name %q (must match ^[a-z0-9-]{1,63}$)", opts.name)
+	}
+
+	// ── Load config ─────────────────────────────────────────────────────────
+	cfg, err := config.Load(opts.cfgPath)
+	if err != nil {
+		cfg = config.Defaults()
+	}
+
+	rigSvc := fleet.RigService(opts.name)
+
+	// ── Step 1: Generate HMAC signing key ────────────────────────────────────
+	hexKey, err := fleet.GenerateSigningKey()
+	if err != nil {
+		return fmt.Errorf("enroll rig: key gen: %w", err)
+	}
+	if opts.apply {
+		if opts.keychain == nil {
+			return fmt.Errorf("enroll rig: keychain unavailable")
+		}
+		if err := opts.keychain.Set(ctx, rigSvc, "hmac-signing-key", hexKey); err != nil {
+			return fmt.Errorf("enroll rig: store signing key: %w", err)
+		}
+		// Print the key ONCE to stdout with a one-time-warning box (mirror Tailnet Lock UX).
+		// NEVER write it to yaml or audit body (T-14-09, D-KN-01).
+		fmt.Fprintf(out, "\n")
+		fmt.Fprintf(out, "┌─────────────────────────────────────────────────────────────────┐\n")
+		fmt.Fprintf(out, "│  ONE-TIME SECRET: HMAC signing key for rig %q\n", opts.name)
+		fmt.Fprintf(out, "│  Store this in your password manager — it will not be shown again.\n")
+		fmt.Fprintf(out, "│  %s\n", hexKey)
+		fmt.Fprintf(out, "└─────────────────────────────────────────────────────────────────┘\n")
+		fmt.Fprintf(out, "\n")
+	} else {
+		fmt.Fprintf(out, "[dry-run] Would generate and store HMAC signing key for rig %q\n", opts.name)
+	}
+
+	// ── Step 2: Migrate v1 keychain entries (non-destructive) ────────────────
+	// Known v1 accounts under service="abysslink". Headscale/NetBird keys are
+	// separate service names and must NOT be migrated here.
+	if opts.keychain != nil {
+		for _, acct := range v1KeychainAccounts {
+			val, getErr := opts.keychain.Get(ctx, "abysslink", acct)
+			if getErr != nil {
+				// Entry absent — skip silently (non-fatal).
+				continue
+			}
+			if opts.apply {
+				if setErr := opts.keychain.Set(ctx, rigSvc, acct, val); setErr != nil {
+					return fmt.Errorf("enroll rig: migrate keychain entry %q: %w", acct, setErr)
+				}
+			} else {
+				fmt.Fprintf(out, "[dry-run] Would migrate keychain entry abysslink/%s → %s/%s\n", acct, rigSvc, acct)
+			}
+		}
+	}
+
+	// ── Step 3: Derive ntfy topic + collision check ───────────────────────────
+	topic := opts.overrideTopic
+	if topic == "" {
+		suffix := make([]byte, 4)
+		if _, err := rand.Read(suffix); err != nil {
+			return fmt.Errorf("enroll rig: topic suffix: %w", err)
+		}
+		topic = "abysslink-" + opts.name + "-" + hex.EncodeToString(suffix)
+	}
+	for _, existing := range cfg.Rigs {
+		if existing.NtfyTopic == topic {
+			return fmt.Errorf("enroll rig: ntfy topic %q already used by rig %q (SC-1, D-NI-02); choose a unique name or override --ntfy-topic", topic, existing.Name)
+		}
+	}
+
+	// ── Step 4: Push rig-to-rig ACL deny (absence-of-grant) + validate-after-push ──
+	// Decision A1 (confirmed): Tailscale/Headscale HuJSON is default-deny; isolation
+	// is expressed as ABSENCE of a tag:laptop→tag:laptop grant. We:
+	//  (a) GetACL to read current document.
+	//  (b) Assert no tag:laptop→tag:laptop (or reverse) grant exists.
+	//      If found: return error (security violation — the admin must remove it).
+	//  (c) SetACL to persist (re-write the same doc) so the read-back round-trips.
+	//  (d) GetACL again to validate read-back confirms no rig↔rig allow path (SC-3).
+	if opts.aclManager != nil {
+		if err := enforceRigToRigACLDeny(ctx, opts.aclManager, opts.apply, out); err != nil {
+			return err
+		}
+	}
+
+	// ── Step 5: Append RigConfig + persist via config.Write (audit) ──────────
+	hostname := opts.hostname
+	if hostname == "" {
+		h, hErr := os.Hostname()
+		if hErr == nil {
+			hostname = h
+		}
+	}
+	backendType := opts.backendType
+	if backendType == "" {
+		backendType = cfg.Backend.Type
+		if backendType == "" {
+			backendType = "tailscale"
+		}
+	}
+
+	rig := config.RigConfig{
+		Name:      opts.name,
+		Hostname:  hostname,
+		NtfyTopic: topic,
+		Backend:   backendType,
+	}
+
+	if opts.apply {
+		cfg.Rigs = append(cfg.Rigs, rig)
+		if err := config.Write(opts.cfgPath, cfg); err != nil {
+			return fmt.Errorf("enroll rig: write config: %w", err)
+		}
+		fmt.Fprintf(out, "Enrolled rig %q (topic=%s, backend=%s)\n", opts.name, topic, backendType)
+	} else {
+		fmt.Fprintf(out, "[dry-run] Would enroll rig %q (topic=%s, backend=%s, hostname=%s)\n",
+			opts.name, topic, backendType, hostname)
+	}
+
+	return nil
+}
+
+// enforceRigToRigACLDeny implements the absence-of-grant discipline for Tailscale/Headscale:
+//  1. GetACL to read the current document.
+//  2. Assert no tag:laptop→tag:laptop (or reverse) grant exists.
+//  3. SetACL to persist (forces a validate-after-push round-trip).
+//  4. GetACL again to confirm read-back shows no rig↔rig allow path (Phase 13 SC-3).
+func enforceRigToRigACLDeny(ctx context.Context, mgr aclManagerFace, apply bool, out io.Writer) error {
+	// Read current ACL.
+	raw, etag, err := mgr.GetACL(ctx)
+	if err != nil {
+		return fmt.Errorf("enroll rig: GetACL: %w", err)
+	}
+
+	// Parse grants to detect any tag:laptop→tag:laptop path.
+	if err := assertNoRigRigGrant(raw); err != nil {
+		return fmt.Errorf("enroll rig: ACL security violation: %w", err)
+	}
+
+	if apply {
+		// SetACL (persist; idempotent write forces the read-back round-trip).
+		if err := mgr.SetACL(ctx, raw, etag); err != nil {
+			return fmt.Errorf("enroll rig: SetACL: %w", err)
+		}
+
+		// Validate-after-push: re-read and assert again (Phase 13 SC-3).
+		raw2, _, err := mgr.GetACL(ctx)
+		if err != nil {
+			return fmt.Errorf("enroll rig: ACL validate-after-push GetACL: %w", err)
+		}
+		if err := assertNoRigRigGrant(raw2); err != nil {
+			return fmt.Errorf("enroll rig: ACL validate-after-push failed: %w", err)
+		}
+		fmt.Fprintf(out, "ACL isolation verified: no tag:laptop↔tag:laptop grant found (absence-of-grant, SC-3)\n")
+	} else {
+		fmt.Fprintf(out, "[dry-run] Would verify ACL: no tag:laptop↔tag:laptop grant (absence-of-grant)\n")
+	}
+
+	return nil
+}
+
+// assertNoRigRigGrant parses the ACL JSON/HuJSON and returns an error if any grant
+// has tag:laptop in both Src and Dst (bidirectional check). This implements the
+// absence-of-grant security invariant for rig-to-rig isolation (Decision A1).
+func assertNoRigRigGrant(raw []byte) error {
+	// Strip HuJSON comments and trailing commas by tolerating parse errors on
+	// unknown tokens — we only need the "grants" array.
+	var doc enrollACLDoc
+	// Best-effort JSON parse (HuJSON comments will cause issues, but in practice
+	// the backend returns the standardized form after a GetACL round-trip).
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		// If we can't parse, we cannot assert safety — return error.
+		return fmt.Errorf("cannot parse ACL document: %w", err)
+	}
+
+	const laptopTag = "tag:laptop"
+	for _, g := range doc.Grants {
+		srcHasLaptop := containsStr(g.Src, laptopTag)
+		dstHasLaptop := containsStr(g.Dst, laptopTag)
+		if srcHasLaptop && dstHasLaptop {
+			return fmt.Errorf("tag:laptop→tag:laptop grant found in ACL (rig-to-rig lateral movement, T-14-10); remove this grant before enrolling")
+		}
+	}
+	return nil
+}
+
+// containsStr reports whether haystack contains needle (case-sensitive).
+func containsStr(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
 
 const oauthSecretEnv = "ABYSSLINK_TS_OAUTH_SECRET" //nolint:gosec // env var name, not a secret
 
@@ -36,19 +308,68 @@ func newEnrollCmd() *cobra.Command {
 		Use:   "enroll",
 		Short: "Enroll a device into the tailnet",
 	}
-	enroll.AddCommand(
-		newEnrollPhoneCmd(),
-		&cobra.Command{
-			Use:   "rig",
-			Short: "Add another laptop to the tailnet (v2 placeholder)",
-			Example: `  # Enroll a second laptop (v2 feature — stub for now)
-  abysslink enroll rig`,
-			RunE: func(cmd *cobra.Command, _ []string) error {
-				printerInfo(newPrinter(cmd), "Multi-rig enrollment is a v2 feature. For now, run `abysslink init` + `abysslink up` on the new machine.")
-				return nil
-			},
+	rigCmd := &cobra.Command{
+		Use:   "rig <name>",
+		Short: "Enroll another laptop as a named rig in the fleet",
+		Example: `  # Preview what enrollment would do (default: dry-run)
+  abysslink enroll rig workstation
+
+  # Apply: generate key, migrate secrets, push ACL, write config
+  abysslink enroll rig workstation --apply`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+			p := newPrinter(cmd)
+
+			b, bErr := cc.backend()
+			if bErr != nil {
+				return fmt.Errorf("enroll rig: backend init: %w", bErr)
+			}
+
+			// Build deps for keychain.
+			deps, dErr := buildDeps(ctx, cc)
+			if dErr != nil {
+				return fmt.Errorf("enroll rig: deps: %w", dErr)
+			}
+
+			// Optional: ACL capability (gate on Capabilities().ACL).
+			var aclMgr aclManagerFace
+			if b.Capabilities().ACL {
+				if am, ok := b.(backend.ACLManager); ok {
+					aclMgr = am
+				}
+			}
+
+			hostname, _ := b.Hostname(ctx)
+
+			printerInfo(p, styleBold.Render("Enroll rig: "+args[0]))
+			if cc.dryRun {
+				printerInfo(p, styleMuted.Render("Dry-run mode — no changes will be made. Use --apply to execute."))
+			}
+
+			cfgPath, _ := cmd.Flags().GetString("config")
+			if cfgPath == "" {
+				cfgPath = defaultConfigPath()
+			}
+
+			return enrollRig(ctx, enrollRigOpts{
+				name:        args[0],
+				cfgPath:     cfgPath,
+				keychain:    deps.Keychain,
+				apply:       cc.apply,
+				aclManager:  aclMgr,
+				hostname:    hostname,
+				backendType: cc.cfg.Backend.Type,
+				stdout:      cmd.OutOrStdout(),
+			})
 		},
-	)
+	}
+
+	enroll.AddCommand(newEnrollPhoneCmd(), rigCmd)
 	return enroll
 }
 
