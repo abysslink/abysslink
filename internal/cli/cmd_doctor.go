@@ -16,13 +16,21 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/abysslink/abysslink/internal/backend"
+	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/spf13/cobra"
 )
+
+// fleetKeychain is the subset of secrets.KeychainStore consumed by the fleet
+// doctor helpers (avoids exposing secrets package import in the helper signature).
+type fleetKeychain = secrets.KeychainStore
 
 // doctorFinding is the JSON record emitted per finding under --json.
 // Fields match the documented schema: module, check, severity, message, fix.
@@ -181,33 +189,17 @@ Exit codes:
 				return fmt.Errorf("doctor: %w", err)
 			}
 
-			// Headscale backend: append hs-* doctor findings.
-			if cc.cfg.Backend.Type == "headscale" {
-				doReq := backend.NewHeadscaleDoRequest(cc.cfg, cc.runner)
-				hsFindingsRaw, hsErr := backend.HeadscaleDoctorChecks(ctx, cc.cfg, cc.runner, doReq)
-				if hsErr == nil {
-					for _, hf := range hsFindingsRaw {
-						findings = append(findings, modules.Finding{
-							Module:   hf.Module,
-							Check:    hf.Check,
-							Severity: modules.Severity(hf.Severity),
-							Message:  hf.Message,
-						})
-					}
-				}
-			}
+			// Backend-specific + fleet: append all backend and fleet findings.
+			findings = appendBackendAndFleetFindings(ctx, cc, deps.Keychain, findings)
 
-			// NetBird backend: append nb-* doctor findings.
-			if cc.cfg.Backend.Type == "netbird" {
-				doReq := backend.NewNetBirdDoRequest(cc.cfg)
-				nbFindingsRaw := backend.NetBirdDoctorChecks(ctx, cc.cfg, cc.runner, doReq)
-				for _, nf := range nbFindingsRaw {
-					findings = append(findings, modules.Finding{
-						Module:   nf.Module,
-						Check:    nf.Check,
-						Severity: modules.Severity(nf.Severity),
-						Message:  nf.Message,
-					})
+			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
+			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")
+			strictFlag, _ := cmd.Flags().GetBool("strict")
+			if allRigsFlag && len(cc.cfg.Rigs) > 0 {
+				var fanErr error
+				findings, fanErr = appendAllRigsFindings(ctx, cc, findings, strictFlag)
+				if fanErr != nil && strictFlag {
+					return &exitError{code: exitCodeFatal}
 				}
 			}
 
@@ -244,6 +236,108 @@ Exit codes:
 			return nil
 		},
 	}
+}
+
+// appendBackendAndFleetFindings combines the headscale, netbird, and fleet
+// doctor finding appends. This consolidation keeps newDoctorCmd's RunE below
+// the gocyclo < 15 threshold.
+func appendBackendAndFleetFindings(ctx context.Context, cc *cmdContext, kc fleetKeychain, findings []modules.Finding) []modules.Finding {
+	// Headscale backend: append hs-* doctor findings.
+	if cc.cfg.Backend.Type == "headscale" {
+		doReq := backend.NewHeadscaleDoRequest(cc.cfg, cc.runner)
+		hsFindingsRaw, hsErr := backend.HeadscaleDoctorChecks(ctx, cc.cfg, cc.runner, doReq)
+		if hsErr == nil {
+			for _, hf := range hsFindingsRaw {
+				findings = append(findings, modules.Finding{
+					Module:   hf.Module,
+					Check:    hf.Check,
+					Severity: modules.Severity(hf.Severity),
+					Message:  hf.Message,
+				})
+			}
+		}
+	}
+
+	// NetBird backend: append nb-* doctor findings.
+	if cc.cfg.Backend.Type == "netbird" {
+		doReq := backend.NewNetBirdDoRequest(cc.cfg)
+		nbFindingsRaw := backend.NetBirdDoctorChecks(ctx, cc.cfg, cc.runner, doReq)
+		for _, nf := range nbFindingsRaw {
+			findings = append(findings, modules.Finding{
+				Module:   nf.Module,
+				Check:    nf.Check,
+				Severity: modules.Severity(nf.Severity),
+				Message:  nf.Message,
+			})
+		}
+	}
+
+	// Fleet: append mr-* doctor findings when rigs are enrolled.
+	return appendFleetFindings(ctx, cc, kc, findings)
+}
+
+// appendFleetFindings appends mr-* fleet isolation findings to findings when
+// rigs are enrolled. Returns the extended slice (may be same slice if no rigs).
+func appendFleetFindings(ctx context.Context, cc *cmdContext, kc fleetKeychain, findings []modules.Finding) []modules.Finding {
+	if len(cc.cfg.Rigs) == 0 {
+		return findings
+	}
+	b, _ := cc.backend()
+	var aclMgr backend.ACLManager
+	if b != nil {
+		aclMgr, _ = b.(backend.ACLManager)
+	}
+	for _, mf := range fleet.DoctorChecks(ctx, cc.cfg, kc, aclMgr) {
+		findings = append(findings, modules.Finding{
+			Module:   mf.Module,
+			Check:    mf.Check,
+			Severity: modules.Severity(mf.Severity),
+			Message:  mf.Message,
+		})
+	}
+	return findings
+}
+
+// appendAllRigsFindings fans out `abysslink doctor --json` to all enrolled rigs,
+// decodes the results, and merges them into findings with rig-prefixed Module names.
+// UNREACHABLE rigs surface as findings; error is non-nil only under --strict.
+func appendAllRigsFindings(ctx context.Context, cc *cmdContext, findings []modules.Finding, strict bool) ([]modules.Finding, error) {
+	const perRigTimeout = 30 * time.Second
+	results, fanErr := fleet.FanOut(ctx, cc.runner, cc.cfg.Rigs, perRigTimeout, strict, []string{"doctor", "--json"})
+	for _, res := range results {
+		if !res.Reachable {
+			sev := modules.SeverityWarning
+			if strict {
+				sev = modules.SeverityFatal
+			}
+			findings = append(findings, modules.Finding{
+				Module:   res.Rig.Name,
+				Check:    "rig-reachable",
+				Severity: sev,
+				Message:  fmt.Sprintf("rig %q is UNREACHABLE — could not collect remote doctor findings", res.Rig.Name),
+			})
+			continue
+		}
+		remoteFindings, _, decErr := fleet.DecodeFindings(res)
+		if decErr != nil {
+			findings = append(findings, modules.Finding{
+				Module:   res.Rig.Name,
+				Check:    "rig-decode",
+				Severity: modules.SeverityWarning,
+				Message:  fmt.Sprintf("rig %q doctor output could not be decoded: %v", res.Rig.Name, decErr),
+			})
+			continue
+		}
+		for _, rf := range remoteFindings {
+			findings = append(findings, modules.Finding{
+				Module:   res.Rig.Name + "/" + rf.Module,
+				Check:    rf.Check,
+				Severity: remoteSeverity(rf.Severity),
+				Message:  rf.Message,
+			})
+		}
+	}
+	return findings, fanErr
 }
 
 // findingFix maps a finding check name to a short remediation command or
@@ -300,6 +394,24 @@ func findingFix(check string) string {
 		"nb-proc-user": "Ensure netbird-server runs as a non-root service user: check systemd User= in the unit file",
 		"nb-runtime":   "Install a container runtime: brew install --cask docker  (or colima: brew install colima && colima start)",
 		"nb-sshcheck":  "", // permanent WARN — SSHCheck not available on NetBird; no fix possible
+		// Fleet isolation checks (mr-* checks).
+		"mr-rig-isolation":   "abysslink enroll rig <name> --apply  (re-pushes the rig-to-rig ACL deny)",
+		"mr-topic-isolation": "Give each rig a unique ntfy_topic in abysslink.yaml",
+		"mr-key-uniqueness":  "Rename the conflicting rig; rig names must be unique (they form the keychain service)",
 	}
 	return fixes[check]
+}
+
+// remoteSeverity converts a JSON severity string ("ok" | "warn" | "fatal") to
+// the modules.Severity integer. Unknown values map to SeverityWarning so
+// unrecognised remote findings degrade gracefully without crashing.
+func remoteSeverity(s string) modules.Severity {
+	switch strings.ToLower(s) {
+	case "ok":
+		return modules.SeverityOK
+	case "fatal":
+		return modules.SeverityFatal
+	default:
+		return modules.SeverityWarning
+	}
 }
