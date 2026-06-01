@@ -126,6 +126,7 @@ None.
 | 260530-8mf | fix(up): skip success summary when user declines ConfirmBlast; fix(acl): post-paste pause in applyManual so the flow waits for the user to save the ACL in the admin editor before returning | 2026-05-30 | a44bfd4 | [260530-8mf-fix-up-rune-so-user-no-on-confirmblast-a](.planning/quick/260530-8mf-fix-up-rune-so-user-no-on-confirmblast-a/) |
 | 260530-8uz | fix(hardening) + fix(power): rewrite scan warnings to be honest about which findings abysslink auto-fixes — hardening firewall is report-only (manual fix paths provided); pmset auto-fix only runs when `power.closed_lid_ac: keep-awake` is set in abysslink.yaml | 2026-05-30 | 53c3199 | [260530-8uz-make-hardening-power-scan-warnings-hones](.planning/quick/260530-8uz-make-hardening-power-scan-warnings-hones/) |
 | 260530-nl4 | feat(claudecode): add `abysslink claudecode disable` command that strips the abysslink notify hooks from ~/.claude/settings.json on demand (Stop + Notification), preserving all other hooks; dry-run default + --apply, writes via internal/audit | 2026-05-30 | 76aa21b | [260530-nl4-add-abysslink-claudecode-disable-command](.planning/quick/260530-nl4-add-abysslink-claudecode-disable-command/) |
+| 260602-1nz | fix(init): gate ensureTailscaleAccount huh prompts behind headless flag — thread autoYes → journeyStages() → stage-1 closure → ensureTailscaleAccount(p, headless bool); both init --yes and init with non-TTY stdin now exit 0 | 2026-06-02 | 1af28a4 | [260602-1nz-fix-g1-non-tty-init-errors-on-huh-tty-op](.planning/quick/260602-1nz-fix-g1-non-tty-init-errors-on-huh-tty-op/) |
 
 ## Deferred Items
 
@@ -145,7 +146,7 @@ None.
 | quick-task | 4 dangling quick-task slugs (no files on disk; 260526-l51, 260530-8mf/8uz/nl4) | Deferred | v2.0.0 close 2026-06-02 |
 | context | phase-11 CONTEXT 3 open questions (answered during planning) | Deferred | v2.0.0 close 2026-06-02 |
 | tech-debt | TestUpDryRunParity environment-dependent golden (not a regression) | RESOLVED 2026-06-02 (3cbeb36 — notify.HealthProbe seam; golden now deterministic) | v2.0.0 close 2026-06-02 |
-| issue | `init --yes </dev/null` (non-TTY) errors on TTY open instead of degrading gracefully (found in phase-10 UAT self-test; config writes OK, exit 1) | Open — needs non-TTY guard before first huh form | v2.0.0 close 2026-06-02 |
+| issue | `init --yes </dev/null` (non-TTY) errors on TTY open instead of degrading gracefully (found in phase-10 UAT self-test; config writes OK, exit 1) | RESOLVED 2026-06-02 (e2cefa9 — headless guard in ensureTailscaleAccount; both init --yes and plain init now exit 0 on non-TTY) | v2.0.0 close 2026-06-02 |
 
 ## Session Continuity
 
