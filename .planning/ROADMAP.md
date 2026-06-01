@@ -31,6 +31,19 @@ Decimal phases appear between their surrounding integers in numeric order.
 Phases 11–14 (18 plans) — backend-pluggable (Tailscale/Headscale/NetBird) + multi-rig fleet with per-rig keychain/ntfy/ACL isolation. Audit PASSED (15/15 requirements).
 → Archived: [`milestones/v2.0.0-ROADMAP.md`](milestones/v2.0.0-ROADMAP.md) · [`milestones/v2.0.0-REQUIREMENTS.md`](milestones/v2.0.0-REQUIREMENTS.md) · audit `v2.0.0-MILESTONE-AUDIT.md`
 
+---
+
+## v3.0.0 — Harden, Observe & Control
+
+Phases 16–21 (6 phases) — supply-chain hardening + tamper-evident audit + observability/metrics + opt-in Web UI dashboard + security audit pass + optional modules & fleet polish. Every new listener is opt-in, tailnet-bound, auth-gated, and gets its own FATAL doctor checks. No immutable v1/v2 floor is weakened.
+
+- [ ] **Phase 16: Supply-Chain Hardening & CI Gates** - govulncheck, semgrep, dependency-review, SLSA L2, cosign v3 keyless, SPDX+CycloneDX SBOM, harden-runner, reproducible builds, `abysslink verify`
+- [ ] **Phase 17: Tamper-Evident Audit Log + Fuzzing** - Hash-chained/HMAC-signed audit entries, external anchor, `abysslink audit` command surface, fuzz targets with seed corpus and gitleaks pre-commit hook
+- [ ] **Phase 18: Observability & Metrics** - `internal/metrics.Registry`, tailnet-IP-bound Prometheus endpoint, `abysslink report`, daemon `GET /status`, fleet daily digest
+- [ ] **Phase 19: Web UI Dashboard (opt-in)** - `//go:build webui` opt-in module, safeweb CSRF, WhoIs auth, TLS via Tailscale cert, read-only gate, CSP self, separate goreleaser artifact
+- [ ] **Phase 20: Security Audit Pass & Doctor Checks** - `abysslink audit [--pentest]`, gosec/semgrep zero findings, refreshed threat model per backend, 18+ new sec-* doctor checks
+- [ ] **Phase 21: Optional Modules & Fleet Polish** - upsnap (WoL with --apply gate), atuin, sandbox (Linux-only Landlock), asciinema (credential warning), NetBird posture-check + events tail, scope-cut docs
+
 ## Phase Details
 
 ### Phase 1: Repo Bootstrap
@@ -209,10 +222,123 @@ Plans:
 
 ---
 
+## v3.0.0 Phase Details
+
+### Phase 16: Supply-Chain Hardening & CI Gates
+
+**Goal**: Every PR and release is automatically scanned for vulnerabilities and supply-chain tampering; release artifacts carry SLSA L2 provenance, cosign v3 keyless signatures, and dual-format SBOMs; two builds from the same tag are byte-identical
+**Depends on**: Nothing (CI/build-layer only; no runtime binary changes)
+**Requirements**: SCH-01, SCH-02, SCH-03, SCH-04, SCH-05, SCH-06, SCH-07
+**Success Criteria** (what must be TRUE):
+
+  1. Every PR CI run executes `govulncheck ./...` (module mode), `semgrep` OSS ruleset, and `actions/dependency-review-action`; a PR with a known reachable CVE or a new AGPL dependency fails to merge
+  2. A tagged release produces a `.bundle` file (cosign v3 keyless) that passes `cosign verify-blob --bundle <file> --offline` without Rekor reachability; `scripts/install.sh` attempts online verification first and falls back to offline bundle, never fails open
+  3. `goreleaser --snapshot` produces both SPDX and CycloneDX SBOMs per artifact; release workflow jobs are split into minimum-privilege roles (build/sign/attest), all third-party actions are pinned to full commit SHAs, and `step-security/harden-runner >= v2.17` is active on every job
+  4. Building the binary twice from the same commit SHA produces identical SHA-256 outputs; `.goreleaser.yaml` uses `{{.CommitDate}}`, `-trimpath`, and `SOURCE_DATE_EPOCH`
+  5. `abysslink verify` fetches and verifies the running binary's cosign signature and SLSA provenance on demand; `abysslink version --provenance` displays the embedded commit SHA and build metadata
+  6. `supply-cosign-bundle` doctor check passes: offline bundle verification succeeds for the installed binary; `supply-slsa-source` check verifies the provenance `gitCommit` field matches the version tag's commit
+
+**Plans**: TBD
+
+### Phase 17: Tamper-Evident Audit Log + Fuzzing
+
+**Goal**: The audit log is hash-chained and HMAC-signed so any deletion, modification, or truncation is detectable; fuzz tests on config, HuJSON, and HMAC parsers fail closed on malformed input; no secret body ever appears in the log
+**Depends on**: Phase 16 (clean CI gates fuzz results)
+**Requirements**: AUD-01, AUD-02, AUD-03, AUD-04, AUD-05, AUD-06, AUD-07, AUD-08
+**Success Criteria** (what must be TRUE):
+
+  1. `audit.Entry` gains `prev_hash` and `sig` (both `omitempty`) without breaking existing unsigned v1/v2 entries; `audit.NewSigned(logPath, kc)` is wired into the daemon and `up --apply` path; `audit.New` callers are unaffected
+  2. `abysslink audit verify` walks the full chain and exits 2 with `CHAIN BROKEN at entry N` on any gap, fork, or HMAC mismatch; `abysslink audit tail/ls/export` emit entries through `Printer` with `--json` support; `abysslink backup verify` checks chain integrity
+  3. A process-level mutex spans the entire read-compute-write sequence; a concurrent-write stress test (50 goroutines) produces exactly 50 entries each with a valid predecessor, with zero chain forks
+  4. The HMAC signing input is type-restricted to `title string` + `diffHash [32]byte` only; no field named body, content, data, raw, or payload can be added to `AuditEntry` without a staticcheck/gosec violation; grepping the audit log after any `repair --apply` finds no keychain-handle values as field values
+  5. An external anchor is written every 100 entries or 1 hour (whichever comes first), including the entry count; `audit-anchor-age` WARN fires if the newest anchor is older than 24 hours; `audit-count-vs-anchor` FATAL fires if the current entry count is less than the anchor's recorded count (truncation detected)
+  6. `FuzzConfigLoad`, `FuzzHuJSONParse`, and `FuzzHMACVerify` fuzz targets each have a seed corpus covering empty, single-token, max-length, and known-malformed inputs; a `len(b) > 4096` guard prevents CI OOM; a gitleaks pre-commit hook blocks any real secret from entering `testdata/fuzz/`; running each target for 60s in CI does not produce a panic or hang
+
+**Plans**: TBD
+
+### Phase 18: Observability & Metrics
+
+**Goal**: `abysslinkd` can expose a tailnet-IP-bound, opt-in Prometheus metrics endpoint and a `GET /status` JSON endpoint; `abysslink report` exports a point-in-time security posture; a fleet daily digest fires via the existing Notifier; no module ever imports `prometheus/client_golang` directly
+**Depends on**: Phase 17 (clean audit seams; CI gates)
+**Requirements**: OBS-01, OBS-02, OBS-03, OBS-04, OBS-05, OBS-06, OBS-07, OBS-08
+**Success Criteria** (what must be TRUE):
+
+  1. `internal/metrics.Registry` interface and `NoopRegistry` are in `modules.Deps` (nil-safe); a depguard lint rule rejects any import of `github.com/prometheus/client_golang` outside `internal/daemon/metrics_server.go`; `make lint` fails on a violation
+  2. Setting `observability.metrics.enabled: true` starts a tailnet-IP-bound listener on the configured port; `config.Validate` rejects `0.0.0.0` or `::` for `bind_addr` with the same error class as Funnel rejection; the `metrics-bind-tailnet` doctor check is FATAL
+  3. Metric labels use a compile-time allowlist; label names `hostname`, `topic`, `user`, `node_id`, and `ip` are rejected at registration; `sanitizeLabel()` maps unlisted values to `other`; `met-label-audit` and `met-cardinality` doctor checks are active at daemon startup
+  4. Disabling metrics in config and triggering a hot-reload closes the metrics TCP listener within 500 ms; `met-disabled-listener` doctor check confirms no process is listening on the configured port when `enabled: false`
+  5. `abysslink report` emits a JSON + human posture snapshot (doctor findings, last N audit entries, per-rig reachability) via `Printer`; `--all-rigs` fans out via `fleet.FanOut`; exit codes 0/1/2 match finding severity
+  6. Daemon `GET /status` endpoint returns a JSON object consumed by the Web UI (Phase 19); fleet daily digest fires once per day via the existing `Notifier` using a dedicated digest ntfy topic with opaque rig IDs and no cross-rig secret leak
+
+**Plans**: TBD
+
+### Phase 19: Web UI Dashboard (opt-in)
+
+**Goal**: An operator who explicitly enables the Web UI can view fleet status, doctor findings, and the audit log timeline in a browser over the tailnet — with TLS, Tailscale WhoIs auth, CSRF protection, and a read-only gate enforced at both the schema and HTTP layers; the base binary excludes the UI entirely
+**Depends on**: Phase 17 (audit.ReadLog), Phase 18 (GET /status, metrics.Registry)
+**Requirements**: WEB-01, WEB-02, WEB-03, WEB-04, WEB-05, WEB-06, WEB-07
+**Success Criteria** (what must be TRUE):
+
+  1. The base binary built without `--tags webui` contains zero bytes of Web UI code; goreleaser produces a separate `--tags webui` artifact; `webui.enabled: false` default means the listener never starts unless explicitly opted in
+  2. `config.Validate` rejects `0.0.0.0`/`::` for the webui bind address and rejects `read_only: false`; `webui-bind`, `webui-funnel`, and `webui-mutations-disabled` doctor checks are all FATAL; the startup security note is printed to stderr on first enable
+  3. TLS is required via `tailscale.com/client/local.Client.GetCertificate`; a `webui-tls` FATAL doctor check fires if TLS is disabled; no plaintext listener is permitted
+  4. Every request passes through WhoIs auth middleware; a request from `127.0.0.1` (loopback) returns 403 — not trusted-local; `webui-auth` and `webui-whoami-local` doctor checks are active; an automated test asserts loopback → 403
+  5. `tailscale.com/safeweb` CSRF is active on every non-GET endpoint from day one; a POST to any endpoint without a valid CSRF token returns 403; `webui-csrf` is a FATAL doctor check; a test issues an unauthenticated POST and asserts 403
+  6. All templates use `html/template` (never `text/template`); htmx is embedded via `embed.FS` with a SHA-384 SRI attribute; CSP header is `default-src 'self'` with no `unsafe-inline` or CDN sources; `gosec G203` lint rule is active; `webui-csp` doctor check verifies the header on a live request
+  7. Read-only views (fleet status, doctor findings, audit-log timeline without hashes or bodies, notify history ring of 100) are reachable and correct; WhoIs availability on Headscale/NetBird is resolved per the research findings (backend-conditional auth or disable path); startup prints a one-time loud security note
+
+**Plans**: TBD
+**UI hint**: yes
+**Research needed**: WhoIs on Headscale/NetBird backends, `GetCertificate` import path, `safeweb` CSRF API surface
+
+### Phase 20: Security Audit Pass & Doctor Checks
+
+**Goal**: `abysslink audit` aggregates all security findings; gosec and semgrep pass with zero unsuppressed results; a refreshed threat model covers all three backends plus every v3 surface; 18 or more new `sec-*` doctor checks are active and FATAL/WARN-classified
+**Depends on**: Phase 16 (CI gates), Phase 18 (metrics surface), Phase 19 (Web UI surface)
+**Requirements**: SEC-01, SEC-02, SEC-03, SEC-04
+**Success Criteria** (what must be TRUE):
+
+  1. `abysslink audit verify` (no flags) is read-only and aggregates doctor findings plus the audit chain check; `abysslink audit --fix` requires `--apply`; `abysslink audit --pentest` runs the full sec-* check suite and exits 2 on any FATAL finding; `--format=json` emits machine-parseable output through `Printer`
+  2. `make lint` runs gosec and semgrep with zero unsuppressed findings; every suppression comment includes a justification; CI blocks merge on any new unsuppressed finding
+  3. A refreshed threat-model document covers all three backends (Tailscale, Headscale, NetBird), the fleet, and every v3 surface (metrics endpoint, Web UI, audit chain); `abysslink threat-model --backend=<name>` renders the backend-specific section
+  4. At least 18 new `sec-*` doctor checks are registered and produce the correct severity: `sec-ssh-permitroot` (FATAL), `sec-ssh-x11forwarding` (WARN), `sec-ssh-agentforwarding` (WARN), `sec-ssh-maxauthtries` (WARN), `sec-ssh-logingracetime` (WARN), `sec-ssh-ciphers` (WARN), `sec-audit-log-exists` (FATAL), `sec-audit-log-perms` (FATAL, mode 0600), `sec-no-world-readable-config` (FATAL), `sec-daemon-socket-perms` (FATAL), `sec-listener-bind` (FATAL), `sec-funnel-schema` (FATAL), `sec-disk-encryption` (FATAL), `sec-binary-signed` (WARN), `sec-upgrade-verified` (WARN), plus checks covering metrics-bind, webui-bind, and audit-anchor-age
+
+**Plans**: TBD
+
+### Phase 21: Optional Modules & Fleet Polish
+
+**Goal**: The four previously-stubbed optional modules (upsnap, atuin, sandbox, asciinema) have real implementations with their hard-floor acceptance gates; NetBird posture-check management and event tailing close the Tailscale parity gap; scope-cut documentation is published
+**Depends on**: Phase 17 (audit.WriteFile seams), Phase 18 (Notifier, fleet.FanOut)
+**Requirements**: MOD3-01, MOD3-02, MOD3-03, MOD3-04, MOD3-05, MOD3-06
+**Success Criteria** (what must be TRUE):
+
+  1. `abysslink wol <rig>` without `--apply` prints a dry-run summary and sends no UDP packet; `abysslink wol <rig> --apply` sends the magic packet, writes an audit entry containing the rig name and MAC address, and is confirmed by the `wol-apply-gate` FATAL doctor check; `upsnap-bind` and `upsnap-no-public` checks are active
+  2. `abysslink asciinema rec` emits a non-suppressible credential warning before starting any recording; the `asciinema-rec-warning` FATAL doctor check verifies the warning is present in the wrapper; no recording starts without the user passing the warning prompt
+  3. The atuin module installs the client, writes `~/.config/atuin/config.toml` via `audit.WriteFile`, and activates shell integration; `atuin-bind` is FATAL and `atuin-key-backed-up` is WARN; the sandbox module applies Linux-only Landlock profiles via `audit.WriteFile` and returns `ErrNotSupported` on macOS; `sandbox-landlock-supported` is WARN on unsupported kernels
+  4. `abysslink netbird posture list/create/delete` manages NetBird posture checks via the existing NetBird backend client; `abysslink netbird events [--follow]` tails the NetBird event stream; `nb-posture-active` is a WARN doctor check
+  5. `docs/headscale-ha.md` and `docs/netbird-scim.md` are published explaining why Headscale PostgreSQL HA and NetBird SCIM are out of scope, with the known-workaround patterns documented; no implementation is attempted for either
+  6. `make lint test` is green across all new module code; all shell calls in the four new module implementations go through `shell.Runner` with no bare `os/exec`; every file mutation goes through `internal/audit.WriteFile`
+
+**Plans**: TBD
+**Research needed**: WoL library selection (mdlayher/wol vs sabhiram/go-wol), Landlock distro/kernel compatibility matrix
+
+---
+
+## Out of Scope (v3.0.0)
+
+- Headscale PostgreSQL HA — no upstream HA support; documented in `docs/headscale-ha.md` (MOD3-06)
+- NetBird SCIM provisioning — commercial-edition-only; documented in `docs/netbird-scim.md` (MOD3-06)
+- macOS sandbox/Landlock — private Apple API; Linux-only stub returns `ErrNotSupported` on macOS (MOD3-03)
+- OpenTelemetry — 15-25 MB bloat; rejected
+- tsnet embedded node — use `tailscale.com/client/local` instead
+- Any new AGPL dependency — depguard-enforced rejection
+
+---
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 16 → 17 → 18 → 19 → 20 → 21
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -230,3 +356,9 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 12. Headscale Backend | 5/5 | Complete    | 2026-05-31 |
 | 13. NetBird Backend | 5/5 | Complete   | 2026-06-01 |
 | 14. Multi-Rig Fleet | 5/5 | Complete    | 2026-06-01 |
+| 16. Supply-Chain Hardening & CI Gates | 0/? | Not started | - |
+| 17. Tamper-Evident Audit Log + Fuzzing | 0/? | Not started | - |
+| 18. Observability & Metrics | 0/? | Not started | - |
+| 19. Web UI Dashboard (opt-in) | 0/? | Not started | - |
+| 20. Security Audit Pass & Doctor Checks | 0/? | Not started | - |
+| 21. Optional Modules & Fleet Polish | 0/? | Not started | - |
