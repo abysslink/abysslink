@@ -144,7 +144,8 @@ None.
 | verification | phase-12 VERIFICATION human_needed | Deferred | v2.0.0 close 2026-06-02 |
 | quick-task | 4 dangling quick-task slugs (no files on disk; 260526-l51, 260530-8mf/8uz/nl4) | Deferred | v2.0.0 close 2026-06-02 |
 | context | phase-11 CONTEXT 3 open questions (answered during planning) | Deferred | v2.0.0 close 2026-06-02 |
-| tech-debt | TestUpDryRunParity environment-dependent golden (not a regression) | Deferred | v2.0.0 close 2026-06-02 |
+| tech-debt | TestUpDryRunParity environment-dependent golden (not a regression) | RESOLVED 2026-06-02 (3cbeb36 — notify.HealthProbe seam; golden now deterministic) | v2.0.0 close 2026-06-02 |
+| issue | `init --yes </dev/null` (non-TTY) errors on TTY open instead of degrading gracefully (found in phase-10 UAT self-test; config writes OK, exit 1) | Open — needs non-TTY guard before first huh form | v2.0.0 close 2026-06-02 |
 
 ## Session Continuity
 
