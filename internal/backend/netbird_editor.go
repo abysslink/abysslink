@@ -279,9 +279,15 @@ func (e *netbirdEditor) PushDenyAllBaseline(ctx context.Context) error {
 	return nil
 }
 
-// PushPolicy posts a single raw policy JSON message to POST /api/policies.
-// Used by ACLManager.SetACL.
-func (e *netbirdEditor) PushPolicy(ctx context.Context, raw json.RawMessage) error {
+// PushPolicy posts a single raw policy JSON message to POST /api/policies,
+// then re-reads the created policy and validates content equality per D-08/SC-3.
+//
+// The intent parameter carries the rules from the input policy body and is
+// passed to Validate() so any silently dropped or altered rule returns an error
+// (FAIL, not warning). This closes the "every ACL policy push" requirement of
+// SC-3 for the general-purpose SetACL path — mirroring the Validate() call
+// already present in PushDenyAllBaseline.
+func (e *netbirdEditor) PushPolicy(ctx context.Context, raw json.RawMessage, intent []nbPolicyRule) error {
 	resp, err := e.doReq(ctx, http.MethodPost, "/api/policies", raw)
 	if err != nil {
 		return fmt.Errorf("netbird: push policy: %w", err)
@@ -289,6 +295,20 @@ func (e *netbirdEditor) PushPolicy(ctx context.Context, raw json.RawMessage) err
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("netbird: push policy: unexpected HTTP %d", resp.StatusCode)
+	}
+
+	// D-08 / SC-3: parse the response to extract the created policy ID, then
+	// re-read and validate content equality. A mismatch (dropped/altered rule)
+	// is a FAIL, not a warning.
+	var created nbPolicy
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return fmt.Errorf("netbird: push policy: parse response: %w", err)
+	}
+	if created.ID == "" {
+		return fmt.Errorf("netbird: push policy: empty policy ID in response")
+	}
+	if err := e.Validate(ctx, created.ID, intent); err != nil {
+		return fmt.Errorf("netbird: push policy: validate: %w", err)
 	}
 	return nil
 }

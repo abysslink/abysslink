@@ -523,6 +523,124 @@ func TestNetBird_Validate(t *testing.T) {
 	})
 }
 
+// TestNetBird_SetACL_ValidatesAfterPush tests that SetACL re-reads each pushed
+// policy and enforces content equality per D-08/SC-3.  Three sub-cases:
+//
+//   - success: server echoes back the exact rules → no error
+//   - dropped_rule: GET returns one fewer rule than POSTed → error (FAIL)
+//   - content_mismatch: GET returns rules with altered action → error (FAIL)
+func TestNetBird_SetACL_ValidatesAfterPush(t *testing.T) {
+	t.Setenv("ABYSSLINK_NB_API_KEY", "nbp_test")
+
+	// Helper: build a minimal httptest.Server whose GET /api/policies/{id}
+	// returns the supplied policyByIDResp JSON (already JSON-encoded).
+	// POST /api/policies echoes back an assigned ID "p1".
+	makeSrv := func(t *testing.T, policyByIDJSON []byte) *httptest.Server {
+		t.Helper()
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/api/policies":
+				// Decode the request so we can echo back with an assigned ID.
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				body["id"] = "p1"
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(body)
+			case r.Method == http.MethodGet && r.URL.Path == "/api/policies/p1":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(policyByIDJSON)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+	}
+
+	// The policy JSON we will push via SetACL.
+	pushedPolicy := `[{"name":"allow-ssh","enabled":true,"rules":[{"name":"ssh","enabled":true,"action":"accept","protocol":"tcp","bidirectional":false,"sources":["grp-phone"],"destinations":["grp-laptop"],"ports":["22"],"port_ranges":[]}]}]`
+
+	// exactEcho: GET /api/policies/p1 returns the same rule that was POSTed.
+	exactEchoResp, _ := json.Marshal(map[string]any{
+		"id":      "p1",
+		"name":    "allow-ssh",
+		"enabled": true,
+		"rules": []map[string]any{
+			{
+				"id": "r1", "name": "ssh", "enabled": true,
+				"action": "accept", "protocol": "tcp", "bidirectional": false,
+				"sources":      []string{"grp-phone"},
+				"destinations": []string{"grp-laptop"},
+				"ports":        []string{"22"},
+				"port_ranges":  []any{},
+			},
+		},
+	})
+
+	// droppedRule: GET returns zero rules (server silently dropped the rule).
+	droppedRuleResp, _ := json.Marshal(map[string]any{
+		"id": "p1", "name": "allow-ssh", "enabled": true,
+		"rules": []any{},
+	})
+
+	// contentMismatch: GET returns same rule count but action altered to "drop".
+	contentMismatchResp, _ := json.Marshal(map[string]any{
+		"id":      "p1",
+		"name":    "allow-ssh",
+		"enabled": true,
+		"rules": []map[string]any{
+			{
+				"id": "r1", "name": "ssh", "enabled": true,
+				"action":   "drop", // wrong — was "accept" in intent
+				"protocol": "tcp", "bidirectional": false,
+				"sources":      []string{"grp-phone"},
+				"destinations": []string{"grp-laptop"},
+				"ports":        []string{"22"},
+				"port_ranges":  []any{},
+			},
+		},
+	})
+
+	t.Run("success_exact_echo", func(t *testing.T) {
+		srv := makeSrv(t, exactEchoResp)
+		defer srv.Close()
+		cfg := netbirdCfg(srv.URL)
+		b, err := backend.New(cfg, shell.NewMockRunner())
+		require.NoError(t, err)
+		acl, ok := b.(backend.ACLManager)
+		require.True(t, ok)
+		err = acl.SetACL(context.Background(), []byte(pushedPolicy), "")
+		require.NoError(t, err, "SetACL must succeed when server echoes back the exact rules")
+	})
+
+	t.Run("dropped_rule_is_fail", func(t *testing.T) {
+		srv := makeSrv(t, droppedRuleResp)
+		defer srv.Close()
+		cfg := netbirdCfg(srv.URL)
+		b, err := backend.New(cfg, shell.NewMockRunner())
+		require.NoError(t, err)
+		acl, ok := b.(backend.ACLManager)
+		require.True(t, ok)
+		err = acl.SetACL(context.Background(), []byte(pushedPolicy), "")
+		require.Error(t, err, "SetACL must return error when server drops a rule (count mismatch)")
+		assert.Contains(t, err.Error(), "count mismatch",
+			"error message must indicate a rule count mismatch")
+	})
+
+	t.Run("content_mismatch_is_fail", func(t *testing.T) {
+		srv := makeSrv(t, contentMismatchResp)
+		defer srv.Close()
+		cfg := netbirdCfg(srv.URL)
+		b, err := backend.New(cfg, shell.NewMockRunner())
+		require.NoError(t, err)
+		acl, ok := b.(backend.ACLManager)
+		require.True(t, ok)
+		err = acl.SetACL(context.Background(), []byte(pushedPolicy), "")
+		require.Error(t, err, "SetACL must return error when server returns altered rule content")
+		assert.Contains(t, err.Error(), "mismatch",
+			"error message must indicate a content mismatch")
+	})
+}
+
 // TestNetBird_Up_EnvInjection verifies that Up():
 //   - reads TS_AUTHKEY from env (never argv)
 //   - calls PushDenyAllBaseline via netbird editor
