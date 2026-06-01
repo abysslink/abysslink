@@ -47,33 +47,40 @@ func GenerateSigningKey() (string, error) {
 
 // SignRigMessage computes an HMAC-SHA256 signature over the canonical string
 //
-//	rigName + "." + ts + "." + message
+//	rigName + "." + ts + "." + title + "." + message
 //
-// where ts is an epoch-seconds timestamp string. The hexKey parameter is the
-// hex-encoded 32-byte signing key returned by GenerateSigningKey (or retrieved
-// from the OS keychain). The signature is returned as a lowercase-hex string.
+// where ts is an epoch-seconds timestamp string and title is the notification
+// subject (X-Title header). The hexKey parameter is the hex-encoded 32-byte
+// signing key returned by GenerateSigningKey (or retrieved from the OS keychain).
+// The signature is returned as a lowercase-hex string.
 //
 // Security: uses crypto/hmac — never hand-rolled MAC (T-14-02). The canonical
 // string format ensures the verifier can reconstruct the signed payload given
-// the same three components (Pitfall 6: timestamp must be transmitted alongside
+// the same four components (Pitfall 6: timestamp must be transmitted alongside
 // the signature so the receiver can recompute — see D-NI-03).
-func SignRigMessage(hexKey, rigName, ts, message string) (string, error) {
+//
+// WR-02: title is included so a relay cannot alter X-Title (the displayed subject
+// on the phone) without invalidating the HMAC signature.
+func SignRigMessage(hexKey, rigName, ts, title, message string) (string, error) {
 	keyBytes, err := hex.DecodeString(hexKey)
 	if err != nil {
 		return "", fmt.Errorf("fleet: sign: decode key: %w", err)
 	}
 	mac := hmac.New(sha256.New, keyBytes)
-	_, _ = mac.Write([]byte(rigName + "." + ts + "." + message))
+	_, _ = mac.Write([]byte(rigName + "." + ts + "." + title + "." + message))
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
-// VerifyRigMessage recomputes the HMAC-SHA256 over rigName + "." + ts + "." +
-// message and compares it against sigHex using hmac.Equal (constant-time
-// comparison, T-14-02). Returns true only when the signature matches exactly.
+// VerifyRigMessage recomputes the HMAC-SHA256 over
+//
+//	rigName + "." + ts + "." + title + "." + message
+//
+// and compares it against sigHex using hmac.Equal (constant-time comparison,
+// T-14-02). Returns true only when the signature matches exactly.
 //
 // Security: never use == on MACs — timing side-channel (T-14-02 / CLAUDE.md).
-func VerifyRigMessage(hexKey, rigName, ts, message, sigHex string) bool {
-	expected, err := SignRigMessage(hexKey, rigName, ts, message)
+func VerifyRigMessage(hexKey, rigName, ts, title, message, sigHex string) bool {
+	expected, err := SignRigMessage(hexKey, rigName, ts, title, message)
 	if err != nil {
 		return false
 	}
