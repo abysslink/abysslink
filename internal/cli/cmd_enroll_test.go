@@ -121,11 +121,11 @@ func TestEnrollRig_TopicCollision(t *testing.T) {
 	kc := newMockKeychain()
 
 	err = enrollRig(context.Background(), enrollRigOpts{
-		name:           "laptop2",
-		cfgPath:        cfgPath,
-		keychain:       kc,
-		apply:          true,
-		overrideTopic:  existingTopic, // force a collision
+		name:          "laptop2",
+		cfgPath:       cfgPath,
+		keychain:      kc,
+		apply:         true,
+		overrideTopic: existingTopic, // force a collision
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "topic", "error must mention topic collision")

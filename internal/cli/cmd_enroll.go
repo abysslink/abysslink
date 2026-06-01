@@ -64,15 +64,15 @@ type aclManagerFace interface {
 
 // enrollRigOpts carries all inputs for enrollRig, enabling clean test injection.
 type enrollRigOpts struct {
-	name          string              // rig name (validated against rigNameRe)
-	cfgPath       string              // path to abysslink.yaml
+	name          string // rig name (validated against rigNameRe)
+	cfgPath       string // path to abysslink.yaml
 	keychain      secrets.KeychainStore
-	apply         bool                // false = dry-run; true = apply
-	overrideTopic string              // optional: override the derived ntfy topic (for tests)
-	aclManager    aclManagerFace      // nil = skip ACL step (no ACL-capable backend)
-	hostname      string              // Tailscale hostname for the rig (empty = use os.Hostname)
-	backendType   string              // backend type string (empty = "tailscale")
-	stdout        io.Writer           // optional: capture stdout (nil = os.Stdout)
+	apply         bool           // false = dry-run; true = apply
+	overrideTopic string         // optional: override the derived ntfy topic (for tests)
+	aclManager    aclManagerFace // nil = skip ACL step (no ACL-capable backend)
+	hostname      string         // Tailscale hostname for the rig (empty = use os.Hostname)
+	backendType   string         // backend type string (empty = "tailscale")
+	stdout        io.Writer      // optional: capture stdout (nil = os.Stdout)
 }
 
 // aclGrant mirrors the subset of tailscale/acl.go aclGrant used for rig-to-rig detection.
@@ -103,12 +103,10 @@ func enrollRig(ctx context.Context, opts enrollRigOpts) error {
 		out = os.Stdout
 	}
 
-	// ── Step 0: Validate name ───────────────────────────────────────────────
 	if !rigNameRe.MatchString(opts.name) {
 		return fmt.Errorf("enroll rig: invalid rig name %q (must match ^[a-z0-9-]{1,63}$)", opts.name)
 	}
 
-	// ── Load config ─────────────────────────────────────────────────────────
 	cfg, err := config.Load(opts.cfgPath)
 	if err != nil {
 		cfg = config.Defaults()
@@ -116,81 +114,99 @@ func enrollRig(ctx context.Context, opts enrollRigOpts) error {
 
 	rigSvc := fleet.RigService(opts.name)
 
-	// ── Step 1: Generate HMAC signing key ────────────────────────────────────
-	hexKey, err := fleet.GenerateSigningKey()
+	if err := enrollRigGenerateKey(ctx, opts, rigSvc, out); err != nil {
+		return err
+	}
+	if err := enrollRigMigrateV1(ctx, opts, rigSvc, out); err != nil {
+		return err
+	}
+
+	topic, err := enrollRigDeriveTopic(opts, cfg)
 	if err != nil {
-		return fmt.Errorf("enroll rig: key gen: %w", err)
-	}
-	if opts.apply {
-		if opts.keychain == nil {
-			return fmt.Errorf("enroll rig: keychain unavailable")
-		}
-		if err := opts.keychain.Set(ctx, rigSvc, "hmac-signing-key", hexKey); err != nil {
-			return fmt.Errorf("enroll rig: store signing key: %w", err)
-		}
-		// Print the key ONCE to stdout with a one-time-warning box (mirror Tailnet Lock UX).
-		// NEVER write it to yaml or audit body (T-14-09, D-KN-01).
-		fmt.Fprintf(out, "\n")
-		fmt.Fprintf(out, "┌─────────────────────────────────────────────────────────────────┐\n")
-		fmt.Fprintf(out, "│  ONE-TIME SECRET: HMAC signing key for rig %q\n", opts.name)
-		fmt.Fprintf(out, "│  Store this in your password manager — it will not be shown again.\n")
-		fmt.Fprintf(out, "│  %s\n", hexKey)
-		fmt.Fprintf(out, "└─────────────────────────────────────────────────────────────────┘\n")
-		fmt.Fprintf(out, "\n")
-	} else {
-		fmt.Fprintf(out, "[dry-run] Would generate and store HMAC signing key for rig %q\n", opts.name)
+		return err
 	}
 
-	// ── Step 2: Migrate v1 keychain entries (non-destructive) ────────────────
-	// Known v1 accounts under service="abysslink". Headscale/NetBird keys are
-	// separate service names and must NOT be migrated here.
-	if opts.keychain != nil {
-		for _, acct := range v1KeychainAccounts {
-			val, getErr := opts.keychain.Get(ctx, "abysslink", acct)
-			if getErr != nil {
-				// Entry absent — skip silently (non-fatal).
-				continue
-			}
-			if opts.apply {
-				if setErr := opts.keychain.Set(ctx, rigSvc, acct, val); setErr != nil {
-					return fmt.Errorf("enroll rig: migrate keychain entry %q: %w", acct, setErr)
-				}
-			} else {
-				fmt.Fprintf(out, "[dry-run] Would migrate keychain entry abysslink/%s → %s/%s\n", acct, rigSvc, acct)
-			}
-		}
-	}
-
-	// ── Step 3: Derive ntfy topic + collision check ───────────────────────────
-	topic := opts.overrideTopic
-	if topic == "" {
-		suffix := make([]byte, 4)
-		if _, err := rand.Read(suffix); err != nil {
-			return fmt.Errorf("enroll rig: topic suffix: %w", err)
-		}
-		topic = "abysslink-" + opts.name + "-" + hex.EncodeToString(suffix)
-	}
-	for _, existing := range cfg.Rigs {
-		if existing.NtfyTopic == topic {
-			return fmt.Errorf("enroll rig: ntfy topic %q already used by rig %q (SC-1, D-NI-02); choose a unique name or override --ntfy-topic", topic, existing.Name)
-		}
-	}
-
-	// ── Step 4: Push rig-to-rig ACL deny (absence-of-grant) + validate-after-push ──
-	// Decision A1 (confirmed): Tailscale/Headscale HuJSON is default-deny; isolation
-	// is expressed as ABSENCE of a tag:laptop→tag:laptop grant. We:
-	//  (a) GetACL to read current document.
-	//  (b) Assert no tag:laptop→tag:laptop (or reverse) grant exists.
-	//      If found: return error (security violation — the admin must remove it).
-	//  (c) SetACL to persist (re-write the same doc) so the read-back round-trips.
-	//  (d) GetACL again to validate read-back confirms no rig↔rig allow path (SC-3).
 	if opts.aclManager != nil {
 		if err := enforceRigToRigACLDeny(ctx, opts.aclManager, opts.apply, out); err != nil {
 			return err
 		}
 	}
 
-	// ── Step 5: Append RigConfig + persist via config.Write (audit) ──────────
+	return enrollRigWriteConfig(opts, cfg, topic, out)
+}
+
+// enrollRigGenerateKey generates the HMAC signing key and stores it (or previews).
+// NEVER writes the key to yaml or audit body (T-14-09, D-KN-01).
+func enrollRigGenerateKey(ctx context.Context, opts enrollRigOpts, rigSvc string, out io.Writer) error {
+	hexKey, err := fleet.GenerateSigningKey()
+	if err != nil {
+		return fmt.Errorf("enroll rig: key gen: %w", err)
+	}
+	if !opts.apply {
+		fmt.Fprintf(out, "[dry-run] Would generate and store HMAC signing key for rig %q\n", opts.name)
+		return nil
+	}
+	if opts.keychain == nil {
+		return fmt.Errorf("enroll rig: keychain unavailable")
+	}
+	if err := opts.keychain.Set(ctx, rigSvc, "hmac-signing-key", hexKey); err != nil {
+		return fmt.Errorf("enroll rig: store signing key: %w", err)
+	}
+	// Print the key ONCE with a one-time-warning box (mirror Tailnet Lock UX).
+	fmt.Fprintf(out, "\n")
+	fmt.Fprintf(out, "┌─────────────────────────────────────────────────────────────────┐\n")
+	fmt.Fprintf(out, "│  ONE-TIME SECRET: HMAC signing key for rig %q\n", opts.name)
+	fmt.Fprintf(out, "│  Store this in your password manager — it will not be shown again.\n")
+	fmt.Fprintf(out, "│  %s\n", hexKey)
+	fmt.Fprintf(out, "└─────────────────────────────────────────────────────────────────┘\n")
+	fmt.Fprintf(out, "\n")
+	return nil
+}
+
+// enrollRigMigrateV1 copies v1 keychain entries into the rig-scoped service.
+// Known v1 accounts under service="abysslink". Headscale/NetBird keys are
+// separate service names and must NOT be migrated here. Non-destructive: v1 entries
+// remain accessible after migration. Dry-run previews without calling Set (Pitfall 4).
+func enrollRigMigrateV1(ctx context.Context, opts enrollRigOpts, rigSvc string, out io.Writer) error {
+	if opts.keychain == nil {
+		return nil
+	}
+	for _, acct := range v1KeychainAccounts {
+		val, getErr := opts.keychain.Get(ctx, "abysslink", acct)
+		if getErr != nil {
+			continue // Entry absent — skip silently (non-fatal).
+		}
+		if opts.apply {
+			if setErr := opts.keychain.Set(ctx, rigSvc, acct, val); setErr != nil {
+				return fmt.Errorf("enroll rig: migrate keychain entry %q: %w", acct, setErr)
+			}
+		} else {
+			fmt.Fprintf(out, "[dry-run] Would migrate keychain entry abysslink/%s → %s/%s\n", acct, rigSvc, acct)
+		}
+	}
+	return nil
+}
+
+// enrollRigDeriveTopic derives the ntfy topic and checks for collisions (SC-1, D-NI-02).
+func enrollRigDeriveTopic(opts enrollRigOpts, cfg *config.Config) (string, error) {
+	topic := opts.overrideTopic
+	if topic == "" {
+		suffix := make([]byte, 4)
+		if _, err := rand.Read(suffix); err != nil {
+			return "", fmt.Errorf("enroll rig: topic suffix: %w", err)
+		}
+		topic = "abysslink-" + opts.name + "-" + hex.EncodeToString(suffix)
+	}
+	for _, existing := range cfg.Rigs {
+		if existing.NtfyTopic == topic {
+			return "", fmt.Errorf("enroll rig: ntfy topic %q already used by rig %q (SC-1, D-NI-02); choose a unique name or override --ntfy-topic", topic, existing.Name)
+		}
+	}
+	return topic, nil
+}
+
+// enrollRigWriteConfig appends the RigConfig and persists via config.Write (audit).
+func enrollRigWriteConfig(opts enrollRigOpts, cfg *config.Config, topic string, out io.Writer) error {
 	hostname := opts.hostname
 	if hostname == "" {
 		h, hErr := os.Hostname()
@@ -223,7 +239,6 @@ func enrollRig(ctx context.Context, opts enrollRigOpts) error {
 		fmt.Fprintf(out, "[dry-run] Would enroll rig %q (topic=%s, backend=%s, hostname=%s)\n",
 			opts.name, topic, backendType, hostname)
 	}
-
 	return nil
 }
 
