@@ -25,20 +25,22 @@ import (
 )
 
 // TestIdentity_HMAC verifies HMAC signing and tamper detection.
+// WR-02: the canonical string is now rigName+"."+ts+"."+title+"."+message.
 func TestIdentity_HMAC(t *testing.T) {
 	key, err := fleet.GenerateSigningKey()
 	require.NoError(t, err)
 
 	rigName := "rigA"
 	ts := "1700000000"
+	title := "Build done"
 	message := "hello"
 
-	sig, err := fleet.SignRigMessage(key, rigName, ts, message)
+	sig, err := fleet.SignRigMessage(key, rigName, ts, title, message)
 	require.NoError(t, err)
 	assert.NotEmpty(t, sig, "signature must not be empty")
 
 	// Stable: recomputing with same inputs yields identical signature.
-	sig2, err := fleet.SignRigMessage(key, rigName, ts, message)
+	sig2, err := fleet.SignRigMessage(key, rigName, ts, title, message)
 	require.NoError(t, err)
 	assert.Equal(t, sig, sig2, "same inputs must produce identical HMAC")
 
@@ -46,19 +48,23 @@ func TestIdentity_HMAC(t *testing.T) {
 	assert.Regexp(t, `^[0-9a-f]+$`, sig, "signature must be lowercase hex")
 
 	// Tamper detection: altering rig-name returns false.
-	ok := fleet.VerifyRigMessage(key, "rigB", ts, message, sig)
+	ok := fleet.VerifyRigMessage(key, "rigB", ts, title, message, sig)
 	assert.False(t, ok, "tampered rig-name must fail verification")
 
 	// Tamper detection: altering timestamp returns false.
-	ok = fleet.VerifyRigMessage(key, rigName, "9999999999", message, sig)
+	ok = fleet.VerifyRigMessage(key, rigName, "9999999999", title, message, sig)
 	assert.False(t, ok, "tampered timestamp must fail verification")
 
+	// Tamper detection: altering title returns false (WR-02: title is now signed).
+	ok = fleet.VerifyRigMessage(key, rigName, ts, "tampered subject", message, sig)
+	assert.False(t, ok, "tampered title must fail verification (WR-02)")
+
 	// Tamper detection: altering message returns false.
-	ok = fleet.VerifyRigMessage(key, rigName, ts, "world", sig)
+	ok = fleet.VerifyRigMessage(key, rigName, ts, title, "world", sig)
 	assert.False(t, ok, "tampered message must fail verification")
 
 	// Correct inputs verify successfully.
-	ok = fleet.VerifyRigMessage(key, rigName, ts, message, sig)
+	ok = fleet.VerifyRigMessage(key, rigName, ts, title, message, sig)
 	assert.True(t, ok, "unaltered inputs must verify")
 }
 
