@@ -18,6 +18,7 @@ package cli
 import (
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -41,11 +42,14 @@ func TestDoctorFleetFixStrings(t *testing.T) {
 
 // TestRemoteSeverity verifies the remoteSeverity converter maps JSON strings to
 // modules.Severity integers correctly, including graceful degradation on unknown values.
+// WR-05: assertions now compare against expected Severity constants, not against the
+// function's own output — the old form (remoteSeverity(x) == remoteSeverity(x)) was
+// tautological and would pass even if the function returned wrong values for every input.
 func TestRemoteSeverity(t *testing.T) {
-	assert.Equal(t, remoteSeverity("ok"), remoteSeverity("ok"))
-	assert.Equal(t, remoteSeverity("fatal"), remoteSeverity("fatal"))
-	assert.Equal(t, remoteSeverity("warn"), remoteSeverity("warn"))
-	// Unknown values must degrade to Warning.
-	assert.Equal(t, remoteSeverity("warn"), remoteSeverity("unknown-severity"))
-	assert.Equal(t, remoteSeverity("warn"), remoteSeverity(""))
+	assert.Equal(t, modules.SeverityOK, remoteSeverity("ok"), `"ok" must map to SeverityOK`)
+	assert.Equal(t, modules.SeverityFatal, remoteSeverity("fatal"), `"fatal" must map to SeverityFatal`)
+	assert.Equal(t, modules.SeverityWarning, remoteSeverity("warn"), `"warn" must map to SeverityWarning`)
+	// Unknown values must degrade to Warning — not crash, not OK.
+	assert.Equal(t, modules.SeverityWarning, remoteSeverity("unknown-severity"), "unknown string must degrade to SeverityWarning")
+	assert.Equal(t, modules.SeverityWarning, remoteSeverity(""), "empty string must degrade to SeverityWarning")
 }
