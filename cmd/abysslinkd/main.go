@@ -27,8 +27,10 @@ import (
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/metrics"
 	notifymod "github.com/abysslink/abysslink/internal/modules"
 	notify "github.com/abysslink/abysslink/internal/modules/notify"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
@@ -76,6 +78,24 @@ func main() {
 	// goroutine exits cleanly on context cancellation (no leak) and never blocks
 	// the daemon's shutdown path.
 	startAnchorWriter(ctx, kc)
+
+	// Opt-in Prometheus /metrics listener (OBS-02/OBS-05, default OFF). When
+	// metrics are enabled, StartMetricsServer binds the tailnet IP and serves the
+	// OBS-05 gauges; when disabled it returns immediately (no goroutine). The
+	// backend client may be nil if the backend is not yet configured — it is
+	// passed through unconditionally because the nil guard is the first statement
+	// inside StartMetricsServer (T-18-16): no caller-side nil-check that would
+	// skip wiring. The registry is a live in-memory sink when enabled, NoopRegistry
+	// otherwise so every metrics call is nil-safe.
+	bc, bcErr := backend.New(cfg, runner)
+	if bcErr != nil {
+		slog.Warn("abysslinkd: backend client unavailable; metrics binding degraded", "err", bcErr)
+	}
+	var reg metrics.Registry = metrics.NoopRegistry{}
+	if cfg.Observability.Metrics.Enabled {
+		reg = metrics.NewMemRegistry()
+	}
+	daemon.StartMetricsServer(ctx, cfg, reg, bc)
 
 	// Daily fleet digest (OBS-08). Opt-in (default OFF). When enabled, fires at
 	// the configured local hour (default 08:00), calls `abysslink status --json`
