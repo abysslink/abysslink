@@ -102,6 +102,48 @@ func NewSigned(logPath string, kc KeychainStore) (*SignedAudit, error) {
 // LogPath returns the path this SignedAudit appends to.
 func (a *SignedAudit) LogPath() string { return a.logPath }
 
+// WriteFile is the signed-path equivalent of *Audit.WriteFile and satisfies the
+// AuditWriter interface. It records the intended mutation as an HMAC-signed,
+// hash-chained entry FIRST (recording only the SHA-256 of content, never the
+// content), then performs the physical write. This append-before-write ordering
+// matches *Audit.WriteFile and the project's audit-then-write convention
+// (T-17-14): if the process crashes between the log append and the write, an
+// operator sees the recorded intent without the effect.
+//
+// It uses context.Background() internally — justified by the AuditWriter
+// interface omitting ctx for drop-in *Audit compatibility (WriteFile is a
+// convenience wrapper over Append, not a hot path; see interface.go).
+func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error {
+	ctx := context.Background()
+
+	// Record intent in the signed chain FIRST (audit-then-write ordering).
+	diffHash := sha256.Sum256(content)
+	if err := a.Append(ctx, SignInput{Title: "write", DiffHash: diffHash}, path, dryRun); err != nil {
+		return err
+	}
+
+	if dryRun {
+		return nil
+	}
+
+	// Back up an existing file before overwriting it so the change is reversible.
+	if _, statErr := os.Stat(path); statErr == nil {
+		if _, bErr := Backup(path); bErr != nil {
+			return fmt.Errorf("audit: backup before write %s: %w", path, bErr)
+		}
+	}
+
+	tmp := path + ".abysslink.tmp"
+	if err := os.WriteFile(tmp, content, perm); err != nil { //nolint:gosec // perm supplied by caller; tmp is path-derived
+		return fmt.Errorf("audit: write temp %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: rename %s → %s: %w", tmp, path, err)
+	}
+	return nil
+}
+
 // hmacKey fetches and hex-decodes the stored HMAC key for this instance.
 func (a *SignedAudit) hmacKey(ctx context.Context) ([]byte, error) {
 	return fetchHMACKey(ctx, a.kc)
