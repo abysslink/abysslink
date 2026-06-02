@@ -119,24 +119,25 @@ verify_checksum() {
 }
 
 # --------------------------------------------------------------------------- #
-# Verify cosign signature (optional — skipped if cosign not installed)         #
+# Verify cosign v3 bundle signature (fails CLOSED on bad signature)           #
 # --------------------------------------------------------------------------- #
 
-verify_cosign() {
+verify_cosign_bundle() {
     _artifact="$1"
-    _cert="$2"
-    _sig="$3"
+    _bundle="$2"
     if have_cmd cosign; then
-        info "verifying cosign signature …"
+        info "verifying cosign v3 bundle signature ..."
         cosign verify-blob \
-            --certificate "${_cert}" \
-            --signature "${_sig}" \
+            --bundle "${_bundle}" \
+            --offline \
             --certificate-identity-regexp "https://github.com/${REPO}" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${_artifact}" || die "cosign verification failed"
-        info "cosign signature OK"
+            "${_artifact}" || die "cosign bundle verification FAILED — refusing to install (Pitfall 14: fail closed)"
+        info "cosign bundle OK"
     else
-        info "cosign not found — skipping signature verification (install cosign to enable)"
+        printf '\n  WARNING: cosign not found — skipping signature verification.\n'
+        printf '  Install cosign for supply-chain assurance:\n'
+        printf '    https://docs.sigstore.dev/cosign/system_config/installation/\n\n'
     fi
 }
 
@@ -186,17 +187,15 @@ main() {
 
     verify_checksum "${_tmpdir}/${_tarball}" "${_tmpdir}/${_sums_file}"
 
-    # Download cosign artifacts if cosign is available.
-    if have_cmd cosign; then
-        _cert_file="${_sums_file}.pem"
-        _sig_file="${_sums_file}.sig"
-        download "${_base_url}/${_cert_file}" "${_tmpdir}/${_cert_file}"
-        download "${_base_url}/${_sig_file}" "${_tmpdir}/${_sig_file}"
-        verify_cosign \
-            "${_tmpdir}/${_sums_file}" \
-            "${_tmpdir}/${_cert_file}" \
-            "${_tmpdir}/${_sig_file}"
-    fi
+    # Download the cosign v3 bundle unconditionally (it is always published) and
+    # verify it. Fails CLOSED when cosign is present and verification fails; warns
+    # (but continues — checksum already verified) when cosign is absent.
+    _bundle_file="${_sums_file}.bundle"
+    info "downloading cosign bundle ..."
+    download "${_base_url}/${_bundle_file}" "${_tmpdir}/${_bundle_file}"
+    verify_cosign_bundle \
+        "${_tmpdir}/${_sums_file}" \
+        "${_tmpdir}/${_bundle_file}"
 
     info "extracting ${_tarball} …"
     tar -xzf "${_tmpdir}/${_tarball}" -C "${_tmpdir}"
