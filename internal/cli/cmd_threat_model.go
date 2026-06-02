@@ -45,12 +45,47 @@ var threatRows = []threatRow{
 	{"ntfy binds tailnet IP only (never 0.0.0.0)", []string{"listen_address"}},
 }
 
+// v3SurfaceRows are the in-process surfaces added in v3 (metrics endpoint, Web
+// UI, audit chain). They render for every backend. Each failChecks entry lists
+// BOTH the sec-* alias ID and the original module check ID so the row flips to ✗
+// if either fires, even if the alias naming evolves.
+var v3SurfaceRows = []threatRow{
+	{"Metrics endpoint bound to tailnet IP only (sec-metrics-bind)", []string{"sec-metrics-bind", "metrics-bind-tailnet"}},
+	{"Web UI bound to tailnet IP only + WhoIs-authenticated (sec-webui-bind)", []string{"sec-webui-bind", "webui-bind"}},
+	{"Audit chain integrity verified < 24h (sec-audit-anchor-age)", []string{"sec-audit-anchor-age", "audit-anchor-age"}},
+}
+
+// backendRows holds the backend-specific threat rows appended when --backend is
+// supplied. An unknown backend key returns nil (no panic).
+var backendRows = map[string][]threatRow{
+	"tailscale": {
+		{"Tailnet Lock enabled", []string{"lock_enabled"}},
+		{"ACL policy not drifted", []string{"acl_drift"}},
+		{"Tailscale Funnel rejected at schema level (sec-funnel-schema)", []string{"sec-funnel-schema", "funnel"}},
+	},
+	"headscale": {
+		{"Headscale API served over TLS (hs-tls)", []string{"hs-tls"}},
+		{"Headscale API authenticated (hs-api-auth)", []string{"hs-api-auth"}},
+		{"No Tailnet Lock on Headscale — permanent advisory (hs-lock)", []string{"hs-lock"}},
+		{"Headscale OIDC allow-list configured (hs-oidc-filter)", []string{"hs-oidc-filter"}},
+	},
+	"netbird": {
+		{"NetBird management API over TLS (nb-tls)", []string{"nb-tls"}},
+		{"NetBird server meets minimum version (nb-version)", []string{"nb-version"}},
+		{"ZITADEL admin token configured (nb-zitadel)", []string{"nb-zitadel"}},
+		{"No Tailnet Lock on NetBird — permanent advisory (nb-lock)", []string{"nb-lock"}},
+	},
+}
+
 func newThreatModelCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "threat-model",
 		Short: "Print the security threat model with the current ✓/✗ status of each defense",
 		Example: `  # Show the threat model and current security posture
-  abysslink threat-model`,
+  abysslink threat-model
+
+  # Include backend-specific threat rows
+  abysslink threat-model --backend=headscale`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -58,6 +93,7 @@ func newThreatModelCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			backend, _ := cmd.Flags().GetString("backend")
 
 			// Derive live status from a doctor pass (best-effort).
 			present := map[string]bool{}
@@ -73,24 +109,50 @@ func newThreatModelCmd() *cobra.Command {
 			}
 
 			printerInfo(p, styleBold.Render("Abysslink threat model")+"  "+styleMuted.Render("(live status)"))
+
 			printerInfo(p, "")
-			for _, row := range threatRows {
-				ok := true
-				for _, c := range row.failChecks {
-					if present[c] {
-						ok = false
-						break
-					}
+			printerInfo(p, styleBold.Render("  Base threat model"))
+			renderThreatRows(p, threatRows, present)
+
+			printerInfo(p, "")
+			printerInfo(p, styleBold.Render("  v3 surfaces"))
+			renderThreatRows(p, v3SurfaceRows, present)
+
+			if backend != "" {
+				if rows, ok := backendRows[backend]; ok {
+					printerInfo(p, "")
+					printerInfo(p, styleBold.Render(fmt.Sprintf("  Backend: %s", backend)))
+					renderThreatRows(p, rows, present)
+				} else {
+					printerInfo(p, "")
+					printerInfo(p, styleMuted.Render(fmt.Sprintf("  unknown backend %q — rendering base + v3 surfaces only (valid: tailscale, headscale, netbird)", backend)))
 				}
-				mark := styleSuccess.Render("✓")
-				if !ok {
-					mark = styleFatal.Render("✗")
-				}
-				printerInfo(p, fmt.Sprintf("  %s  %s", mark, row.desc))
 			}
+
 			printerInfo(p, "")
 			printerInfo(p, styleMuted.Render("✗ means a doctor check is currently failing — run `abysslink doctor` for detail."))
 			return nil
 		},
+	}
+	cmd.Flags().String("backend", "", "render backend-specific threat rows (tailscale, headscale, netbird)")
+	return cmd
+}
+
+// renderThreatRows prints each row with a ✓/✗ mark derived from the present
+// (failing-check) set built from a live doctor pass.
+func renderThreatRows(p Printer, rows []threatRow, present map[string]bool) {
+	for _, row := range rows {
+		ok := true
+		for _, c := range row.failChecks {
+			if present[c] {
+				ok = false
+				break
+			}
+		}
+		mark := styleSuccess.Render("✓")
+		if !ok {
+			mark = styleFatal.Render("✗")
+		}
+		printerInfo(p, fmt.Sprintf("  %s  %s", mark, row.desc))
 	}
 }
