@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/daemon"
@@ -405,12 +406,53 @@ func secFixChmod(p Printer, path string, dryRun bool) bool {
 		printerError(p, "sec-fix: audit append failed; skipping chmod of "+path+": "+aerr.Error())
 		return false
 	}
-	if cerr := os.Chmod(path, 0o600); cerr != nil {
+	if cerr := secChmodNoFollow(path, 0o600); cerr != nil {
 		printerError(p, "sec-fix: chmod failed for "+path+": "+cerr.Error())
 		return false
 	}
 	printerInfo(p, "sec-fix: chmod 0600 "+path)
 	return true
+}
+
+// secChmodNoFollow tightens path's permissions without following symlinks
+// (WR-02). --fix exists to remediate a config dir that is already
+// group/other-accessible, so an attacker with write access to that dir could,
+// between the enumerating walk and the chmod, swap a flagged regular file for a
+// symlink to a sensitive target (e.g. ~/.ssh/authorized_keys) and redirect the
+// chmod. The plain os.Chmod follows symlinks, so we:
+//
+//  1. Lstat the path immediately before acting and REFUSE if it is now a symlink.
+//  2. For regular files, open with O_NOFOLLOW and fchmod the resulting fd — the
+//     kernel guarantees the fd refers to the inode that passed the lstat, closing
+//     the residual lstat→chmod race entirely.
+//
+// Non-regular targets (the daemon socket) cannot be opened O_RDONLY, so they
+// fall back to a plain chmod after the symlink guard; the lstat→chmod window is
+// acceptable there because the socket lives in a daemon-owned runtime dir, not
+// the user-writable config dir, and the symlink guard still blocks redirection.
+func secChmodNoFollow(path string, mode os.FileMode) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to chmod %s: path is a symlink (possible TOCTOU swap)", path)
+	}
+	if !fi.Mode().IsRegular() {
+		// Socket / device / etc.: cannot O_NOFOLLOW-open for fchmod; the symlink
+		// guard above already blocked the redirection case.
+		return os.Chmod(path, mode)
+	}
+	// #nosec G304 -- path is derived from trusted source functions (audit log
+	// path / abysslinkConfigDir() / daemon.SocketPath()), never from a
+	// Finding.Message (T-20-03-01); O_NOFOLLOW additionally refuses any symlink
+	// swapped in after the enumerating walk (WR-02).
+	fd, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("refusing to chmod %s: open O_NOFOLLOW failed (replaced or symlink): %w", path, err)
+	}
+	defer func() { _ = fd.Close() }()
+	return fd.Chmod(mode)
 }
 
 // tailEntries returns the last n entries of the log. A missing log yields an
