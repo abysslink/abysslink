@@ -226,7 +226,8 @@ func isPartial(r *http.Request) bool {
 
 // render writes either the full page (base.html) or just the "content" block,
 // depending on whether the request is an htmx partial. A render failure is
-// logged via slog and answered with a 500 (no stack trace to the client).
+// logged via slog and answered with the styled error view (no stack trace to
+// the client).
 func (h *Handlers) render(w http.ResponseWriter, r *http.Request, tmpl *template.Template, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	name := "base.html"
@@ -235,7 +236,28 @@ func (h *Handlers) render(w http.ResponseWriter, r *http.Request, tmpl *template
 	}
 	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
 		slog.Error("webui: render failed", "template", name, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.renderError(w, r, http.StatusInternalServerError, "Something went wrong",
+			"The dashboard could not render this view. Check the rig logs.")
+	}
+}
+
+// renderError serves the styled error.html view for a user-facing error
+// response (403 / 404 / 500). It writes the status code first, then executes
+// errorTmpl. Crucially it does NOT recurse into render() on a template failure:
+// a second failure falls back to a bare http.Error so a broken error template
+// can never loop. The body carries only approved copy — never a stack trace or
+// internal detail (V7 error-handling posture).
+func (h *Handlers) renderError(w http.ResponseWriter, r *http.Request, status int, heading, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	name := "base.html"
+	if isPartial(r) {
+		name = "content"
+	}
+	data := errorData{pageData: h.newPageData(r, ""), Heading: heading, Message: message}
+	if err := h.errorTmpl.ExecuteTemplate(w, name, data); err != nil {
+		// Fail safe: status already written, so just log. Do not recurse.
+		slog.Error("webui: error template render failed", "template", name, "err", err)
 	}
 }
 
@@ -252,7 +274,8 @@ func (h *Handlers) handleStatusFragment(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := h.statusTmpl.ExecuteTemplate(w, "status-panel", h.buildStatusData(r)); err != nil {
 		slog.Error("webui: render failed", "template", "status-panel", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.renderError(w, r, http.StatusInternalServerError, "Something went wrong",
+			"The status panel could not render. Check the rig logs.")
 	}
 }
 
@@ -353,7 +376,8 @@ func (h *Handlers) handleAudit(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if rerr := h.auditTmpl.ExecuteTemplate(w, "audit-rows", data); rerr != nil {
 			slog.Error("webui: render failed", "template", "audit-rows", "err", rerr)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			h.renderError(w, r, http.StatusInternalServerError, "Something went wrong",
+				"The audit timeline could not render. Check the rig logs.")
 		}
 		return
 	}
