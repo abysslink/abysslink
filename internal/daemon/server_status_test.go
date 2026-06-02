@@ -153,6 +153,28 @@ func TestDaemonStatus_RigIDOpaque(t *testing.T) {
 	assert.False(t, strings.Contains(string(body), "my-secret-host"), "no raw hostname anywhere in /status")
 }
 
+// TestDaemonStatus_PostureCompleteStub is the WR-05 regression: /status must
+// expose posture_complete=false this phase so consumers do not read the
+// hardcoded reachable=true and zeroed doctor counts as an authoritative
+// all-clear on a security-posture endpoint.
+func TestDaemonStatus_PostureCompleteStub(t *testing.T) {
+	client, cancel := startStatusServer(t, statusCfg())
+	defer cancel()
+
+	resp := doStatus(t, client, http.MethodGet)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(body), `"posture_complete"`, "posture_complete must be present")
+
+	var out struct {
+		PostureComplete bool `json:"posture_complete"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	assert.False(t, out.PostureComplete, "posture_complete must be false while doctor wiring is a stub (WR-05)")
+}
+
 func TestDaemonStatus_ContentType(t *testing.T) {
 	client, cancel := startStatusServer(t, statusCfg())
 	defer cancel()
