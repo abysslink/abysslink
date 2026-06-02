@@ -18,6 +18,7 @@ package cli
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -231,6 +232,15 @@ func slsaProvenanceExists(ctx context.Context, checksumPath string) bool {
 	if err != nil {
 		return false
 	}
-	// A populated attestations array indicates at least one attestation exists.
-	return strings.Contains(string(body), "\"attestations\"") && strings.Contains(string(body), "bundle")
+	// Decode the envelope and check for a populated attestations array rather
+	// than substring-guessing the raw JSON (which could false-positive on an
+	// empty array that merely mentions "bundle", or false-negative on a schema
+	// change).
+	var ar struct {
+		Attestations []json.RawMessage `json:"attestations"`
+	}
+	if json.Unmarshal(body, &ar) != nil {
+		return false
+	}
+	return len(ar.Attestations) > 0
 }
