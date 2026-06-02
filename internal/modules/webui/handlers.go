@@ -27,6 +27,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/modules"
+	"tailscale.com/safeweb"
 )
 
 // auditPageSize is the number of audit entries shown per page (UI-SPEC View 3).
@@ -54,6 +55,10 @@ type HandlerDeps struct {
 	Ring         *NotifyRingBuffer
 	AuditLogPath string
 	RigHostname  string
+	// AllowNotify mirrors webui.allow_notify. When true the notify view renders
+	// the scaffolded POST form (with its CSRF token); when false (the default,
+	// WEB-05) the form is omitted entirely so the only mutation path stays locked.
+	AllowNotify bool
 }
 
 // Handlers holds the parsed template sets and injected dependencies for every
@@ -140,6 +145,13 @@ type notifyRow struct {
 type notifyData struct {
 	pageData
 	Events []notifyRow
+	// AllowNotify gates whether the scaffolded POST form is rendered (WEB-05).
+	AllowNotify bool
+	// CSRFField is the safeweb-generated hidden CSRF input. It is template.HTML
+	// because it is framework-generated (gorilla/csrf), not user data, so it is
+	// safe to emit unescaped. Without it the (locked) allow_notify POST form
+	// could never pass safeweb's CSRF gate (WR-02).
+	CSRFField template.HTML
 }
 
 // pageData carries the shell fields every full-page view needs for base.html.
@@ -398,7 +410,17 @@ func (h *Handlers) handleNotify(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	h.render(w, r, h.notifyTmpl, notifyData{pageData: h.newPageData(r, "notify"), Events: rows})
+	data := notifyData{
+		pageData:    h.newPageData(r, "notify"),
+		Events:      rows,
+		AllowNotify: h.deps.AllowNotify,
+	}
+	if h.deps.AllowNotify {
+		// safeweb.CSRFTemplateField returns the masked-token hidden input the
+		// safeweb CSRF gate requires for the POST to be accepted (WEB-05).
+		data.CSRFField = safeweb.CSRFTemplateField(r)
+	}
+	h.render(w, r, h.notifyTmpl, data)
 }
 
 // handleNotifyPost is the scaffolded allow_notify mutation path. It is only
