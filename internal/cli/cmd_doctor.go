@@ -159,8 +159,10 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 // metricsDoctorFindings runs the four Phase 18 observability posture checks
 // against the metrics config and the live registry. All checks are read-only.
 //
-//   - metrics-bind-tailnet (FATAL): metrics enabled with a bind_addr containing
-//     0.0.0.0 or :: — the endpoint must bind the tailnet IP only (OBS-03).
+//   - metrics-bind-tailnet (FATAL): metrics enabled with a bind_addr that is
+//     either unspecified (0.0.0.0 / ::) or — when the backend tailnet IP is
+//     resolvable — does not equal that tailnet IP. The endpoint must bind the
+//     tailnet IP only (OBS-03, WR-01).
 //   - met-label-audit (FATAL): a metric series carries a label name outside the
 //     compile-time allowlist {severity,check_id,backend,result,rig} (OBS-04).
 //   - met-cardinality (WARN): more than 500 unique (name, label-set) series —
@@ -170,7 +172,7 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 //     with a 200ms timeout, no shellout (OBS-05).
 func metricsDoctorFindings(cfg *config.Config, reg metrics.Registry, tailnetIP string) []modules.Finding {
 	return []modules.Finding{
-		metBindTailnetCheck(cfg),
+		metBindTailnetCheck(cfg, tailnetIP),
 		metLabelAuditCheck(reg),
 		metCardinalityCheck(reg),
 		metDisabledListenerCheck(cfg, tailnetIP),
@@ -198,11 +200,24 @@ func resolveTailnetIP(ctx context.Context, cc *cmdContext) string {
 // kept local to avoid a cli->daemon import for a single constant (IN-03).
 const defaultMetricsPort = 9090
 
-// metBindTailnetCheck enforces the OBS-03 tailnet-only bind floor.
-func metBindTailnetCheck(cfg *config.Config) modules.Finding {
+// metBindTailnetCheck enforces the OBS-03 tailnet-only bind floor. It mirrors the
+// runtime predicate in daemon.resolveMetricsAddr (WR-01): when bind_addr is set,
+// its host MUST equal the backend-resolved tailnet IP. This rejects wildcard
+// (0.0.0.0/::), loopback, and public/LAN NIC addresses without hardcoding any one
+// backend's address range — the backend is the source of truth for the node's
+// tailnet IP across Tailscale, Headscale, and NetBird.
+//
+// tailnetIP is best-effort: when it is "" (backend unavailable in the short-lived
+// CLI process) the check falls back to flagging only the unspecified/wildcard
+// case, since it cannot prove a mismatch without the authoritative tailnet IP.
+func metBindTailnetCheck(cfg *config.Config, tailnetIP string) modules.Finding {
 	const check = "metrics-bind-tailnet"
 	addr := cfg.Observability.Metrics.BindAddr
-	if cfg.Observability.Metrics.Enabled && addr != "" && config.IsUnspecifiedBindAddr(addr) {
+	if !cfg.Observability.Metrics.Enabled || addr == "" {
+		return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metrics bind address is tailnet-scoped"}
+	}
+
+	if config.IsUnspecifiedBindAddr(addr) {
 		return modules.Finding{
 			Module:   "metrics",
 			Check:    check,
@@ -210,6 +225,24 @@ func metBindTailnetCheck(cfg *config.Config) modules.Finding {
 			Message:  "observability.metrics.bind_addr must be tailnet IP only — 0.0.0.0/:: is forbidden (OBS-03)",
 		}
 	}
+
+	// With the authoritative tailnet IP, assert the configured host matches it.
+	if tailnetIP != "" {
+		host := config.BindAddrHost(addr)
+		bindIP := net.ParseIP(host)
+		tnIP := net.ParseIP(tailnetIP)
+		if tnIP != nil && (bindIP == nil || !bindIP.Equal(tnIP)) {
+			return modules.Finding{
+				Module:   "metrics",
+				Check:    check,
+				Severity: modules.SeverityFatal,
+				Message: fmt.Sprintf(
+					"observability.metrics.bind_addr %q is not the tailnet IP %q — metrics must bind the tailnet IP only (OBS-03)",
+					addr, tailnetIP),
+			}
+		}
+	}
+
 	return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metrics bind address is tailnet-scoped"}
 }
 
