@@ -167,12 +167,15 @@ type daemonStatusResponse struct {
 	LastSeen   string              `json:"last_seen,omitempty"`
 	Uptime     string              `json:"uptime"`
 
-	// PostureComplete signals whether reachable + doctor are authoritative
-	// posture data. It is false this phase (OBS-07 stub): full doctor wiring is
-	// deferred to Phase 19, so reachable is a hardcoded true and the doctor
-	// counts are zeroed. Consumers (e.g. the Phase 19 Web UI / fleet aggregator)
-	// MUST treat reachable/doctor as non-authoritative while this is false and
-	// not report a fabricated "0 fatal, reachable" all-clear (WR-05).
+	// PostureComplete signals whether the DOCTOR summary is authoritative
+	// posture data. It is false this phase: the full doctor families live in
+	// internal/cli (a daemon→cli import would form a cycle, so the daemon cannot
+	// run them), hence the doctor counts here are zeroed. Reachable is NO LONGER
+	// a stub — it is a live, best-effort probe (s.resolveReachable, fail-honest
+	// to false on any error/panic, never a fabricated true), so it is the only
+	// authoritative live field on this response. The Web UI reads the real doctor
+	// posture from cli.CollectDoctorFindings, not this endpoint. Consumers MUST
+	// NOT read the zeroed doctor summary as a "0 fatal" all-clear (WR-05).
 	PostureComplete bool `json:"posture_complete"`
 }
 
