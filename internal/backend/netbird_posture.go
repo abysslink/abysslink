@@ -20,7 +20,55 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/abysslink/abysslink/internal/config"
 )
+
+// PostureCheck is the exported, CLI-facing view of a NetBird posture check.
+// It mirrors the internal nbPostureCheck fields used for display.
+type PostureCheck struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// NetBirdListPostureChecks constructs a netbirdAdapter from cfg and returns all
+// posture checks via GET /api/posture-checks. This is the CLI-facing accessor
+// (the adapter and its methods are unexported); it follows the same
+// adapter-construction pattern as NewNetBirdDoRequest (D-05: reuse doRequest,
+// no new HTTP client). The runner is unused by REST calls; a nil runner is safe.
+func NetBirdListPostureChecks(ctx context.Context, cfg *config.Config) ([]PostureCheck, error) {
+	checks, err := newNetBirdAdapter(cfg, nil).ListPostureChecks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PostureCheck, len(checks))
+	for i, c := range checks {
+		out[i] = PostureCheck{ID: c.ID, Name: c.Name, Description: c.Description}
+	}
+	return out, nil
+}
+
+// NetBirdCreatePostureCheck creates a posture check via POST /api/posture-checks.
+// checksJSON is the optional raw "checks" object (operator-supplied --checks
+// value); it is passed verbatim as json.RawMessage and validated server-side.
+func NetBirdCreatePostureCheck(ctx context.Context, cfg *config.Config, name, description string, checksJSON []byte) (PostureCheck, error) {
+	req := nbCreatePostureCheckRequest{Name: name, Description: description}
+	if len(checksJSON) > 0 {
+		req.Checks = json.RawMessage(checksJSON)
+	}
+	created, err := newNetBirdAdapter(cfg, nil).CreatePostureCheck(ctx, req)
+	if err != nil {
+		return PostureCheck{}, err
+	}
+	return PostureCheck{ID: created.ID, Name: created.Name, Description: created.Description}, nil
+}
+
+// NetBirdDeletePostureCheck deletes a posture check by ID via
+// DELETE /api/posture-checks/{id}.
+func NetBirdDeletePostureCheck(ctx context.Context, cfg *config.Config, id string) error {
+	return newNetBirdAdapter(cfg, nil).DeletePostureCheck(ctx, id)
+}
 
 // nbPostureCheck is a single posture check from GET /api/posture-checks.
 // Only the fields needed for CLI display are modelled; the full "checks" object
