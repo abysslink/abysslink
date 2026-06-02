@@ -129,3 +129,121 @@ func TestVerify_TruncationDetected(t *testing.T) {
 	require.NoError(t, verr)
 	assert.True(t, res.TruncationDetected, "anchor.EntryCount > len(entries) must flag truncation")
 }
+
+// TestVerify_NilKeychainNoPanic reproduces CR-02: Verify(ctx, path, nil) must
+// walk the chain without dereferencing a nil keychain, reporting skipped sigs.
+func TestVerify_NilKeychainNoPanic(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	writeSomeEntries(t, sa, 3)
+	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
+
+	res, verr := audit.Verify(context.Background(), logPath, nil)
+	require.NoError(t, verr, "nil keychain must not error")
+	assert.True(t, res.OK, "chain structure is valid even without HMAC checks")
+	assert.Equal(t, 0, res.SigsVerified, "no signatures can be verified without a key")
+	assert.Greater(t, res.SigsSkipped, 0, "skipped signatures must be reported")
+}
+
+// TestVerify_ForgedAnchorRejected reproduces CR-01: a forged/unsigned anchor
+// (valid JSON, invalid HMAC) must be treated as tampering, not trusted.
+func TestVerify_ForgedAnchorRejected(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	writeSomeEntries(t, sa, 3)
+	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
+
+	// Forge the anchor: shrink EntryCount to hide a (future) truncation and
+	// leave the now-stale HMAC in place. An attacker cannot produce a valid HMAC.
+	anchorFile := filepath.Join(dir, "audit.anchor.json")
+	data, _ := os.ReadFile(anchorFile) //nolint:gosec
+	var a audit.Anchor
+	require.NoError(t, json.Unmarshal(data, &a))
+	a.EntryCount = 1
+	bad, _ := json.Marshal(a)
+	require.NoError(t, os.WriteFile(anchorFile, bad, 0o600))
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.False(t, res.OK, "forged anchor HMAC must fail verification")
+	assert.Equal(t, "anchor HMAC invalid (forged or tampered)", res.Reason)
+}
+
+// TestVerify_TailDryRunFlipDetected reproduces CR-03: flipping DryRun on the
+// tail entry (which has no successor and so is not protected by the chain) must
+// now be caught because DryRun is part of the signed input.
+func TestVerify_TailDryRunFlipDetected(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	// Append a dry-run tail entry, then flip it to a real mutation.
+	require.NoError(t, sa.Append(context.Background(), audit.SignInput{
+		Title: "write", DiffHash: sha256.Sum256([]byte("planned")),
+	}, "/etc/important", true))
+
+	data, _ := os.ReadFile(logPath) //nolint:gosec
+	line := bytes.TrimRight(data, "\n")
+	var e audit.Entry
+	require.NoError(t, json.Unmarshal(line, &e))
+	e.DryRun = false // attacker: make a planned-only action look real
+	bad, _ := json.Marshal(e)
+	require.NoError(t, os.WriteFile(logPath, append(bad, '\n'), 0o600))
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.False(t, res.OK, "flipping tail DryRun must break the HMAC")
+	assert.Equal(t, "sig mismatch", res.Reason)
+}
+
+// TestVerify_TailTargetRewriteDetected reproduces CR-03 for the Target field.
+func TestVerify_TailTargetRewriteDetected(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	require.NoError(t, sa.Append(context.Background(), audit.SignInput{
+		Title: "write", DiffHash: sha256.Sum256([]byte("c")),
+	}, "/etc/a", false))
+
+	data, _ := os.ReadFile(logPath) //nolint:gosec
+	line := bytes.TrimRight(data, "\n")
+	var e audit.Entry
+	require.NoError(t, json.Unmarshal(line, &e))
+	e.Target = "/etc/evil" // redirect the recorded target
+	bad, _ := json.Marshal(e)
+	require.NoError(t, os.WriteFile(logPath, append(bad, '\n'), 0o600))
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.False(t, res.OK, "rewriting tail Target must break the HMAC")
+	assert.Equal(t, "sig mismatch", res.Reason)
+}
+
+// TestVerify_AnchorLastHashConsistent covers WR-01's happy path: a freshly
+// written anchor's LastHash matches the log tail, so an intact log+anchor
+// verifies cleanly. The mismatch (history-rewrite) branch is exercised by
+// TestVerify_ForgedAnchorRejected, since rewriting the anchor's LastHash
+// invalidates its HMAC (the attacker has no key).
+func TestVerify_AnchorLastHashConsistent(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	writeSomeEntries(t, sa, 3)
+	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.True(t, res.OK, "intact anchor LastHash must verify")
+	assert.False(t, res.TruncationDetected)
+}
