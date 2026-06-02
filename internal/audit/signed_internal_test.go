@@ -45,8 +45,29 @@ func TestVerifyHMAC_MatchAndMismatch(t *testing.T) {
 }
 
 func TestSignBytes_NullSeparator(t *testing.T) {
-	in := SignInput{Title: "ab", DiffHash: [32]byte{0xff}}
+	// Canonical layout (CR-03): title \0 target \0 time \0 dryRun \0 prevHash \0 32 DiffHash bytes.
+	in := SignInput{Title: "ab", Target: "t", Time: "T", DryRun: true, PrevHash: "p", DiffHash: [32]byte{0xff}}
 	got := signBytes(in)
 	assert.Equal(t, byte(0x00), got[2], "null byte separator after title")
-	assert.Len(t, got, len("ab")+1+32)
+	// 2(title) +1 +1(target) +1 +1(time) +1 +1(dryRun) +1 +1(prevHash) +1 +32(digest)
+	wantLen := len("ab") + 1 + len("t") + 1 + len("T") + 1 + 1 + 1 + len("p") + 1 + 32
+	assert.Len(t, got, wantLen)
+	assert.Equal(t, byte(1), got[len("ab")+1+len("t")+1+len("T")+1], "dry_run true encoded as 0x01")
+}
+
+func TestSignBytes_CoversAllMetadataFields(t *testing.T) {
+	// CR-03: flipping any signed metadata field must change the HMAC input.
+	base := SignInput{Title: "write", Target: "/etc/a", Time: "2026-01-01T00:00:00Z", DryRun: false, PrevHash: "genesis", DiffHash: sha256.Sum256([]byte("x"))}
+	b0 := signBytes(base)
+
+	mutators := []func(in SignInput) SignInput{
+		func(in SignInput) SignInput { in.Title = "delete"; return in },
+		func(in SignInput) SignInput { in.Target = "/etc/b"; return in },
+		func(in SignInput) SignInput { in.Time = "2027-01-01T00:00:00Z"; return in },
+		func(in SignInput) SignInput { in.DryRun = true; return in },
+		func(in SignInput) SignInput { in.PrevHash = "deadbeef"; return in },
+	}
+	for i, m := range mutators {
+		assert.False(t, bytes.Equal(b0, signBytes(m(base))), "mutator %d must change signed bytes", i)
+	}
 }
