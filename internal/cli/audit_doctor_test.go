@@ -79,6 +79,28 @@ func TestAuditDoctor_AnchorAgeWarnWhenStale(t *testing.T) {
 	assert.Equal(t, modules.SeverityWarning, f.Severity)
 }
 
+// TestAuditDoctor_AnchorAgeWarnWhenUnparseable covers WR-05: an anchor whose
+// Time does not parse as RFC3339 must emit a WARN finding, not silently pass as
+// "age within threshold" (false-clean). A local attacker who can write
+// audit.anchor.json could otherwise set Time to garbage to suppress staleness.
+func TestAuditDoctor_AnchorAgeWarnWhenUnparseable(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	bad := audit.Anchor{
+		EntryCount: 0,
+		LastHash:   "",
+		Time:       "not-a-timestamp",
+	}
+	data, err := json.Marshal(bad)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "audit.anchor.json"), data, 0o600))
+
+	findings := auditDoctorFindings(context.Background(), logPath, secrets.NewMockStore())
+	f := findingByCheck(findings, "audit-anchor-age")
+	require.NotNil(t, f, "unparseable anchor time must produce an anchor-age finding")
+	assert.Equal(t, modules.SeverityWarning, f.Severity)
+}
+
 func TestAuditDoctor_CountVsAnchorFatal(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")
