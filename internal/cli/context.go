@@ -23,6 +23,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/modules/acl"
 	asciinema "github.com/abysslink/abysslink/internal/modules/asciinema"
@@ -175,6 +176,15 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 		auditWriter = audit.New(logPath)
 	}
 
+	// Select the metrics sink: a live in-memory registry when observability
+	// metrics are enabled, otherwise the nil-safe NoopRegistry. Modules always
+	// call Registry methods unconditionally (never nil-check), so this field is
+	// always populated.
+	var reg metrics.Registry = metrics.NoopRegistry{}
+	if cc.cfg.Observability.Metrics.Enabled {
+		reg = metrics.NewMemRegistry()
+	}
+
 	return modules.Deps{
 		Cfg:      cc.cfg,
 		Runner:   cc.runner,
@@ -182,6 +192,7 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 		Platform: plat,
 		Keychain: kc,
 		Audit:    auditWriter,
+		Registry: reg,
 		// Prompt routes module prompts through the interactive gate + tui.Pause:
 		// never raw stdout (which would corrupt --json) and never a bare stdin
 		// read (which would block in non-TTY/CI/--json contexts). CR-01 / T-10-16.
