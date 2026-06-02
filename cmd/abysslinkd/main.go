@@ -77,6 +77,13 @@ func main() {
 	// the daemon's shutdown path.
 	startAnchorWriter(ctx, kc)
 
+	// Daily fleet digest (OBS-08). Opt-in (default OFF). When enabled, fires at
+	// the configured local hour (default 08:00), calls `abysslink status --json`
+	// via the sibling CLI binary (never the daemon socket), and delivers an
+	// opaque-rig-id summary on the dedicated digest ntfy topic. The goroutine
+	// exits cleanly on ctx cancellation; a disabled digest launches no goroutine.
+	daemon.StartDigestScheduler(ctx, cfg, directNotifier{m: nm}, runner)
+
 	if err := srv.Run(ctx); err != nil {
 		slog.Error("abysslinkd: exited with error", "err", err)
 		os.Exit(1)
