@@ -146,6 +146,11 @@ Flags:
 			pentest, _ := cmd.Flags().GetBool("pentest")
 			fix, _ := cmd.Flags().GetBool("fix")
 			format, _ := cmd.Flags().GetString("format")
+			// IN-01: reject unknown --format values rather than silently falling
+			// back to human output (a script piping "JSON" would get ANSI text).
+			if format != "" && format != "json" {
+				return fmt.Errorf("unsupported --format %q (only \"json\")", format)
+			}
 			// --format=json forces a JSON printer even when the root --json flag
 			// is absent, so the findings array reaches stdout (PrintJSON is a
 			// no-op on the human printer).
@@ -180,10 +185,6 @@ func (s stderrOnlyPrinter) Printv(key, value string) { s.inner.Error(key + ": " 
 func (s stderrOnlyPrinter) Error(msg string)         { s.inner.Error(msg) }
 func (s stderrOnlyPrinter) PrintJSON(_ any)          {}
 
-// jsonModeChainPrinter returns a Printer that keeps the chain-verify step's
-// human text off stdout while preserving stderr diagnostics.
-func jsonModeChainPrinter(p Printer) Printer { return stderrOnlyPrinter{inner: p} }
-
 // aggregateOpts carries the audit-verify aggregate flags. dryRun mirrors the
 // root --apply gate (true when --apply is absent): the --fix path only mutates
 // permissions when dryRun is false.
@@ -208,7 +209,7 @@ func runAuditAggregate(ctx context.Context, cc *cmdContext, p Printer, logPath s
 	// exit code is unchanged.
 	verifyP := p
 	if opts.format == "json" {
-		verifyP = jsonModeChainPrinter(p)
+		verifyP = stderrOnlyPrinter{inner: p}
 	}
 	if err := runAuditVerify(ctx, verifyP, logPath, kc); err != nil {
 		var ee *exitError
