@@ -25,7 +25,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -33,10 +32,6 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/safeweb"
 )
-
-// defaultWebUIPort is the TLS listen port used when webui.port is unset. It
-// mirrors config.Defaults() (8443) so the listener and the schema agree.
-const defaultWebUIPort = 8443
 
 // tailnetIPResolver yields this node's tailnet IP. It is a seam so the bind
 // resolver is unit-testable without a live tailscaled. The production
@@ -75,11 +70,12 @@ func (r localTailnetResolver) IP(ctx context.Context) (string, error) {
 //     wildcard, loopback, public/LAN, or mismatched host fails closed. A
 //     bind_addr that carries its own port keeps it; a bare host is joined with
 //     the configured/default port.
+//
+// Host/port precedence is delegated to config.EffectiveWebUIHostPort, the SAME
+// helper the doctor live probe uses (webuiProbeURL), so the listener and the
+// probe can never disagree about the effective port (WR-03).
 func resolveWebUIAddr(ctx context.Context, cfg *config.Config, resolver tailnetIPResolver) (string, bool) {
-	port := cfg.WebUI.Port
-	if port <= 0 {
-		port = defaultWebUIPort
-	}
+	host, port := config.EffectiveWebUIHostPort(cfg)
 
 	tailnetIP, err := resolver.IP(ctx)
 	if err != nil {
@@ -97,17 +93,12 @@ func resolveWebUIAddr(ctx context.Context, cfg *config.Config, resolver tailnetI
 		return "", false
 	}
 
-	if bindAddr := strings.TrimSpace(cfg.WebUI.BindAddr); bindAddr != "" {
-		host := config.BindAddrHost(bindAddr)
+	if host != "" {
 		bindIP := net.ParseIP(host)
 		if bindIP == nil || !bindIP.Equal(parsedTailnet) {
 			slog.Error("webui: configured bind_addr is not the tailnet IP; listener disabled (WEB-02)",
-				"bind_addr", bindAddr, "tailnet_ip", tailnetIP)
+				"bind_addr", cfg.WebUI.BindAddr, "tailnet_ip", tailnetIP)
 			return "", false
-		}
-		if _, _, splitErr := net.SplitHostPort(bindAddr); splitErr == nil {
-			// bind_addr already carries a port; honor it verbatim.
-			return bindAddr, true
 		}
 		return net.JoinHostPort(host, strconv.Itoa(port)), true
 	}

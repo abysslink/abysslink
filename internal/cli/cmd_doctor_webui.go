@@ -38,10 +38,6 @@ import (
 // (no //go:build webui) never imports any tailscale.com package (T-19-08).
 var errWhoamiPeerNotFound = errors.New("webui-whoami-local: peer not found (localapi reachable)")
 
-// webuiDefaultPort mirrors config.Defaults() (8443) and webui.defaultWebUIPort
-// so the live-probe checks target the same port the listener binds.
-const webuiDefaultPort = 8443
-
 // webuiProbeTimeout bounds every live doctor probe so a hung tailscaled or an
 // unreachable webui listener never wedges the doctor run.
 const webuiProbeTimeout = 500 * time.Millisecond
@@ -84,18 +80,15 @@ func webuiDoctorFindings(ctx context.Context, cfg *config.Config) []modules.Find
 // webuiProbeURL resolves the https URL the live-probe checks target. An empty
 // bind_addr yields "" (the live checks then report unreachable, which the
 // funnel/bind checks already flag FATAL for the empty-addr case).
+//
+// It resolves host:port via config.EffectiveWebUIHostPort, the SAME helper the
+// listener uses (resolveWebUIAddr), so the doctor probe always targets the exact
+// port the listener binds — no independent port resolver that could disagree
+// (WR-03).
 func webuiProbeURL(cfg *config.Config) string {
-	if cfg.WebUI.BindAddr == "" {
+	host, port := config.EffectiveWebUIHostPort(cfg)
+	if host == "" {
 		return ""
-	}
-	host := config.BindAddrHost(cfg.WebUI.BindAddr)
-	port := cfg.WebUI.Port
-	if port <= 0 {
-		port = webuiDefaultPort
-	}
-	if _, _, err := net.SplitHostPort(cfg.WebUI.BindAddr); err == nil {
-		// bind_addr already carries a port; honor it.
-		return "https://" + cfg.WebUI.BindAddr
 	}
 	return "https://" + net.JoinHostPort(host, strconv.Itoa(port))
 }
