@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -37,18 +38,81 @@ import (
 // mirrors config.Defaults() (8443) so the listener and the schema agree.
 const defaultWebUIPort = 8443
 
-// webuiAddr resolves the host:port the listener binds. An empty bind_addr is
-// resolved to the tailnet IP at the daemon seam (Plan 04); here it falls back
-// to the loopback-free unspecified-host form only for address construction —
-// the listener itself is only ever created after ValidateWebUI and the TLS
-// probe pass, so a wildcard bind is rejected upstream (WEB-02).
-func webuiAddr(cfg *config.Config) string {
+// tailnetIPResolver yields this node's tailnet IP. It is a seam so the bind
+// resolver is unit-testable without a live tailscaled. The production
+// implementation (localTailnetResolver) derives the IP from the Tailscale
+// localapi Status; tests inject a stub.
+type tailnetIPResolver interface {
+	IP(ctx context.Context) (string, error)
+}
+
+// localTailnetResolver resolves the tailnet IP from the Tailscale localapi by
+// reading Status.Self.TailscaleIPs[0]. It mirrors internal/tailscale.LocalClient.IP
+// without importing that package, keeping the webui server self-contained on the
+// tailscale.com/client/local seam it already uses for GetCertificate.
+type localTailnetResolver struct{ lc *local.Client }
+
+func (r localTailnetResolver) IP(ctx context.Context) (string, error) {
+	st, err := r.lc.Status(ctx)
+	if err != nil {
+		return "", err
+	}
+	if st == nil || st.Self == nil || len(st.Self.TailscaleIPs) == 0 {
+		return "", nil
+	}
+	return st.Self.TailscaleIPs[0].String(), nil
+}
+
+// resolveWebUIAddr determines the host:port the listener binds, failing closed
+// (ok == false) rather than ever binding a non-tailnet interface (WEB-02). It
+// mirrors the metrics server's resolveMetricsAddr (OBS-03):
+//
+//   - The backend-reported tailnet IP is resolved first. An empty,
+//     unparseable, or unspecified IP fails closed (never a wildcard bind).
+//   - When webui.bind_addr is empty (the default), the resolved tailnet IP is
+//     bound directly.
+//   - When webui.bind_addr is set, its host MUST equal the tailnet IP; a
+//     wildcard, loopback, public/LAN, or mismatched host fails closed. A
+//     bind_addr that carries its own port keeps it; a bare host is joined with
+//     the configured/default port.
+func resolveWebUIAddr(ctx context.Context, cfg *config.Config, resolver tailnetIPResolver) (string, bool) {
 	port := cfg.WebUI.Port
 	if port <= 0 {
 		port = defaultWebUIPort
 	}
-	host := cfg.WebUI.BindAddr
-	return net.JoinHostPort(host, strconv.Itoa(port))
+
+	tailnetIP, err := resolver.IP(ctx)
+	if err != nil {
+		slog.Error("webui: resolve tailnet IP; refusing wildcard bind, listener disabled (WEB-02)", "err", err)
+		return "", false
+	}
+	if tailnetIP == "" {
+		// Fail closed: an empty host would make tls.Listen bind 0.0.0.0/:: (WEB-02).
+		slog.Error("webui: empty tailnet IP; refusing wildcard bind, listener disabled (WEB-02)")
+		return "", false
+	}
+	parsedTailnet := net.ParseIP(tailnetIP)
+	if parsedTailnet == nil || parsedTailnet.IsUnspecified() {
+		slog.Error("webui: non-tailnet/unspecified IP; listener disabled (WEB-02)", "ip", tailnetIP)
+		return "", false
+	}
+
+	if bindAddr := strings.TrimSpace(cfg.WebUI.BindAddr); bindAddr != "" {
+		host := config.BindAddrHost(bindAddr)
+		bindIP := net.ParseIP(host)
+		if bindIP == nil || !bindIP.Equal(parsedTailnet) {
+			slog.Error("webui: configured bind_addr is not the tailnet IP; listener disabled (WEB-02)",
+				"bind_addr", bindAddr, "tailnet_ip", tailnetIP)
+			return "", false
+		}
+		if _, _, splitErr := net.SplitHostPort(bindAddr); splitErr == nil {
+			// bind_addr already carries a port; honor it verbatim.
+			return bindAddr, true
+		}
+		return net.JoinHostPort(host, strconv.Itoa(port)), true
+	}
+
+	return net.JoinHostPort(tailnetIP, strconv.Itoa(port)), true
 }
 
 // buildCSP returns the Content-Security-Policy for all browser responses. It
@@ -103,9 +167,21 @@ func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingB
 		ring = NewNotifyRingBuffer()
 	}
 
-	addr := webuiAddr(cfg)
-
 	var lc local.Client // zero value uses the platform-default tailscaled socket
+
+	// WEB-02 floor: resolve the listener address to the tailnet IP and FAIL
+	// CLOSED if it cannot be confirmed. An empty bind_addr binds the resolved
+	// tailnet IP; an explicit bind_addr must equal it. Never a wildcard bind.
+	// This mirrors the metrics server's resolveMetricsAddr (OBS-03) — the config
+	// validator only rejects an *explicit* 0.0.0.0/::, so without this the
+	// default empty bind_addr would have bound :8443 on every interface.
+	addr, ok := resolveWebUIAddr(ctx, cfg, localTailnetResolver{lc: &lc})
+	if !ok {
+		// resolveWebUIAddr already logged the fail-closed reason. Never fall back
+		// to a wildcard bind (WEB-02).
+		return fmt.Errorf("webui: refusing to bind; tailnet IP could not be confirmed (WEB-02)")
+	}
+
 	tlsCfg := &tls.Config{
 		GetCertificate: lc.GetCertificate,
 		MinVersion:     tls.VersionTLS12,
