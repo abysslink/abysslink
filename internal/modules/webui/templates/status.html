@@ -1,0 +1,86 @@
+{{- /*
+SPDX-License-Identifier: Apache-2.0
+Copyright 2026 Abysslink Contributors
+
+Fleet Status view. Defines "content" (the #main-content body for /) and
+"status-panel" (the auto-polling fragment returned by /status-fragment).
+All styling via CSS classes only — zero inline style attributes (WEB-06).
+*/ -}}
+{{- define "content" -}}
+<h1 class="t-title">Fleet Status</h1>
+{{ template "status-panel" . }}
+{{- end -}}
+
+{{- define "status-panel" -}}
+<div
+  id="status-panel"
+  hx-get="/status-fragment"
+  hx-trigger="every 10s"
+  hx-swap="outerHTML"
+>
+  <div class="summary-bar">
+    <span class="t-body">Rigs: {{ .Online }}/{{ .Total }} online</span>
+    <span class="t-body c-muted"
+      >Last check: <span class="t-mono">{{ .LastCheck }}</span></span
+    >
+    <svg
+      class="dot-live"
+      width="8"
+      height="8"
+      aria-hidden="true"
+      viewBox="0 0 8 8"
+    >
+      <circle cx="4" cy="4" r="4" />
+    </svg>
+    <span class="t-label c-muted">live</span>
+    <span class="loading-spinner htmx-indicator" aria-hidden="true"></span>
+  </div>
+
+  {{ if .Rigs }}
+  <table>
+    <caption class="sr-only">
+      Rig status
+    </caption>
+    <thead>
+      <tr>
+        <th>Rig name</th>
+        <th>Status</th>
+        <th>Last seen</th>
+        <th>TLS cert expiry</th>
+        <th>Lock status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ range .Rigs }}
+      <tr>
+        <td class="t-body">{{ .Name }}</td>
+        <td>
+          <svg
+            class="{{ .StatusClass }}"
+            width="8"
+            height="8"
+            aria-label="{{ .StatusLabel }}"
+            viewBox="0 0 8 8"
+          >
+            <circle cx="4" cy="4" r="4" />
+          </svg>
+          <span class="t-body">{{ .StatusLabel }}</span>
+        </td>
+        <td class="t-mono">{{ .LastSeen }}</td>
+        <td class="t-body {{ .CertClass }}">{{ .CertDays }}</td>
+        <td class="t-body {{ .LockClass }}">{{ .LockStatus }}</td>
+      </tr>
+      {{ end }}
+    </tbody>
+  </table>
+  {{ else }}
+  <div class="empty-state">
+    <div class="empty-heading">No rigs enrolled</div>
+    <div class="t-body">
+      Run <span class="t-mono">abysslink enroll rig</span> to add a rig to this
+      dashboard.
+    </div>
+  </div>
+  {{ end }}
+</div>
+{{- end -}}

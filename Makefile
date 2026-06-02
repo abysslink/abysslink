@@ -79,7 +79,7 @@ check-htmx-sri:
 	  echo "NOTICE: htmx.min.js not yet vendored — run 'make vendor-htmx' first"; \
 	else \
 	  actual=$$(openssl dgst -sha384 -binary internal/modules/webui/assets/htmx.min.js | openssl base64 -A); \
-	  expected=$$(grep 'HTMXIntegrity' internal/modules/webui/sri_const_gen.go | cut -d'"' -f2 | sed 's/^sha384-//'); \
+	  expected=$$(grep 'const HTMXIntegrity' internal/modules/webui/sri_const_gen.go | cut -d'"' -f2 | sed 's/^sha384-//'); \
 	  if [ "$$actual" != "$$expected" ]; then \
 	    echo "FAIL: htmx SRI mismatch — re-run go generate ./internal/modules/webui/..."; exit 1; \
 	  fi; \
@@ -92,7 +92,7 @@ check-htmx-sri:
 vendor-htmx:
 	@mkdir -p internal/modules/webui/assets
 	@curl -fsSL \
-	  https://github.com/bigskysoftware/htmx/releases/download/v2.0.10/htmx.min.js \
+	  https://unpkg.com/htmx.org@2.0.10/dist/htmx.min.js \
 	  -o internal/modules/webui/assets/htmx.min.js
 	@echo "Downloaded htmx 2.0.10 — run 'make check-htmx-sri' to verify SRI"
 

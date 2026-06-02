@@ -1,0 +1,43 @@
+{{- /*
+SPDX-License-Identifier: Apache-2.0
+Copyright 2026 Abysslink Contributors
+
+Notify History view. Last 100 events from the in-memory ring buffer. Priority
+badges via CSS classes only; no inline styles, no secret body content (WEB-07).
+*/ -}}
+{{- define "content" -}}
+<h1 class="t-title">Notifications</h1>
+{{ if .Events }}
+<table>
+  <caption class="sr-only">
+    Notification history
+  </caption>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Title</th>
+      <th>Topic</th>
+      <th>Priority</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{ range .Events }}
+    <tr>
+      <td class="t-mono c-muted">{{ .Time }}</td>
+      <td class="t-body">{{ .Title }}</td>
+      <td class="t-mono c-muted">{{ .Topic }}</td>
+      <td><span class="{{ .PriorityClass }}">{{ .Priority }}</span></td>
+    </tr>
+    {{ end }}
+  </tbody>
+</table>
+{{ else }}
+<div class="empty-state">
+  <div class="empty-heading">No notifications yet</div>
+  <div class="t-body">
+    Notifications appear here after your first
+    <span class="t-mono">abysslink notify</span> call.
+  </div>
+</div>
+{{ end }}
+{{- end -}}
