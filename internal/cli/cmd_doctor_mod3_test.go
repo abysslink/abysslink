@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -99,6 +100,28 @@ func TestDoctorAtuinKeyBackedUp_Warn(t *testing.T) {
 	f, ok := findFinding(findings, "atuin-key-backed-up")
 	require.True(t, ok, "atuin-key-backed-up must be present when atuin is enabled")
 	assert.Equal(t, modules.SeverityWarning, f.Severity)
+}
+
+// sandboxEnabledCfg returns a config with the sandbox module enabled.
+func sandboxEnabledCfg() *config.Config {
+	cfg := config.Defaults()
+	cfg.Modules.Sandbox.Enabled = true
+	return cfg
+}
+
+// TestDoctorSandboxLandlockSupported_Warn verifies the
+// sandbox-landlock-supported finding is present when the sandbox module is
+// enabled. On non-Linux (and Linux < 5.13) it is WARN; on a Landlock-capable
+// Linux kernel it is OK. The finding must always be present either way.
+func TestDoctorSandboxLandlockSupported_Warn(t *testing.T) {
+	findings := mod3DoctorFindings(context.Background(), sandboxEnabledCfg(), shell.NewMockRunner())
+	f, ok := findFinding(findings, "sandbox-landlock-supported")
+	require.True(t, ok, "sandbox-landlock-supported must be present when sandbox is enabled")
+	if runtime.GOOS == "linux" {
+		assert.Contains(t, []modules.Severity{modules.SeverityOK, modules.SeverityWarning}, f.Severity)
+	} else {
+		assert.Equal(t, modules.SeverityWarning, f.Severity, "Landlock is Linux-only — must WARN on non-Linux")
+	}
 }
 
 // TestDoctorAsciinemaRecWarning_Fatal verifies the asciinema-rec-warning FATAL

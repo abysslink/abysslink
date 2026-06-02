@@ -2,3 +2,11 @@ Abysslink
 Copyright 2026 Abysslink Contributors
 
 This product includes software developed by the Abysslink Contributors.
+
+Third-party dependencies (Linux builds only):
+- github.com/landlock-lsm/go-landlock (BSD-3-Clause) — Linux Landlock LSM
+  bindings, imported only under //go:build linux.
+- kernel.org/pub/linux/libs/security/libcap/psx (LGPLv2+) — transitive
+  dependency of go-landlock. LGPLv2+ permits use by Apache-2.0-licensed
+  software; only the upstream library is licensed under the LGPL, abysslink's
+  own source remains Apache-2.0.

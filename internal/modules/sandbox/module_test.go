@@ -17,6 +17,7 @@ package sandbox
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -33,10 +34,12 @@ func enabledCfg() *config.Config {
 	return cfg
 }
 
-func TestDetect_Disabled_NilFindings(t *testing.T) {
+// TestSandboxModule_Detect_Disabled verifies Detect returns nil findings when
+// the module is disabled, regardless of platform.
+func TestSandboxModule_Detect_Disabled(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Modules.Sandbox.Enabled = false
-	r := shell.NewMockRunner() // no calls expected
+	r := shell.NewMockRunner() // no shell calls expected
 	m := New(modules.Deps{Cfg: cfg, Runner: r})
 	findings, err := m.Detect(context.Background())
 	require.NoError(t, err)
@@ -44,59 +47,44 @@ func TestDetect_Disabled_NilFindings(t *testing.T) {
 	assert.True(t, r.Done(), "no shell calls should be made when module is disabled")
 }
 
-func TestDetect_Enabled_SandboxExecFails_Finding(t *testing.T) {
-	// Simulate sandbox-exec returning a non-zero exit code with no "profile" in stderr.
-	r := shell.NewMockRunner(shell.Call{
-		Result: shell.Result{ExitCode: 1, Stderr: "command not found"},
-	})
-	m := &Module{runner: r, cfg: enabledCfg()}
-	// Exercise detectDarwin directly so the test is OS-independent.
-	findings := m.detectDarwin(context.Background())
+// TestModule_Detect_macOS verifies that on darwin Detect emits the
+// sandbox-landlock-supported WARN finding (Landlock is Linux-only). The check
+// is skipped on Linux, where Landlock may be supported.
+func TestModule_Detect_macOS(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("Landlock may be supported on Linux; this test asserts the non-Linux stub path")
+	}
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: shell.NewMockRunner()})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
 	require.Len(t, findings, 1)
-	assert.Equal(t, "sandbox_exec_available", findings[0].Check)
+	assert.Equal(t, "sandbox-landlock-supported", findings[0].Check)
 	assert.Equal(t, modules.SeverityWarning, findings[0].Severity)
+	assert.Contains(t, findings[0].Message, "Linux kernel")
 }
 
-func TestDetect_Enabled_SandboxExecProfileStderr_NoFinding(t *testing.T) {
-	// sandbox-exec prints something containing "profile" to stderr — treat as available.
-	r := shell.NewMockRunner(shell.Call{
-		Result: shell.Result{ExitCode: 1, Stderr: "sandbox: profile loading failed: no-internet"},
-	})
-	m := &Module{runner: r, cfg: enabledCfg()}
-	findings := m.detectDarwin(context.Background())
-	assert.Empty(t, findings, "stderr containing 'profile' means sandbox-exec is present")
+// TestModule_Apply_macOS verifies Apply returns ErrNotSupported on darwin and
+// never panics.
+func TestModule_Apply_macOS(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("Apply succeeds (or BestEffort no-ops) on Linux; this test asserts the non-Linux stub path")
+	}
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: shell.NewMockRunner()})
+	err := m.Apply(context.Background())
+	assert.ErrorIs(t, err, ErrNotSupported)
 }
 
-func TestDetect_Enabled_SandboxExecOK_NoFinding(t *testing.T) {
-	r := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 0}})
-	m := &Module{runner: r, cfg: enabledCfg()}
-	findings := m.detectDarwin(context.Background())
-	assert.Empty(t, findings)
+// TestIsLandlockSupported_Stub verifies the build-tag-polymorphic
+// isLandlockSupported() returns false on non-Linux (stub) builds.
+func TestIsLandlockSupported_Stub(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("stub returns false only on non-Linux builds")
+	}
+	assert.False(t, isLandlockSupported())
+	assert.False(t, IsLandlockSupported(), "exported wrapper must mirror the internal probe")
 }
 
-func TestDetect_Linux_FirejailMissing_Finding(t *testing.T) {
-	// firejail not found (exit 127), then systemctl --user status (exit 0).
-	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 127, Stderr: "command not found"}},
-		shell.Call{Result: shell.Result{ExitCode: 0}},
-	)
-	m := &Module{runner: r, cfg: enabledCfg()}
-	findings := m.detectLinux(context.Background())
-	require.Len(t, findings, 1)
-	assert.Equal(t, "firejail_available", findings[0].Check)
-	assert.Equal(t, modules.SeverityWarning, findings[0].Severity)
-}
-
-func TestDetect_Linux_FirejailPresent_NoFinding(t *testing.T) {
-	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "firejail version 0.9.72"}},
-		shell.Call{Result: shell.Result{ExitCode: 0}},
-	)
-	m := &Module{runner: r, cfg: enabledCfg()}
-	findings := m.detectLinux(context.Background())
-	assert.Empty(t, findings)
-}
-
+// TestPlan_Disabled_Nil verifies Plan returns nil when the module is disabled.
 func TestPlan_Disabled_Nil(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Modules.Sandbox.Enabled = false
@@ -106,34 +94,23 @@ func TestPlan_Disabled_Nil(t *testing.T) {
 	assert.Nil(t, actions)
 }
 
+// TestPlan_Enabled_ReturnsAction verifies Plan returns the single Landlock action.
 func TestPlan_Enabled_ReturnsAction(t *testing.T) {
 	m := New(modules.Deps{Cfg: enabledCfg(), Runner: shell.NewMockRunner()})
 	actions, err := m.Plan(context.Background(), false)
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
 	assert.Equal(t, "sandbox", actions[0].Module)
-	assert.False(t, actions[0].Reversible, "sandbox profiles are not reversible via auto-apply")
+	assert.Contains(t, actions[0].Description, "Landlock")
+	assert.False(t, actions[0].Reversible, "Landlock isolation is not reversible via auto-apply")
 }
 
-func TestApply_IsNoOp(t *testing.T) {
-	// Apply must always return nil — it is intentionally a no-op.
-	m := New(modules.Deps{Cfg: enabledCfg(), Runner: shell.NewMockRunner()})
-	err := m.Apply(context.Background())
-	assert.NoError(t, err)
-	assert.True(t, m.runner.(*shell.MockRunner).Done(), "Apply must not invoke any shell commands")
-}
-
+// TestVerify_DelegatesToDetect verifies Verify mirrors Detect.
 func TestVerify_DelegatesToDetect(t *testing.T) {
-	// Verify is an alias for Detect. Supply two calls so the test is safe on both
-	// darwin (1 call: sandbox-exec) and linux (2 calls: firejail + systemctl).
-	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "command not found"}},
-		shell.Call{Result: shell.Result{ExitCode: 0}},
-	)
-	m := &Module{runner: r, cfg: enabledCfg()}
-	findings, err := m.Verify(context.Background())
-	require.NoError(t, err)
-	// On darwin: sandbox-exec not found → 1 finding.
-	// On linux: firejail not found → 1 finding.
-	assert.NotEmpty(t, findings)
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: shell.NewMockRunner()})
+	vf, verr := m.Verify(context.Background())
+	df, derr := m.Detect(context.Background())
+	require.NoError(t, verr)
+	require.NoError(t, derr)
+	assert.Equal(t, df, vf)
 }
