@@ -82,7 +82,9 @@ func TestAuditDoctor_AnchorAgeWarnWhenStale(t *testing.T) {
 func TestAuditDoctor_CountVsAnchorFatal(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")
-	// Fresh anchor recording 5 entries, but the log has 0 — truncation.
+	// Fresh anchor recording 5 entries, but the log has 0 — truncation. The
+	// anchor is unsigned (no valid HMAC), which CR-01 now treats as tamper:
+	// either way the audit-count-vs-anchor check fires FATAL.
 	anchor := audit.Anchor{
 		EntryCount: 5,
 		LastHash:   "abc",
@@ -96,4 +98,55 @@ func TestAuditDoctor_CountVsAnchorFatal(t *testing.T) {
 	f := findingByCheck(findings, "audit-count-vs-anchor")
 	require.NotNil(t, f, "count < anchor.EntryCount must be FATAL")
 	assert.Equal(t, modules.SeverityFatal, f.Severity)
+}
+
+// TestAuditDoctor_ForgedAnchorFatal covers CR-01: an anchor whose HMAC does not
+// validate (forged or unsigned) must be reported FATAL by audit-count-vs-anchor
+// regardless of whether its EntryCount happens to look consistent.
+func TestAuditDoctor_ForgedAnchorFatal(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	kc := secrets.NewMockStore()
+
+	// Build a real signed log + anchor first.
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, true))
+	}
+	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
+
+	// Forge: rewrite the anchor's EntryCount, leaving the stale HMAC.
+	anchorFile := filepath.Join(dir, "audit.anchor.json")
+	raw, _ := os.ReadFile(anchorFile) //nolint:gosec
+	var a audit.Anchor
+	require.NoError(t, json.Unmarshal(raw, &a))
+	a.LastHash = "deadbeef" // tamper a signed field; the HMAC is now stale
+	bad, _ := json.Marshal(a)
+	require.NoError(t, os.WriteFile(anchorFile, bad, 0o600))
+
+	findings := auditDoctorFindings(context.Background(), logPath, kc)
+	f := findingByCheck(findings, "audit-count-vs-anchor")
+	require.NotNil(t, f, "forged anchor HMAC must be FATAL even when counts match")
+	assert.Equal(t, modules.SeverityFatal, f.Severity)
+}
+
+// TestAuditDoctor_ValidAnchorNoFinding covers CR-01's happy path: a properly
+// signed anchor whose count matches the log must produce no count-vs-anchor
+// finding.
+func TestAuditDoctor_ValidAnchorNoFinding(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	kc := secrets.NewMockStore()
+
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, true))
+	}
+	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
+
+	findings := auditDoctorFindings(context.Background(), logPath, kc)
+	assert.Nil(t, findingByCheck(findings, "audit-count-vs-anchor"),
+		"a valid signed anchor with matching count must not flag truncation")
 }
