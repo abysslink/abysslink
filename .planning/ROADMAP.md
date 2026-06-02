@@ -38,7 +38,7 @@ Phases 11–14 (18 plans) — backend-pluggable (Tailscale/Headscale/NetBird) + 
 Phases 16–21 (6 phases) — supply-chain hardening + tamper-evident audit + observability/metrics + opt-in Web UI dashboard + security audit pass + optional modules & fleet polish. Every new listener is opt-in, tailnet-bound, auth-gated, and gets its own FATAL doctor checks. No immutable v1/v2 floor is weakened.
 
 - [x] **Phase 16: Supply-Chain Hardening & CI Gates** - govulncheck, semgrep, dependency-review, SLSA L2, cosign v3 keyless, SPDX+CycloneDX SBOM, harden-runner, reproducible builds, `abysslink verify` (completed 2026-06-02)
-- [ ] **Phase 17: Tamper-Evident Audit Log + Fuzzing** - Hash-chained/HMAC-signed audit entries, external anchor, `abysslink audit` command surface, fuzz targets with seed corpus and gitleaks pre-commit hook
+- [x] **Phase 17: Tamper-Evident Audit Log + Fuzzing** - Hash-chained/HMAC-signed audit entries, external anchor, `abysslink audit` command surface, fuzz targets with seed corpus and gitleaks pre-commit hook (completed 2026-06-02)
 - [ ] **Phase 18: Observability & Metrics** - `internal/metrics.Registry`, tailnet-IP-bound Prometheus endpoint, `abysslink report`, daemon `GET /status`, fleet daily digest
 - [ ] **Phase 19: Web UI Dashboard (opt-in)** - `//go:build webui` opt-in module, safeweb CSRF, WhoIs auth, TLS via Tailscale cert, read-only gate, CSP self, separate goreleaser artifact
 - [ ] **Phase 20: Security Audit Pass & Doctor Checks** - `abysslink audit [--pentest]`, gosec/semgrep zero findings, refreshed threat model per backend, 18+ new sec-* doctor checks
@@ -265,9 +265,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 17-01-PLAN.md — audit library core: Entry extension, SignedAudit, anchor, chain verifier, forbidigo lint rule
-- [ ] 17-02-PLAN.md — CLI surface: audit verify/tail/ls/export, backup verify, doctor checks, daemon SignedAudit wiring
-- [ ] 17-03-PLAN.md — fuzz targets: FuzzHMACVerify, FuzzConfigLoad, FuzzHuJSONParse with seed corpora, gitleaks hook, fuzz.yml CI
+- [x] 17-01-PLAN.md — audit library core: Entry extension, SignedAudit, anchor, chain verifier, forbidigo lint rule
+- [x] 17-02-PLAN.md — CLI surface: audit verify/tail/ls/export, backup verify, doctor checks, daemon SignedAudit wiring
+- [x] 17-03-PLAN.md — fuzz targets: FuzzHMACVerify, FuzzConfigLoad, FuzzHuJSONParse with seed corpora, gitleaks hook, fuzz.yml CI
 
 ### Phase 18: Observability & Metrics
 
@@ -283,7 +283,14 @@ Plans:
   5. `abysslink report` emits a JSON + human posture snapshot (doctor findings, last N audit entries, per-rig reachability) via `Printer`; `--all-rigs` fans out via `fleet.FanOut`; exit codes 0/1/2 match finding severity
   6. Daemon `GET /status` endpoint returns a JSON object consumed by the Web UI (Phase 19); fleet daily digest fires once per day via the existing `Notifier` using a dedicated digest ntfy topic with opaque rig IDs and no cross-rig secret leak
 
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+
+- [ ] 18-01-PLAN.md — internal/metrics package (Registry, NoopRegistry, labels, allowlist), config.Observability struct, .golangci.yml depguard ban (OBS-01, OBS-03, OBS-04)
+- [ ] 18-02-PLAN.md — daemon metrics TCP listener (hand-rolled Prometheus text exposition) + GET /status handler (OBS-02, OBS-05, OBS-07)
+- [ ] 18-03-PLAN.md — fleet daily digest scheduler + abysslink report command + metrics doctor checks (OBS-04, OBS-05, OBS-06, OBS-08)
+- [ ] 18-04-PLAN.md — daemon entrypoint wiring (startMetricsServer + startDigestScheduler) + make lint test green + VALIDATION.md (OBS-02, OBS-05, OBS-07, OBS-08)
 
 ### Phase 19: Web UI Dashboard (opt-in)
 
@@ -370,7 +377,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 13. NetBird Backend | 5/5 | Complete   | 2026-06-01 |
 | 14. Multi-Rig Fleet | 5/5 | Complete    | 2026-06-01 |
 | 16. Supply-Chain Hardening & CI Gates | 4/4 | Complete    | 2026-06-02 |
-| 17. Tamper-Evident Audit Log + Fuzzing | 0/? | Not started | - |
+| 17. Tamper-Evident Audit Log + Fuzzing | 3/3 | Complete    | 2026-06-02 |
 | 18. Observability & Metrics | 0/? | Not started | - |
 | 19. Web UI Dashboard (opt-in) | 0/? | Not started | - |
 | 20. Security Audit Pass & Doctor Checks | 0/? | Not started | - |
