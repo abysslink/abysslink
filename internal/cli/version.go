@@ -20,4 +20,10 @@ var (
 	version   = "dev"
 	commit    = "unknown"
 	buildDate = "unknown"
+	// slsaURL is the SLSA provenance attestation URL for this release. Empty in
+	// dev builds; goreleaser injects it via -X .../cli.slsaURL=<url> at release time.
+	slsaURL = ""
+	// bundleURL is the cosign v3 bundle asset URL for this release. Empty in dev
+	// builds; goreleaser injects it via -X .../cli.bundleURL=<url> at release time.
+	bundleURL = ""
 )

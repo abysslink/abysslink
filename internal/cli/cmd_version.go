@@ -21,16 +21,57 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// provenanceJSON is the --provenance --json record for `abysslink version`.
+type provenanceJSON struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuildDate string `json:"build_date"`
+	SLSAURL   string `json:"slsa_url"`
+	BundleURL string `json:"bundle_url"`
+}
+
 func newVersionCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print version information",
 		Example: `  # Show abysslink version, commit, and build date
-  abysslink version`,
+  abysslink version
+
+  # Include supply-chain provenance (SLSA + cosign bundle URLs)
+  abysslink version --provenance`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			printerInfo(newPrinter(cmd),
-				fmt.Sprintf("abysslink %s (%s) built %s", version, commit, buildDate))
+			provenance, _ := cmd.Flags().GetBool("provenance")
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			p := newPrinter(cmd)
+
+			if jsonOut {
+				p.PrintJSON(provenanceJSON{
+					Version:   version,
+					Commit:    commit,
+					BuildDate: buildDate,
+					SLSAURL:   slsaURL,
+					BundleURL: bundleURL,
+				})
+				return nil
+			}
+
+			printerInfo(p, fmt.Sprintf("abysslink %s (%s) built %s", version, commit, buildDate))
+			if provenance {
+				printerInfo(p, "SLSA provenance: "+orNone(slsaURL))
+				printerInfo(p, "Bundle: "+orNone(bundleURL))
+			}
 			return nil
 		},
 	}
+	cmd.Flags().Bool("provenance", false, "show SLSA provenance and cosign bundle URLs")
+	cmd.Flags().Bool("json", false, "emit version/provenance info as JSON")
+	return cmd
+}
+
+// orNone returns s, or a "(none — dev build)" placeholder when s is empty.
+func orNone(s string) string {
+	if s == "" {
+		return "(none — dev build)"
+	}
+	return s
 }

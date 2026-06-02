@@ -18,6 +18,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/secrets"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
 
@@ -191,6 +194,9 @@ Exit codes:
 
 			// Backend-specific + fleet: append all backend and fleet findings.
 			findings = appendBackendAndFleetFindings(ctx, cc, deps.Keychain, findings)
+
+			// Supply-chain integrity advisories (cosign v3 bundle + SLSA provenance).
+			findings = append(findings, supplyChainFindings(ctx, cc.runner, version, "")...)
 
 			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
 			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")
@@ -398,8 +404,105 @@ func findingFix(check string) string {
 		"mr-rig-isolation":   "abysslink enroll rig <name> --apply  (re-pushes the rig-to-rig ACL deny)",
 		"mr-topic-isolation": "Give each rig a unique ntfy_topic in abysslink.yaml",
 		"mr-key-uniqueness":  "Rename the conflicting rig; rig names must be unique (they form the keychain service)",
+		// Supply-chain integrity advisories (supply-* checks).
+		"supply-cosign-bundle": "Install cosign and re-verify: abysslink verify   (or reinstall from a signed release)",
+		"supply-slsa-source":   "Upgrade to a v3+ release built with SLSA provenance: abysslink upgrade --apply",
 	}
 	return fixes[check]
+}
+
+// supplyChainFindings runs the supply-chain integrity advisory checks:
+// supply-cosign-bundle (verifies the release cosign v3 bundle offline) and
+// supply-slsa-source (confirms a SLSA provenance URL is embedded). Both are
+// SeverityWarning on failure — the binary runs fine without a verifiable bundle;
+// these are integrity advisories, not fail-closed gates. The runner is injected
+// so tests can substitute a shell.MockRunner. When bundleOverride is non-empty,
+// the cosign verification runs against it directly and no download is attempted.
+func supplyChainFindings(ctx context.Context, runner shell.Runner, ver, bundleOverride string) []modules.Finding {
+	return []modules.Finding{
+		supplyCosignBundleCheck(ctx, runner, ver, bundleOverride),
+		supplySLSASourceCheck(),
+	}
+}
+
+// supplyCosignBundleCheck verifies the installed release's cosign v3 bundle.
+func supplyCosignBundleCheck(ctx context.Context, runner shell.Runner, ver, bundleOverride string) modules.Finding {
+	const check = "supply-cosign-bundle"
+	bare := strings.TrimPrefix(ver, "v")
+	if bare == "" || bare == "dev" || bare == "unknown" {
+		return modules.Finding{
+			Module:   "supply",
+			Check:    check,
+			Severity: modules.SeverityWarning,
+			Message:  "dev build — no release bundle available to verify",
+		}
+	}
+
+	checksumName := fmt.Sprintf("abysslink_%s_checksums.txt", bare)
+	checksumPath := bundleOverride // reused below only when override present
+	bundlePath := bundleOverride
+
+	if bundleOverride == "" {
+		tmpDir, err := os.MkdirTemp("", "abysslink-doctor-supply-*")
+		if err != nil {
+			return supplyBundleWarn(check, err)
+		}
+		defer func() { _ = os.RemoveAll(tmpDir) }()
+		baseURL := fmt.Sprintf("https://github.com/%s/releases/download/v%s", upgradeRepo, bare)
+		checksumPath = filepath.Join(tmpDir, checksumName)
+		bundlePath = filepath.Join(tmpDir, checksumName+".bundle")
+		if err := downloadFile(ctx, baseURL+"/"+checksumName, checksumPath); err != nil {
+			return supplyBundleWarn(check, fmt.Errorf("download checksums: %w", err))
+		}
+		if err := downloadFile(ctx, baseURL+"/"+checksumName+".bundle", bundlePath); err != nil {
+			return supplyBundleWarn(check, fmt.Errorf("download bundle: %w", err))
+		}
+	} else {
+		// Override mode (tests): use a sibling checksums file if present.
+		sibling := filepath.Join(filepath.Dir(bundleOverride), checksumName)
+		if _, statErr := os.Stat(sibling); statErr == nil {
+			checksumPath = sibling
+		}
+	}
+
+	if err := verifyCosignBundle(ctx, runner, checksumPath, bundlePath); err != nil {
+		return supplyBundleWarn(check, err)
+	}
+	return modules.Finding{
+		Module:   "supply",
+		Check:    check,
+		Severity: modules.SeverityOK,
+		Message:  "cosign v3 bundle verified (offline)",
+	}
+}
+
+// supplyBundleWarn builds the SeverityWarning finding for a failed bundle check.
+func supplyBundleWarn(check string, err error) modules.Finding {
+	return modules.Finding{
+		Module:   "supply",
+		Check:    check,
+		Severity: modules.SeverityWarning,
+		Message:  fmt.Sprintf("cosign bundle verification failed: %v", err),
+	}
+}
+
+// supplySLSASourceCheck confirms a SLSA provenance URL is embedded in the build.
+func supplySLSASourceCheck() modules.Finding {
+	const check = "supply-slsa-source"
+	if slsaURL == "" {
+		return modules.Finding{
+			Module:   "supply",
+			Check:    check,
+			Severity: modules.SeverityWarning,
+			Message:  "no SLSA provenance URL embedded (dev build or pre-v3 release)",
+		}
+	}
+	return modules.Finding{
+		Module:   "supply",
+		Check:    check,
+		Severity: modules.SeverityOK,
+		Message:  "SLSA L2 provenance available at " + slsaURL,
+	}
 }
 
 // remoteSeverity converts a JSON severity string ("ok" | "warn" | "fatal") to
