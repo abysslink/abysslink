@@ -182,8 +182,7 @@ func metricsDoctorFindings(cfg *config.Config, reg metrics.Registry) []modules.F
 func metBindTailnetCheck(cfg *config.Config) modules.Finding {
 	const check = "metrics-bind-tailnet"
 	addr := cfg.Observability.Metrics.BindAddr
-	if cfg.Observability.Metrics.Enabled && addr != "" &&
-		(strings.Contains(addr, "0.0.0.0") || strings.Contains(addr, "::")) {
+	if cfg.Observability.Metrics.Enabled && addr != "" && config.IsUnspecifiedBindAddr(addr) {
 		return modules.Finding{
 			Module:   "metrics",
 			Check:    check,

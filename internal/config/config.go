@@ -17,6 +17,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -486,11 +487,31 @@ func validateIdentity(cfg *Config) error {
 // FATAL error class as the Funnel/backend rejections. An empty bind_addr is
 // resolved at runtime to the tailnet IP and is therefore accepted here.
 func validateObservability(cfg *Config) error {
-	if addr := cfg.Observability.Metrics.BindAddr; addr != "" &&
-		(strings.Contains(addr, "0.0.0.0") || strings.Contains(addr, "::")) {
+	if addr := cfg.Observability.Metrics.BindAddr; addr != "" && IsUnspecifiedBindAddr(addr) {
 		return fmt.Errorf("config: observability.metrics.bind_addr %q must not be 0.0.0.0 or :: — metrics must bind to the tailnet IP only (OBS-03)", addr)
 	}
 	return nil
+}
+
+// IsUnspecifiedBindAddr reports whether addr's host part is an unspecified
+// (wildcard) address — IPv4 0.0.0.0 or IPv6 :: — which would expose the
+// metrics endpoint on every interface (OBS-03, Information Disclosure).
+//
+// It parses the host rather than substring-matching, so legitimate IPv6
+// tailnet ULA addresses (e.g. fd7a:115c:a1e0::1234, which contain "::" as a
+// zero-run abbreviation) are NOT wrongly rejected — only the truly
+// unspecified addresses 0.0.0.0 and :: are. addr may be "host:port",
+// "[host]:port", or a bare host; a bare/un-splittable value is treated as the
+// host itself. A non-IP host (e.g. a DNS name) is not unspecified.
+func IsUnspecifiedBindAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Not host:port (bare host, or bracketed host without port). Strip any
+		// surrounding brackets so "[::]" parses as "::".
+		host = strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
 }
 
 // validateBackend enforces backend-specific config invariants.
