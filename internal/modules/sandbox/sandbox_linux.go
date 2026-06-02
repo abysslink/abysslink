@@ -46,15 +46,21 @@ func isLandlockSupported() bool {
 // applyLandlockProfile applies a minimal Landlock profile to the current
 // process. It uses BestEffort() so kernels < 5.13 degrade gracefully (no error)
 // rather than failing closed. The concrete path rules are operator-configured
-// out of band; this module currently applies an empty (no-op advisory) profile
-// and logs that Landlock is active. Returns any error from the kernel.
+// out of band; this module currently applies an empty (advisory no-op) profile.
+//
+// Logging is truthful about enforcement (WR-03): it probes Landlock support
+// first and only claims isolation when the kernel actually enforces it. On an
+// unsupported kernel (< 5.13) BestEffort applies nothing, so it logs a WARN
+// stating Landlock is NOT enforced rather than a misleading "applied" message.
+// Returns any error from the kernel.
 func applyLandlockProfile(_ context.Context) error {
 	if !isLandlockSupported() {
-		slog.Info("sandbox: Landlock not supported on this kernel (>= 5.13 required); skipping (BestEffort)")
+		slog.Warn("sandbox: Landlock NOT enforced (kernel < 5.13 required); no process isolation applied")
+		return nil
 	}
 	if err := landlock.V1.BestEffort().RestrictPaths(); err != nil {
 		return err
 	}
-	slog.Info("sandbox: Landlock process isolation applied (BestEffort)")
+	slog.Info("sandbox: Landlock process isolation applied (BestEffort, empty advisory profile)")
 	return nil
 }
