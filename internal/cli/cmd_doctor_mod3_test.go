@@ -132,3 +132,32 @@ func TestDoctorAsciinemaRecWarning_Fatal(t *testing.T) {
 	require.True(t, ok, "asciinema-rec-warning must be present when asciinema is enabled")
 	assert.Equal(t, modules.SeverityFatal, f.Severity)
 }
+
+// netbirdBackendCfg returns a config with the NetBird backend selected.
+func netbirdBackendCfg() *config.Config {
+	cfg := config.Defaults()
+	cfg.Backend.Type = "netbird"
+	cfg.Server.NetBird.ServerURL = "https://nb.example.com"
+	return cfg
+}
+
+// TestDoctorNbPostureActive_Warn verifies the nb-posture-active WARN finding is
+// present when the NetBird backend is configured but the API key is unset
+// (cannot reach the API to count posture checks).
+func TestDoctorNbPostureActive_Warn(t *testing.T) {
+	t.Setenv("ABYSSLINK_NB_API_KEY", "") // no key → cannot check posture status
+
+	findings := mod3DoctorFindings(context.Background(), netbirdBackendCfg(), shell.NewMockRunner())
+	f, ok := findFinding(findings, "nb-posture-active")
+	require.True(t, ok, "nb-posture-active must be present when NetBird backend is configured")
+	assert.Equal(t, modules.SeverityWarning, f.Severity)
+}
+
+// TestDoctorNbPostureActive_AbsentForNonNetBird verifies the finding is NOT
+// emitted for non-NetBird backends.
+func TestDoctorNbPostureActive_AbsentForNonNetBird(t *testing.T) {
+	cfg := config.Defaults() // backend.type defaults to tailscale
+	findings := mod3DoctorFindings(context.Background(), cfg, shell.NewMockRunner())
+	_, ok := findFinding(findings, "nb-posture-active")
+	assert.False(t, ok, "nb-posture-active must not be emitted for non-NetBird backends")
+}
