@@ -101,7 +101,19 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 				})
 			}
 		} else {
+			// WR-05: an unparseable anchor timestamp must NOT read as "age within
+			// threshold". Silence here let an attacker who can write
+			// audit.anchor.json (the AUD-02 threat model) set Time to garbage and
+			// suppress the staleness signal entirely (false-clean). Emit a WARN
+			// finding so the sec-audit-anchor-age alias does not fall back to its
+			// SeverityOK placeholder.
 			slog.Warn("doctor: parse anchor time failed", "err", perr)
+			findings = append(findings, modules.Finding{
+				Module:   "audit",
+				Check:    "audit-anchor-age",
+				Severity: modules.SeverityWarning,
+				Message:  "audit anchor timestamp is unparseable — anchor may be corrupt or forged",
+			})
 		}
 	}
 
