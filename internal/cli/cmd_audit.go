@@ -293,6 +293,12 @@ func collectAggregateFindings(ctx context.Context, cc *cmdContext, deps modules.
 	// 18 sec-* checks; the 3 aliases reuse the slices above (run-once).
 	all = append(all, secDoctorFindings(ctx, cc, deps, pentest, metFinds, webuiFinds, auditFinds)...)
 
+	// Phase 21 optional-module posture (MOD3-01..05): wol-apply-gate,
+	// upsnap-bind/no-public, atuin-bind/key-backed-up, asciinema-rec-warning,
+	// sandbox-landlock-supported, nb-posture-active. Mirrors cmd_doctor.go RunE
+	// (B1): without this the aggregate silently dropped all 9 Phase-21 checks.
+	all = append(all, mod3DoctorFindings(ctx, cc.cfg, cc.runner)...)
+
 	return all
 }
 
