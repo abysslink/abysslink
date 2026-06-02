@@ -209,8 +209,12 @@ main() {
     info "installing ${BINARY} to ${_dest_dir}/ …"
     install -m 755 "${_tmpdir}/${BINARY}" "${_dest_dir}/${BINARY}"
 
-    # Verify the installed binary runs.
-    "${_dest_dir}/${BINARY}" version >/dev/null 2>&1 || true
+    # Verify the installed binary runs (fail closed: a binary that cannot
+    # execute — wrong arch, corrupt extraction, missing loader — must not be
+    # reported as a successful install).
+    if ! "${_dest_dir}/${BINARY}" version >/dev/null 2>&1; then
+        die "installed binary failed to run — installation is broken"
+    fi
 
     info "abysslink ${_version} installed to ${_dest_dir}/${BINARY}"
 
