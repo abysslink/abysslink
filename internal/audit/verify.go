@@ -23,36 +23,67 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 // VerifyResult reports the outcome of a chain walk. OK is true only when every
 // signed entry chains and verifies; At is the index of the first bad entry (-1
-// when OK). TruncationDetected is set when the anchor records more entries than
-// the log currently holds.
+// when OK). TruncationDetected is set when the (HMAC-validated) anchor records
+// more entries than the log currently holds. SigsVerified counts entries whose
+// HMAC signature was checked and matched; SigsSkipped counts entries whose
+// signature could not be authenticated (legacy/unsigned entries, or any signed
+// entry when the keychain is unavailable so HMAC checks are skipped).
 type VerifyResult struct {
 	OK                 bool
 	At                 int
 	Reason             string
 	TruncationDetected bool
+	SigsVerified       int
+	SigsSkipped        int
 }
 
 // Verify walks the full log and the anchor. It is a read-only path and holds no
 // mutex. Pre-chain legacy entries (empty PrevHash) are skipped gracefully so
 // existing unsigned v1/v2 logs still verify.
+//
+// kc may be nil when no keychain backend is available. In that case Verify still
+// walks the hash chain (and validates anchor structure where possible) but
+// SKIPS the per-entry HMAC check rather than dereferencing a nil keychain — this
+// honours the documented "verify can still walk the chain with a nil key"
+// contract (cmd_audit.go) and the "no panics in normal control flow" hard rule.
+// Skipped signatures are surfaced via VerifyResult.SigsSkipped so callers do not
+// mistake an unverified walk for a fully authenticated one.
 func Verify(ctx context.Context, logPath string, kc KeychainStore) (VerifyResult, error) {
 	rawLines, entries, err := scanRawAndEntries(logPath)
 	if err != nil {
 		return VerifyResult{}, err
 	}
 
-	key, err := fetchHMACKey(ctx, kc)
-	if err != nil {
-		return VerifyResult{}, err
+	// CR-02: only fetch the HMAC key when a keychain is actually present.
+	// fetchHMACKey calls kc.Get, which panics on a nil interface.
+	var key []byte
+	if kc != nil {
+		if key, err = fetchHMACKey(ctx, kc); err != nil {
+			return VerifyResult{}, err
+		}
 	}
 
+	result := walkChain(rawLines, entries, key)
+	if !result.OK {
+		return result, nil
+	}
+	return verifyAnchor(logPath, rawLines, entries, key, kc, result)
+}
+
+// walkChain validates each entry's prev_hash link and (when key != nil) HMAC
+// signature, returning the first failure or an OK result with sig counts. A nil
+// key skips HMAC checks (documented fail-open-chain-walk; CR-02).
+func walkChain(rawLines [][]byte, entries []Entry, key []byte) VerifyResult {
+	result := VerifyResult{OK: true, At: -1}
 	for i, e := range entries {
 		if e.PrevHash == "" {
-			continue // pre-chain legacy entry — skip chain/sig checks
+			result.SigsSkipped++ // pre-chain legacy entry — skip chain/sig checks
+			continue
 		}
 
 		expectedPrev := genesisMarker
@@ -61,33 +92,84 @@ func Verify(ctx context.Context, logPath string, kc KeychainStore) (VerifyResult
 			expectedPrev = hex.EncodeToString(sum[:])
 		}
 		if e.PrevHash != expectedPrev {
-			return VerifyResult{OK: false, At: i, Reason: "prev_hash mismatch"}, nil
+			return VerifyResult{OK: false, At: i, Reason: "prev_hash mismatch"}
 		}
 
-		if e.Sig != "" {
-			// Reconstruct the EXACT SignInput that Append signed: Title == e.Op
-			// and DiffHash is the [32]byte recovered by hex-decoding the stored
-			// hash. Append stores Hash = hex(in.DiffHash[:]); hashing that hex
-			// string instead would never match the signed digest.
-			in := SignInput{Title: e.Op}
-			raw, derr := hex.DecodeString(e.Hash)
-			if derr != nil || len(raw) != len(in.DiffHash) {
-				return VerifyResult{OK: false, At: i, Reason: "sig mismatch"}, nil
-			}
-			copy(in.DiffHash[:], raw)
-			if !verifyHMAC(key, in, e.Sig) {
-				return VerifyResult{OK: false, At: i, Reason: "sig mismatch"}, nil
-			}
+		if e.Sig == "" {
+			result.SigsSkipped++
+			continue
 		}
+		if key == nil {
+			// Keychain unavailable: skip the HMAC check but record it was not
+			// authenticated so callers can warn the operator.
+			result.SigsSkipped++
+			continue
+		}
+		if !verifyEntrySig(key, e) {
+			return VerifyResult{OK: false, At: i, Reason: "sig mismatch"}
+		}
+		result.SigsVerified++
 	}
+	return result
+}
 
-	result := VerifyResult{OK: true, At: -1}
+// verifyEntrySig reconstructs the EXACT SignInput that Append signed (CR-03):
+// Title == e.Op, plus Target/Time/DryRun/PrevHash, and DiffHash recovered by
+// hex-decoding the stored hash. Append stores Hash = hex(in.DiffHash[:]) and
+// Time as RFC3339; using the hex string or a different time precision would
+// never match the signed digest.
+func verifyEntrySig(key []byte, e Entry) bool {
+	in := SignInput{
+		Title:    e.Op,
+		Target:   e.Target,
+		Time:     e.Time.UTC().Format(time.RFC3339),
+		DryRun:   e.DryRun,
+		PrevHash: e.PrevHash,
+	}
+	raw, derr := hex.DecodeString(e.Hash)
+	if derr != nil || len(raw) != len(in.DiffHash) {
+		return false
+	}
+	copy(in.DiffHash[:], raw)
+	return verifyHMAC(key, in, e.Sig)
+}
+
+// verifyAnchor validates the external anchor (CR-01, WR-01) and folds the result
+// into the running VerifyResult.
+func verifyAnchor(logPath string, rawLines [][]byte, entries []Entry, key []byte, kc KeychainStore, result VerifyResult) (VerifyResult, error) {
 	anchor, err := ReadAnchor(logPath)
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	if anchor != nil && anchor.EntryCount > int64(len(entries)) {
+	if anchor == nil {
+		return result, nil
+	}
+	// CR-01: a forged/unsigned anchor must be treated as tampering, not silently
+	// trusted. When the keychain is unavailable we cannot authenticate the
+	// anchor, so conservatively skip the anchor checks rather than trust an
+	// unverifiable anchor.
+	if key == nil {
+		result.SigsSkipped++
+		return result, nil
+	}
+	ok, verr := VerifyAnchor(logPath, kc)
+	if verr != nil {
+		return VerifyResult{}, verr
+	}
+	if !ok {
+		return VerifyResult{OK: false, At: -1, Reason: "anchor HMAC invalid (forged or tampered)"}, nil
+	}
+	if anchor.EntryCount > int64(len(entries)) {
 		result.TruncationDetected = true
+	}
+	// WR-01: when the counts match, the anchor's LastHash must equal
+	// sha256(last raw line). A mismatch is a history rewrite at/below the
+	// anchored length that the count check alone cannot catch.
+	if anchor.EntryCount == int64(len(entries)) && len(rawLines) > 0 {
+		sum := sha256.Sum256(rawLines[len(rawLines)-1])
+		if anchor.LastHash != hex.EncodeToString(sum[:]) {
+			return VerifyResult{OK: false, At: len(entries) - 1, Reason: "anchor last_hash mismatch (history rewrite)"}, nil
+		}
 	}
 	return result, nil
 }
