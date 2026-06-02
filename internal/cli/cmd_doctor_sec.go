@@ -270,9 +270,9 @@ func secSSHLoginGraceTimeCheckPathRunner(ctx context.Context, runner shell.Runne
 	if val == "" {
 		val = sshDefaultLoginGraceTime
 	}
-	// LoginGraceTime may carry a unit suffix (e.g. "2m"); strip non-digits for a
-	// coarse seconds estimate. A bare integer is seconds.
-	n, perr := strconv.Atoi(strings.TrimSpace(val))
+	// LoginGraceTime may carry an sshd time-format unit suffix (e.g. "2m" = 120s,
+	// "1h" = 3600s); convert it to seconds. A bare integer is seconds (IN-03).
+	n, perr := parseSSHDSeconds(strings.TrimSpace(val))
 	if perr != nil {
 		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
 			Message: "LoginGraceTime unparseable (" + val + ") — treating as default"}
@@ -283,6 +283,36 @@ func secSSHLoginGraceTimeCheckPathRunner(ctx context.Context, runner shell.Runne
 	}
 	return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
 		Message: fmt.Sprintf("LoginGraceTime: %ds", n)}
+}
+
+// parseSSHDSeconds converts an sshd_config time value to seconds. sshd accepts a
+// bare integer (seconds) or a value with a single unit suffix — s(econds),
+// m(inutes), h(ours), d(ays), w(eeks) — e.g. "2m" = 120, "1h" = 3600. Only the
+// common single-unit form is handled (sufficient for a coarse threshold check);
+// anything else returns an error so the caller treats it as the default.
+func parseSSHDSeconds(val string) (int, error) {
+	if val == "" {
+		return 0, fmt.Errorf("empty time value")
+	}
+	mult := 1
+	last := val[len(val)-1]
+	switch last {
+	case 's', 'S':
+		mult, val = 1, val[:len(val)-1]
+	case 'm', 'M':
+		mult, val = 60, val[:len(val)-1]
+	case 'h', 'H':
+		mult, val = 3600, val[:len(val)-1]
+	case 'd', 'D':
+		mult, val = 86400, val[:len(val)-1]
+	case 'w', 'W':
+		mult, val = 604800, val[:len(val)-1]
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return 0, err
+	}
+	return n * mult, nil
 }
 
 func secSSHCiphersCheck(ctx context.Context, runner shell.Runner, pentest bool) modules.Finding {
