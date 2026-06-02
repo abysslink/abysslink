@@ -188,6 +188,50 @@ func TestApply_WritesShellRC_Bash(t *testing.T) {
 	assert.Contains(t, string(data), `eval "$(atuin init bash)"`)
 }
 
+// TestApply_PreservesShellRCPerms verifies WR-04: appending the atuin init line
+// to a pre-existing 0o644 shell rc must NOT narrow it to 0o600. The user's
+// existing dotfile permissions are preserved.
+func TestApply_PreservesShellRCPerms(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	rcPath := filepath.Join(dir, ".zshrc")
+	require.NoError(t, os.WriteFile(rcPath, []byte("# user rc\n"), 0o644))
+
+	a := audit.New(filepath.Join(dir, "audit.log"))
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Audit: a})
+	require.NoError(t, m.Apply(context.Background()))
+
+	fi, err := os.Stat(rcPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm(), "existing shell rc mode must be preserved, not narrowed")
+
+	data, err := os.ReadFile(rcPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `eval "$(atuin init zsh)"`)
+}
+
+// TestApply_NewShellRCDefaultPerms verifies that when no rc file exists, the
+// freshly-created one gets the conventional 0o644 default for shell init files.
+func TestApply_NewShellRCDefaultPerms(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/bin/bash")
+
+	a := audit.New(filepath.Join(dir, "audit.log"))
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Audit: a})
+	require.NoError(t, m.Apply(context.Background()))
+
+	fi, err := os.Stat(filepath.Join(dir, ".bashrc"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm(), "new shell rc must use the conventional 0o644 default")
+}
+
 // countingAudit wraps audit.AuditWriter to count WriteFile calls per path so
 // the idempotency test can assert the shell-rc line is written at most once.
 type countingAudit struct {
