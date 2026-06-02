@@ -208,7 +208,7 @@ func emitVerifyHuman(p Printer, res verifyResult, verr error) {
 // when the API responds 200 with at least one attestation. Any error or non-200
 // response yields false — provenance is informational, never fatal.
 func slsaProvenanceExists(ctx context.Context, checksumPath string) bool {
-	data, err := os.ReadFile(checksumPath) //nolint:gosec
+	data, err := os.ReadFile(checksumPath) //nolint:gosec // G304: checksumPath is an internally-derived checksum file path, not user input
 	if err != nil {
 		return false
 	}

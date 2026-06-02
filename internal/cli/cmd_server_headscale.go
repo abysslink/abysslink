@@ -200,7 +200,7 @@ func headscaleInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, 
 	}
 
 	// ── Step 5: Write binary via audit.WriteFile ───────────────────────────────
-	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec
+	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec // G304: tmpBinPath is an internally-staged download temp path, not user-controlled
 	if err != nil {
 		return fmt.Errorf("headscale init: read temp binary: %w", err)
 	}
@@ -724,7 +724,7 @@ func headscaleSwapBinary(ctx context.Context, cfg *config.Config, runner shell.R
 	}
 
 	// Write new binary via audit.WriteFile.
-	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec
+	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec // G304: tmpBinPath is an internally-staged download temp path, not user-controlled
 	if err != nil {
 		return fmt.Errorf("headscale upgrade: read new binary: %w", err)
 	}

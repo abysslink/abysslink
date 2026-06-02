@@ -203,7 +203,7 @@ func scanRawAndEntries(logPath string) ([][]byte, []Entry, error) {
 		}
 		return nil, nil, fmt.Errorf("audit: open log %s: %w", logPath, err)
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // errcheck: close error on read-only/append file handle is non-actionable; data durability handled by explicit Sync where required
 
 	var rawLines [][]byte
 	var entries []Entry

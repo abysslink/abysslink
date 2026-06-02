@@ -78,7 +78,7 @@ func (e *netbirdEditor) listGroups(ctx context.Context) ([]nbGroup, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netbird: list groups: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: list groups: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -115,7 +115,7 @@ func (e *netbirdEditor) EnsureGroup(ctx context.Context, name string) (string, e
 	if err != nil {
 		return "", fmt.Errorf("netbird: create group %q: %w", name, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("netbird: create group %q: unexpected HTTP %d", name, resp.StatusCode)
 	}
@@ -153,7 +153,7 @@ func (e *netbirdEditor) listPolicies(ctx context.Context) ([]nbPolicy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netbird: list policies: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: list policies: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -262,7 +262,7 @@ func (e *netbirdEditor) PushDenyAllBaseline(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("netbird: deny-all baseline: push: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("netbird: deny-all baseline: push: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -295,7 +295,7 @@ func (e *netbirdEditor) PushPolicy(ctx context.Context, raw json.RawMessage, int
 	if err != nil {
 		return fmt.Errorf("netbird: push policy: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("netbird: push policy: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -329,7 +329,7 @@ func (e *netbirdEditor) Validate(ctx context.Context, policyID string, intent []
 	if err != nil {
 		return fmt.Errorf("netbird: validate: re-read policy %s: %w", policyID, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("netbird: validate: re-read policy %s: unexpected HTTP %d", policyID, resp.StatusCode)
 	}

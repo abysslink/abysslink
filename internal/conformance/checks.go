@@ -61,7 +61,7 @@ var telemetryPackages = []string{
 // that look like leaked secrets. Returns an error describing the first match.
 // Returns nil if the file does not exist (no audit log yet = no secrets).
 func CheckNoSecretsInAuditLog(_ context.Context, auditLogPath string) error {
-	f, err := os.Open(auditLogPath) //nolint:gosec
+	f, err := os.Open(auditLogPath) //nolint:gosec // G304: auditLogPath is the internal audit-log path under test, not user input
 	if os.IsNotExist(err) {
 		// No audit log yet; nothing to check.
 		return nil
@@ -69,7 +69,7 @@ func CheckNoSecretsInAuditLog(_ context.Context, auditLogPath string) error {
 	if err != nil {
 		return fmt.Errorf("conformance: open audit log %s: %w", auditLogPath, err)
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // errcheck: close error on read-only/append file handle is non-actionable; data durability handled by explicit Sync where required
 
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
@@ -126,7 +126,7 @@ func CheckNoTelemetry(_ context.Context, repoRoot string) error {
 			return nil
 		}
 
-		data, readErr := os.ReadFile(path) //nolint:gosec
+		data, readErr := os.ReadFile(path) //nolint:gosec // G304: path is a conformance-scenario file path derived internally, not user input
 		if readErr != nil {
 			return nil // best-effort; skip unreadable files
 		}

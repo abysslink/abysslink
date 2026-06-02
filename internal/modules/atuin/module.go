@@ -85,7 +85,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 
 	// Check that sync_address is not pointing to the public cloud server.
 	cfgPath := atuinConfigPath()
-	data, err := os.ReadFile(cfgPath) //nolint:gosec
+	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the module config path resolved internally, not user input
 	if err == nil {
 		content := string(data)
 		if strings.Contains(content, "api.atuin.sh") {

@@ -34,7 +34,7 @@ type ExecRunner struct{}
 // An error is returned only when the process cannot be started or the context
 // is cancelled before completion.
 func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (Result, error) {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: shell.Runner is the project-sanctioned exec abstraction (CLAUDE.md); argv is exec'd directly with no shell, never sh -c
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -62,7 +62,7 @@ func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (Resu
 // stderr so interactive flows (e.g. `tailscale up` browser login) work with a
 // live terminal. Output is not captured.
 func (r *ExecRunner) RunInteractive(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: shell.Runner is the project-sanctioned exec abstraction (CLAUDE.md); argv is exec'd directly with no shell, never sh -c
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -75,7 +75,7 @@ func (r *ExecRunner) RunInteractive(ctx context.Context, name string, args ...st
 // that the new value is the only occurrence (most libc getenv implementations
 // return the first match, so appending-only leaves the old value in effect).
 func (r *ExecRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (Result, error) {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: shell.Runner is the project-sanctioned exec abstraction (CLAUDE.md); argv is exec'd directly with no shell, never sh -c
 	override := make(map[string]bool, len(env))
 	for k := range env {
 		override[k] = true
@@ -118,7 +118,7 @@ func (r *ExecRunner) RunWithEnv(ctx context.Context, env map[string]string, name
 // RunWithStdin executes name with args, wiring stdin to the provided reader.
 // Use this to deliver secrets to a process without placing them on argv.
 func (r *ExecRunner) RunWithStdin(ctx context.Context, stdin io.Reader, name string, args ...string) (Result, error) {
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: shell.Runner is the project-sanctioned exec abstraction (CLAUDE.md); argv is exec'd directly with no shell, never sh -c
 	var stdout, stderr bytes.Buffer
 	cmd.Stdin = stdin
 	cmd.Stdout = &stdout

@@ -386,7 +386,7 @@ func nbZitadelProbe(ctx context.Context, issuerBase string) DoctorFinding {
 			Message: fmt.Sprintf("nb-zitadel: probe request failed (server may be unreachable): %v", err),
 		}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
@@ -499,7 +499,7 @@ func checkNbKeyType(ctx context.Context, doReq doRequestFunc) DoctorFinding {
 			Message: "nb-key-type: could not complete check: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
 	if resp.StatusCode != http.StatusOK {
 		return DoctorFinding{Module: mod, Check: check, Severity: DoctorWarning,
@@ -592,7 +592,7 @@ func checkNbAPIAuth(ctx context.Context, doReq doRequestFunc) DoctorFinding {
 			Message: "nb-api-auth: NetBird API unreachable: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -723,7 +723,7 @@ func parseNbConfigYAML(path string) (*nbConfigYAML, error) {
 	if path == "" {
 		return nil, fmt.Errorf("netbird config path is empty")
 	}
-	data, err := os.ReadFile(path) //nolint:gosec
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is a netbird config path resolved internally, not user input
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}

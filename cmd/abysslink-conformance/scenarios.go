@@ -54,7 +54,7 @@ func testInitCreatesConfig(ctx context.Context, binPath, _ string, configPath st
 		return fmt.Errorf("config file not created at %s: %w", configPath, statErr)
 	}
 
-	data, readErr := os.ReadFile(configPath) //nolint:gosec
+	data, readErr := os.ReadFile(configPath) //nolint:gosec // G304: configPath is a conformance-scenario config path derived internally, not user input
 	if readErr != nil {
 		return fmt.Errorf("could not read config file: %w", readErr)
 	}
