@@ -114,9 +114,11 @@ func NewMemRegistry() Registry {
 	return &memRegistry{entries: make(map[string]*metricEntry)}
 }
 
-// canonicalKey builds a deterministic map key from a metric name and its label
-// set: "name|k1=v1|k2=v2" with keys sorted for stability.
-func canonicalKey(name string, labels map[string]string) string {
+// CanonicalKey builds a deterministic key from a metric name and its label set:
+// "name|k1=v1|k2=v2" with keys sorted for stability. It is the single source of
+// truth for series identity, reused by the doctor cardinality check (IN-02) so
+// the serialization cannot drift between packages.
+func CanonicalKey(name string, labels map[string]string) string {
 	if len(labels) == 0 {
 		return name
 	}
@@ -152,7 +154,7 @@ func copyLabels(labels map[string]string) map[string]string {
 // getOrCreate returns the existing entry for (name, labels) or creates one with
 // the given type. If an entry already exists, its stored type and help win.
 func (r *memRegistry) getOrCreate(name, help, metricType string, labels map[string]string) *metricEntry {
-	key := canonicalKey(name, labels)
+	key := CanonicalKey(name, labels)
 
 	r.mu.RLock()
 	e, ok := r.entries[key]

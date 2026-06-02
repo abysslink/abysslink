@@ -22,7 +22,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -302,25 +301,11 @@ func metDisabledListenerCheck(cfg *config.Config, tailnetIP string) modules.Find
 // tuples across all registered families — the Prometheus time-series definition.
 func countMetricSeries(reg metrics.Registry) int {
 	seen := make(map[string]struct{})
-	formatCanonicalKey := func(name string, labels map[string]string) string {
-		keys := make([]string, 0, len(labels))
-		for k := range labels {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		var b strings.Builder
-		b.WriteString(name)
-		for _, k := range keys {
-			b.WriteString("|")
-			b.WriteString(k)
-			b.WriteString("=")
-			b.WriteString(labels[k])
-		}
-		return b.String()
-	}
 	for _, fam := range reg.Snapshot() {
 		for _, sample := range fam.Samples {
-			seen[formatCanonicalKey(fam.Name, sample.Labels)] = struct{}{}
+			// IN-02: reuse the metrics package's single source of truth for
+			// series identity rather than reimplementing the serialization here.
+			seen[metrics.CanonicalKey(fam.Name, sample.Labels)] = struct{}{}
 		}
 	}
 	return len(seen)
