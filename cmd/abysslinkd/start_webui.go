@@ -71,11 +71,20 @@ func startWebUI(ctx context.Context, cfg *config.Config, srv *daemon.Server, _ s
 		if hostname == "" {
 			hostname = "this-rig"
 		}
+		// The listener address is resolved to the tailnet IP inside
+		// StartWebUIServer (WEB-02), so this entrypoint does not yet know the
+		// concrete IP. Describe the binding rather than interpolating the raw
+		// (often empty) bind_addr config field, which previously printed a
+		// misleading trailing-blank "Bound to tailnet IP " (IN-01).
+		bindDesc := "the tailnet IP only"
+		if cfg.WebUI.BindAddr != "" {
+			bindDesc = cfg.WebUI.BindAddr
+		}
 		fmt.Fprintf(os.Stderr,
 			"ABYSSLINK WEB UI: enabled. Accessible at https://%s:%d/ over tailnet only. "+
-				"Bound to tailnet IP %s. Read-only. Auth: Tailscale WhoIs. TLS: Tailscale cert. "+
+				"Bound to %s. Read-only. Auth: Tailscale WhoIs. TLS: Tailscale cert. "+
 				"This service is NOT accessible from the internet.\n",
-			hostname, port, cfg.WebUI.BindAddr)
+			hostname, port, bindDesc)
 	})
 
 	go func() {
