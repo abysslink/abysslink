@@ -53,15 +53,15 @@ type ipOnlyBackend struct {
 	ipErr error
 }
 
-func (m *ipOnlyBackend) Status(context.Context) (*backend.Status, error)  { return nil, nil }
-func (m *ipOnlyBackend) IP(context.Context) (string, error)               { return m.ip, m.ipErr }
-func (m *ipOnlyBackend) Hostname(context.Context) (string, error)         { return "", nil }
-func (m *ipOnlyBackend) SSHConfig() backend.SSHConfig                      { return backend.SSHConfig{} }
-func (m *ipOnlyBackend) LockCapability() backend.LockCapability            { return backend.LockCapability("") }
-func (m *ipOnlyBackend) Capabilities() backend.Capabilities               { return backend.Capabilities{} }
-func (m *ipOnlyBackend) Up(context.Context, backend.UpOpts) error          { return nil }
-func (m *ipOnlyBackend) Set(context.Context, backend.SetOpts) error        { return nil }
-func (m *ipOnlyBackend) Down(context.Context) error                        { return nil }
+func (m *ipOnlyBackend) Status(context.Context) (*backend.Status, error) { return nil, nil }
+func (m *ipOnlyBackend) IP(context.Context) (string, error)              { return m.ip, m.ipErr }
+func (m *ipOnlyBackend) Hostname(context.Context) (string, error)        { return "", nil }
+func (m *ipOnlyBackend) SSHConfig() backend.SSHConfig                    { return backend.SSHConfig{} }
+func (m *ipOnlyBackend) LockCapability() backend.LockCapability          { return backend.LockCapability("") }
+func (m *ipOnlyBackend) Capabilities() backend.Capabilities              { return backend.Capabilities{} }
+func (m *ipOnlyBackend) Up(context.Context, backend.UpOpts) error        { return nil }
+func (m *ipOnlyBackend) Set(context.Context, backend.SetOpts) error      { return nil }
+func (m *ipOnlyBackend) Down(context.Context) error                      { return nil }
 
 // TestResolveMetricsAddrTailnetFloor is the WR-01 regression for the
 // backend-agnostic OBS-03 floor: an explicit bind_addr is accepted only when its
@@ -70,11 +70,11 @@ func (m *ipOnlyBackend) Down(context.Context) error                        { ret
 func TestResolveMetricsAddrTailnetFloor(t *testing.T) {
 	const port = 9090
 	cases := []struct {
-		name       string
-		backendIP  string
-		bindAddr   string
-		wantOK     bool
-		wantAddr   string // checked only when wantOK
+		name      string
+		backendIP string
+		bindAddr  string
+		wantOK    bool
+		wantAddr  string // checked only when wantOK
 	}{
 		{
 			name:      "empty bind_addr binds backend CGNAT IP",
