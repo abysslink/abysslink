@@ -66,10 +66,6 @@ func TestParseSSHDTOutput(t *testing.T) {
 	assert.False(t, found)
 }
 
-// secCfg returns a minimal config used by SSH check tests; the SSH checks read
-// the effective sshd config, not the abysslink config, so cfg content is moot.
-func secCfg() *config.Config { return config.Defaults() }
-
 func TestSecSSHPermitRoot(t *testing.T) {
 	ctx := context.Background()
 	t.Run("yes", func(t *testing.T) {
