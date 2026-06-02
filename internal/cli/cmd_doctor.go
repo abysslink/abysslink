@@ -524,6 +524,13 @@ Exit codes:
 			// targets the same address the live listener binds (WR-03).
 			findings = append(findings, metricsDoctorFindings(cc.cfg, deps.MetricsRegistry(), resolveTailnetIP(ctx, cc))...)
 
+			// Web UI posture (WEB-02..WEB-06): 8 HARD-FLOOR checks, all FATAL on
+			// misconfiguration. Config-layer checks plus net.Dial / net/http live
+			// probes — no tailscale.com import, so the base binary stays free of
+			// webui/SDK symbols (T-19-08). All checks are no-ops (SeverityOK) when
+			// webui is disabled, except webui-bind which fires even when disabled.
+			findings = append(findings, webuiDoctorFindings(ctx, cc.cfg)...)
+
 			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
 			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")
 			strictFlag, _ := cmd.Flags().GetBool("strict")
@@ -733,6 +740,15 @@ func findingFix(check string) string {
 		// Supply-chain integrity advisories (supply-* checks).
 		"supply-cosign-bundle": "Install cosign and re-verify: abysslink verify   (or reinstall from a signed release)",
 		"supply-slsa-source":   "Upgrade to a v3+ release built with SLSA provenance: abysslink upgrade --apply",
+		// Web UI posture checks (webui-* checks).
+		"webui-bind":               "Set webui.bind_addr to your tailnet IP in abysslink.yaml",
+		"webui-funnel":             "Set webui.bind_addr to your tailnet IP; Funnel is permanently rejected",
+		"webui-mutations-disabled": "Set webui.read_only: true in abysslink.yaml (WEB-02)",
+		"webui-tls":                "webui requires Tailscale backend; Headscale/NetBird are unsupported for TLS (issue #2137)",
+		"webui-auth":               "Ensure tailscaled is running: tailscale status",
+		"webui-whoami-local":       "Start tailscaled; abysslink doctor will re-check",
+		"webui-csrf":               "Restart abysslinkd-webui; if the issue persists, file a bug",
+		"webui-csp":                "Restart abysslinkd-webui; if the issue persists, file a bug",
 	}
 	return fixes[check]
 }
