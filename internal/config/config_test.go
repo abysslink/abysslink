@@ -239,3 +239,48 @@ func TestRigConfig_DefaultsEmpty(t *testing.T) {
 	cfg := config.Defaults()
 	assert.Empty(t, cfg.Rigs, "Defaults() must return an empty Rigs slice")
 }
+
+// validObsBaseConfig returns a Config that passes all pre-existing Validate
+// checks, so observability-specific assertions are isolated.
+func validObsBaseConfig() *config.Config {
+	cfg := config.Defaults()
+	cfg.Version = 1
+	cfg.Identity.Email = "a@b.com"
+	cfg.Identity.UnixUser = "user"
+	cfg.Tailnet.Hostname = "host"
+	return cfg
+}
+
+func TestValidateObservability(t *testing.T) {
+	tests := []struct {
+		name      string
+		bindAddr  string
+		wantErr   bool
+		errSubstr string
+	}{
+		{name: "rejects 0.0.0.0", bindAddr: "0.0.0.0:9090", wantErr: true, errSubstr: "OBS-03"},
+		{name: "rejects double colon", bindAddr: "::", wantErr: true, errSubstr: "OBS-03"},
+		{name: "rejects bracketed v6 any", bindAddr: "[::]:9090", wantErr: true, errSubstr: "OBS-03"},
+		{name: "accepts empty", bindAddr: "", wantErr: false},
+		{name: "accepts tailnet ip", bindAddr: "100.64.0.1", wantErr: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validObsBaseConfig()
+			cfg.Observability.Metrics.BindAddr = tc.bindAddr
+			err := config.Validate(cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errSubstr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestDefaultsObservabilityOff(t *testing.T) {
+	cfg := config.Defaults()
+	assert.False(t, cfg.Observability.Metrics.Enabled, "metrics must default OFF")
+	assert.False(t, cfg.Observability.Digest.Enabled, "digest must default OFF")
+}
