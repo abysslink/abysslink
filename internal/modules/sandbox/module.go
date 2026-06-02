@@ -17,16 +17,33 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"log/slog"
-	"runtime"
-	"strings"
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
-// Module detects OS-level process isolation capabilities for remote-access services.
+// ErrNotSupported is returned by Apply on non-Linux platforms: Landlock is a
+// Linux-only kernel LSM (kernel >= 5.13) with no macOS/Windows equivalent. It
+// is declared here (not in a build-tagged file) so callers and tests can
+// reference it on every platform; only the non-Linux applyLandlockProfile
+// returns it.
+var ErrNotSupported = errors.New("sandbox: Landlock is Linux-only (kernel >= 5.13 required)")
+
+// Module applies kernel-native process isolation for remote-access services.
+//
+// On Linux it uses the Landlock LSM (kernel >= 5.13) via go-landlock; on every
+// other platform it is a no-op that reports the capability is unavailable.
+// The platform-specific behaviour lives in build-tagged files:
+//   - sandbox_linux.go (//go:build linux): real Landlock probe + apply.
+//   - sandbox_stub.go  (//go:build !linux): isLandlockSupported()==false,
+//     applyLandlockProfile()==ErrNotSupported.
+//
+// This file has NO build tag — it compiles on all platforms and dispatches to
+// the platform functions, so the function signatures in the two build-tagged
+// files MUST match.
 type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
@@ -43,90 +60,61 @@ func (m *Module) Name() string { return "sandbox" }
 // Deps returns this module's dependencies.
 func (m *Module) Deps() []string { return nil }
 
-// Detect checks whether process isolation tools are available.
-func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
+// IsLandlockSupported reports whether the running kernel supports the Landlock
+// LSM (Linux kernel >= 5.13). It is an exported, build-tag-polymorphic wrapper
+// around the package-internal isLandlockSupported() so the cli/doctor package
+// can probe the capability across the package boundary. Always false on non-Linux.
+func IsLandlockSupported() bool { return isLandlockSupported() }
+
+// Detect reports whether kernel-native process isolation (Landlock) is
+// available. When the sandbox module is enabled but Landlock is unavailable
+// (non-Linux, or Linux kernel < 5.13 / Landlock disabled) it emits a WARN
+// finding; when Landlock is available it returns no finding.
+func (m *Module) Detect(_ context.Context) ([]modules.Finding, error) {
 	if !m.cfg.Modules.Sandbox.Enabled {
 		slog.Debug("sandbox module disabled, skipping detect")
 		return nil, nil
 	}
 
-	var findings []modules.Finding
-
-	switch runtime.GOOS {
-	case "darwin":
-		findings = append(findings, m.detectDarwin(ctx)...)
-	case "linux":
-		findings = append(findings, m.detectLinux(ctx)...)
-	default:
-		slog.Warn("sandbox detect: unsupported OS", "os", runtime.GOOS)
-	}
-
-	return findings, nil
-}
-
-func (m *Module) detectDarwin(ctx context.Context) []modules.Finding {
-	var findings []modules.Finding
-
-	// sandbox-exec is the macOS userspace sandbox tool.
-	res, err := m.runner.Run(ctx, "sandbox-exec", "-n", "no-internet", "/bin/true")
-	if err != nil || (res.ExitCode != 0 && !strings.Contains(res.Stderr, "profile")) {
-		findings = append(findings, modules.Finding{
+	if !isLandlockSupported() {
+		return []modules.Finding{{
 			Module:   m.Name(),
-			Check:    "sandbox_exec_available",
+			Check:    "sandbox-landlock-supported",
 			Severity: modules.SeverityWarning,
-			Message:  "sandbox-exec not available — macOS process sandboxing cannot be applied to remote services",
-		})
-	} else {
-		slog.Debug("sandbox detect: sandbox-exec available")
+			Message:  "Landlock not supported on this platform (Linux kernel >= 5.13 required) — sandbox module is unavailable",
+		}}, nil
 	}
 
-	return findings
+	slog.Debug("sandbox detect: Landlock LSM available")
+	return nil, nil
 }
 
-func (m *Module) detectLinux(ctx context.Context) []modules.Finding {
-	var findings []modules.Finding
-
-	// Check for firejail (user-space sandboxing).
-	res, err := m.runner.Run(ctx, "firejail", "--version")
-	if err != nil || res.ExitCode != 0 {
-		findings = append(findings, modules.Finding{
-			Module:   m.Name(),
-			Check:    "firejail_available",
-			Severity: modules.SeverityWarning,
-			Message:  "firejail not found — install it to enable process sandboxing for remote services: sudo apt install firejail",
-		})
-	} else {
-		slog.Debug("sandbox detect: firejail available")
-	}
-
-	// Check if systemd is available for sandboxing via service directives.
-	res, err = m.runner.Run(ctx, "systemctl", "--user", "status")
-	if err == nil && res.ExitCode <= 3 {
-		slog.Debug("sandbox detect: systemd --user available for service sandboxing")
-	}
-
-	return findings
-}
-
-// Plan returns no auto-apply actions — sandbox profiles require operator review.
+// Plan reports the single sandbox action: apply Landlock process isolation.
+// Returns nil when the module is disabled.
 func (m *Module) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
 	if !m.cfg.Modules.Sandbox.Enabled {
 		return nil, nil
 	}
 	return []modules.Action{{
 		Module:      m.Name(),
-		Description: "sandbox profiles require manual review — run `abysslink doctor` and apply profiles per the security guide",
+		Description: "sandbox: apply Landlock process isolation (Linux kernel >= 5.13 required)",
 		Reversible:  false,
 	}}, nil
 }
 
-// Apply is intentionally a no-op — sandbox profiles are operator-applied.
-func (m *Module) Apply(_ context.Context) error { return nil }
+// Apply applies the Landlock profile on Linux; on every other platform it
+// returns ErrNotSupported (Landlock is a Linux-only kernel feature).
+func (m *Module) Apply(ctx context.Context) error {
+	return applyLandlockProfile(ctx)
+}
 
 // Verify re-runs Detect.
 func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 	return m.Detect(ctx)
 }
 
-// Repair is a no-op.
-func (m *Module) Repair(_ context.Context) error { return nil }
+// Repair re-runs Detect — sandbox findings are advisory and not auto-repairable.
+func (m *Module) Repair(ctx context.Context) error {
+	_, err := m.Detect(ctx)
+	return err
+}

@@ -23,6 +23,7 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	atuin "github.com/abysslink/abysslink/internal/modules/atuin"
+	sandbox "github.com/abysslink/abysslink/internal/modules/sandbox"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -49,6 +50,12 @@ import (
 //     at a public cloud endpoint (T-21-02-02).
 //   - atuin-key-backed-up (WARN): the sync key must be backed up in a password
 //     manager; the check only os.Stats the key path, never reads its contents.
+//
+// sandbox findings (emitted only when cfg.Modules.Sandbox.Enabled):
+//   - sandbox-landlock-supported (WARN when unsupported, OK when supported):
+//     probes the kernel via sandbox.IsLandlockSupported(); Landlock is a
+//     Linux-only LSM (kernel >= 5.13), so this is always WARN on macOS and on
+//     Linux kernels < 5.13 — the sandbox module is a no-op there (MOD3-03).
 //
 // asciinema findings (emitted only when cfg.Modules.Asciinema.Enabled):
 //   - asciinema-rec-warning (FATAL): structural invariant that `abysslink
@@ -93,6 +100,10 @@ func mod3DoctorFindings(_ context.Context, cfg *config.Config, _ shell.Runner) [
 		)
 	}
 
+	if cfg.Modules.Sandbox.Enabled {
+		findings = append(findings, sandboxLandlockSupportedFinding())
+	}
+
 	if cfg.Modules.Asciinema.Enabled {
 		findings = append(findings,
 			modules.Finding{
@@ -122,5 +133,28 @@ func atuinKeyBackedUpFinding() modules.Finding {
 		Check:    "atuin-key-backed-up",
 		Severity: modules.SeverityWarning,
 		Message:  msg,
+	}
+}
+
+// sandboxLandlockSupportedFinding builds the sandbox-landlock-supported finding.
+// It probes the running kernel via the build-tag-polymorphic
+// sandbox.IsLandlockSupported(): WARN when Landlock is unavailable (non-Linux,
+// or Linux kernel < 5.13 / Landlock disabled) — the sandbox module is then a
+// no-op — and OK when Landlock V1 is available. The probe is a read-only no-op
+// kernel call (empty RestrictPaths); it never mutates the process state.
+func sandboxLandlockSupportedFinding() modules.Finding {
+	if sandbox.IsLandlockSupported() {
+		return modules.Finding{
+			Module:   "sandbox",
+			Check:    "sandbox-landlock-supported",
+			Severity: modules.SeverityOK,
+			Message:  "sandbox-landlock-supported — Landlock LSM available",
+		}
+	}
+	return modules.Finding{
+		Module:   "sandbox",
+		Check:    "sandbox-landlock-supported",
+		Severity: modules.SeverityWarning,
+		Message:  "sandbox-landlock-supported — Landlock LSM not available on this platform (Linux kernel >= 5.13 required); sandbox module is a no-op",
 	}
 }
