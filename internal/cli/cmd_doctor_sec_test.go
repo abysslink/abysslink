@@ -192,7 +192,8 @@ func TestSecAuditLogExists(t *testing.T) {
 func TestSecAuditLogPerms(t *testing.T) {
 	t.Run("0644", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "audit.log")
-		require.NoError(t, os.WriteFile(p, []byte("x"), 0o644))
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+		require.NoError(t, os.Chmod(p, 0o644)) // bypass umask
 		f := secAuditLogPermsCheckPath(p)
 		assert.Equal(t, "sec-audit-log-perms", f.Check)
 		assert.Equal(t, modules.SeverityFatal, f.Severity)
@@ -208,7 +209,11 @@ func TestSecAuditLogPerms(t *testing.T) {
 func TestSecNoWorldReadableConfig(t *testing.T) {
 	t.Run("world_writable", func(t *testing.T) {
 		dir := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "abysslink.yaml"), []byte("x"), 0o646))
+		p := filepath.Join(dir, "abysslink.yaml")
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+		// Chmod explicitly to bypass the process umask, which would otherwise
+		// strip the group/other-write bits the check is looking for.
+		require.NoError(t, os.Chmod(p, 0o646))
 		f := secNoWorldReadableConfigCheckDir(dir)
 		assert.Equal(t, "sec-no-world-readable-config", f.Check)
 		assert.Equal(t, modules.SeverityFatal, f.Severity)
@@ -224,7 +229,8 @@ func TestSecNoWorldReadableConfig(t *testing.T) {
 func TestSecDaemonSocketPerms(t *testing.T) {
 	t.Run("bad", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "abysslinkd.sock")
-		require.NoError(t, os.WriteFile(p, []byte("x"), 0o644))
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+		require.NoError(t, os.Chmod(p, 0o644)) // bypass umask
 		f := secDaemonSocketPermsCheckPath(p)
 		assert.Equal(t, "sec-daemon-socket-perms", f.Check)
 		assert.Equal(t, modules.SeverityFatal, f.Severity)
