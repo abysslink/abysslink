@@ -351,7 +351,9 @@ func runAuditFix(p Printer, logPath string, dryRun bool) {
 		}
 	}
 
-	// 2. World/group-writable config files (re-walk the trusted config dir).
+	// 2. Group/other-accessible config files (re-walk the trusted config dir).
+	// Mirror secNoWorldReadableConfigCheckDir's looseConfigBits (0o077) so --fix
+	// tightens exactly what the sec-no-world-readable-config check flags (WR-03).
 	if dir := abysslinkConfigDir(); dir != "" {
 		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || !d.Type().IsRegular() {
@@ -361,7 +363,7 @@ func runAuditFix(p Printer, logPath string, dryRun bool) {
 			if ferr != nil {
 				return nil
 			}
-			if fi.Mode().Perm()&0o022 != 0 {
+			if fi.Mode().Perm()&looseConfigBits != 0 {
 				secFixChmod(p, path, dryRun)
 			}
 			return nil
