@@ -134,6 +134,16 @@ Full threat model: [docs/security/threat-model.md](docs/security/threat-model.md
 curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/scripts/install.sh | sh
 ```
 
+The installer always verifies the SHA-256 checksum manifest. If `cosign`
+is on your PATH it also verifies the cosign signature bundle. When `cosign`
+is absent the installer falls back to checksum-only verification with a
+warning. To require a cosign signature and fail closed when `cosign` is
+missing, set `ABYSSLINK_REQUIRE_COSIGN=1`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/scripts/install.sh | ABYSSLINK_REQUIRE_COSIGN=1 sh
+```
+
 Or download a release binary from [Releases](https://github.com/abysslink/abysslink/releases) and drop it in your PATH.
 
 Verify the cosign signature:
