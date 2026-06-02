@@ -19,26 +19,36 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
+	"net"
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
-	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
-const upsnapPort = "8090"
+// magicPacketLen is the fixed Wake-on-LAN magic-packet size: a 6-byte 0xFF
+// sync stream followed by 16 repetitions of the 6-byte target MAC.
+const magicPacketLen = 6 + 16*6 // 102
 
-// Module implements the optional UpSnap Wake-on-LAN module.
+// macLen is the byte length of an IEEE 802 MAC address (EUI-48).
+const macLen = 6
+
+// Module implements the optional Wake-on-LAN module.
+//
+// In v3 the upsnap module is the WoL enablement module. It no longer manages a
+// running UpSnap service: its job is to (1) detect that WoL is configured
+// (module enabled + at least one rig carries a mac: field) and (2) surface
+// structural doctor findings. The actual UDP magic-packet send is the CLI
+// command's responsibility (cmd_wol.go), gated behind --apply, so the mutation
+// gate lives in exactly one place.
 type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
-	plat   platform.Platform
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, plat: d.Platform}
+	return &Module{runner: d.Runner, cfg: d.Cfg}
 }
 
 // Name returns the canonical module name.
@@ -47,8 +57,10 @@ func (m *Module) Name() string { return "upsnap" }
 // Deps returns this module's dependencies.
 func (m *Module) Deps() []string { return []string{"tailscale"} }
 
-// Detect checks whether upsnap is installed and not binding to all interfaces.
-func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
+// Detect reports the WoL configuration state. When the module is disabled it
+// returns no findings. When enabled it emits a WARN if no rig has a usable
+// mac: field, because WoL cannot wake anything without a target MAC.
+func (m *Module) Detect(_ context.Context) ([]modules.Finding, error) {
 	if !m.cfg.Modules.Upsnap.Enabled {
 		slog.Debug("upsnap module disabled, skipping detect")
 		return nil, nil
@@ -56,109 +68,47 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 
 	var findings []modules.Finding
 
-	res, err := m.runner.Run(ctx, "upsnap", "--version")
-	if err != nil || res.ExitCode != 0 {
-		// upsnap may print version to stderr; check both.
-		combined := strings.ToLower(res.Stdout + res.Stderr)
-		if !strings.Contains(combined, "upsnap") {
-			findings = append(findings, modules.Finding{
-				Module:   m.Name(),
-				Check:    "installed",
-				Severity: modules.SeverityFatal,
-				Message:  "upsnap not found — install from https://github.com/seriousm4x/UpSnap/releases",
-			})
-			return findings, nil
-		}
-	}
-	slog.Debug("upsnap detected")
-
-	// Check running processes for wildcard bind.
-	res, err = m.runner.Run(ctx, "pgrep", "-a", "upsnap")
-	if err == nil && res.ExitCode == 0 {
-		if strings.Contains(res.Stdout, "0.0.0.0") {
-			findings = append(findings, modules.Finding{
-				Module:   m.Name(),
-				Check:    "bind_tailnet",
-				Severity: modules.SeverityWarning,
-				Message:  "upsnap appears bound to 0.0.0.0 — must bind to tailnet IP only",
-			})
-		}
+	if !m.hasRigWithMAC() {
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "wol-no-rig-mac",
+			Severity: modules.SeverityWarning,
+			Message:  "no rig has a mac: field set — add mac: <MAC> to a rig in abysslink.yaml to enable WoL",
+		})
 	}
 
 	return findings, nil
 }
 
-// Plan computes the actions needed.
-func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
+// hasRigWithMAC reports whether any configured rig carries a parseable MAC.
+func (m *Module) hasRigWithMAC() bool {
+	for _, rig := range m.cfg.Rigs {
+		if rig.MAC == "" {
+			continue
+		}
+		if _, err := net.ParseMAC(rig.MAC); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// Plan reports that WoL is ready. WoL is a manual per-command action, so there
+// is no converge-time work to do; Plan returns a single informational action.
+func (m *Module) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
 	if !m.cfg.Modules.Upsnap.Enabled {
 		return nil, nil
 	}
-
-	findings, err := m.Detect(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var actions []modules.Action
-	for _, f := range findings {
-		switch f.Check {
-		case "installed":
-			actions = append(actions, modules.Action{
-				Module:      m.Name(),
-				Description: "install upsnap (download from https://github.com/seriousm4x/UpSnap/releases)",
-				Reversible:  false,
-			})
-		case "bind_tailnet":
-			actions = append(actions, modules.Action{
-				Module:      m.Name(),
-				Description: fmt.Sprintf("restart upsnap bound to tailnet IP:%s", upsnapPort),
-				Reversible:  true,
-			})
-		}
-	}
-
-	if len(actions) == 0 {
-		actions = append(actions, modules.Action{
-			Module:      m.Name(),
-			Description: fmt.Sprintf("ensure upsnap service bound to tailnet IP:%s", upsnapPort),
-			Reversible:  true,
-		})
-	}
-
-	return actions, nil
+	return []modules.Action{{
+		Module:      m.Name(),
+		Description: "WoL (Wake-on-LAN) ready — run `abysslink wol <rig> --apply` to wake a rig",
+		Reversible:  false,
+	}}, nil
 }
 
-// Apply installs upsnap and runs it bound to the tailnet IP.
-func (m *Module) Apply(ctx context.Context) error {
-	if !m.cfg.Modules.Upsnap.Enabled {
-		return nil
-	}
-
-	if res, err := m.runner.Run(ctx, "upsnap", "--version"); err != nil || res.ExitCode != 0 {
-		combined := strings.ToLower(res.Stdout + res.Stderr)
-		if !strings.Contains(combined, "upsnap") {
-			slog.Info("upsnap apply: upsnap not found — install from https://github.com/seriousm4x/UpSnap/releases and ensure it is on PATH")
-			return fmt.Errorf("upsnap apply: upsnap not on PATH — download from https://github.com/seriousm4x/UpSnap/releases and place in ~/.local/bin/upsnap")
-		}
-	}
-
-	ip, err := modules.TailnetIP(ctx, m.runner)
-	if err != nil {
-		return fmt.Errorf("upsnap apply: %w", err)
-	}
-
-	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
-		Label:     "dev.abysslink.upsnap",
-		Args:      []string{"upsnap", "serve", "--http", fmt.Sprintf("%s:%s", ip, upsnapPort)},
-		KeepAlive: true,
-		RunAtLoad: true,
-	}); err != nil {
-		return fmt.Errorf("upsnap apply: install service: %w", err)
-	}
-
-	slog.Info("upsnap apply: service installed",
-		"url", fmt.Sprintf("http://%s:%s", ip, upsnapPort),
-		"note", "set an admin password on first login")
+// Apply is a no-op: WoL is a manual per-command action triggered by
+// `abysslink wol <rig> --apply`, not a converge-time mutation.
+func (m *Module) Apply(_ context.Context) error {
 	return nil
 }
 
@@ -167,7 +117,27 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 	return m.Detect(ctx)
 }
 
-// Repair re-runs Apply.
+// Repair re-runs Detect (WoL has no converge-time remediation).
 func (m *Module) Repair(ctx context.Context) error {
-	return m.Apply(ctx)
+	_, err := m.Detect(ctx)
+	return err
+}
+
+// BuildMagicPacket constructs the hand-rolled 102-byte Wake-on-LAN magic
+// packet for mac: 6 bytes of 0xFF followed by 16 repetitions of the 6-byte
+// MAC. It returns an error when mac is not exactly 6 bytes (EUI-48). Pure
+// stdlib; no external dependency. The caller (cmd_wol.go) is responsible for
+// the UDP broadcast send and the --apply gate.
+func BuildMagicPacket(mac net.HardwareAddr) ([]byte, error) {
+	if len(mac) != macLen {
+		return nil, fmt.Errorf("upsnap: invalid MAC address length %d (expected %d)", len(mac), macLen)
+	}
+	pkt := make([]byte, magicPacketLen)
+	for i := range 6 {
+		pkt[i] = 0xFF
+	}
+	for i := range 16 {
+		copy(pkt[6+i*macLen:], mac)
+	}
+	return pkt, nil
 }
