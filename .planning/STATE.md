@@ -96,6 +96,7 @@ Last activity: 2026-06-02 -- Phase 16 execution started
 - [Phase ?]: Backward compat for existing rig: yaml keys
 - [Phase ?]: Prevents timing side-channel attacks
 - [Phase ?]: Decision A1 (confirmed): Tailscale/Headscale HuJSON isolation = absence-of-grant; no explicit deny construct
+- [2026-06-02 reconcile]: v1.0.0 phases 1-10 SHIPPED (commits ≤ 2026-05-29); ROADMAP `[x]` + Progress table + velocity table all mark them Complete. Their `.planning/phases/0X-*` dirs were cleaned (SUMMARYs removed; 4-9 have no dir), so `roadmap.analyze` mis-reports disk_status incomplete for 2-9. This is a stale-disk artifact, NOT pending work — unlike v2.0.0 (phases 11-14) which were archived to `milestones/v2.0.0-ROADMAP.md`, v1.0.0 was never formally archived inline. Autonomous run scoped `--from 16`; do NOT re-execute 2-9 (would overwrite shipped 68-file CLI scaffold). Safety branch: `backup/pre-autonomous-260602` @ 8c47187.
 
 ### Pending Todos
 
