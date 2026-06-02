@@ -61,18 +61,13 @@ const (
 // SECTION 1 — sshd effective config (RESEARCH Pattern 2)
 // ---------------------------------------------------------------------------
 
-// readSSHEffectiveConfig returns the effective value of an sshd config keyword.
-// It PARSES /etc/ssh/sshd_config as the primary, always-available path (no
-// prompt, no root). It attempts the authoritative `sshd -T` ONLY when running as
-// root (os.Getuid()==0) — it NEVER invokes sudo (CONTEXT Open Question #1). When
-// neither source yields a value it returns ("", nil) for an absent directive, or
-// ("", errSSHDAbsent) when sshd is not installed at all.
-func readSSHEffectiveConfig(ctx context.Context, runner shell.Runner, keyword string) (string, error) {
-	return readSSHEffectiveConfigPath(ctx, runner, defaultSSHDConfigPath, keyword)
-}
-
-// readSSHEffectiveConfigPath is the path-injectable core used by both the live
-// check and the unit tests (which point at a fixture sshd_config).
+// readSSHEffectiveConfigPath returns the effective value of an sshd config
+// keyword. It PARSES sshd_config (default /etc/ssh/sshd_config) as the primary,
+// always-available path (no prompt, no root). It attempts the authoritative
+// `sshd -T` ONLY when running as root (os.Getuid()==0) — it NEVER invokes sudo
+// (CONTEXT Open Question #1). When neither source yields a value it returns
+// ("", nil) for an absent directive, or ("", errSSHDAbsent) when sshd is not
+// installed at all. configPath is injectable so unit tests can point at a fixture.
 func readSSHEffectiveConfigPath(ctx context.Context, runner shell.Runner, configPath, keyword string) (string, error) {
 	// Authoritative source: sshd -T (root only — it reads private host keys to
 	// validate ciphers and fails as "no hostkeys available" otherwise).
