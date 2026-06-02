@@ -58,6 +58,13 @@ type netbirdAdapter struct {
 	runner  shell.Runner
 	baseURL string        // cfg.Server.NetBird.ServerURL; set in constructor
 	apiKey  func() string // lazy loader reading ABYSSLINK_NB_API_KEY; NEVER stored as plain field
+
+	// eventPollStart / eventPollMax bound the TailEvents --follow polling
+	// backoff (start interval and cap). Defaulted in the constructor; overridable
+	// in tests to keep the polling loop fast. NetBird's audit-events endpoint has
+	// no streaming/cursor support, so --follow polls with bounded backoff.
+	eventPollStart time.Duration
+	eventPollMax   time.Duration
 }
 
 // newNetBirdAdapter constructs a netbirdAdapter from the given config and runner.
@@ -75,6 +82,8 @@ func newNetBirdAdapter(cfg *config.Config, runner shell.Runner) *netbirdAdapter 
 		apiKey: func() string {
 			return os.Getenv(netbirdAPIKeyEnv)
 		},
+		eventPollStart: defaultEventPollStart,
+		eventPollMax:   defaultEventPollMax,
 	}
 }
 
