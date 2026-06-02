@@ -159,7 +159,12 @@ func runReport(cmd *cobra.Command, _ []string) error {
 }
 
 // collectReportFindings gathers the full doctor finding set: per-module Detect,
-// backend + fleet, supply-chain, audit posture, and metrics posture.
+// backend + fleet, supply-chain, audit posture, metrics posture, web UI posture
+// (P19), security audit posture (P20), and optional-module posture (P21). The
+// ordering and signatures mirror cmd_doctor.go RunE exactly so the 3 sec-*
+// cross-ref aliases (sec-metrics-bind, sec-webui-bind, sec-audit-anchor-age)
+// reuse the pre-computed met/webui/audit slices and the underlying checks run
+// exactly once (B2 / RESEARCH Pitfall 3).
 func collectReportFindings(ctx context.Context, cc *cmdContext) ([]modules.Finding, error) {
 	deps, err := buildDeps(ctx, cc)
 	if err != nil {
@@ -176,12 +181,31 @@ func collectReportFindings(ctx context.Context, cc *cmdContext) ([]modules.Findi
 	}
 	findings = appendBackendAndFleetFindings(ctx, cc, deps.Keychain, findings)
 	findings = append(findings, supplyChainFindings(ctx, cc.runner, version, "")...)
+
+	// Audit posture (Phase 17) — captured for the sec-audit-anchor-age alias.
+	var auditFinds []modules.Finding
 	if logPath, lpErr := auditDefaultLogPath(); lpErr == nil {
-		findings = append(findings, auditDoctorFindings(ctx, logPath, deps.Keychain)...)
+		auditFinds = auditDoctorFindings(ctx, logPath, deps.Keychain)
+		findings = append(findings, auditFinds...)
 	} else {
 		slog.Warn("report: audit log path unavailable; skipping audit checks", "err", lpErr)
 	}
-	findings = append(findings, metricsDoctorFindings(cc.cfg, deps.MetricsRegistry(), resolveTailnetIP(ctx, cc))...)
+
+	// Metrics posture (Phase 18) — captured for the sec-metrics-bind alias.
+	metFinds := metricsDoctorFindings(cc.cfg, deps.MetricsRegistry(), resolveTailnetIP(ctx, cc))
+	findings = append(findings, metFinds...)
+
+	// Web UI posture (Phase 19) — captured for the sec-webui-bind alias.
+	webuiFinds := webuiDoctorFindings(ctx, cc.cfg)
+	findings = append(findings, webuiFinds...)
+
+	// Security audit posture (Phase 20): 18 sec-* checks. The 3 cross-ref aliases
+	// reuse the met/webui/audit slices above so the underlying checks run once.
+	findings = append(findings, secDoctorFindings(ctx, cc, deps, false, metFinds, webuiFinds, auditFinds)...)
+
+	// Optional-module posture (Phase 21, MOD3-01..05).
+	findings = append(findings, mod3DoctorFindings(ctx, cc.cfg, cc.runner)...)
+
 	return findings, nil
 }
 
