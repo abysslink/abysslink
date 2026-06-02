@@ -41,7 +41,7 @@ Phases 16–21 (6 phases) — supply-chain hardening + tamper-evident audit + ob
 - [x] **Phase 17: Tamper-Evident Audit Log + Fuzzing** - Hash-chained/HMAC-signed audit entries, external anchor, `abysslink audit` command surface, fuzz targets with seed corpus and gitleaks pre-commit hook (completed 2026-06-02)
 - [x] **Phase 18: Observability & Metrics** - `internal/metrics.Registry`, tailnet-IP-bound Prometheus endpoint, `abysslink report`, daemon `GET /status`, fleet daily digest (completed 2026-06-02)
 - [x] **Phase 19: Web UI Dashboard (opt-in)** - `//go:build webui` opt-in module, safeweb CSRF, WhoIs auth, TLS via Tailscale cert, read-only gate, CSP self, separate goreleaser artifact (completed 2026-06-02)
-- [ ] **Phase 20: Security Audit Pass & Doctor Checks** - `abysslink audit [--pentest]`, gosec/semgrep zero findings, refreshed threat model per backend, 18+ new sec-* doctor checks
+- [x] **Phase 20: Security Audit Pass & Doctor Checks** - `abysslink audit [--pentest]`, gosec/semgrep zero findings, refreshed threat model per backend, 18+ new sec-* doctor checks (completed 2026-06-02)
 - [ ] **Phase 21: Optional Modules & Fleet Polish** - upsnap (WoL with --apply gate), atuin, sandbox (Linux-only Landlock), asciinema (credential warning), NetBird posture-check + events tail, scope-cut docs
 
 ## Phase Details
@@ -331,10 +331,10 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 20-01-PLAN.md — gosec/semgrep zero-unsuppressed: nolintlint gate + fix real findings + annotate 95 bare directives + gosec CI job
-- [ ] 20-02-PLAN.md — 18 new sec-* doctor checks (cmd_doctor_sec.go) wired into doctor RunE
-- [ ] 20-03-PLAN.md — audit verify aggregate: --pentest/--fix/--format=json flags + exit 0/1/2 + tests
-- [ ] 20-04-PLAN.md — threat-model doc refresh (per-backend + fleet + v3) + --backend rendering
+- [x] 20-01-PLAN.md — gosec/semgrep zero-unsuppressed: nolintlint gate + fix real findings + annotate 95 bare directives + gosec CI job
+- [x] 20-02-PLAN.md — 18 new sec-* doctor checks (cmd_doctor_sec.go) wired into doctor RunE
+- [x] 20-03-PLAN.md — audit verify aggregate: --pentest/--fix/--format=json flags + exit 0/1/2 + tests
+- [x] 20-04-PLAN.md — threat-model doc refresh (per-backend + fleet + v3) + --backend rendering
 
 ### Phase 21: Optional Modules & Fleet Polish
 
@@ -350,8 +350,15 @@ Plans:
   5. `docs/headscale-ha.md` and `docs/netbird-scim.md` are published explaining why Headscale PostgreSQL HA and NetBird SCIM are out of scope, with the known-workaround patterns documented; no implementation is attempted for either
   6. `make lint test` is green across all new module code; all shell calls in the four new module implementations go through `shell.Runner` with no bare `os/exec`; every file mutation goes through `internal/audit.WriteFile`
 
-**Plans**: TBD
-**Research needed**: WoL library selection (mdlayher/wol vs sabhiram/go-wol), Landlock distro/kernel compatibility matrix
+**Plans**: 5 plans
+
+Plans:
+
+- [ ] 21-01-PLAN.md — WoL magic packet (upsnap module rewrite, cmd_wol.go, RigConfig.MAC, wol-apply-gate FATAL)
+- [ ] 21-02-PLAN.md — atuin shell-rc integration + asciinema rec credential warning + atuin/asciinema doctor checks
+- [ ] 21-03-PLAN.md — sandbox Landlock (go-landlock checkpoint, linux/stub, sandbox-landlock-supported WARN)
+- [ ] 21-04-PLAN.md — NetBird posture list/create/delete + events --follow + nb-posture-active WARN
+- [ ] 21-05-PLAN.md — Wire commands into root.go + integrate mod3DoctorFindings + scope-cut docs + make lint test gate
 
 ---
 
@@ -391,5 +398,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 17. Tamper-Evident Audit Log + Fuzzing | 3/3 | Complete    | 2026-06-02 |
 | 18. Observability & Metrics | 4/4 | Complete    | 2026-06-02 |
 | 19. Web UI Dashboard (opt-in) | 4/4 | Complete    | 2026-06-02 |
-| 20. Security Audit Pass & Doctor Checks | 0/? | Not started | - |
-| 21. Optional Modules & Fleet Polish | 0/? | Not started | - |
+| 20. Security Audit Pass & Doctor Checks | 4/4 | Complete    | 2026-06-02 |
+| 21. Optional Modules & Fleet Polish | 0/5 | Not started | - |
