@@ -39,7 +39,7 @@ import (
 const (
 	upgradeRepo           = "abysslink/abysslink"
 	upgradeOIDCIssuer     = "https://token.actions.githubusercontent.com"
-	upgradeIdentityRegexp = "https://github.com/abysslink/abysslink/.github/workflows/release.yml@refs/tags/.*"
+	upgradeIdentityRegexp = `^https://github\.com/abysslink/abysslink/\.github/workflows/release\.yml@refs/tags/.*$`
 )
 
 func newUpgradeCmd() *cobra.Command {
