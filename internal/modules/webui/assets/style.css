@@ -1,0 +1,435 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2026 Abysslink Contributors
+ *
+ * Single source of truth for all dashboard styling. Served same-origin from
+ * embed.FS so the default-src 'self' CSP permits it (WEB-06). No inline styles
+ * exist in any template; every visual token lives here.
+ */
+
+:root {
+  /* Surface palette (60 / 30 / 10) */
+  --c-bg: #0f1117;
+  --c-surface: #1a1d27;
+  --c-accent: #5c7cfa;
+  --c-border: #2a2d3a;
+  --c-muted: #6b7280;
+
+  /* Semantic severity */
+  --c-ok: #04b575;
+  --c-warn: #ffd060;
+  --c-fatal: #ff5f87;
+  --c-security: #00b4d8;
+  --c-fg: #e2e8f0;
+
+  /* Spacing scale (multiples of 4) */
+  --sp-xs: 4px;
+  --sp-sm: 8px;
+  --sp-md: 16px;
+  --sp-lg: 24px;
+  --sp-xl: 32px;
+  --sp-2xl: 48px;
+  --sp-3xl: 64px;
+
+  /* Font stacks */
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier,
+    monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--c-bg);
+  color: var(--c-fg);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+/* ---- Typography ---- */
+.t-body {
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.t-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.t-heading {
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.t-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.t-mono {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.4;
+}
+.c-muted {
+  color: var(--c-muted);
+}
+.c-fg {
+  color: var(--c-fg);
+}
+
+/* ---- Layout: page shell ---- */
+.page-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-md);
+  padding: 0 var(--sp-md);
+  background-color: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+}
+.page-header .header-logo {
+  font-weight: 600;
+}
+.page-header .header-spacer {
+  flex: 1;
+}
+.page-header .header-login {
+  color: var(--c-muted);
+}
+
+.layout {
+  display: flex;
+  align-items: flex-start;
+}
+
+.nav-rail {
+  width: 200px;
+  flex: 0 0 200px;
+  background-color: var(--c-surface);
+  border-right: 1px solid var(--c-border);
+  min-height: calc(100vh - 56px);
+  display: flex;
+  flex-direction: column;
+}
+.nav-rail a {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 var(--sp-md);
+  color: var(--c-fg);
+  text-decoration: none;
+  border-left: 4px solid transparent;
+}
+.nav-rail a:hover {
+  background-color: var(--c-bg);
+}
+.nav-active {
+  border-left: 4px solid var(--c-accent) !important;
+  background-color: var(--c-bg);
+}
+
+.main-content {
+  flex: 1;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: var(--sp-xl);
+}
+
+/* ---- Focus ring ---- */
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* ---- Tables ---- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th {
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--c-muted);
+  padding: var(--sp-sm);
+  border-bottom: 1px solid var(--c-border);
+}
+td {
+  padding: var(--sp-sm);
+  border-bottom: 1px solid var(--c-border);
+}
+tr:nth-child(even) td {
+  background-color: var(--c-surface);
+}
+
+/* ---- Summary bar (fleet status zone A) ---- */
+.summary-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-lg);
+  padding: var(--sp-sm) var(--sp-md);
+  background-color: var(--c-surface);
+  margin-bottom: var(--sp-lg);
+}
+
+/* ---- Status dots ---- */
+.dot-online circle {
+  fill: var(--c-ok);
+}
+.dot-offline circle {
+  fill: var(--c-fatal);
+}
+.dot-unknown circle {
+  fill: var(--c-muted);
+}
+.dot-live circle {
+  fill: var(--c-accent);
+}
+.dot-live {
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* ---- Cert expiry coloring ---- */
+.cert-warn {
+  color: var(--c-warn);
+}
+.cert-fatal {
+  color: var(--c-fatal);
+}
+.lock-ok {
+  color: var(--c-ok);
+}
+.lock-warn {
+  color: var(--c-warn);
+}
+.lock-na {
+  color: var(--c-muted);
+}
+
+/* ---- Badges ---- */
+.badge-fatal,
+.badge-warn,
+.badge-ok,
+.badge-dryrun,
+.badge-priority-high,
+.badge-priority-default,
+.badge-priority-low {
+  display: inline-block;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: var(--sp-xs) var(--sp-sm);
+  border-radius: 3px;
+  border: 1px solid transparent;
+  text-transform: uppercase;
+}
+.badge-fatal {
+  background-color: rgba(255, 95, 135, 0.15);
+  color: var(--c-fatal);
+  border-color: var(--c-fatal);
+}
+.badge-warn {
+  background-color: rgba(255, 208, 96, 0.15);
+  color: var(--c-warn);
+  border-color: var(--c-warn);
+}
+.badge-ok {
+  background-color: rgba(4, 181, 117, 0.15);
+  color: var(--c-ok);
+  border-color: var(--c-ok);
+}
+.badge-dryrun {
+  background-color: rgba(107, 114, 128, 0.2);
+  color: var(--c-muted);
+  border-color: var(--c-muted);
+}
+.badge-priority-high {
+  background-color: rgba(255, 95, 135, 0.15);
+  color: var(--c-fatal);
+  border-color: var(--c-fatal);
+}
+.badge-priority-default {
+  background-color: var(--c-surface);
+  color: var(--c-muted);
+  border-color: var(--c-muted);
+}
+.badge-priority-low {
+  color: var(--c-muted);
+}
+
+/* ---- Doctor groups ---- */
+.doctor-group {
+  margin-bottom: var(--sp-md);
+}
+.doctor-group-header {
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.3;
+  padding: var(--sp-sm) var(--sp-md);
+  background-color: var(--c-surface);
+  border-left: 4px solid var(--c-border);
+  cursor: pointer;
+}
+.severity-fatal {
+  border-left-color: var(--c-fatal);
+}
+.severity-warn {
+  border-left-color: var(--c-warn);
+}
+.severity-ok {
+  border-left-color: var(--c-ok);
+}
+.finding-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-md);
+  min-height: 44px;
+  padding: var(--sp-sm) var(--sp-md);
+  border-bottom: 1px solid var(--c-border);
+}
+
+/* ---- Audit timeline ---- */
+.audit-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.audit-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-md);
+  min-height: 44px;
+  padding: var(--sp-sm) 0;
+  border-bottom: 1px solid var(--c-border);
+}
+.audit-op {
+  font-weight: 600;
+}
+
+/* ---- Buttons ---- */
+.btn-secondary {
+  margin-top: var(--sp-md);
+  min-height: 44px;
+  padding: var(--sp-sm) var(--sp-md);
+  background-color: var(--c-surface);
+  color: var(--c-fg);
+  border: 1px solid var(--c-border);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+/* ---- htmx indicator + loading spinner ---- */
+.htmx-indicator {
+  display: none;
+}
+.htmx-request .htmx-indicator {
+  display: inline;
+}
+.loading-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--c-border);
+  border-top-color: var(--c-accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- Error banner ---- */
+.error-banner {
+  display: none;
+}
+.error-banner--visible {
+  display: block;
+  color: var(--c-fatal);
+  background-color: var(--c-surface);
+  padding: var(--sp-sm) var(--sp-md);
+  margin-bottom: var(--sp-md);
+  border: 1px solid var(--c-fatal);
+  border-radius: 3px;
+}
+
+/* ---- Empty states ---- */
+.empty-state {
+  padding: var(--sp-xl);
+  text-align: center;
+  color: var(--c-muted);
+}
+.empty-state .empty-heading {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--c-fg);
+  margin-bottom: var(--sp-sm);
+}
+
+/* ---- Screen-reader only ---- */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- Responsive: nav becomes horizontal below 640px ---- */
+@media (max-width: 640px) {
+  .layout {
+    flex-direction: column;
+  }
+  .nav-rail {
+    width: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
+    flex-direction: row;
+    border-right: none;
+    border-bottom: 1px solid var(--c-border);
+  }
+  .nav-rail a {
+    border-left: none;
+    border-bottom: 4px solid transparent;
+  }
+  .nav-active {
+    border-left: none !important;
+    border-bottom: 4px solid var(--c-accent);
+  }
+}

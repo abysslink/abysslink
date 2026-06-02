@@ -1,0 +1,13 @@
+{{- /*
+SPDX-License-Identifier: Apache-2.0
+Copyright 2026 Abysslink Contributors
+
+Error page for 403 / 404 / 500. Shows only the approved copy — never a stack
+trace or internal error detail (V7 error-handling posture).
+*/ -}}
+{{- define "content" -}}
+<h1 class="t-title">{{ .Heading }}</h1>
+<div class="empty-state">
+  <div class="t-body">{{ .Message }}</div>
+</div>
+{{- end -}}
