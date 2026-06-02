@@ -37,7 +37,7 @@ const sshdDropInPath = "/etc/ssh/sshd_config.d/99-abysslink.conf"
 type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
-	audit  *audit.Audit
+	audit  audit.AuditWriter
 }
 
 // New returns a new Module.
