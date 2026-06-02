@@ -19,14 +19,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
+	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -151,6 +155,138 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 	}
 
 	return findings
+}
+
+// metricsDoctorFindings runs the four Phase 18 observability posture checks
+// against the metrics config and the live registry. All checks are read-only.
+//
+//   - metrics-bind-tailnet (FATAL): metrics enabled with a bind_addr containing
+//     0.0.0.0 or :: — the endpoint must bind the tailnet IP only (OBS-03).
+//   - met-label-audit (FATAL): a metric series carries a label name outside the
+//     compile-time allowlist {severity,check_id,backend,result,rig} (OBS-04).
+//   - met-cardinality (WARN): more than 500 unique (name, label-set) series —
+//     cardinality-explosion risk (OBS-04).
+//   - met-disabled-listener (FATAL): metrics disabled but the configured port is
+//     still accepting connections (stale listener) — probed via net.DialTimeout
+//     with a 200ms timeout, no shellout (OBS-05).
+func metricsDoctorFindings(cfg *config.Config, reg metrics.Registry) []modules.Finding {
+	return []modules.Finding{
+		metBindTailnetCheck(cfg),
+		metLabelAuditCheck(reg),
+		metCardinalityCheck(reg),
+		metDisabledListenerCheck(cfg),
+	}
+}
+
+// metBindTailnetCheck enforces the OBS-03 tailnet-only bind floor.
+func metBindTailnetCheck(cfg *config.Config) modules.Finding {
+	const check = "metrics-bind-tailnet"
+	addr := cfg.Observability.Metrics.BindAddr
+	if cfg.Observability.Metrics.Enabled && addr != "" &&
+		(strings.Contains(addr, "0.0.0.0") || strings.Contains(addr, "::")) {
+		return modules.Finding{
+			Module:   "metrics",
+			Check:    check,
+			Severity: modules.SeverityFatal,
+			Message:  "observability.metrics.bind_addr must be tailnet IP only — 0.0.0.0/:: is forbidden (OBS-03)",
+		}
+	}
+	return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metrics bind address is tailnet-scoped"}
+}
+
+// metLabelAuditCheck flags any series whose label names fall outside the
+// compile-time allowlist (collapsed to "other" by SanitizeLabel).
+func metLabelAuditCheck(reg metrics.Registry) modules.Finding {
+	const check = "met-label-audit"
+	for _, fam := range reg.Snapshot() {
+		for _, sample := range fam.Samples {
+			for key := range sample.Labels {
+				if metrics.SanitizeLabel(key) == "other" {
+					return modules.Finding{
+						Module:   "metrics",
+						Check:    check,
+						Severity: modules.SeverityFatal,
+						Message: fmt.Sprintf(
+							"unlisted label name %q found in metric %q — only {severity,check_id,backend,result,rig} are permitted (OBS-04)",
+							key, fam.Name),
+					}
+				}
+			}
+		}
+	}
+	return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "all metric labels are within the allowlist"}
+}
+
+// metCardinalityCheck WARNs when the registry holds more than 500 unique series.
+func metCardinalityCheck(reg metrics.Registry) modules.Finding {
+	const check = "met-cardinality"
+	if n := countMetricSeries(reg); n > 500 {
+		return modules.Finding{
+			Module:   "metrics",
+			Check:    check,
+			Severity: modules.SeverityWarning,
+			Message:  fmt.Sprintf("met-cardinality: %d series exceeds 500 — risk of cardinality explosion (OBS-04)", n),
+		}
+	}
+	return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metric series count is within budget"}
+}
+
+// metDisabledListenerCheck FATALs when metrics are disabled but the configured
+// port is still listening. The probe uses net.DialTimeout (200ms) — never a
+// ss/lsof shellout (OBS-05). Disable is restart-scoped: this verifies the port
+// stays closed after a restart with enabled=false.
+func metDisabledListenerCheck(cfg *config.Config) modules.Finding {
+	const check = "met-disabled-listener"
+	if cfg.Observability.Metrics.Enabled {
+		return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metrics enabled — listener probe not applicable"}
+	}
+	addr := cfg.Observability.Metrics.BindAddr
+	if addr == "" {
+		port := cfg.Observability.Metrics.Port
+		if port <= 0 {
+			port = 9090
+		}
+		addr = fmt.Sprintf(":%d", port)
+	}
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		return modules.Finding{
+			Module:   "metrics",
+			Check:    check,
+			Severity: modules.SeverityFatal,
+			Message:  fmt.Sprintf("port %s is listening but metrics.enabled=false — stale listener (OBS-05)", addr),
+		}
+	}
+	return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "no stale metrics listener detected"}
+}
+
+// countMetricSeries returns the number of unique (metric name, sorted label-set)
+// tuples across all registered families — the Prometheus time-series definition.
+func countMetricSeries(reg metrics.Registry) int {
+	seen := make(map[string]struct{})
+	formatCanonicalKey := func(name string, labels map[string]string) string {
+		keys := make([]string, 0, len(labels))
+		for k := range labels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var b strings.Builder
+		b.WriteString(name)
+		for _, k := range keys {
+			b.WriteString("|")
+			b.WriteString(k)
+			b.WriteString("=")
+			b.WriteString(labels[k])
+		}
+		return b.String()
+	}
+	for _, fam := range reg.Snapshot() {
+		for _, sample := range fam.Samples {
+			seen[formatCanonicalKey(fam.Name, sample.Labels)] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 // fleetKeychain is the subset of secrets.KeychainStore consumed by the fleet
@@ -326,6 +462,10 @@ Exit codes:
 			} else {
 				slog.Warn("doctor: audit log path unavailable; skipping audit checks", "err", lpErr)
 			}
+
+			// Observability metrics posture (OBS-03/04/05): bind floor, label
+			// allowlist, cardinality budget, and stale-listener probe.
+			findings = append(findings, metricsDoctorFindings(cc.cfg, deps.MetricsRegistry())...)
 
 			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
 			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")
