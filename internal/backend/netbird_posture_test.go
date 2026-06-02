@@ -115,3 +115,39 @@ func TestDeletePostureCheck_Error(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 404")
 }
+
+// TestDeletePostureCheck_RejectsPathTraversal verifies WR-01: an id containing a
+// path separator or "../" segment is rejected outright (defence in depth) rather
+// than redirecting the DELETE verb to a different resource.
+func TestDeletePostureCheck_RejectsPathTraversal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("server must not be reached for an illegal id")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	a := newTestNetBirdAdapter(t, srv.URL)
+	for _, bad := range []string{"../groups/abc", "pc/../../x", "a/b", "", "  "} {
+		err := a.DeletePostureCheck(context.Background(), bad)
+		require.Error(t, err, "id %q must be rejected", bad)
+	}
+}
+
+// TestDeletePostureCheck_EscapesSpecialChars verifies WR-01: an id with
+// URL-significant characters (space, "?", "#") is percent-escaped into a single
+// path segment rather than altering the request target.
+func TestDeletePostureCheck_EscapesSpecialChars(t *testing.T) {
+	const id = "pc one?x#y"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// r.URL.Path is the decoded path; it must contain the full id as a single
+		// segment under /api/posture-checks/ with no extra path elements.
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	a := newTestNetBirdAdapter(t, srv.URL)
+	require.NoError(t, a.DeletePostureCheck(context.Background(), id))
+	assert.Equal(t, "/api/posture-checks/"+id, gotPath)
+}
