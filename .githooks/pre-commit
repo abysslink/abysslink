@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+#
+# AUD-08: blocks real secrets from entering testdata/fuzz/ corpus (and any
+# other staged file) before the commit lands. The fuzz seed corpus is committed
+# to git, so a gitleaks scan on staged content is the first line of defence
+# against a credential slipping into a corpus file.
+#
+# Activate with: git config core.hooksPath .githooks
+set -euo pipefail
+
+if command -v gitleaks &>/dev/null; then
+    # detect --staged scans only what is about to be committed; --redact keeps
+    # any matched secret out of the hook's own output. --exit-code 1 makes a
+    # finding block the commit.
+    gitleaks detect --staged --redact --exit-code 1 \
+        --log-level warn \
+        --source "$(git rev-parse --show-toplevel)" \
+        --no-banner
+else
+    # Graceful degradation (RESEARCH.md Pattern 7): gitleaks is optional on dev
+    # machines. The CI gitleaks-action provides the hard gate, so a missing
+    # local binary must WARN and exit 0 rather than block every commit.
+    echo "WARNING: gitleaks not installed — skipping secret scan. Install: brew install gitleaks"
+fi
