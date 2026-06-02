@@ -1,0 +1,2 @@
+/* placeholder — real stylesheet/assets land in Plan 03 (UI-SPEC). This
+   file exists so the //go:embed directive in assets.go compiles. */
