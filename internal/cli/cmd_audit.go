@@ -57,6 +57,14 @@ func auditKeychain(ctx context.Context, cc *cmdContext) audit.KeychainStore {
 // detected truncation — emitting the exact "CHAIN BROKEN at entry N" string on
 // stderr (T-17-09: exit 2 is reserved for genuine chain breaks).
 func runAuditVerify(ctx context.Context, p Printer, logPath string, kc audit.KeychainStore) error {
+	// WR-02: never let an operator mistake an unverified walk for a real
+	// integrity check. When the keychain is unavailable, HMAC signatures (and
+	// the anchor) cannot be authenticated, so emit a prominent visible banner —
+	// slog.Warn alone is hidden at the default non-TTY level.
+	if kc == nil {
+		printerError(p, "HMAC checks SKIPPED — keychain unavailable; chain structure walked but signatures NOT authenticated")
+	}
+
 	result, err := audit.Verify(ctx, logPath, kc)
 	if err != nil {
 		// Parse/IO errors are generic failures (exit 1), never exit 2 (T-17-09).
@@ -75,8 +83,16 @@ func runAuditVerify(ctx context.Context, p Printer, logPath string, kc audit.Key
 		return &exitError{code: exitCodeFatal}
 	}
 
+	// WR-03: distinguish authenticated signatures from skipped/legacy ones so
+	// "Chain OK" never overstates what was verified.
 	entries, _ := audit.ReadLog(logPath)
-	printerInfo(p, fmt.Sprintf("Chain OK — %d entries verified", len(entries)))
+	printerInfo(p, fmt.Sprintf("Chain OK — %d entries (%d signatures verified, %d legacy/unsigned/unverifiable skipped)",
+		len(entries), result.SigsVerified, result.SigsSkipped))
+	if kc == nil {
+		// Degraded result: chain walked but unauthenticated. Exit non-zero so
+		// scripts do not treat an unverified log as fully trusted (WR-02).
+		return &exitError{code: exitCodeError}
+	}
 	return nil
 }
 
