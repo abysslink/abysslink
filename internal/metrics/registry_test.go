@@ -115,3 +115,27 @@ func TestMemRegistrySameKeyReturnsIdentical(t *testing.T) {
 	c2.Inc()
 	assert.Equal(t, 2.0, c1.Value(), "both handles refer to the same logical counter")
 }
+
+// TestMemRegistryTypeCollisionValueIsTypeAware is the WR-06 regression: when a
+// name is first registered as a gauge and then fetched via Counter(),
+// getOrCreate returns the existing gauge entry. The counter handle's Value()
+// must reinterpret the stored bits per the entry's real (gauge) type — matching
+// Snapshot — rather than reading the Float64bits storage as a raw integer.
+func TestMemRegistryTypeCollisionValueIsTypeAware(t *testing.T) {
+	reg := metrics.NewMemRegistry()
+	g := reg.Gauge("collide", "help", nil)
+	g.Set(3.5)
+
+	// Fetch the same name as a counter — getOrCreate returns the gauge entry.
+	c := reg.Counter("collide", "help", nil)
+
+	// Both accessors must agree with the type-aware Snapshot value (3.5), not a
+	// garbage integer reinterpretation of the float bit pattern.
+	assert.Equal(t, 3.5, c.Value(), "counter handle to a gauge entry must read the gauge value (WR-06)")
+	assert.Equal(t, 3.5, g.Value())
+
+	snap := reg.Snapshot()
+	require.Len(t, snap, 1)
+	require.Len(t, snap[0].Samples, 1)
+	assert.Equal(t, 3.5, snap[0].Samples[0].Value)
+}
