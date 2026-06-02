@@ -98,6 +98,10 @@ func whoIsMiddleware(w whoIser, next http.Handler) http.Handler {
 // allow_notify path: a POST to "/notify" passes only when cfg.AllowNotify is
 // true. CSRF enforcement for that path is handled by safeweb below this
 // middleware, not here.
+//
+// OPTIONS is allowed through as a "safe" method for completeness, but no route
+// matches it and safeweb configures no CORS, so a preflight falls through to a
+// 404 — CORS preflight is intentionally unsupported (same-origin only) (IN-02).
 func readOnlyMiddleware(cfg *config.WebUIConfig, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		switch r.Method {
