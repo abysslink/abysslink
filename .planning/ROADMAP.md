@@ -238,7 +238,15 @@ Plans:
   5. `abysslink verify` fetches and verifies the running binary's cosign signature and SLSA provenance on demand; `abysslink version --provenance` displays the embedded commit SHA and build metadata
   6. `supply-cosign-bundle` doctor check passes: offline bundle verification succeeds for the installed binary; `supply-slsa-source` check verifies the provenance `gitCommit` field matches the version tag's commit
 
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+
+- [ ] 16-01-PLAN.md — PR security scan gates: govulncheck (module mode), semgrep OSS, dependency-review-action, harden-runner, dependabot (SCH-01, SCH-05)
+- [ ] 16-02-PLAN.md — Reproducible builds: -trimpath + {{.CommitDate}} + SOURCE_DATE_EPOCH; dual SBOM (SPDX+CycloneDX via syft); repro-check CI job (SCH-04, SCH-06)
+- [ ] 16-03-PLAN.md — Release workflow hardening: split build/sign/attest jobs, cosign v3 bundle, actions/attest@v4 SLSA L2, pinned SHAs, harden-runner (SCH-02, SCH-03, SCH-05)
+- [ ] 16-04-PLAN.md — CLI: abysslink verify + version --provenance + cosign v3 upgrade path + supply-cosign-bundle/supply-slsa-source doctor checks + install.sh fail-closed (SCH-07)
+
 
 ### Phase 17: Tamper-Evident Audit Log + Fuzzing
 
@@ -356,7 +364,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 12. Headscale Backend | 5/5 | Complete    | 2026-05-31 |
 | 13. NetBird Backend | 5/5 | Complete   | 2026-06-01 |
 | 14. Multi-Rig Fleet | 5/5 | Complete    | 2026-06-01 |
-| 16. Supply-Chain Hardening & CI Gates | 0/? | Not started | - |
+| 16. Supply-Chain Hardening & CI Gates | 0/4 | In progress | - |
 | 17. Tamper-Evident Audit Log + Fuzzing | 0/? | Not started | - |
 | 18. Observability & Metrics | 0/? | Not started | - |
 | 19. Web UI Dashboard (opt-in) | 0/? | Not started | - |
