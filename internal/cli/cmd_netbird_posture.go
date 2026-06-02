@@ -140,9 +140,9 @@ func netbirdPostureCreateRunE(ctx context.Context, cc *cmdContext, p Printer, na
 
 func newNetBirdPostureDeleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <id>",
-		Short: "Delete a NetBird posture check by ID",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <id>",
+		Short:   "Delete a NetBird posture check by ID",
+		Args:    cobra.ExactArgs(1),
 		Example: `  abysslink netbird posture delete pc-abc123`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cc, err := loadCmdContext(cmd)
