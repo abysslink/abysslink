@@ -82,6 +82,51 @@ jobs:
             p/golang
           generateSarif: "0"
 
+  gosec:
+    name: gosec (static security analysis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            golang.org:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            storage.googleapis.com:443
+            objects.githubusercontent.com:443
+            github.com:443
+            api.github.com:443
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Install gosec
+        # Pinned (not @latest) — a supply-chain-hardening gate must itself be
+        # reproducible and immune to upstream tool compromise (T-20-01-04). Bump
+        # via Dependabot (gomod ecosystem) or a documented manual cadence.
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4
+
+      - name: Run gosec
+        # gosec exits non-zero on any unsuppressed finding; no continue-on-error.
+        # The excluded rule families are project-wide verified false-positives /
+        # accepted risks, each documented with an inline //nolint justification
+        # (SEC-02): G304 file-path-from-variable (internal trusted paths),
+        # G101 env-var/keychain-name FPs, G302/G306 executable-binary 0o755,
+        # G204 shell.Runner sanctioned exec abstraction (CLAUDE.md). The genuine
+        # G115 (signed.go) and G402 (webui doctor probe) carry #nosec annotations.
+        run: gosec -quiet -exclude=G304,G101,G302,G306,G204 ./...
+
   dep-review:
     name: dependency review
     runs-on: ubuntu-latest

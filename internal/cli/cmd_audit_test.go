@@ -72,7 +72,7 @@ func TestAuditVerify_Clean(t *testing.T) {
 func TestAuditVerify_Broken(t *testing.T) {
 	logPath, kc := newSignedLog(t, 4)
 	// Corrupt the prev_hash at entry index 2 (the 3rd line).
-	data, err := os.ReadFile(logPath) //nolint:gosec
+	data, err := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	require.GreaterOrEqual(t, len(lines), 4)

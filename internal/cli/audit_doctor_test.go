@@ -118,7 +118,7 @@ func TestAuditDoctor_ForgedAnchorFatal(t *testing.T) {
 
 	// Forge: rewrite the anchor's EntryCount, leaving the stale HMAC.
 	anchorFile := filepath.Join(dir, "audit.anchor.json")
-	raw, _ := os.ReadFile(anchorFile) //nolint:gosec
+	raw, _ := os.ReadFile(anchorFile) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	var a audit.Anchor
 	require.NoError(t, json.Unmarshal(raw, &a))
 	a.LastHash = "deadbeef" // tamper a signed field; the HMAC is now stale

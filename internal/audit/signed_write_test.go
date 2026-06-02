@@ -41,11 +41,11 @@ func TestSignedWriteFile_LogsThenWrites(t *testing.T) {
 
 	require.NoError(t, sa.WriteFile(target, []byte("secret-body"), 0o600, false))
 
-	got, err := os.ReadFile(target) //nolint:gosec
+	got, err := os.ReadFile(target) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Equal(t, "secret-body", string(got))
 
-	logRaw, err := os.ReadFile(logPath) //nolint:gosec
+	logRaw, err := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	// One signed entry recorded; content body must never appear.
 	assert.Contains(t, string(logRaw), target)

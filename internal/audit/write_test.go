@@ -34,11 +34,11 @@ func TestWriteFile_CreatesFileAndLogs(t *testing.T) {
 
 	require.NoError(t, a.WriteFile(target, []byte("hello"), 0o600, false))
 
-	got, err := os.ReadFile(target) //nolint:gosec
+	got, err := os.ReadFile(target) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Equal(t, "hello", string(got))
 
-	logRaw, err := os.ReadFile(logPath) //nolint:gosec
+	logRaw, err := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Contains(t, string(logRaw), target)
 	// The content itself must never appear in the audit log.
@@ -53,7 +53,7 @@ func TestWriteFile_BacksUpExistingBeforeOverwrite(t *testing.T) {
 	a := audit.New(filepath.Join(dir, "audit.log"))
 	require.NoError(t, a.WriteFile(target, []byte("new"), 0o600, false))
 
-	got, err := os.ReadFile(target) //nolint:gosec
+	got, err := os.ReadFile(target) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Equal(t, "new", string(got))
 
@@ -61,7 +61,7 @@ func TestWriteFile_BacksUpExistingBeforeOverwrite(t *testing.T) {
 	matches, err := filepath.Glob(target + ".bak.*")
 	require.NoError(t, err)
 	require.Len(t, matches, 1)
-	bak, err := os.ReadFile(matches[0]) //nolint:gosec
+	bak, err := os.ReadFile(matches[0]) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Equal(t, "old", string(bak))
 }
@@ -78,7 +78,7 @@ func TestWriteFile_DryRunDoesNotWrite(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "dry-run must not create the file")
 
 	// The intended mutation is still recorded, tagged dry-run.
-	logRaw, err := os.ReadFile(logPath) //nolint:gosec
+	logRaw, err := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Contains(t, string(logRaw), `"dry_run":true`)
 }
