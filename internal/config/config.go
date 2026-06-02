@@ -20,6 +20,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -546,6 +547,39 @@ func ValidateObservability(cfg *Config) error {
 		return fmt.Errorf("config: observability.metrics.bind_addr %q must not be 0.0.0.0 or :: — metrics must bind to the tailnet IP only (OBS-03)", addr)
 	}
 	return nil
+}
+
+// DefaultWebUIPort is the TLS listen port used when webui.port is unset. It is
+// the single source of truth shared by the webui listener (resolveWebUIAddr)
+// and the doctor live probe (webuiProbeURL) so the two never disagree about the
+// effective port (WR-03).
+const DefaultWebUIPort = 8443
+
+// EffectiveWebUIHostPort resolves the host and port the webui listener and the
+// doctor probe MUST agree on, given only the config (no tailnet-IP resolution,
+// which is done at the listener seam). Precedence (single source of truth, WR-03):
+//
+//   - If bind_addr carries an embedded port (host:port / [host]:port), that port
+//     wins and the embedded host is returned. This matches the listener, which
+//     honors an embedded port verbatim.
+//   - Otherwise the host is bind_addr's bare host (possibly empty, meaning
+//     "resolve to the tailnet IP at runtime") and the port is webui.port, or
+//     DefaultWebUIPort when unset.
+//
+// Returning both pieces (rather than two independent resolvers) is what keeps
+// the doctor probe targeting the same port the listener actually binds.
+func EffectiveWebUIHostPort(cfg *Config) (host string, port int) {
+	host = BindAddrHost(cfg.WebUI.BindAddr)
+	if _, portStr, err := net.SplitHostPort(cfg.WebUI.BindAddr); err == nil {
+		if p, perr := strconv.Atoi(portStr); perr == nil {
+			return host, p
+		}
+	}
+	port = cfg.WebUI.Port
+	if port <= 0 {
+		port = DefaultWebUIPort
+	}
+	return host, port
 }
 
 // IsUnspecifiedBindAddr reports whether addr's host part is an unspecified
