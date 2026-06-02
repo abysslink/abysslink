@@ -54,7 +54,7 @@ type Observability struct {
 
 // ObservabilityMetrics configures the in-process metrics HTTP exposition.
 // BindAddr, when set, MUST bind to the tailnet IP only — never 0.0.0.0 or ::
-// (OBS-03, enforced by validateObservability).
+// (OBS-03, enforced by ValidateObservability).
 type ObservabilityMetrics struct {
 	Enabled  bool   `yaml:"enabled"`
 	BindAddr string `yaml:"bind_addr,omitempty"`
@@ -455,7 +455,7 @@ func Validate(cfg *Config) error {
 	if err := validateBackend(cfg); err != nil {
 		return err
 	}
-	if err := validateObservability(cfg); err != nil {
+	if err := ValidateObservability(cfg); err != nil {
 		return err
 	}
 	return nil
@@ -480,13 +480,18 @@ func validateIdentity(cfg *Config) error {
 	return nil
 }
 
-// validateObservability enforces the OBS-03 hard floor: when the metrics
+// ValidateObservability enforces the OBS-03 hard floor: when the metrics
 // exposition bind address is set, it MUST bind to the tailnet IP only. A
-// bind_addr containing 0.0.0.0 or :: would expose internal metrics on every
-// interface (Information Disclosure, T-18-01), so it is rejected with the same
-// FATAL error class as the Funnel/backend rejections. An empty bind_addr is
-// resolved at runtime to the tailnet IP and is therefore accepted here.
-func validateObservability(cfg *Config) error {
+// bind_addr that is unspecified (0.0.0.0 or ::) would expose internal metrics
+// on every interface (Information Disclosure, T-18-01), so it is rejected with
+// the same FATAL error class as the Funnel/backend rejections. An empty
+// bind_addr is resolved at runtime to the tailnet IP and is therefore accepted
+// here.
+//
+// It is exported so the daemon can enforce the floor at the point the metrics
+// listener starts (CR-02), independently of whether the global Validate is
+// wired into the config load path.
+func ValidateObservability(cfg *Config) error {
 	if addr := cfg.Observability.Metrics.BindAddr; addr != "" && IsUnspecifiedBindAddr(addr) {
 		return fmt.Errorf("config: observability.metrics.bind_addr %q must not be 0.0.0.0 or :: — metrics must bind to the tailnet IP only (OBS-03)", addr)
 	}

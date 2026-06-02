@@ -55,6 +55,14 @@ func StartMetricsServer(ctx context.Context, cfg *config.Config, reg metrics.Reg
 	if cfg == nil || !cfg.Observability.Metrics.Enabled {
 		return
 	}
+	// CR-02: enforce the OBS-03 schema floor on the real runtime path. The
+	// global config.Validate is not (yet) wired into config.Load, so a
+	// hand-written observability.metrics.bind_addr: 0.0.0.0:9090 would otherwise
+	// reach the listener unchecked. Fail closed here before any goroutine binds.
+	if err := config.ValidateObservability(cfg); err != nil {
+		slog.Error("abysslinkd: metrics: invalid observability config; listener disabled", "err", err)
+		return
+	}
 	go func() {
 		// BLOCKER 3 guard: a nil interface value would panic on b.IP(ctx).
 		// This MUST be the first statement, before any method call on b
