@@ -30,8 +30,13 @@ import (
 	"time"
 
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/shell"
 )
+
+// daemonVersion is the abysslinkd build version reported by GET /status. It
+// defaults to "dev"; Plan 04 wires the real value from the build ldflag.
+var daemonVersion = "dev"
 
 // Watcher polling defaults. The pane watcher fires when a pane has shown a
 // prompt-shaped last line with no output change for at least idleInterval.
@@ -51,11 +56,18 @@ type Server struct {
 	runner     shell.Runner
 	cfg        *config.Config
 	socketPath string
+	startedAt  time.Time
 }
 
 // NewServer returns a Server. notifier MUST be a direct backend (see Notifier).
 func NewServer(notifier Notifier, runner shell.Runner, cfg *config.Config) *Server {
-	return &Server{notifier: notifier, runner: runner, cfg: cfg, socketPath: SocketPath()}
+	return &Server{
+		notifier:   notifier,
+		runner:     runner,
+		cfg:        cfg,
+		socketPath: SocketPath(),
+		startedAt:  time.Now(),
+	}
 }
 
 // Run listens on the Unix socket and starts watchers until ctx is cancelled.
@@ -75,6 +87,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/notify", s.handleNotify)
+	mux.HandleFunc("/status", s.handleStatus)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO}
 
@@ -115,6 +128,70 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// daemonStatusResponse is the JSON schema for GET /status, consumed by the
+// Phase 19 Web UI. rig_id is opaque (SHA-256 prefix of the hostname) — no raw
+// hostname, IP, or node_id is exposed (OBS-04).
+type daemonStatusResponse struct {
+	Version    string               `json:"version"`
+	Backend    string               `json:"backend"`
+	RigID      string               `json:"rig_id"`
+	Reachable  bool                 `json:"reachable"`
+	LockStatus string               `json:"lock_status"`
+	Doctor     daemonDoctorSummary  `json:"doctor"`
+	CertExpiry string               `json:"cert_expiry,omitempty"`
+	LastSeen   string               `json:"last_seen,omitempty"`
+	Uptime     string               `json:"uptime"`
+}
+
+// daemonDoctorSummary is the per-severity doctor finding count in /status.
+type daemonDoctorSummary struct {
+	Fatal int `json:"fatal"`
+	Warn  int `json:"warn"`
+	Pass  int `json:"pass"`
+}
+
+// handleStatus serves GET /status: a read-only JSON posture snapshot of the
+// daemon. It is tailnet-bound and unauthenticated this phase (Phase 19 adds
+// WhoIs + TLS). Reachability is true because the daemon is running; full doctor
+// wiring is deferred to Phase 19.
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	backendType := "tailscale"
+	hostname := ""
+	lock := false
+	if s.cfg != nil {
+		if s.cfg.Backend.Type != "" {
+			backendType = s.cfg.Backend.Type
+		}
+		hostname = s.cfg.Tailnet.Hostname
+		lock = s.cfg.Tailnet.Lock.Enabled
+	}
+
+	lockStatus := "unlocked"
+	if lock {
+		lockStatus = "locked"
+	}
+
+	resp := daemonStatusResponse{
+		Version:    daemonVersion,
+		Backend:    backendType,
+		RigID:      metrics.OpaqueRigLabel(hostname),
+		Reachable:  true,
+		LockStatus: lockStatus,
+		Doctor:     daemonDoctorSummary{},
+		Uptime:     time.Since(s.startedAt).Truncate(time.Second).String(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Warn("daemon: status encode failed", "err", err)
+	}
 }
 
 // startWatchers launches a goroutine per configured watcher (pane, file, HTTP).
