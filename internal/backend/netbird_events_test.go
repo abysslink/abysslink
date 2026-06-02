@@ -116,6 +116,57 @@ func TestTailEvents_Follow_Deduplicates(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(buf.String(), `"e2"`))
 }
 
+// TestTailEvents_Follow_ShrinkThenRegrow verifies WR-02: when the snapshot
+// shrinks (rotation/purge) and then regrows with genuinely new events, the new
+// events are still printed. A count-based watermark dropped them silently
+// because the regrown count had not yet exceeded the old high-water mark.
+func TestTailEvents_Follow_ShrinkThenRegrow(t *testing.T) {
+	var poll int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(&poll, 1)
+		w.WriteHeader(http.StatusOK)
+		var events []nbAuditEvent
+		switch {
+		case n == 1:
+			// Initial: three events (high-water mark = 3).
+			events = []nbAuditEvent{
+				{ID: "e1", Activity: "a1"},
+				{ID: "e2", Activity: "a2"},
+				{ID: "e3", Activity: "a3"},
+			}
+		case n == 2:
+			// Snapshot shrinks (e1/e2 rotated out) — fewer events than before.
+			events = []nbAuditEvent{
+				{ID: "e3", Activity: "a3"},
+			}
+		default:
+			// Regrows with a genuinely new event e4, but total count (2) is still
+			// below the old high-water mark (3). A count watermark would skip e4.
+			events = []nbAuditEvent{
+				{ID: "e3", Activity: "a3"},
+				{ID: "e4", Activity: "a4"},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(events)
+	}))
+	defer srv.Close()
+
+	a := newTestNetBirdAdapter(t, srv.URL)
+	a.eventPollStart = 10 * time.Millisecond
+	a.eventPollMax = 20 * time.Millisecond
+
+	var buf bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	require.NoError(t, a.TailEvents(ctx, &buf, true))
+	// e1..e3 printed on the initial fetch; e4 must be printed once after regrow.
+	assert.Equal(t, 1, strings.Count(buf.String(), `"e4"`), "new event after shrink/regrow must not be dropped")
+	// e3 was already printed initially and must not be reprinted just because the
+	// snapshot shrank (the watermark survives the shrink).
+	assert.Equal(t, 1, strings.Count(buf.String(), `"e3"`), "watermark must prevent reprinting surviving events")
+}
+
 // TestTailEvents_Follow_Cancellation verifies clean exit on context cancellation.
 func TestTailEvents_Follow_Cancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
