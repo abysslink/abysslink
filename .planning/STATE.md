@@ -2,15 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
-status: executing
-last_updated: "2026-06-02T08:29:06.896Z"
-last_activity: 2026-06-02 -- Phase 16 execution started
+status: milestone_complete
+last_updated: 2026-06-02T20:42:48.083Z
+last_activity: 2026-06-03 -- v3.0.0 shipped (audit PASSED, 3 gaps closed); local tag v3.0.0
 progress:
   total_phases: 16
-  completed_phases: 2
-  total_plans: 16
-  completed_plans: 9
-  percent: 13
+  completed_phases: 8
+  total_plans: 36
+  completed_plans: 51
+  percent: 50
+stopped_at: Milestone complete (Phase 21 was final phase)
 ---
 
 # Project State
@@ -20,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Phase 16 — supply-chain-hardening-ci-gates
+**Current focus:** Milestone complete
 
 ## Current Position
 
-Phase: 16 (supply-chain-hardening-ci-gates) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase 16
-Last activity: 2026-06-02 -- Phase 16 execution started
+Phase: 21
+Plan: Not started
+Status: Milestone complete
+Last activity: 2026-06-02
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 46 (v1.0.0)
+- Total plans completed: 70 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 
@@ -70,6 +71,30 @@ Last activity: 2026-06-02 -- Phase 16 execution started
 | Phase 14-multi-rig-fleet P01 | 12m | 2 tasks | 5 files |
 | Phase 14-multi-rig-fleet P02 | 6m | 2 tasks | 6 files |
 | Phase 14-multi-rig-fleet P03 | 40m | 2 tasks | 5 files |
+| Phase 16 P01 | 6m | 2 tasks | 2 files |
+| Phase 16 P02 | 10m | 2 tasks | 3 files |
+| Phase 16 P03 | ~8m | 2 tasks | 2 files |
+| Phase 16 P04 | ~25m | 2 tasks | 9 files |
+| Phase 17 P01 | ~18m | 3 tasks | 9 files |
+| Phase 17 P02 | ~20m | 3 tasks | 22 files |
+| Phase 17 P03 | ~15m | 2 tasks | 17 files |
+| Phase 18 P01 | 6min | 2 tasks | 9 files |
+| Phase 18 P02 | 4min | 2 tasks | 4 files |
+| Phase 18 P03 | 12min | 3 tasks | 8 files |
+| Phase 18 P04 | 5min | 2 tasks | 4 files |
+| Phase 19 P01 | 6m | 2 tasks | 5 files |
+| Phase 19 P02 | 8m | 16 tasks | 13 files |
+| Phase 19 P03 | 12m | 2 tasks | 12 files |
+| Phase 19 P04 | 15 | 2 tasks | 12 files |
+| Phase 20 P02 | 22min | 2 tasks | 3 files |
+| Phase 20 P04 | 420 | 2 tasks | 3 files |
+| Phase 20 P01 | 38min | 3 tasks | 38 files |
+| Phase 20 P03 | 18min | 2 tasks | 5 files |
+| Phase 21 P01 | 18min | 2 tasks | 8 files |
+| Phase 21 P02 | 14min | 2 tasks | 8 files |
+| Phase 21 P03 | 12 | 1 tasks | 9 files |
+| Phase 21 P04 | 9min | 2 tasks | 12 files |
+| Phase 21 P05 | 7min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -97,6 +122,41 @@ Last activity: 2026-06-02 -- Phase 16 execution started
 - [Phase ?]: Prevents timing side-channel attacks
 - [Phase ?]: Decision A1 (confirmed): Tailscale/Headscale HuJSON isolation = absence-of-grant; no explicit deny construct
 - [2026-06-02 reconcile]: v1.0.0 phases 1-10 SHIPPED (commits ≤ 2026-05-29); ROADMAP `[x]` + Progress table + velocity table all mark them Complete. Their `.planning/phases/0X-*` dirs were cleaned (SUMMARYs removed; 4-9 have no dir), so `roadmap.analyze` mis-reports disk_status incomplete for 2-9. This is a stale-disk artifact, NOT pending work — unlike v2.0.0 (phases 11-14) which were archived to `milestones/v2.0.0-ROADMAP.md`, v1.0.0 was never formally archived inline. Autonomous run scoped `--from 16`; do NOT re-execute 2-9 (would overwrite shipped 68-file CLI scaffold). Safety branch: `backup/pre-autonomous-260602` @ 8c47187.
+- [Phase ?]: Phase 16-01: harden-runner pinned to v2.17.0 per must_haves; semgrep uses renamed semgrep/semgrep-action@v1
+- [Phase ?]: Phase 16-01: GitHub Actions pinned to verified full 40-char commit SHAs; plan-supplied SHAs were truncated/wrong, re-verified via git ls-remote against upstream tags
+- [Phase ?]: Phase 16-02: reproducible goreleaser builds — {{.CommitDate}} + -trimpath all targets; dual SPDX+CycloneDX SBOMs; repro-check.yml CI gate asserts sha256 binary identity
+- [Phase 16]: Phase 16-03: split release.yml into least-privilege build/sign/attest jobs; cosign v3 .bundle offline verify; actions/attest SLSA L2 bound to github.sha; actions/attest@v4.1.4 did not exist -> pinned v4.1.0 (59d89421)
+- [Phase ?]: Phase 16-04: SCH-07 user-visible supply-chain — abysslink verify (cosign v3 --bundle --offline), version --provenance, upgrade v3 bundle path, doctor supply-cosign-bundle/supply-slsa-source (WARN), install.sh fail-closed; no new Go runtime deps
+- [Phase 17]: Phase 17-01: Verify reconstructs the signed DiffHash by hex-decoding the stored Entry.Hash (round-trips Append); the plan's sha256([]byte(entry.Hash)) verify formula would never validate a legitimately signed entry (Rule 1 fix, commit 646c7bc)
+- [Phase 17]: Phase 17-01: local audit.KeychainStore interface includes Delete to exactly match secrets.KeychainStore, avoiding the audit->secrets import cycle while letting MockStore/DarwinStore/LinuxStore satisfy it by assignment
+- [Phase ?]: AuditWriter interface lets *Audit and *SignedAudit be injected interchangeably via Deps.Audit (ctx-less WriteFile for drop-in compat)
+- [Phase ?]: backup verify and audit verify share the identical audit.Verify path (T-17-12); no separate weaker verification
+- [Phase ?]: Phase 17-03: FuzzConfigLoad uses external config_test + temp YAML (Load is path-only); FuzzHMACVerify in-package for private verifyHMAC; FuzzHuJSONParse drives NewACLEditor (most direct HuJSON parse path)
+- [Phase ?]: Phase 17-03: len(b)>4096 guard is first statement in every fuzz body (T-17-15); 12 seed corpus files use synthetic non-secret inputs so gitleaks does not flag them (AUD-08)
+- [Phase ?]: Metrics are hand-rolled (no prometheus/client_golang); depguard total-ban enforces it (OBS-01)
+- [Phase ?]: OBS-03 hard floor: observability.metrics.bind_addr rejects 0.0.0.0/:: in config.Validate
+- [Phase 18]: 18-02: exported StartMetricsServer/RegisterOBS05Metrics so the external daemon_test package and Plan-04 main.go can call them
+- [Phase 18]: 18-02: separate escapeHelp (backslash+newline) from escapeLabelValue (backslash+quote+newline) per Prometheus text-format spec; net.JoinHostPort for IPv6-safe addr
+- [Phase ?]: Exported StartDigestScheduler so package main can launch the digest; helpers stay unexported (18-03)
+- [Phase ?]: abysslink report reuses persistent root --all-rigs/--strict; rigReachability serialises opaque rig ids only (18-03)
+- [Phase ?]: Phase 18 metrics wired at daemon startup; Registry selected by config in both main.go and buildDeps (NewMemRegistry/NoopRegistry)
+- [Phase ?]: Phase 19-01: tailscale.com v1.98.5 pinned via //go:build webui blank-import placeholder; base binary links 0 tailscale.com packages (T-19-02)
+- [Phase ?]: Phase 19-01: go directive bumped 1.23.0->1.26.3 (forced by tailscale.com v1.98.5 module floor)
+- [Phase ?]: Phase 19-01: ValidateWebUI mirrors ValidateObservability bind-floor + rejects read_only:false (WEB-02 config-layer gate)
+- [Phase ?]: Per-view html/template sets (base+view) because each view defines the content block
+- [Phase 19]: htmx 2.0.10 vendored from unpkg npm mirror (GitHub release asset 404s); SHA-384 cross-verified against jsdelivr
+- [Phase ?]: Phase 19 webui doctor checks use net.Dial/net.http probes (no tailscale import) to keep base binary SDK-free
+- [Phase ?]: 20-02: sshd_config is the primary sec-ssh-* parse path; sshd -T only as root, never sudo
+- [Phase ?]: 20-02: sec-* cross-ref aliases reuse pre-computed Phase-17/18/19 findings (run-once)
+- [Phase ?]: threat-model --backend renders backend rows; unknown backend warns + renders base+v3 only (no error)
+- [Phase ?]: v3SurfaceRows failChecks list both sec-* alias and original module check ID so rows reflect posture if alias naming evolves
+- [Phase ?]: SEC-02 tooling gate: nolintlint allow-unused:true; standalone gosec -exclude FP families + #nosec for genuine G115/G402; G104 fixed at root
+- [Phase ?]: WoL audit uses chain-correct Append (signed/unsigned), not WriteFile with a bogus sentinel path (W-02 correction)
+- [Phase ?]: upsnap module rewritten as WoL enablement module; packet send lives in the CLI command behind the --apply HARD FLOOR, not in the module
+- [Phase ?]: 21-03: go-landlock v0.8.1 used (no AGPL; psx LGPLv2+ acceptable)
+- [Phase ?]: 21-04: NetBird posture/events via exported wrappers over netbirdAdapter.doRequest (no new client/interface); events --follow count-watermark dedup with 2s->30s bounded backoff, ctx-cancellable; nb-posture-active WARN gated on backend.type==netbird
+- [Phase 21]: 21-05: mod3DoctorFindings wired into doctor RunE (after secDoctorFindings, before --all-rigs fan-out); all 9 Phase-21 checks now appear in abysslink doctor + --json. root.go needed no change (wol/asciinema/netbird already registered by plans 01/02/04)
+- [Phase 21]: 21-05: Headscale HA + NetBird SCIM published as scope-cut docs (docs/headscale-ha.md, docs/netbird-scim.md) — out of scope, workarounds documented not implemented (MOD3-06). Phase 21 CLOSED: make lint test green, GOOS=linux Landlock build clean. Final phase of v3.0.0.
 
 ### Pending Todos
 
@@ -145,6 +205,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-01T20:37:58.913Z
-Stopped at: Phase 14 context gathered
+Last session: 2026-06-02T20:14:11.978Z
+Stopped at: Completed 21-05-PLAN.md (final plan; Phase 21 complete; v3.0.0 ready for verification)
 Resume file: None
