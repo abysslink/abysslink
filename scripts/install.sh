@@ -138,9 +138,13 @@ verify_cosign_bundle() {
             "${_artifact}" || die "cosign bundle verification FAILED — refusing to install (Pitfall 14: fail closed)"
         info "cosign bundle OK"
     else
+        if [ "${ABYSSLINK_REQUIRE_COSIGN:-0}" = "1" ]; then
+            die "cosign required (ABYSSLINK_REQUIRE_COSIGN=1) but not found — refusing to install (Pitfall 14: fail closed)"
+        fi
         printf '\n  WARNING: cosign not found — skipping signature verification.\n'
         printf '  Install cosign for supply-chain assurance:\n'
-        printf '    https://docs.sigstore.dev/cosign/system_config/installation/\n\n'
+        printf '    https://docs.sigstore.dev/cosign/system_config/installation/\n'
+        printf '  Set ABYSSLINK_REQUIRE_COSIGN=1 to fail closed when cosign is absent.\n\n'
     fi
 }
 
