@@ -17,12 +17,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,6 +98,38 @@ func TestReportRigReachabilityOpaque(t *testing.T) {
 	b, err := json.Marshal(rr)
 	require.NoError(t, err)
 	assert.NotContains(t, string(b), "my-secret-rig-hostname")
+}
+
+// TestReportFindingsIncludeSecAndMod3 guards B2: collectReportFindings must
+// gather the Phase-20 sec-* family and the Phase-21 mod3 family so the report
+// posture export does not omit them. Enabling Upsnap makes the FATAL
+// wol-apply-gate mod3 check deterministic; the sec-* family always runs.
+func TestReportFindingsIncludeSecAndMod3(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.BindAddr = "100.64.0.1:9090"
+	cfg.WebUI.BindAddr = "100.64.0.1:8443"
+	cfg.Modules.Upsnap.Enabled = true
+	// noopRunner (ExitCode=1, nil error) lets every shell-calling module Detect
+	// produce a graceful "unavailable" finding without the module-runner doctor
+	// pass erroring out on this dev/CI host (e.g. fdesetup absent).
+	cc := &cmdContext{cfg: cfg, runner: &noopRunner{}, dryRun: true}
+
+	findings, err := collectReportFindings(context.Background(), cc)
+	require.NoError(t, err)
+
+	var hasSec, hasMod3 bool
+	for _, f := range findings {
+		if strings.HasPrefix(f.Check, "sec-") {
+			hasSec = true
+		}
+		if f.Check == "wol-apply-gate" {
+			hasMod3 = true
+		}
+	}
+	assert.True(t, hasSec, "report findings must include a Phase-20 sec-* check (B2)")
+	assert.True(t, hasMod3, "report findings must include the Phase-21 wol-apply-gate mod3 check (B2)")
 }
 
 func TestNewReportCmdRegistered(t *testing.T) {
