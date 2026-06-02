@@ -101,7 +101,7 @@ func (m *Module) Apply(ctx context.Context) error {
 	srvCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	m.cancel = cancel
 	go func() {
-		if err := StartWebUIServer(srvCtx, m.cfg); err != nil && !errors.Is(err, context.Canceled) {
+		if err := StartWebUIServer(srvCtx, m.cfg, nil); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("webui: server exited", "err", err)
 		}
 	}()

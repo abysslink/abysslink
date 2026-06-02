@@ -50,6 +50,17 @@ const (
 // promptRegex matches common shell/REPL prompt-shaped trailing lines.
 var promptRegex = regexp.MustCompile(`[>$?#»❯]\s*$`)
 
+// RingAdder records a delivered notification in the Phase 19 web-UI notify-history
+// ring. It is defined here (not imported from internal/modules/webui) so the
+// daemon package carries zero webui/Tailscale-SDK imports and the base binary
+// stays SDK-free (T-19-08); the webui ring satisfies it via a thin adapter in
+// the //go:build webui daemon entrypoint (cmd/abysslinkd/start_webui.go). It
+// receives only metadata (title/topic/priority/time) — never the body content
+// (T-19-19 / AUD-04: no secret bodies on observable surfaces).
+type RingAdder interface {
+	AddEvent(title, topic, priority string, t time.Time)
+}
+
 // Server serves the notify socket and runs configured watchers.
 type Server struct {
 	notifier   Notifier
@@ -57,6 +68,7 @@ type Server struct {
 	cfg        *config.Config
 	socketPath string
 	startedAt  time.Time
+	ring       RingAdder // nil unless the webui build wires it via SetRing
 }
 
 // NewServer returns a Server. notifier MUST be a direct backend (see Notifier).
@@ -69,6 +81,11 @@ func NewServer(notifier Notifier, runner shell.Runner, cfg *config.Config) *Serv
 		startedAt:  time.Now(),
 	}
 }
+
+// SetRing injects the web-UI notify-history ring. It is called only by the
+// //go:build webui daemon entrypoint; in the base build the ring stays nil and
+// handleNotify skips the record (no-op, nil-safe).
+func (s *Server) SetRing(r RingAdder) { s.ring = r }
 
 // Run listens on the Unix socket and starts watchers until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
@@ -126,6 +143,11 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("daemon: notify delivery failed", "err", err)
 		http.Error(w, "delivery failed", http.StatusBadGateway)
 		return
+	}
+	// Record the delivery in the web-UI notify-history ring (Phase 19, WEB-07).
+	// Metadata only — never req.Body (T-19-19). nil when webui is not wired.
+	if s.ring != nil {
+		s.ring.AddEvent(req.Title, req.Topic, req.Priority, time.Now())
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

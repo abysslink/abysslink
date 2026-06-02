@@ -55,10 +55,10 @@ type Config struct {
 // config-layer half of the two-layer read-only gate; the HTTP-layer half lives
 // in the webui module).
 type WebUIConfig struct {
-	Enabled     bool   `yaml:"enabled"`             // default false — listener never starts unless explicitly opted in (WEB-01)
-	BindAddr    string `yaml:"bind_addr,omitempty"` // resolved to the tailnet IP at runtime when empty
-	Port        int    `yaml:"port,omitempty"`      // default 0 → use 8443
-	ReadOnly    bool   `yaml:"read_only"`           // MUST be true; false is rejected by ValidateWebUI (WEB-02)
+	Enabled     bool   `yaml:"enabled"`                // default false — listener never starts unless explicitly opted in (WEB-01)
+	BindAddr    string `yaml:"bind_addr,omitempty"`    // resolved to the tailnet IP at runtime when empty
+	Port        int    `yaml:"port,omitempty"`         // default 0 → use 8443
+	ReadOnly    bool   `yaml:"read_only"`              // MUST be true; false is rejected by ValidateWebUI (WEB-02)
 	AllowNotify bool   `yaml:"allow_notify,omitempty"` // scaffolded, default false (WEB-05)
 }
 
