@@ -150,12 +150,41 @@ func newSafewebServer(mux *http.ServeMux) (*safeweb.Server, error) {
 // (the notify-history view then stays empty). The daemon entrypoint passes the
 // same ring it injected into the daemon Server via SetRing so deliveries
 // recorded in handleNotify appear in the /notify view (WEB-07).
-func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingBuffer) error {
+// serverOptions holds the optional live data sources the daemon entrypoint
+// injects. Both default to nil; with nil providers the views render their empty
+// states (the handler nil-guards remain authoritative defenses).
+type serverOptions struct {
+	status StatusFunc
+	doctor DoctorFunc
+}
+
+// Option configures StartWebUIServer. The daemon entrypoint (//go:build webui)
+// uses WithStatusProvider/WithDoctorProvider to inject the real status and
+// doctor data sources without this package importing internal/cli (the
+// adapters live in package main, keeping the webui→cli boundary intact).
+type Option func(*serverOptions)
+
+// WithStatusProvider injects the fleet-status data source.
+func WithStatusProvider(fn StatusFunc) Option {
+	return func(o *serverOptions) { o.status = fn }
+}
+
+// WithDoctorProvider injects the doctor findings data source.
+func WithDoctorProvider(fn DoctorFunc) Option {
+	return func(o *serverOptions) { o.doctor = fn }
+}
+
+func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingBuffer, opts ...Option) error {
 	if err := config.ValidateWebUI(cfg); err != nil {
 		return err
 	}
 	if ring == nil {
 		ring = NewNotifyRingBuffer()
+	}
+
+	var so serverOptions
+	for _, opt := range opts {
+		opt(&so)
 	}
 
 	var lc local.Client // zero value uses the platform-default tailscaled socket
@@ -186,20 +215,30 @@ func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingB
 	// The mux carries the four read-only view routes plus the embedded static
 	// assets, and is wrapped by safeweb (CSRF + CSP), then the read-only gate,
 	// then the WhoIs gate as the OUTERMOST handler so unauthenticated peers
-	// never reach routing. The status/doctor providers are nil here; the daemon
-	// entrypoint (Plan 04) injects the live data sources via a future seam. With
-	// nil providers the views render their empty states rather than panicking.
+	// never reach routing. The status/doctor providers come from the daemon
+	// entrypoint via WithStatusProvider/WithDoctorProvider (B3): it adapts
+	// internal/cli's CollectFleetStatus/CollectDoctorFindings so the dashboard
+	// renders REAL posture data. When a provider is nil (e.g. the module.go
+	// self-start path, or tests) the views render their empty states rather than
+	// panicking — the handler nil-guards remain the authoritative defense.
 	auditLogPath, err := audit.DefaultLogPath()
 	if err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("webui: audit log path: %w", err)
 	}
-	handlers, err := NewHandlers(HandlerDeps{
+	deps := HandlerDeps{
 		Ring:         ring,
 		AuditLogPath: auditLogPath,
 		RigHostname:  cfg.Tailnet.Hostname,
 		AllowNotify:  cfg.WebUI.AllowNotify,
-	})
+	}
+	if so.status != nil {
+		deps.Status = statusFuncAdapter{fn: so.status}
+	}
+	if so.doctor != nil {
+		deps.Doctor = doctorFuncAdapter{fn: so.doctor}
+	}
+	handlers, err := NewHandlers(deps)
 	if err != nil {
 		_ = ln.Close()
 		return err

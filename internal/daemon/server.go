@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -213,17 +214,29 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		lockStatus = "locked"
 	}
 
+	// Reachability is now REAL (B3): resolve the node's own tailnet IP via the
+	// backend. A daemon whose backend reports a tailnet IP is reachable on the
+	// tailnet; a resolution failure is reported as not-reachable rather than a
+	// hardcoded true (WR-05: never a fabricated all-clear). The doctor summary
+	// remains a non-authoritative stub here — the full doctor families live in
+	// internal/cli (which cannot be imported from daemon: it would form an import
+	// cycle). The Web UI dashboard reads the authoritative doctor posture
+	// directly from internal/cli.CollectDoctorFindings, not from this endpoint;
+	// PostureComplete therefore stays false so consumers do not read the zeroed
+	// doctor summary as a genuine "0 fatal" all-clear.
+	reachable := s.resolveReachable(r.Context())
+
 	resp := daemonStatusResponse{
 		Version:    daemonVersion,
 		Backend:    backendType,
 		RigID:      metrics.OpaqueRigLabel(hostname),
-		Reachable:  true,                  // STUB (OBS-07): not yet wired — see PostureComplete.
+		Reachable:  reachable,             // REAL: backend tailnet-IP resolution (B3).
 		LockStatus: lockStatus,            // authoritative: read from config.
 		Doctor:     daemonDoctorSummary{}, // STUB (OBS-07): zeroed counts, not a real all-clear.
 		Uptime:     time.Since(s.startedAt).Truncate(time.Second).String(),
-		// PostureComplete=false flags reachable/doctor as non-authoritative this
-		// phase so consumers do not read the zeroed doctor summary as a genuine
-		// "0 fatal" all-clear on a security-posture endpoint (WR-05).
+		// PostureComplete=false flags the DOCTOR summary as non-authoritative so
+		// consumers do not read the zeroed doctor summary as a genuine "0 fatal"
+		// all-clear on a security-posture endpoint (WR-05). Reachable is now real.
 		PostureComplete: false,
 	}
 
@@ -231,6 +244,37 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Warn("daemon: status encode failed", "err", err)
 	}
+}
+
+// resolveReachable reports whether this node is reachable on the tailnet by
+// resolving its own tailnet IP via the backend. A backend construction or
+// IP-resolution failure (or an empty IP) yields false — an HONEST "not
+// confirmed reachable" rather than the previous hardcoded true (WR-05). It
+// respects ctx cancellation and never propagates a panic: the backend's
+// localapi probe can panic when tailscaled is absent (e.g. CI or a
+// not-yet-started daemon), which a /status handler must never surface as a 500.
+// A recovered panic is treated as not-reachable (fail-honest, never a fabricated
+// true) and logged via slog (CLAUDE.md: library code logs, never prints).
+func (s *Server) resolveReachable(ctx context.Context) (reachable bool) {
+	if s.cfg == nil {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("daemon: reachability probe panicked; reporting not-reachable", "recovered", r)
+			reachable = false
+		}
+	}()
+	b, err := backend.New(s.cfg, s.runner)
+	if err != nil || b == nil {
+		slog.Warn("daemon: backend unavailable for reachability probe", "err", err)
+		return false
+	}
+	ip, err := b.IP(ctx)
+	if err != nil || ip == "" {
+		return false
+	}
+	return true
 }
 
 // startWatchers launches a goroutine per configured watcher (pane, file, HTTP).

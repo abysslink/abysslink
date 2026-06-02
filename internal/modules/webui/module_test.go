@@ -696,6 +696,118 @@ func writeAuditLog(t *testing.T, path string, entries []audit.Entry) {
 	}
 }
 
+// TestProjectRigRowHonestEnums asserts the exported RigStatusRow → internal
+// rigRow projection maps honest tri-state enums to honest CSS classes and never
+// fabricates an all-clear (WR-05): "unknown" reachability stays dot-unknown, an
+// absent lock/cert stays N/A.
+func TestProjectRigRowHonestEnums(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          RigStatusRow
+		wantStatus  string
+		wantLabel   string
+		wantLock    string
+		wantLockCls string
+		wantCert    string
+		wantCertCls string
+	}{
+		{
+			name:       "online locked healthy cert",
+			in:         RigStatusRow{Reachable: "online", Lock: "locked", HasCert: true, CertDays: 90},
+			wantStatus: "dot-online", wantLabel: "online", wantLock: "Locked", wantLockCls: "lock-ok",
+			wantCert: "90d", wantCertCls: "",
+		},
+		{
+			name:       "unknown reachability stays unknown (no fabricated online)",
+			in:         RigStatusRow{Reachable: "unknown", Lock: ""},
+			wantStatus: "dot-unknown", wantLabel: "unknown", wantLock: "N/A", wantLockCls: "lock-na",
+			wantCert: "N/A", wantCertCls: "",
+		},
+		{
+			name:       "offline + expiring cert warns",
+			in:         RigStatusRow{Reachable: "offline", Lock: "unlocked", HasCert: true, CertDays: 10},
+			wantStatus: "dot-offline", wantLabel: "offline", wantLock: "Unlocked", wantLockCls: "lock-warn",
+			wantCert: "10d", wantCertCls: "cert-warn",
+		},
+		{
+			name:       "near-expiry cert is fatal",
+			in:         RigStatusRow{Reachable: "online", HasCert: true, CertDays: 3},
+			wantStatus: "dot-online", wantLabel: "online", wantLock: "N/A", wantLockCls: "lock-na",
+			wantCert: "3d", wantCertCls: "cert-fatal",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := projectRigRow(tc.in)
+			assert.Equal(t, tc.wantStatus, got.StatusClass)
+			assert.Equal(t, tc.wantLabel, got.StatusLabel)
+			assert.Equal(t, tc.wantLock, got.LockStatus)
+			assert.Equal(t, tc.wantLockCls, got.LockClass)
+			assert.Equal(t, tc.wantCert, got.CertDays)
+			assert.Equal(t, tc.wantCertCls, got.CertClass)
+		})
+	}
+}
+
+// TestStatusFuncAdapterRendersRealRows asserts the exported StatusFunc seam
+// (the daemon entrypoint's injection point) flows through to the rendered
+// fleet-status view, so a non-nil provider yields REAL rows — the B3 wiring.
+func TestStatusFuncAdapterRendersRealRows(t *testing.T) {
+	fn := StatusFunc(func(_ context.Context) (int, int, []RigStatusRow) {
+		return 1, 2, []RigStatusRow{
+			{Name: "laptop", Reachable: "online", Lock: "locked", LastSeen: "now", IsLocalRig: true},
+			{Name: "workstation", Reachable: "unknown", Lock: ""},
+		}
+	})
+	h, err := NewHandlers(HandlerDeps{
+		Status:       statusFuncAdapter{fn: fn},
+		Doctor:       stubDoctorProvider{},
+		Ring:         NewNotifyRingBuffer(),
+		AuditLogPath: "",
+		RigHostname:  "laptop",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "100.64.0.5:40000"
+	rec := httptest.NewRecorder()
+	h.handleRoot(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "laptop", "real local rig name must render")
+	assert.Contains(t, body, "workstation", "real remote rig name must render")
+	assert.Contains(t, body, "dot-unknown", "unprobed rig must render the honest unknown dot, not a fabricated online (WR-05)")
+}
+
+// TestDoctorFuncAdapterRendersFinding asserts the exported DoctorFunc seam
+// renders a real finding in the /doctor view when the provider is non-nil.
+func TestDoctorFuncAdapterRendersFinding(t *testing.T) {
+	fn := DoctorFunc(func(_ context.Context) []modules.Finding {
+		return []modules.Finding{
+			{Module: "ssh", Check: "sec-ssh-permitroot", Severity: modules.SeverityFatal, Message: "PermitRootLogin is yes"},
+		}
+	})
+	h, err := NewHandlers(HandlerDeps{
+		Status:       stubStatusProvider{},
+		Doctor:       doctorFuncAdapter{fn: fn},
+		Ring:         NewNotifyRingBuffer(),
+		AuditLogPath: "",
+		RigHostname:  "laptop",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/doctor", nil)
+	req.RemoteAddr = "100.64.0.5:40000"
+	rec := httptest.NewRecorder()
+	h.handleDoctor(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "sec-ssh-permitroot", "doctor view must render the real finding check name")
+	assert.Contains(t, body, "FATAL", "doctor view must render the finding's FATAL badge")
+}
+
 // compile-time assertion that the module satisfies the Module interface.
 var _ modules.Module = (*Module)(nil)
 

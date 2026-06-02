@@ -25,9 +25,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/cli"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/modules/webui"
+	"github.com/abysslink/abysslink/internal/shell"
 )
 
 // webuiNoteOnce guards the loud one-time security note so it prints exactly once
@@ -87,9 +90,80 @@ func startWebUI(ctx context.Context, cfg *config.Config, srv *daemon.Server, _ s
 			hostname, port, bindDesc)
 	})
 
+	// Build the live data-source adapters. These bridge the webui package's
+	// exported provider seams to internal/cli's single-source-of-truth
+	// collectors (B3) WITHOUT the webui package importing internal/cli: the
+	// adapters live here, in package main (//go:build webui), which is allowed to
+	// import both. The daemon shares its own runner so the providers probe the
+	// same backend the daemon uses.
+	runner := shell.Runner(&shell.ExecRunner{})
+	statusProvider := webuiStatusProvider(cfg, runner)
+	doctorProvider := webuiDoctorProvider(cfg, runner)
+
 	go func() {
-		if err := webui.StartWebUIServer(ctx, cfg, ring); err != nil && ctx.Err() == nil {
+		if err := webui.StartWebUIServer(ctx, cfg, ring,
+			webui.WithStatusProvider(statusProvider),
+			webui.WithDoctorProvider(doctorProvider),
+		); err != nil && ctx.Err() == nil {
 			slog.Error("abysslinkd: webui server exited with error", "err", err)
 		}
 	}()
+}
+
+// webuiStatusProvider adapts cli.CollectFleetStatus to the webui.StatusFunc
+// seam, mapping cli.RigStatus (neutral, CSS-free) to webui.RigStatusRow. The
+// honest tri-state reachability/lock enums are preserved end-to-end so the
+// dashboard never renders a fabricated all-clear (WR-05): an unprobed rig stays
+// "unknown", a remote rig with no collected lock posture stays N/A.
+func webuiStatusProvider(cfg *config.Config, runner shell.Runner) webui.StatusFunc {
+	return func(ctx context.Context) (int, int, []webui.RigStatusRow) {
+		online, total, rigs := cli.CollectFleetStatus(ctx, cfg, runner)
+		rows := make([]webui.RigStatusRow, 0, len(rigs))
+		for _, r := range rigs {
+			rows = append(rows, webui.RigStatusRow{
+				Name:       r.Name,
+				Reachable:  reachabilityString(r.Reachable),
+				Lock:       lockString(r.Lock),
+				LastSeen:   r.LastSeen,
+				CertDays:   r.CertDays,
+				HasCert:    r.HasCert,
+				IsLocalRig: r.IsLocalRig,
+			})
+		}
+		return online, total, rows
+	}
+}
+
+// webuiDoctorProvider adapts cli.CollectDoctorFindings to the webui.DoctorFunc
+// seam. modules.Finding is already CSS-free so it passes through unchanged; the
+// webui handler does the severity→badge projection.
+func webuiDoctorProvider(cfg *config.Config, runner shell.Runner) webui.DoctorFunc {
+	return func(ctx context.Context) []modules.Finding {
+		return cli.CollectDoctorFindings(ctx, cfg, runner)
+	}
+}
+
+// reachabilityString maps the cli tri-state to the webui honest string enum.
+func reachabilityString(r cli.RigReachability) string {
+	switch r {
+	case cli.RigOnline:
+		return "online"
+	case cli.RigOffline:
+		return "offline"
+	default:
+		return "unknown"
+	}
+}
+
+// lockString maps the cli lock tri-state to the webui honest string enum
+// ("" means N/A — never a fabricated "locked").
+func lockString(l cli.LockState) string {
+	switch l {
+	case cli.LockLocked:
+		return "locked"
+	case cli.LockUnlocked:
+		return "unlocked"
+	default:
+		return ""
+	}
 }
