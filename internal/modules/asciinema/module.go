@@ -43,11 +43,17 @@ type Module struct {
 	cfg    *config.Config
 	plat   platform.Platform
 	audit  audit.AuditWriter
+	// Prompt is the non-suppressible credential-warning gate, wired from
+	// modules.Deps.Prompt (CLI layer → tui.Pause). It may be nil when the module
+	// is constructed without a CLI Prompt (tests, non-interactive contexts). Any
+	// recording path that depends on the warning MUST fail closed when Prompt is
+	// nil — never silently skip the warning (HARD FLOOR, T-21-02-01).
+	Prompt func(ctx context.Context, msg string) error
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, plat: d.Platform, audit: d.Audit}
+	return &Module{runner: d.Runner, cfg: d.Cfg, plat: d.Platform, audit: d.Audit, Prompt: d.Prompt}
 }
 
 // Name returns the canonical module name.

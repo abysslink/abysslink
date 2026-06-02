@@ -61,7 +61,51 @@ func TestDoctorUpSnapNoPublic_Warn(t *testing.T) {
 // TestDoctorMod3_DisabledNoFindings verifies that a disabled upsnap module
 // yields no findings.
 func TestDoctorMod3_DisabledNoFindings(t *testing.T) {
-	cfg := config.Defaults() // upsnap disabled by default
+	cfg := config.Defaults() // all mod3 modules disabled by default
 	findings := mod3DoctorFindings(context.Background(), cfg, shell.NewMockRunner())
 	assert.Empty(t, findings)
+}
+
+// atuinEnabledCfg returns a config with the atuin module enabled.
+func atuinEnabledCfg() *config.Config {
+	cfg := config.Defaults()
+	cfg.Modules.Atuin.Enabled = true
+	return cfg
+}
+
+// asciinemaEnabledCfg returns a config with the asciinema module enabled.
+func asciinemaEnabledCfg() *config.Config {
+	cfg := config.Defaults()
+	cfg.Modules.Asciinema.Enabled = true
+	return cfg
+}
+
+// TestDoctorAtuinBind_Fatal verifies the atuin-bind FATAL finding is present
+// when atuin is enabled.
+func TestDoctorAtuinBind_Fatal(t *testing.T) {
+	findings := mod3DoctorFindings(context.Background(), atuinEnabledCfg(), shell.NewMockRunner())
+	f, ok := findFinding(findings, "atuin-bind")
+	require.True(t, ok, "atuin-bind must be present when atuin is enabled")
+	assert.Equal(t, modules.SeverityFatal, f.Severity)
+}
+
+// TestDoctorAtuinKeyBackedUp_Warn verifies the atuin-key-backed-up WARN finding
+// is present when atuin is enabled (both key-present and key-absent are WARN).
+func TestDoctorAtuinKeyBackedUp_Warn(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir) // point KeyPath at a temp dir with no key file
+
+	findings := mod3DoctorFindings(context.Background(), atuinEnabledCfg(), shell.NewMockRunner())
+	f, ok := findFinding(findings, "atuin-key-backed-up")
+	require.True(t, ok, "atuin-key-backed-up must be present when atuin is enabled")
+	assert.Equal(t, modules.SeverityWarning, f.Severity)
+}
+
+// TestDoctorAsciinemaRecWarning_Fatal verifies the asciinema-rec-warning FATAL
+// finding is present when asciinema is enabled.
+func TestDoctorAsciinemaRecWarning_Fatal(t *testing.T) {
+	findings := mod3DoctorFindings(context.Background(), asciinemaEnabledCfg(), shell.NewMockRunner())
+	f, ok := findFinding(findings, "asciinema-rec-warning")
+	require.True(t, ok, "asciinema-rec-warning must be present when asciinema is enabled")
+	assert.Equal(t, modules.SeverityFatal, f.Severity)
 }
