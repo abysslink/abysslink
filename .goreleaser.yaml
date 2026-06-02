@@ -21,11 +21,13 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -trimpath
     ldflags:
       - -s -w
       - -X github.com/abysslink/abysslink/internal/cli.version={{.Version}}
       - -X github.com/abysslink/abysslink/internal/cli.commit={{.Commit}}
-      - -X github.com/abysslink/abysslink/internal/cli.buildDate={{.Date}}
+      - -X github.com/abysslink/abysslink/internal/cli.buildDate={{.CommitDate}}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
   - id: abysslinkd
@@ -39,11 +41,13 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -trimpath
     ldflags:
       - -s -w
       - -X github.com/abysslink/abysslink/internal/cli.version={{.Version}}
       - -X github.com/abysslink/abysslink/internal/cli.commit={{.Commit}}
-      - -X github.com/abysslink/abysslink/internal/cli.buildDate={{.Date}}
+      - -X github.com/abysslink/abysslink/internal/cli.buildDate={{.CommitDate}}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
@@ -67,10 +71,22 @@ checksum:
   algorithm: sha256
 
 sboms:
-  - artifacts: archive
+  - id: spdx
+    artifacts: archive
+    documents:
+      - "${artifact}.spdx.json"
+    args:
+      - "${artifact}"
+      - "--output"
+      - "spdx-json=${document}"
+  - id: cyclonedx
+    artifacts: archive
     documents:
       - "${artifact}.cdx.json"
-    args: ["${artifact}", "--output", "cyclonedx-json=${document}"]
+    args:
+      - "${artifact}"
+      - "--output"
+      - "cyclonedx-json=${document}"
 
 signs:
   - cmd: cosign
