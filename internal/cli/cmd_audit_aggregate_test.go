@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -165,6 +166,10 @@ func TestAuditFormatJSON(t *testing.T) {
 
 func TestAuditFix(t *testing.T) {
 	t.Run("dry_run_does_not_chmod", func(t *testing.T) {
+		// WR-01: a dry-run now records the would-be mutation, so isolate the
+		// audit-log path (DefaultLogPath honors XDG_STATE_HOME) to keep the
+		// developer's real log clean.
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		logPath := filepath.Join(t.TempDir(), "audit.log")
 		require.NoError(t, os.WriteFile(logPath, []byte("x"), 0o600))
 		require.NoError(t, os.Chmod(logPath, 0o644)) // lax perms, bypass umask
@@ -178,6 +183,17 @@ func TestAuditFix(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm(), "dry-run must not chmod")
 		assert.Contains(t, out.String(), "would chmod")
+
+		// WR-01: the dry-run must leave an audit record (DryRun=true) so a --fix
+		// preview that enumerates targets is not a traceless action.
+		defLog, err := audit.DefaultLogPath()
+		require.NoError(t, err)
+		entries, err := audit.ReadLog(defLog)
+		require.NoError(t, err)
+		require.NotEmpty(t, entries, "dry-run --fix must record the would-be mutation")
+		last := entries[len(entries)-1]
+		assert.Equal(t, "sec-fix", last.Op)
+		assert.True(t, last.DryRun, "dry-run record must be tagged DryRun=true")
 	})
 
 	t.Run("apply_chmods_audit_log", func(t *testing.T) {
