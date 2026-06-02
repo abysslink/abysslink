@@ -176,6 +176,12 @@ func resolveMetricsAddr(ctx context.Context, cfg *config.Config, b backend.Clien
 func metricsHandler(reg metrics.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", metricsContentType)
+		// WR-04: defend the public-shaped seam — a nil Registry must not panic
+		// (CLAUDE.md: no panics in normal control flow). Mirror the nil-backend
+		// guard above. An empty 200 body is a valid (empty) exposition.
+		if reg == nil {
+			return
+		}
 		writeMetrics(w, reg.Snapshot())
 	}
 }
