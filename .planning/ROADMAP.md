@@ -39,7 +39,7 @@ Phases 16–21 (6 phases) — supply-chain hardening + tamper-evident audit + ob
 
 - [x] **Phase 16: Supply-Chain Hardening & CI Gates** - govulncheck, semgrep, dependency-review, SLSA L2, cosign v3 keyless, SPDX+CycloneDX SBOM, harden-runner, reproducible builds, `abysslink verify` (completed 2026-06-02)
 - [x] **Phase 17: Tamper-Evident Audit Log + Fuzzing** - Hash-chained/HMAC-signed audit entries, external anchor, `abysslink audit` command surface, fuzz targets with seed corpus and gitleaks pre-commit hook (completed 2026-06-02)
-- [ ] **Phase 18: Observability & Metrics** - `internal/metrics.Registry`, tailnet-IP-bound Prometheus endpoint, `abysslink report`, daemon `GET /status`, fleet daily digest
+- [x] **Phase 18: Observability & Metrics** - `internal/metrics.Registry`, tailnet-IP-bound Prometheus endpoint, `abysslink report`, daemon `GET /status`, fleet daily digest (completed 2026-06-02)
 - [ ] **Phase 19: Web UI Dashboard (opt-in)** - `//go:build webui` opt-in module, safeweb CSRF, WhoIs auth, TLS via Tailscale cert, read-only gate, CSP self, separate goreleaser artifact
 - [ ] **Phase 20: Security Audit Pass & Doctor Checks** - `abysslink audit [--pentest]`, gosec/semgrep zero findings, refreshed threat model per backend, 18+ new sec-* doctor checks
 - [ ] **Phase 21: Optional Modules & Fleet Polish** - upsnap (WoL with --apply gate), atuin, sandbox (Linux-only Landlock), asciinema (credential warning), NetBird posture-check + events tail, scope-cut docs
@@ -287,10 +287,10 @@ Plans:
 
 Plans:
 
-- [ ] 18-01-PLAN.md — internal/metrics package (Registry, NoopRegistry, labels, allowlist), config.Observability struct, .golangci.yml depguard ban (OBS-01, OBS-03, OBS-04)
-- [ ] 18-02-PLAN.md — daemon metrics TCP listener (hand-rolled Prometheus text exposition) + GET /status handler (OBS-02, OBS-05, OBS-07)
-- [ ] 18-03-PLAN.md — fleet daily digest scheduler + abysslink report command + metrics doctor checks (OBS-04, OBS-05, OBS-06, OBS-08)
-- [ ] 18-04-PLAN.md — daemon entrypoint wiring (startMetricsServer + startDigestScheduler) + make lint test green + VALIDATION.md (OBS-02, OBS-05, OBS-07, OBS-08)
+- [x] 18-01-PLAN.md — internal/metrics package (Registry, NoopRegistry, labels, allowlist), config.Observability struct, .golangci.yml depguard ban (OBS-01, OBS-03, OBS-04)
+- [x] 18-02-PLAN.md — daemon metrics TCP listener (hand-rolled Prometheus text exposition) + GET /status handler (OBS-02, OBS-05, OBS-07)
+- [x] 18-03-PLAN.md — fleet daily digest scheduler + abysslink report command + metrics doctor checks (OBS-04, OBS-05, OBS-06, OBS-08)
+- [x] 18-04-PLAN.md — daemon entrypoint wiring (startMetricsServer + startDigestScheduler) + make lint test green + VALIDATION.md (OBS-02, OBS-05, OBS-07, OBS-08)
 
 ### Phase 19: Web UI Dashboard (opt-in)
 
@@ -307,9 +307,14 @@ Plans:
   6. All templates use `html/template` (never `text/template`); htmx is embedded via `embed.FS` with a SHA-384 SRI attribute; CSP header is `default-src 'self'` with no `unsafe-inline` or CDN sources; `gosec G203` lint rule is active; `webui-csp` doctor check verifies the header on a live request
   7. Read-only views (fleet status, doctor findings, audit-log timeline without hashes or bodies, notify history ring of 100) are reachable and correct; WhoIs availability on Headscale/NetBird is resolved per the research findings (backend-conditional auth or disable path); startup prints a one-time loud security note
 
-**Plans**: TBD
-**UI hint**: yes
-**Research needed**: WhoIs on Headscale/NetBird backends, `GetCertificate` import path, `safeweb` CSRF API surface
+**Plans**: 4 plans
+
+Plans:
+
+- [ ] 19-01-PLAN.md — WebUI config struct + ValidateWebUI + goreleaser abysslinkd-webui build entry (WEB-01, WEB-02 schema layer)
+- [ ] 19-02-PLAN.md — webui package skeleton: security core (server, WhoIs middleware, safeweb CSRF, ring buffer, audit projection, SRI) + base-binary isolation tests (WEB-01, WEB-03, WEB-04, WEB-05)
+- [ ] 19-03-PLAN.md — HTTP handlers + templates + static assets (htmx vendor, style.css, error-handler.js) + CSP tests (WEB-06, WEB-07)
+- [ ] 19-04-PLAN.md — 8 FATAL webui doctor checks + daemon wiring + make lint test green + VALIDATION.md (WEB-02, WEB-03, WEB-04, WEB-05, WEB-06, WEB-07)
 
 ### Phase 20: Security Audit Pass & Doctor Checks
 
@@ -378,7 +383,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 14. Multi-Rig Fleet | 5/5 | Complete    | 2026-06-01 |
 | 16. Supply-Chain Hardening & CI Gates | 4/4 | Complete    | 2026-06-02 |
 | 17. Tamper-Evident Audit Log + Fuzzing | 3/3 | Complete    | 2026-06-02 |
-| 18. Observability & Metrics | 0/? | Not started | - |
-| 19. Web UI Dashboard (opt-in) | 0/? | Not started | - |
+| 18. Observability & Metrics | 4/4 | Complete    | 2026-06-02 |
+| 19. Web UI Dashboard (opt-in) | 0/4 | Not started | - |
 | 20. Security Audit Pass & Doctor Checks | 0/? | Not started | - |
 | 21. Optional Modules & Fleet Polish | 0/? | Not started | - |
