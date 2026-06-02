@@ -576,6 +576,32 @@ func TestNotifyView(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "Build finished", "notify view must render the event title")
 }
 
+func TestRenderErrorView(t *testing.T) {
+	h := newTestHandlers(t)
+
+	// Full-page error render.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "100.64.0.5:40000"
+	rec := httptest.NewRecorder()
+	h.renderError(rec, req, http.StatusNotFound, "Not found", "no such page")
+
+	require.Equal(t, http.StatusNotFound, rec.Code, "renderError must write the status code")
+	body := rec.Body.String()
+	assert.Contains(t, body, "Not found", "error view must render the heading")
+	assert.Contains(t, body, "no such page", "error view must render the message")
+	assert.Contains(t, body, "<html", "full-page error render must include the base shell")
+
+	// Partial (htmx) error render renders only the content block.
+	preq := httptest.NewRequest(http.MethodGet, "/", nil)
+	preq.RemoteAddr = "100.64.0.5:40000"
+	preq.Header.Set("HX-Request", "true")
+	prec := httptest.NewRecorder()
+	h.renderError(prec, preq, http.StatusInternalServerError, "Boom", "internal")
+	assert.Equal(t, http.StatusInternalServerError, prec.Code)
+	assert.Contains(t, prec.Body.String(), "Boom")
+	assert.NotContains(t, prec.Body.String(), "<html", "partial error render must omit the base shell")
+}
+
 // writeAuditLog writes entries as JSONL to path for handler tests.
 func writeAuditLog(t *testing.T, path string, entries []audit.Entry) {
 	t.Helper()
