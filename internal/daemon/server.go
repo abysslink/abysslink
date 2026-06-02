@@ -143,6 +143,14 @@ type daemonStatusResponse struct {
 	CertExpiry string              `json:"cert_expiry,omitempty"`
 	LastSeen   string              `json:"last_seen,omitempty"`
 	Uptime     string              `json:"uptime"`
+
+	// PostureComplete signals whether reachable + doctor are authoritative
+	// posture data. It is false this phase (OBS-07 stub): full doctor wiring is
+	// deferred to Phase 19, so reachable is a hardcoded true and the doctor
+	// counts are zeroed. Consumers (e.g. the Phase 19 Web UI / fleet aggregator)
+	// MUST treat reachable/doctor as non-authoritative while this is false and
+	// not report a fabricated "0 fatal, reachable" all-clear (WR-05).
+	PostureComplete bool `json:"posture_complete"`
 }
 
 // daemonDoctorSummary is the per-severity doctor finding count in /status.
@@ -182,10 +190,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Version:    daemonVersion,
 		Backend:    backendType,
 		RigID:      metrics.OpaqueRigLabel(hostname),
-		Reachable:  true,
-		LockStatus: lockStatus,
-		Doctor:     daemonDoctorSummary{},
+		Reachable:  true,                  // STUB (OBS-07): not yet wired — see PostureComplete.
+		LockStatus: lockStatus,            // authoritative: read from config.
+		Doctor:     daemonDoctorSummary{}, // STUB (OBS-07): zeroed counts, not a real all-clear.
 		Uptime:     time.Since(s.startedAt).Truncate(time.Second).String(),
+		// PostureComplete=false flags reachable/doctor as non-authoritative this
+		// phase so consumers do not read the zeroed doctor summary as a genuine
+		// "0 fatal" all-clear on a security-posture endpoint (WR-05).
+		PostureComplete: false,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
