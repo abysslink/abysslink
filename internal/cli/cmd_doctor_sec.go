@@ -68,10 +68,17 @@ const (
 // (CONTEXT Open Question #1). When neither source yields a value it returns
 // ("", nil) for an absent directive, or ("", errSSHDAbsent) when sshd is not
 // installed at all. configPath is injectable so unit tests can point at a fixture.
-func readSSHEffectiveConfigPath(ctx context.Context, runner shell.Runner, configPath, keyword string) (string, error) {
-	// Authoritative source: sshd -T (root only — it reads private host keys to
-	// validate ciphers and fails as "no hostkeys available" otherwise).
-	if runner != nil && os.Getuid() == 0 {
+//
+// allowNonRootSshd is the --pentest escape hatch: when true, `sshd -T` is
+// attempted even when not root (os.Getuid()!=0). Explicit pentest runs accept
+// the "no hostkeys available" failure mode in exchange for trying the
+// authoritative source; the file-parse fallback still applies on failure. When
+// false (the normal doctor path) the os.Getuid()==0 guard remains in effect.
+func readSSHEffectiveConfigPath(ctx context.Context, runner shell.Runner, configPath, keyword string, allowNonRootSshd bool) (string, error) {
+	// Authoritative source: sshd -T (normally root only — it reads private host
+	// keys to validate ciphers and fails as "no hostkeys available" otherwise).
+	// --pentest (allowNonRootSshd) bypasses the root guard to try it regardless.
+	if runner != nil && (allowNonRootSshd || os.Getuid() == 0) {
 		if res, err := runner.Run(ctx, "sshd", "-T"); err == nil && res.ExitCode == 0 {
 			if val, found := parseSSHDTOutput(res.Stdout, keyword); found {
 				return val, nil
@@ -141,17 +148,17 @@ func secSSHDAbsentOK(check string) modules.Finding {
 
 // --- SSH checks (6). Each *Path variant takes an explicit config path for tests.
 
-func secSSHPermitRootCheck(ctx context.Context, runner shell.Runner) modules.Finding {
-	return secSSHPermitRootCheckPathRunner(ctx, runner, defaultSSHDConfigPath)
+func secSSHPermitRootCheck(ctx context.Context, runner shell.Runner, pentest bool) modules.Finding {
+	return secSSHPermitRootCheckPathRunner(ctx, runner, defaultSSHDConfigPath, pentest)
 }
 
 func secSSHPermitRootCheckPath(ctx context.Context, path string) modules.Finding {
-	return secSSHPermitRootCheckPathRunner(ctx, nil, path)
+	return secSSHPermitRootCheckPathRunner(ctx, nil, path, false)
 }
 
-func secSSHPermitRootCheckPathRunner(ctx context.Context, runner shell.Runner, path string) modules.Finding {
+func secSSHPermitRootCheckPathRunner(ctx context.Context, runner shell.Runner, path string, pentest bool) modules.Finding {
 	const check = "sec-ssh-permitroot"
-	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "permitrootlogin")
+	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "permitrootlogin", pentest)
 	if errors.Is(err, errSSHDAbsent) {
 		return secSSHDAbsentOK(check)
 	}
@@ -166,17 +173,17 @@ func secSSHPermitRootCheckPathRunner(ctx context.Context, runner shell.Runner, p
 		Message: "PermitRootLogin: " + val}
 }
 
-func secSSHX11ForwardingCheck(ctx context.Context, runner shell.Runner) modules.Finding {
-	return secSSHX11ForwardingCheckPathRunner(ctx, runner, defaultSSHDConfigPath)
+func secSSHX11ForwardingCheck(ctx context.Context, runner shell.Runner, pentest bool) modules.Finding {
+	return secSSHX11ForwardingCheckPathRunner(ctx, runner, defaultSSHDConfigPath, pentest)
 }
 
 func secSSHX11ForwardingCheckPath(ctx context.Context, path string) modules.Finding {
-	return secSSHX11ForwardingCheckPathRunner(ctx, nil, path)
+	return secSSHX11ForwardingCheckPathRunner(ctx, nil, path, false)
 }
 
-func secSSHX11ForwardingCheckPathRunner(ctx context.Context, runner shell.Runner, path string) modules.Finding {
+func secSSHX11ForwardingCheckPathRunner(ctx context.Context, runner shell.Runner, path string, pentest bool) modules.Finding {
 	const check = "sec-ssh-x11forwarding"
-	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "x11forwarding")
+	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "x11forwarding", pentest)
 	if errors.Is(err, errSSHDAbsent) {
 		return secSSHDAbsentOK(check)
 	}
@@ -191,17 +198,17 @@ func secSSHX11ForwardingCheckPathRunner(ctx context.Context, runner shell.Runner
 		Message: "X11Forwarding: " + val}
 }
 
-func secSSHAgentForwardingCheck(ctx context.Context, runner shell.Runner) modules.Finding {
-	return secSSHAgentForwardingCheckPathRunner(ctx, runner, defaultSSHDConfigPath)
+func secSSHAgentForwardingCheck(ctx context.Context, runner shell.Runner, pentest bool) modules.Finding {
+	return secSSHAgentForwardingCheckPathRunner(ctx, runner, defaultSSHDConfigPath, pentest)
 }
 
 func secSSHAgentForwardingCheckPath(ctx context.Context, path string) modules.Finding {
-	return secSSHAgentForwardingCheckPathRunner(ctx, nil, path)
+	return secSSHAgentForwardingCheckPathRunner(ctx, nil, path, false)
 }
 
-func secSSHAgentForwardingCheckPathRunner(ctx context.Context, runner shell.Runner, path string) modules.Finding {
+func secSSHAgentForwardingCheckPathRunner(ctx context.Context, runner shell.Runner, path string, pentest bool) modules.Finding {
 	const check = "sec-ssh-agentforwarding"
-	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "allowagentforwarding")
+	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "allowagentforwarding", pentest)
 	if errors.Is(err, errSSHDAbsent) {
 		return secSSHDAbsentOK(check)
 	}
@@ -216,17 +223,17 @@ func secSSHAgentForwardingCheckPathRunner(ctx context.Context, runner shell.Runn
 		Message: "AllowAgentForwarding: " + val}
 }
 
-func secSSHMaxAuthTriesCheck(ctx context.Context, runner shell.Runner) modules.Finding {
-	return secSSHMaxAuthTriesCheckPathRunner(ctx, runner, defaultSSHDConfigPath)
+func secSSHMaxAuthTriesCheck(ctx context.Context, runner shell.Runner, pentest bool) modules.Finding {
+	return secSSHMaxAuthTriesCheckPathRunner(ctx, runner, defaultSSHDConfigPath, pentest)
 }
 
 func secSSHMaxAuthTriesCheckPath(ctx context.Context, path string) modules.Finding {
-	return secSSHMaxAuthTriesCheckPathRunner(ctx, nil, path)
+	return secSSHMaxAuthTriesCheckPathRunner(ctx, nil, path, false)
 }
 
-func secSSHMaxAuthTriesCheckPathRunner(ctx context.Context, runner shell.Runner, path string) modules.Finding {
+func secSSHMaxAuthTriesCheckPathRunner(ctx context.Context, runner shell.Runner, path string, pentest bool) modules.Finding {
 	const check = "sec-ssh-maxauthtries"
-	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "maxauthtries")
+	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "maxauthtries", pentest)
 	if errors.Is(err, errSSHDAbsent) {
 		return secSSHDAbsentOK(check)
 	}
@@ -246,17 +253,17 @@ func secSSHMaxAuthTriesCheckPathRunner(ctx context.Context, runner shell.Runner,
 		Message: fmt.Sprintf("MaxAuthTries: %d", n)}
 }
 
-func secSSHLoginGraceTimeCheck(ctx context.Context, runner shell.Runner) modules.Finding {
-	return secSSHLoginGraceTimeCheckPathRunner(ctx, runner, defaultSSHDConfigPath)
+func secSSHLoginGraceTimeCheck(ctx context.Context, runner shell.Runner, pentest bool) modules.Finding {
+	return secSSHLoginGraceTimeCheckPathRunner(ctx, runner, defaultSSHDConfigPath, pentest)
 }
 
 func secSSHLoginGraceTimeCheckPath(ctx context.Context, path string) modules.Finding {
-	return secSSHLoginGraceTimeCheckPathRunner(ctx, nil, path)
+	return secSSHLoginGraceTimeCheckPathRunner(ctx, nil, path, false)
 }
 
-func secSSHLoginGraceTimeCheckPathRunner(ctx context.Context, runner shell.Runner, path string) modules.Finding {
+func secSSHLoginGraceTimeCheckPathRunner(ctx context.Context, runner shell.Runner, path string, pentest bool) modules.Finding {
 	const check = "sec-ssh-logingracetime"
-	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "logingracetime")
+	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "logingracetime", pentest)
 	if errors.Is(err, errSSHDAbsent) {
 		return secSSHDAbsentOK(check)
 	}
@@ -278,17 +285,17 @@ func secSSHLoginGraceTimeCheckPathRunner(ctx context.Context, runner shell.Runne
 		Message: fmt.Sprintf("LoginGraceTime: %ds", n)}
 }
 
-func secSSHCiphersCheck(ctx context.Context, runner shell.Runner) modules.Finding {
-	return secSSHCiphersCheckPathRunner(ctx, runner, defaultSSHDConfigPath)
+func secSSHCiphersCheck(ctx context.Context, runner shell.Runner, pentest bool) modules.Finding {
+	return secSSHCiphersCheckPathRunner(ctx, runner, defaultSSHDConfigPath, pentest)
 }
 
 func secSSHCiphersCheckPath(ctx context.Context, path string) modules.Finding {
-	return secSSHCiphersCheckPathRunner(ctx, nil, path)
+	return secSSHCiphersCheckPathRunner(ctx, nil, path, false)
 }
 
-func secSSHCiphersCheckPathRunner(ctx context.Context, runner shell.Runner, path string) modules.Finding {
+func secSSHCiphersCheckPathRunner(ctx context.Context, runner shell.Runner, path string, pentest bool) modules.Finding {
 	const check = "sec-ssh-ciphers"
-	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "ciphers")
+	val, err := readSSHEffectiveConfigPath(ctx, runner, path, "ciphers", pentest)
 	if errors.Is(err, errSSHDAbsent) {
 		return secSSHDAbsentOK(check)
 	}
@@ -536,17 +543,22 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 // webuiFindings / auditFindings slices so the underlying Phase-17/18/19 checks
 // run exactly once (RESEARCH Pitfall 3). The 6 SSH checks degrade gracefully —
 // any panic in an sshd parse is recovered to a WARN, never propagated as FATAL.
-func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps,
+//
+// pentest is the --pentest escape hatch: when true the SSH checks attempt the
+// authoritative `sshd -T` even when not root (bypassing the os.Getuid()==0
+// guard). The normal doctor path passes pentest=false so sshd -T is attempted
+// only as root and the always-available sshd_config parse is the primary source.
+func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, pentest bool,
 	metFindings, webuiFindings, auditFindings []modules.Finding) []modules.Finding {
 	findings := make([]modules.Finding, 0, 18)
 
 	// SSH checks (6) — guarded so a parse failure never crashes the doctor run.
-	findings = append(findings, safeSSHCheck("sec-ssh-permitroot", func() modules.Finding { return secSSHPermitRootCheck(ctx, cc.runner) }))
-	findings = append(findings, safeSSHCheck("sec-ssh-x11forwarding", func() modules.Finding { return secSSHX11ForwardingCheck(ctx, cc.runner) }))
-	findings = append(findings, safeSSHCheck("sec-ssh-agentforwarding", func() modules.Finding { return secSSHAgentForwardingCheck(ctx, cc.runner) }))
-	findings = append(findings, safeSSHCheck("sec-ssh-maxauthtries", func() modules.Finding { return secSSHMaxAuthTriesCheck(ctx, cc.runner) }))
-	findings = append(findings, safeSSHCheck("sec-ssh-logingracetime", func() modules.Finding { return secSSHLoginGraceTimeCheck(ctx, cc.runner) }))
-	findings = append(findings, safeSSHCheck("sec-ssh-ciphers", func() modules.Finding { return secSSHCiphersCheck(ctx, cc.runner) }))
+	findings = append(findings, safeSSHCheck("sec-ssh-permitroot", func() modules.Finding { return secSSHPermitRootCheck(ctx, cc.runner, pentest) }))
+	findings = append(findings, safeSSHCheck("sec-ssh-x11forwarding", func() modules.Finding { return secSSHX11ForwardingCheck(ctx, cc.runner, pentest) }))
+	findings = append(findings, safeSSHCheck("sec-ssh-agentforwarding", func() modules.Finding { return secSSHAgentForwardingCheck(ctx, cc.runner, pentest) }))
+	findings = append(findings, safeSSHCheck("sec-ssh-maxauthtries", func() modules.Finding { return secSSHMaxAuthTriesCheck(ctx, cc.runner, pentest) }))
+	findings = append(findings, safeSSHCheck("sec-ssh-logingracetime", func() modules.Finding { return secSSHLoginGraceTimeCheck(ctx, cc.runner, pentest) }))
+	findings = append(findings, safeSSHCheck("sec-ssh-ciphers", func() modules.Finding { return secSSHCiphersCheck(ctx, cc.runner, pentest) }))
 
 	// Audit log + perms sweep (4).
 	findings = append(findings,
