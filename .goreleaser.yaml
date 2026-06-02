@@ -92,15 +92,12 @@ sboms:
       - "--output"
       - "cyclonedx-json=${document}"
 
-signs:
-  - cmd: cosign
-    args:
-      - sign-blob
-      - "--bundle=${artifact}.bundle"
-      - "--yes"
-      - "${artifact}"
-    artifacts: checksum
-    output: true
+# NOTE: Cosign signing is intentionally NOT configured here. The single source
+# of truth for release signing is the dedicated `sign` job in
+# .github/workflows/release.yml, which runs `cosign sign-blob --bundle` against
+# the checksum manifest with `id-token: write` for keyless OIDC signing. The
+# release workflow invokes goreleaser with `--skip=sign`, so a `signs:` block
+# here would be dead config that diverges from what actually ships.
 
 nfpms:
   - id: packages
