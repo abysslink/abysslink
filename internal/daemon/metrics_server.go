@@ -17,6 +17,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -90,7 +91,7 @@ func StartMetricsServer(ctx context.Context, cfg *config.Config, reg metrics.Reg
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO}
 
 		go func() {
-			if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
+			if serveErr := srv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 				slog.Error("abysslinkd: metrics: serve", "err", serveErr)
 			}
 		}()
