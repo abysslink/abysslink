@@ -86,7 +86,7 @@ func TestVerifyAnchor_CleanAndTampered(t *testing.T) {
 
 	// Tamper: bump EntryCount without re-signing.
 	anchorFile := filepath.Join(dir, "audit.anchor.json")
-	data, _ := os.ReadFile(anchorFile) //nolint:gosec
+	data, _ := os.ReadFile(anchorFile) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	var a audit.Anchor
 	require.NoError(t, json.Unmarshal(data, &a))
 	a.EntryCount = 9999

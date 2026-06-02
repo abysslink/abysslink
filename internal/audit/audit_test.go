@@ -37,7 +37,7 @@ func TestAppend_WritesEntry(t *testing.T) {
 	err := a.Append("write", "/etc/foo", content, false)
 	require.NoError(t, err)
 
-	raw, err := os.ReadFile(logPath) //nolint:gosec
+	raw, err := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 
 	var entry audit.Entry
@@ -54,7 +54,7 @@ func TestAppend_DryRunFlagged(t *testing.T) {
 	a := audit.New(filepath.Join(dir, "audit.log"))
 	require.NoError(t, a.Append("write", "/foo", []byte("x"), true))
 
-	raw, err := os.ReadFile(filepath.Join(dir, "audit.log")) //nolint:gosec
+	raw, err := os.ReadFile(filepath.Join(dir, "audit.log")) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	var entry audit.Entry
 	require.NoError(t, json.Unmarshal(raw[:len(raw)-1], &entry))
@@ -67,7 +67,7 @@ func TestAppend_NoContentInLog(t *testing.T) {
 	a := audit.New(filepath.Join(dir, "audit.log"))
 	require.NoError(t, a.Append("write", "/foo", secret, false))
 
-	raw, err := os.ReadFile(filepath.Join(dir, "audit.log")) //nolint:gosec
+	raw, err := os.ReadFile(filepath.Join(dir, "audit.log")) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "my-secret-token")
 }
@@ -95,7 +95,7 @@ func TestBackupRestore_RoundTrip(t *testing.T) {
 	// Restore from backup.
 	require.NoError(t, audit.Restore(original, bakPath))
 
-	restored, err := os.ReadFile(original) //nolint:gosec
+	restored, err := os.ReadFile(original) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Equal(t, content, restored)
 }

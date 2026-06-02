@@ -40,7 +40,7 @@ func TestMetricsHandlerNilRegistry(t *testing.T) {
 	assert.NotPanics(t, func() { h(rec, req) })
 
 	res := rec.Result()
-	defer res.Body.Close() //nolint:errcheck
+	defer res.Body.Close() //nolint:errcheck // errcheck: close error in test teardown is non-actionable
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 	assert.Equal(t, metricsContentType, res.Header.Get("Content-Type"))
 	assert.Empty(t, rec.Body.String(), "nil registry yields an empty exposition")

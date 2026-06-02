@@ -34,10 +34,17 @@ build:
 test:
 	$(GO) test -race -count=1 ./...
 
-## lint: run golangci-lint and gofmt check, then the webui build-tag gates
+## lint: run golangci-lint (incl. gosec + nolintlint), gofmt, the webui build-tag
+## gates, then the standalone gosec + semgrep security scanners (SEC-02).
+## Requires: gosec (go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4),
+## semgrep (pipx install semgrep). The G304/G101/G302/G306/G204 excludes mirror
+## the golangci-lint gosec config + justified #nosec///nolint suppressions; the
+## remaining real findings are fixed at the root or carry inline justifications.
 lint: check-webui-build-tags check-webui-isolation
 	$(GOLANGCI) run ./...
 	@gofmt -l . | grep -v vendor | grep . && echo "gofmt: files need formatting (run gofmt -w .)" && exit 1 || true
+	gosec -quiet -exclude=G304,G101,G302,G306,G204 ./...
+	semgrep --config p/r2c-security-audit --config p/golang --error --quiet .
 
 ## check-webui-build-tags: assert every .go file under internal/modules/webui/
 ## carries //go:build webui (Pitfall 5 — a single untagged file leaks the package

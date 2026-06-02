@@ -129,7 +129,7 @@ func TestUpDryRunParity(t *testing.T) {
 	}
 
 	// Subsequent runs: assert output is byte-for-byte identical to the golden.
-	golden, err := os.ReadFile(goldenPath) //nolint:gosec
+	golden, err := os.ReadFile(goldenPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	require.Equal(t, string(golden), got,
 		"up --dry-run output differs from golden %s; "+

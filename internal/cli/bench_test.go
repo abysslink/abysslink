@@ -37,12 +37,12 @@ func BenchmarkStatusWarm(b *testing.B) {
 	binPath := resolveBenchBinary(b)
 
 	// Warm up the binary (prime OS page cache).
-	_ = exec.Command(binPath, "version").Run() //nolint:gosec
+	_ = exec.Command(binPath, "version").Run() //nolint:gosec // G204: test execs the built binary under test from a controlled path
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		start := time.Now()
-		cmd := exec.Command(binPath, "status") //nolint:gosec
+		cmd := exec.Command(binPath, "status") //nolint:gosec // G204: test execs the built binary under test from a controlled path
 		if err := cmd.Run(); err != nil {
 			b.Logf("status exited non-zero (expected in CI): %v", err)
 		}
@@ -68,7 +68,7 @@ func TestStatusCompletesWithinColdBudget(t *testing.T) {
 
 	const budget = 2 * time.Second
 	start := time.Now()
-	cmd := exec.Command(binPath, "status") //nolint:gosec
+	cmd := exec.Command(binPath, "status") //nolint:gosec // G204: test execs the built binary under test from a controlled path
 	_ = cmd.Run()
 	elapsed := time.Since(start)
 	if elapsed > budget {
@@ -87,7 +87,7 @@ func TestUpDryRunWithinBudget(t *testing.T) {
 
 	const budget = 3 * time.Second
 	start := time.Now()
-	cmd := exec.Command(binPath, "up") //nolint:gosec
+	cmd := exec.Command(binPath, "up") //nolint:gosec // G204: test execs the built binary under test from a controlled path
 	_ = cmd.Run()
 	elapsed := time.Since(start)
 	if elapsed > budget {

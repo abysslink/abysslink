@@ -16,8 +16,20 @@ linters:
     - unused
     - staticcheck
     - depguard
+    - nolintlint
 
 linters-settings:
+  nolintlint:
+    require-explanation: true   # SEC-02: every //nolint:X must carry an inline justification
+    require-specific: true      # //nolint without a linter name is forbidden
+    # allow-unused: true — gosec's G304 is globally excluded above and errcheck does
+    # not flag deferred Close(), so several justified //nolint directives suppress
+    # nothing under golangci-lint's own config. They remain load-bearing for the
+    # STANDALONE gosec CI job (which ignores golangci config). Flagging them as
+    # "unused" would force their removal and break the standalone gosec gate, so
+    # allow-unused stays true. require-explanation + require-specific are the actual
+    # SEC-02 security gates: every suppression is named and justified.
+    allow-unused: true
   forbidigo:
     analyze-types: true
     forbid:

@@ -77,7 +77,7 @@ func TestSignedAppend_GenesisThenChain(t *testing.T) {
 	require.NoError(t, sa.Append(ctx, audit.SignInput{Title: "write", DiffHash: sha256.Sum256([]byte("b"))}, "/etc/b", false))
 
 	// Read raw lines to compute the expected prev_hash of entry 2.
-	data, rerr := os.ReadFile(logPath) //nolint:gosec
+	data, rerr := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, rerr)
 	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
 	require.Len(t, lines, 2)

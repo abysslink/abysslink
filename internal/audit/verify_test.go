@@ -54,7 +54,7 @@ func TestVerify_CorruptedPrevHashAtIndex2(t *testing.T) {
 	writeSomeEntries(t, sa, 4)
 
 	// Corrupt entry[2].PrevHash by rewriting the line in place.
-	data, _ := os.ReadFile(logPath) //nolint:gosec
+	data, _ := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
 	require.GreaterOrEqual(t, len(lines), 3)
 	var e audit.Entry
@@ -80,7 +80,7 @@ func TestVerify_SigMismatch(t *testing.T) {
 	writeSomeEntries(t, sa, 1)
 
 	// Corrupt the sig of the only (genesis) entry; prev_hash stays valid.
-	data, _ := os.ReadFile(logPath) //nolint:gosec
+	data, _ := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	line := bytes.TrimRight(data, "\n")
 	var e audit.Entry
 	require.NoError(t, json.Unmarshal(line, &e))
@@ -130,7 +130,7 @@ func TestVerify_TailStripDowngradeRejected(t *testing.T) {
 	require.True(t, res0.OK)
 
 	// Attacker: strip prev_hash+sig from the tail entry and rewrite its metadata.
-	data, _ := os.ReadFile(logPath) //nolint:gosec
+	data, _ := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
 	last := len(lines) - 1
 	var e audit.Entry
@@ -208,7 +208,7 @@ func TestVerify_TruncationDetected(t *testing.T) {
 	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
 
 	// Truncate the log to a single entry, keeping the chain valid for entry 0.
-	data, _ := os.ReadFile(logPath) //nolint:gosec
+	data, _ := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
 	require.NoError(t, os.WriteFile(logPath, append(lines[0], '\n'), 0o600))
 
@@ -249,7 +249,7 @@ func TestVerify_ForgedAnchorRejected(t *testing.T) {
 	// Forge the anchor: shrink EntryCount to hide a (future) truncation and
 	// leave the now-stale HMAC in place. An attacker cannot produce a valid HMAC.
 	anchorFile := filepath.Join(dir, "audit.anchor.json")
-	data, _ := os.ReadFile(anchorFile) //nolint:gosec
+	data, _ := os.ReadFile(anchorFile) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	var a audit.Anchor
 	require.NoError(t, json.Unmarshal(data, &a))
 	a.EntryCount = 1
@@ -276,7 +276,7 @@ func TestVerify_TailDryRunFlipDetected(t *testing.T) {
 		Title: "write", DiffHash: sha256.Sum256([]byte("planned")),
 	}, "/etc/important", true))
 
-	data, _ := os.ReadFile(logPath) //nolint:gosec
+	data, _ := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	line := bytes.TrimRight(data, "\n")
 	var e audit.Entry
 	require.NoError(t, json.Unmarshal(line, &e))
@@ -301,7 +301,7 @@ func TestVerify_TailTargetRewriteDetected(t *testing.T) {
 		Title: "write", DiffHash: sha256.Sum256([]byte("c")),
 	}, "/etc/a", false))
 
-	data, _ := os.ReadFile(logPath) //nolint:gosec
+	data, _ := os.ReadFile(logPath) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	line := bytes.TrimRight(data, "\n")
 	var e audit.Entry
 	require.NoError(t, json.Unmarshal(line, &e))

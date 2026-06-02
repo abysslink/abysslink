@@ -29,8 +29,9 @@ import "os"
 // explicitly justified because WriteFile is a convenience wrapper over Append,
 // not a hot path, and the audit-then-write ordering invariant is enforced inside
 // the implementation rather than expressed in the interface.
-// nolint:revive // name mandated by Phase 17 plan (AUD-03 must_haves + grep contract);
 // "AuditWriter" is the documented public contract across modules.Deps and CLI wiring.
+//
+//nolint:revive // name mandated by Phase 17 plan (AUD-03 must_haves + grep contract);
 type AuditWriter interface {
 	// WriteFile records the intended mutation in the audit log (recording only
 	// the SHA-256 of content, never the content itself), then writes content to
