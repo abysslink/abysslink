@@ -34,7 +34,7 @@ func ReadLog(logPath string) ([]Entry, error) {
 		}
 		return nil, fmt.Errorf("audit: open log %s: %w", logPath, err)
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // errcheck: close error on read-only/append file handle is non-actionable; data durability handled by explicit Sync where required
 
 	var entries []Entry
 	scanner := bufio.NewScanner(f)
@@ -140,7 +140,7 @@ func Reverse(logPath string, dryRun bool) ([]ReverseAction, error) {
 		switch a.Action {
 		case "restore":
 			if dryRun {
-				if content, rerr := os.ReadFile(a.Backup); rerr == nil { //nolint:gosec
+				if content, rerr := os.ReadFile(a.Backup); rerr == nil { //nolint:gosec // G304: a.Backup is a path from a trusted audit-log entry written by abysslink, not user input
 					a.Hash = HashOf(content)
 				}
 				continue
@@ -149,7 +149,7 @@ func Reverse(logPath string, dryRun bool) ([]ReverseAction, error) {
 				a.Err = rerr
 				continue
 			}
-			if content, rerr := os.ReadFile(a.Target); rerr == nil { //nolint:gosec
+			if content, rerr := os.ReadFile(a.Target); rerr == nil { //nolint:gosec // G304: a.Target is a path from a trusted audit-log entry written by abysslink, not user input
 				a.Hash = HashOf(content)
 			}
 			// The original content is back in place; drop the redundant backups.

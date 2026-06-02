@@ -105,7 +105,7 @@ func MergeNetBirdConfig(ctx context.Context, cfgPath string, nb config.NetBirdSe
 // not exist, and its pre-merge marshalled bytes for dry-run diffing.
 func loadNetBirdYAML(path string) (map[string]any, []byte, error) {
 	var m map[string]any
-	data, err := os.ReadFile(path) //nolint:gosec
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is a backend config path resolved internally, not user input
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return nil, nil, fmt.Errorf("netbird config: read %s: %w", path, err)
@@ -121,6 +121,6 @@ func loadNetBirdYAML(path string) (map[string]any, []byte, error) {
 	if m == nil {
 		m = make(map[string]any)
 	}
-	oldBytes, _ := yaml.Marshal(m) //nolint:errcheck
+	oldBytes, _ := yaml.Marshal(m) //nolint:errcheck // errcheck: yaml.Marshal on a known-serializable map cannot fail in practice; result used only for diff display
 	return m, oldBytes, nil
 }

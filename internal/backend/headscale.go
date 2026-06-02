@@ -95,7 +95,7 @@ func (a *headscaleAdapter) Status(ctx context.Context) (*Status, error) {
 	if err != nil {
 		return nil, fmt.Errorf("headscale: status: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("headscale: status: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -124,7 +124,7 @@ func (a *headscaleAdapter) IP(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("headscale: ip: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("headscale: ip: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -159,7 +159,7 @@ func (a *headscaleAdapter) Hostname(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("headscale: hostname: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("headscale: hostname: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -288,7 +288,7 @@ func (a *headscaleAdapter) Devices(ctx context.Context) ([]Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("headscale: list nodes: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("headscale: list nodes: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -315,7 +315,7 @@ func (a *headscaleAdapter) TagDevice(ctx context.Context, id string, tags []stri
 	if err != nil {
 		return fmt.Errorf("headscale: tag node %s: %w", id, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("headscale: tag node %s: unexpected HTTP %d", id, resp.StatusCode)
 	}
@@ -328,7 +328,7 @@ func (a *headscaleAdapter) DeleteDevice(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("headscale: delete node %s: %w", id, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("headscale: delete node %s: unexpected HTTP %d", id, resp.StatusCode)
 	}
@@ -351,7 +351,7 @@ func (a *headscaleAdapter) CreateAuthKey(ctx context.Context, tags []string) (st
 	if err != nil {
 		return "", fmt.Errorf("headscale: create auth key: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("headscale: create auth key: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -373,7 +373,7 @@ func (a *headscaleAdapter) GetACL(ctx context.Context) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("headscale: get acl: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("headscale: get acl: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -393,7 +393,7 @@ func (a *headscaleAdapter) SetACL(ctx context.Context, acl []byte, _ string) err
 	if err != nil {
 		return fmt.Errorf("headscale: set acl: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("headscale: set acl: unexpected HTTP %d", resp.StatusCode)
 	}

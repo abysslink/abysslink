@@ -388,11 +388,11 @@ func Defaults() *Config {
 // Load reads path, decodes YAML strictly (unknown keys are rejected), and
 // returns the parsed Config. Default values are applied for omitted fields.
 func Load(path string) (*Config, error) {
-	f, err := os.Open(path) //nolint:gosec
+	f, err := os.Open(path) //nolint:gosec // G304: path is the resolved abysslink config file path, not user-controlled at this layer
 	if err != nil {
 		return nil, fmt.Errorf("config: open %s: %w", path, err)
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // errcheck: close error on read-only/append file handle is non-actionable; data durability handled by explicit Sync where required
 
 	cfg := Defaults()
 	dec := yaml.NewDecoder(f)

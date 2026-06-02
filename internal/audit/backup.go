@@ -26,7 +26,7 @@ import (
 // Backup atomically copies src to <src>.bak.<timestamp> in the same directory.
 // It returns the path of the backup file on success.
 func Backup(src string) (string, error) {
-	content, err := os.ReadFile(src) //nolint:gosec
+	content, err := os.ReadFile(src) //nolint:gosec // G304: src is an audit backup path derived from the target path, not user-controlled
 	if err != nil {
 		return "", fmt.Errorf("audit: backup read %s: %w", src, err)
 	}
@@ -37,7 +37,7 @@ func Backup(src string) (string, error) {
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	dst := fmt.Sprintf("%s.bak.%s", src, stamp)
 
-	if err := os.WriteFile(dst, content, 0o600); err != nil { //nolint:gosec
+	if err := os.WriteFile(dst, content, 0o600); err != nil { //nolint:gosec // G304: dst is an audit backup path derived internally; 0o600 enforces owner-only perms
 		return "", fmt.Errorf("audit: backup write %s: %w", dst, err)
 	}
 	return dst, nil
@@ -57,13 +57,13 @@ func Restore(dst, backupPath string) error {
 		return fmt.Errorf("audit: backup %q and dst %q must be in the same directory", backupPath, dst)
 	}
 
-	content, err := os.ReadFile(cleanBak) //nolint:gosec
+	content, err := os.ReadFile(cleanBak) //nolint:gosec // G304: cleanBak is a filepath.Clean of an internally-derived backup path, not user-controlled
 	if err != nil {
 		return fmt.Errorf("audit: restore read backup %s: %w", cleanBak, err)
 	}
 
 	tmp := cleanDst + ".tmp"
-	if err := os.WriteFile(tmp, content, 0o600); err != nil { //nolint:gosec
+	if err := os.WriteFile(tmp, content, 0o600); err != nil { //nolint:gosec // G304: tmp is an internally-derived restore temp path; 0o600 enforces owner-only perms
 		return fmt.Errorf("audit: restore write tmp %s: %w", tmp, err)
 	}
 

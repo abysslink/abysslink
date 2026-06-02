@@ -245,7 +245,7 @@ func netbirdLinuxBinarySetup(ctx context.Context, runner shell.Runner, p Printer
 	printerInfo(p, styleSuccess.Render("  ✓  version "+version+" meets floor "+netbirdMinVersion))
 
 	// ── SHA-256 checksum: compute and print for operator records ──────────────
-	binData, err := os.ReadFile(binaryPath) //nolint:gosec
+	binData, err := os.ReadFile(binaryPath) //nolint:gosec // G304: binaryPath is an internally-staged download temp path, not user-controlled
 	if err != nil {
 		return fmt.Errorf("netbird init: read binary for checksum: %w", err)
 	}
@@ -439,7 +439,7 @@ func detectContainerRuntime(ctx context.Context, runner shell.Runner) (string, e
 //   - HTTP 200 with results → FAIL + return error (provisioning refused).
 //   - Network error or unexpected status → FAIL + return error.
 func netbirdZitadelInitProbe(ctx context.Context, cfgPath string, p Printer) error {
-	data, err := os.ReadFile(cfgPath) //nolint:gosec
+	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the resolved netbird config path derived internally, not user input
 	if err != nil {
 		// config.yaml not found — ZITADEL not in use (Dex default has no issuer in
 		// a newly-written config).
@@ -499,7 +499,7 @@ func runNetBirdZitadelProbe(ctx context.Context, issuerBase string, p Printer) e
 	if err != nil {
 		return fmt.Errorf("ZITADEL CVE probe failed: %w — provisioning refused; verify ZITADEL state manually", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:

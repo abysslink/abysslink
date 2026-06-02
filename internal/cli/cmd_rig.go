@@ -227,7 +227,7 @@ func validateImportRigs(existing, incoming []config.RigConfig) error {
 
 func runRigImport(cfgPath, importPath string, apply bool, out io.Writer) error {
 	// Read import file.
-	data, err := os.ReadFile(importPath) //nolint:gosec
+	data, err := os.ReadFile(importPath) //nolint:gosec // G304: importPath is an operator-supplied rig export file; read is intentional and the path is the documented CLI argument
 	if err != nil {
 		return fmt.Errorf("rig import: read %s: %w", importPath, err)
 	}

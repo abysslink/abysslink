@@ -187,7 +187,7 @@ func verifyCosignBlob(ctx context.Context, runner shell.Runner, target, bundleFi
 // verifyChecksum reads the sha256 checksum file and checks that the file at
 // filePath matches the recorded hash for wantName.
 func verifyChecksum(checksumFile, wantName, filePath string) error {
-	f, err := os.Open(checksumFile) //nolint:gosec
+	f, err := os.Open(checksumFile) //nolint:gosec // G304: checksumFile is an internally-staged download temp path, not user input
 	if err != nil {
 		return err
 	}
@@ -218,7 +218,7 @@ func verifyChecksum(checksumFile, wantName, filePath string) error {
 
 // sha256File returns the lower-hex SHA-256 of a file.
 func sha256File(path string) (string, error) {
-	data, err := os.ReadFile(path) //nolint:gosec
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is an internally-staged download temp path, not user input
 	if err != nil {
 		return "", err
 	}
@@ -228,7 +228,7 @@ func sha256File(path string) (string, error) {
 
 // extractBinary extracts the `abysslink` binary from a .tar.gz archive to outDir.
 func extractBinary(tarPath, outDir string) (string, error) {
-	f, err := os.Open(tarPath) //nolint:gosec
+	f, err := os.Open(tarPath) //nolint:gosec // G304: tarPath is an internally-staged download temp path, not user input
 	if err != nil {
 		return "", err
 	}
@@ -257,12 +257,12 @@ func extractBinary(tarPath, outDir string) (string, error) {
 			continue
 		}
 		outPath := filepath.Join(outDir, base)
-		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) //nolint:gosec
+		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) //nolint:gosec // G302: 0o755 required — extracted file is an executable binary
 		if err != nil {
 			return "", err
 		}
 		// nosemgrep: go.lang.security.decompression_bomb.potential-dos-via-decompression-bomb
-		if _, err := io.Copy(out, io.LimitReader(tr, 200<<20)); err != nil { //nolint:gosec
+		if _, err := io.Copy(out, io.LimitReader(tr, 200<<20)); err != nil { //nolint:gosec // G110: io.LimitReader caps extraction at 200MiB — decompression bomb mitigated
 			_ = out.Close()
 			return "", err
 		}
@@ -284,11 +284,11 @@ func atomicReplace(dst, src string) error {
 	_ = tmp.Close()
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	srcData, err := os.ReadFile(src) //nolint:gosec
+	srcData, err := os.ReadFile(src) //nolint:gosec // G304: src is the freshly-extracted upgrade binary path derived internally, not user input
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmpPath, srcData, 0o755); err != nil { //nolint:gosec
+	if err := os.WriteFile(tmpPath, srcData, 0o755); err != nil { //nolint:gosec // G306: 0o755 required — written file is an executable binary
 		return err
 	}
 	return os.Rename(tmpPath, dst)
@@ -309,12 +309,12 @@ func downloadFile(ctx context.Context, url, dest string) error {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	f, err := os.Create(dest) //nolint:gosec
+	f, err := os.Create(dest) //nolint:gosec // G304: dest is an internally-derived download temp path, not user input
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	_, err = io.Copy(f, io.LimitReader(resp.Body, 200<<20)) //nolint:gosec
+	_, err = io.Copy(f, io.LimitReader(resp.Body, 200<<20)) //nolint:gosec // G110: io.LimitReader caps download at 200MiB — decompression/oversize bomb mitigated
 	return err
 }
 

@@ -118,7 +118,7 @@ func (m *Module) detectSettingsFile(home string) (findings []modules.Finding, da
 		}}, nil, true
 	}
 	settingsPath := filepath.Join(claudeDir, "settings.json")
-	raw, err := os.ReadFile(settingsPath) //nolint:gosec
+	raw, err := os.ReadFile(settingsPath) //nolint:gosec // G304: settingsPath is the Claude Code settings path resolved internally, not user input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []modules.Finding{{
@@ -336,7 +336,7 @@ func (m *Module) Apply(ctx context.Context) error {
 	// If the file exists but contains invalid JSON, return an error rather than
 	// silently overwriting it — that would destroy the user's settings.
 	existing := make(map[string]interface{})
-	if data, err := os.ReadFile(settingsPath); err == nil { //nolint:gosec
+	if data, err := os.ReadFile(settingsPath); err == nil { //nolint:gosec // G304: settingsPath is the Claude Code settings path resolved internally, not user input
 		if err := json.Unmarshal(data, &existing); err != nil {
 			return fmt.Errorf("claudecode: settings.json is not valid JSON (%w); "+
 				"back it up and remove it, then re-run to reset", err)
@@ -479,7 +479,7 @@ func readSettingsForRemoval(home, settingsPath string) ([]byte, error) {
 	if _, statErr := os.Stat(filepath.Join(home, ".claude")); os.IsNotExist(statErr) {
 		return nil, nil
 	}
-	raw, err := os.ReadFile(settingsPath) //nolint:gosec
+	raw, err := os.ReadFile(settingsPath) //nolint:gosec // G304: settingsPath is the Claude Code settings path resolved internally, not user input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
