@@ -64,17 +64,12 @@ func StartMetricsServer(ctx context.Context, cfg *config.Config, reg metrics.Reg
 			return
 		}
 
-		ip, err := b.IP(ctx)
-		if err != nil {
-			slog.Error("abysslinkd: metrics: resolve tailnet IP", "err", err)
+		addr, ok := resolveMetricsAddr(ctx, cfg, b)
+		if !ok {
+			// resolveMetricsAddr already logged the fail-closed reason. Never
+			// fall back to a wildcard bind (OBS-03).
 			return
 		}
-
-		port := cfg.Observability.Metrics.Port
-		if port <= 0 {
-			port = defaultMetricsPort
-		}
-		addr := net.JoinHostPort(ip, strconv.Itoa(port))
 
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
@@ -116,6 +111,55 @@ func StartMetricsServer(ctx context.Context, cfg *config.Config, reg metrics.Reg
 			}
 		}
 	}()
+}
+
+// resolveMetricsAddr determines the address the metrics listener binds, failing
+// closed (ok == false) rather than ever binding a wildcard interface (OBS-03).
+//
+// Source-of-truth precedence:
+//   - If observability.metrics.bind_addr is set, it is honored verbatim — but
+//     only after rejecting unspecified hosts (0.0.0.0 / ::). A bind_addr that
+//     carries its own port wins; a bare-host bind_addr is joined with the
+//     configured/default port.
+//   - Otherwise the tailnet IP from backend.Client.IP is used. An empty IP
+//     (LocalClient.IP returns ("", nil) when the node has no Tailscale address)
+//     or any unspecified/unparseable IP fails closed — never a wildcard bind.
+func resolveMetricsAddr(ctx context.Context, cfg *config.Config, b backend.Client) (string, bool) {
+	port := cfg.Observability.Metrics.Port
+	if port <= 0 {
+		port = defaultMetricsPort
+	}
+
+	if bindAddr := strings.TrimSpace(cfg.Observability.Metrics.BindAddr); bindAddr != "" {
+		if config.IsUnspecifiedBindAddr(bindAddr) {
+			slog.Error("abysslinkd: metrics: configured bind_addr is unspecified/wildcard; listener disabled (OBS-03)", "bind_addr", bindAddr)
+			return "", false
+		}
+		// Honor an explicit host:port; otherwise treat bind_addr as a bare host
+		// and apply the configured/default port.
+		if _, _, err := net.SplitHostPort(bindAddr); err == nil {
+			return bindAddr, true
+		}
+		host := strings.TrimSuffix(strings.TrimPrefix(bindAddr, "["), "]")
+		return net.JoinHostPort(host, strconv.Itoa(port)), true
+	}
+
+	ip, err := b.IP(ctx)
+	if err != nil {
+		slog.Error("abysslinkd: metrics: resolve tailnet IP", "err", err)
+		return "", false
+	}
+	if ip == "" {
+		// Fail closed: an empty host would make net.Listen bind 0.0.0.0/:: (OBS-03).
+		slog.Error("abysslinkd: metrics: empty tailnet IP; refusing wildcard bind, listener disabled")
+		return "", false
+	}
+	// Defense in depth: reject any unspecified address that slipped through.
+	if pa := net.ParseIP(ip); pa == nil || pa.IsUnspecified() {
+		slog.Error("abysslinkd: metrics: non-tailnet/unspecified IP; listener disabled", "ip", ip)
+		return "", false
+	}
+	return net.JoinHostPort(ip, strconv.Itoa(port)), true
 }
 
 // metricsHandler returns the GET /metrics HTTP handler. It sets the strict
