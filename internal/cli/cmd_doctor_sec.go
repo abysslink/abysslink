@@ -363,10 +363,20 @@ func secNoWorldReadableConfigCheck() modules.Finding {
 	return secNoWorldReadableConfigCheckDir(abysslinkConfigDir())
 }
 
+// looseConfigBits is the set of group/other permission bits that are forbidden
+// on an abysslink config file. abysslink config can carry tailnet bind
+// addresses, rig topology, ntfy topics, and backend endpoints, so ANY
+// group/other access (read OR write) is an exposure the check must catch. This
+// includes the world-read bit (0o004) the check name promises (SEC-04), the
+// group-read bit (0o040), and the group/other-write tamper bits (0o022).
+const looseConfigBits = 0o077
+
 // secNoWorldReadableConfigCheckDir walks every REGULAR file under the abysslink
-// config directory and FATALs on any world/group-writable file (mode & 0o022).
-// Symlinks are not followed (entry.Type().IsRegular()); directories are skipped
-// (RESEARCH Open Question #2, T-20-02-03).
+// config directory and FATALs on any file granting group/other access
+// (mode & 0o077) — world-readable config is the primary exposure the check name
+// promises (SEC-04), and group/other-write is the tamper surface. Symlinks are
+// not followed (entry.Type().IsRegular()); directories are skipped (RESEARCH
+// Open Question #2, T-20-02-03).
 func secNoWorldReadableConfigCheckDir(dir string) modules.Finding {
 	const check = "sec-no-world-readable-config"
 	if dir == "" {
@@ -389,7 +399,7 @@ func secNoWorldReadableConfigCheckDir(dir string) modules.Finding {
 		if ferr != nil {
 			return nil
 		}
-		if fi.Mode()&0o022 != 0 {
+		if fi.Mode()&looseConfigBits != 0 {
 			offenders = append(offenders, fmt.Sprintf("%s (%#o)", path, fi.Mode().Perm()))
 		}
 		return nil
@@ -399,10 +409,10 @@ func secNoWorldReadableConfigCheckDir(dir string) modules.Finding {
 	}
 	if len(offenders) > 0 {
 		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
-			Message: "world/group-writable config files found: " + strings.Join(offenders, ", ")}
+			Message: "config files readable/writable by group or other found: " + strings.Join(offenders, ", ")}
 	}
 	return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
-		Message: "no world/group-writable config files"}
+		Message: "no group/other-accessible config files"}
 }
 
 func secDaemonSocketPermsCheck() modules.Finding {

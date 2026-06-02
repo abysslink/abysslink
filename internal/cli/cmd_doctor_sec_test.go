@@ -214,6 +214,26 @@ func TestSecNoWorldReadableConfig(t *testing.T) {
 		assert.Equal(t, "sec-no-world-readable-config", f.Check)
 		assert.Equal(t, modules.SeverityFatal, f.Severity)
 	})
+	t.Run("world_readable", func(t *testing.T) {
+		// WR-03: a 0o644 config file is world-READABLE — exactly what the check
+		// name and SEC-04 promise to catch. The pre-fix 0o022-only mask let this
+		// pass clean (false-OK); the looseConfigBits (0o077) mask must FATAL it.
+		dir := t.TempDir()
+		p := filepath.Join(dir, "abysslink.yaml")
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+		require.NoError(t, os.Chmod(p, 0o644)) // bypass umask
+		f := secNoWorldReadableConfigCheckDir(dir)
+		assert.Equal(t, "sec-no-world-readable-config", f.Check)
+		assert.Equal(t, modules.SeverityFatal, f.Severity)
+	})
+	t.Run("group_readable", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "abysslink.yaml")
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+		require.NoError(t, os.Chmod(p, 0o640)) // group-read only; bypass umask
+		f := secNoWorldReadableConfigCheckDir(dir)
+		assert.Equal(t, modules.SeverityFatal, f.Severity)
+	})
 	t.Run("restricted", func(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "abysslink.yaml"), []byte("x"), 0o600))
