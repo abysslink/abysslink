@@ -185,7 +185,7 @@ func newBackupRestoreCmd() *cobra.Command {
 // prior version), the preview notes that fact instead of erroring.
 func restoreDiffPreview(p Printer, target, backupPath, backupLabel string) error {
 	// Read backup content (must exist).
-	backupBytes, err := os.ReadFile(backupPath) //nolint:gosec
+	backupBytes, err := os.ReadFile(backupPath) //nolint:gosec // G304: backupPath is an audit backup path resolved internally, not user input
 	if err != nil {
 		return fmt.Errorf("read backup %s: %w", backupPath, err)
 	}
@@ -195,7 +195,7 @@ func restoreDiffPreview(p Printer, target, backupPath, backupLabel string) error
 	var currentBytes []byte
 	var currentHash string
 	currentMissing := false
-	currentBytes, err = os.ReadFile(target) //nolint:gosec
+	currentBytes, err = os.ReadFile(target) //nolint:gosec // G304: target is a path from a trusted audit-log entry, not user input
 	if err != nil {
 		if os.IsNotExist(err) {
 			currentMissing = true

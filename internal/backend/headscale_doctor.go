@@ -177,7 +177,7 @@ func validateBYOTLS(_ context.Context, hs config.HeadscaleServer) error {
 	}
 
 	// Check key file permissions — group/world readable is a security failure.
-	fi, err := os.Stat(keyPath) //nolint:gosec
+	fi, err := os.Stat(keyPath) //nolint:gosec // G304: keyPath is a headscale key path resolved internally, not user input
 	if err != nil {
 		return fmt.Errorf("headscale tls: stat key file %s: %w", keyPath, err)
 	}
@@ -294,11 +294,11 @@ func parseHsConfigYAML(path string) (*hsConfigYAML, error) {
 	if path == "" {
 		return nil, fmt.Errorf("headscale config path is empty")
 	}
-	f, err := os.Open(path) //nolint:gosec
+	f, err := os.Open(path) //nolint:gosec // G304: path is a headscale config path resolved internally, not user input
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // errcheck: close error on read-only/append file handle is non-actionable; data durability handled by explicit Sync where required
 
 	var cfg hsConfigYAML
 	dec := yaml.NewDecoder(f)
@@ -426,7 +426,7 @@ func checkHsDbPerms(dbPath string) DoctorFinding {
 		return DoctorFinding{Module: mod, Check: check, Severity: DoctorWarning,
 			Message: "hs-db-perms: db_path not configured"}
 	}
-	fi, err := os.Stat(dbPath) //nolint:gosec
+	fi, err := os.Stat(dbPath) //nolint:gosec // G304: dbPath is a headscale DB path resolved internally, not user input
 	if err != nil {
 		return DoctorFinding{
 			Module:   mod,
@@ -629,7 +629,7 @@ func checkHsAPIAuth(ctx context.Context, doReq doRequestFunc) DoctorFinding {
 			Message:  "Headscale API unreachable: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -714,7 +714,7 @@ func checkHsKeyExpiry(ctx context.Context, doReq doRequestFunc) DoctorFinding {
 			Message:  "hs-key-expiry: could not complete check: " + err.Error(),
 		}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
 	if resp.StatusCode != http.StatusOK {
 		return DoctorFinding{

@@ -250,7 +250,7 @@ func readLastNonEmptyLine(logPath string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("audit: open log %s: %w", logPath, err)
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // errcheck: close error on read-only/append file handle is non-actionable; data durability handled by explicit Sync where required
 
 	var last []byte
 	scanner := bufio.NewScanner(f)
@@ -329,7 +329,7 @@ func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, d
 	}
 	line = append(line, '\n')
 
-	f, err := os.OpenFile(a.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec
+	f, err := os.OpenFile(a.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: a.logPath is the internal audit-log path set at construction, not user-controlled
 	if err != nil {
 		a.mu.Unlock()
 		return fmt.Errorf("audit: open log %s: %w", a.logPath, err)

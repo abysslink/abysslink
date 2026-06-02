@@ -34,7 +34,7 @@ import (
 )
 
 // ntfyBaseURL is overridden in tests to point at httptest.Server.
-var ntfyBaseURL = "" //nolint:gochecknoglobals
+var ntfyBaseURL = "" //nolint:gochecknoglobals // gochecknoglobals: package-level var is a test/injection seam for base URL override; intentional
 
 // HealthProbe performs the ntfy reachability check used by Detect. It is a
 // package-level seam so deterministic fixtures — notably the `up --dry-run`
@@ -42,7 +42,7 @@ var ntfyBaseURL = "" //nolint:gochecknoglobals
 // listening on localhost (the probe is a real network dial that bypasses the
 // injected shell.Runner). Returns nil when ntfy is reachable and healthy, a
 // non-nil error otherwise. Overridden in tests; restore in cleanup.
-var HealthProbe = defaultHealthProbe //nolint:gochecknoglobals
+var HealthProbe = defaultHealthProbe //nolint:gochecknoglobals // gochecknoglobals: package-level var is a test/injection seam for health-probe override; intentional
 
 // defaultHealthProbe issues an HTTP GET against the ntfy health endpoint.
 func defaultHealthProbe(ctx context.Context, url string) error {
@@ -60,7 +60,7 @@ func defaultHealthProbe(ctx context.Context, url string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("ntfy health endpoint returned status %d", resp.StatusCode)
 	}
@@ -214,7 +214,7 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 		})
 		return findings, nil
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
 	if resp.StatusCode != http.StatusOK {
 		sev := modules.SeverityFatal
@@ -291,7 +291,7 @@ func (m *Module) SendDirect(ctx context.Context, title, body string) error {
 	if err != nil {
 		return fmt.Errorf("notify send: POST to ntfy: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

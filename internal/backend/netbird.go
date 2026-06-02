@@ -99,7 +99,7 @@ func (a *netbirdAdapter) Status(ctx context.Context) (*Status, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netbird: status: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: status: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -128,7 +128,7 @@ func (a *netbirdAdapter) IP(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("netbird: ip: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("netbird: ip: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -159,7 +159,7 @@ func (a *netbirdAdapter) Hostname(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("netbird: hostname: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("netbird: hostname: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -296,7 +296,7 @@ func (a *netbirdAdapter) Devices(ctx context.Context) ([]Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netbird: list peers: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: list peers: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -333,7 +333,7 @@ func (a *netbirdAdapter) TagDevice(ctx context.Context, id string, tags []string
 	if err != nil {
 		return fmt.Errorf("netbird: tag peer %s: %w", id, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("netbird: tag peer %s: unexpected HTTP %d", id, resp.StatusCode)
 	}
@@ -346,7 +346,7 @@ func (a *netbirdAdapter) DeleteDevice(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("netbird: delete peer %s: %w", id, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("netbird: delete peer %s: unexpected HTTP %d", id, resp.StatusCode)
 	}
@@ -380,7 +380,7 @@ func (a *netbirdAdapter) CreateAuthKey(ctx context.Context, tags []string) (stri
 	if err != nil {
 		return "", fmt.Errorf("netbird: create auth key: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("netbird: create auth key: unexpected HTTP %d", resp.StatusCode)
 	}
@@ -404,7 +404,7 @@ func (a *netbirdAdapter) GetACL(ctx context.Context) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("netbird: get acl: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("netbird: get acl: unexpected HTTP %d", resp.StatusCode)
 	}

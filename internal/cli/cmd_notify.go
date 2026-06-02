@@ -37,7 +37,7 @@ import (
 // notifyCmdBaseURL is a test seam: when non-empty, all --all-rigs per-rig POSTs
 // target this base URL instead of the ntfy default. Override in tests via
 // httptest.Server.URL (mirrors ntfyBaseURL in notify/module.go but scoped to cli).
-var notifyCmdBaseURL = "" //nolint:gochecknoglobals
+var notifyCmdBaseURL = "" //nolint:gochecknoglobals // gochecknoglobals: package-level var is a test/injection seam for base URL override; intentional
 
 func newNotifyCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -233,7 +233,7 @@ func sendRigNotify(
 	if err != nil {
 		return fmt.Errorf("notify rig %q: POST: %w", rig.Name, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

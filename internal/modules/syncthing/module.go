@@ -78,7 +78,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 
 	// Check GUI bind address in the config XML.
 	cfgPath := syncthingConfigPath()
-	data, err := os.ReadFile(cfgPath) //nolint:gosec
+	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the module config path resolved internally, not user input
 	if err != nil {
 		if !os.IsNotExist(err) {
 			slog.Warn("syncthing detect: cannot read config", "path", cfgPath, "err", err)

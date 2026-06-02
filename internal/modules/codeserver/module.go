@@ -105,7 +105,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	}
 	cfgPath := filepath.Join(home, codeServerConfigPath)
 
-	data, err := os.ReadFile(cfgPath) //nolint:gosec
+	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the module config path resolved internally, not user input
 	if err != nil {
 		if os.IsNotExist(err) {
 			findings = append(findings, modules.Finding{
