@@ -19,6 +19,8 @@ package webui
 
 import (
 	"embed"
+	"io/fs"
+	"log/slog"
 	"net/http"
 )
 
@@ -37,10 +39,23 @@ var embedFS embed.FS
 const staticPrefix = "/static/"
 
 // ServeStaticAssets registers the embedded assets directory under
-// staticPrefix on mux using the Go 1.22 http.FileServerFS. It will be wired
-// from server.go once Plan 03 adds the real asset files; it is exported so the
-// route registration is testable in isolation.
+// staticPrefix on mux using the Go 1.22 http.FileServerFS.
+//
+// The embed.FS is rooted at the package directory, so its top-level entries are
+// assets/ and templates/. A browser request for /static/style.css must map to
+// the embedded assets/style.css. We therefore (a) re-root the FS at the assets
+// subtree via fs.Sub so URL paths resolve directly against the real files, and
+// (b) strip the full /static/ prefix (not just the leading slash) before the
+// lookup. Re-rooting at assets/ also means templates/ is never reachable under
+// /static/ (CR-02). It is exported so the route registration is testable in
+// isolation.
 func ServeStaticAssets(mux *http.ServeMux) {
-	fileServer := http.FileServerFS(embedFS)
-	mux.Handle("GET "+staticPrefix, http.StripPrefix("/", fileServer))
+	assetsFS, err := fs.Sub(embedFS, "assets")
+	if err != nil {
+		// embedFS is a compile-time constant; "assets" always exists. Fail
+		// closed (no handler) and log rather than panic (CLAUDE.md).
+		slog.Error("webui: static assets sub-FS unavailable; /static not served", "err", err)
+		return
+	}
+	mux.Handle("GET "+staticPrefix, http.StripPrefix(staticPrefix, http.FileServerFS(assetsFS)))
 }
