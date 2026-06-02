@@ -18,12 +18,14 @@ LDFLAGS    := -s -w \
   -X $(MODULE)/internal/cli.commit=$(COMMIT) \
   -X $(MODULE)/internal/cli.buildDate=$(BUILD_DATE)
 
-.PHONY: build test lint cover release install clean conformance security-audit
+.PHONY: build test lint cover release install clean conformance security-audit repro-check
 
-## build: compile CLI and daemon binaries
+## build: compile CLI and daemon binaries (reproducible: SOURCE_DATE_EPOCH from git)
 build:
-	$(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/abysslink
-	$(GO) build -ldflags "$(LDFLAGS)" -o $(DAEMON) ./cmd/abysslinkd
+	SOURCE_DATE_EPOCH=$$(git log -1 --format='%ct') \
+	  $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/abysslink
+	SOURCE_DATE_EPOCH=$$(git log -1 --format='%ct') \
+	  $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(DAEMON) ./cmd/abysslinkd
 
 ## test: run all tests
 test:
@@ -46,7 +48,21 @@ release:
 
 ## install: install CLI binary to GOPATH/bin or GOBIN
 install:
-	$(GO) install -ldflags "$(LDFLAGS)" ./cmd/abysslink
+	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/abysslink
+
+## repro-check: build binary twice and assert byte-identical output
+repro-check:
+	@echo "=== Reproducibility check ==="
+	@mkdir -p /tmp/abysslink-repro-1 /tmp/abysslink-repro-2
+	SOURCE_DATE_EPOCH=$$(git log -1 --format='%ct') \
+	  $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o /tmp/abysslink-repro-1/abysslink ./cmd/abysslink
+	SOURCE_DATE_EPOCH=$$(git log -1 --format='%ct') \
+	  $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o /tmp/abysslink-repro-2/abysslink ./cmd/abysslink
+	@sha256sum /tmp/abysslink-repro-1/abysslink /tmp/abysslink-repro-2/abysslink
+	@diff /tmp/abysslink-repro-1/abysslink /tmp/abysslink-repro-2/abysslink \
+	  && echo "OK: byte-identical" \
+	  || (echo "FAIL: binaries differ"; exit 1)
+	@rm -rf /tmp/abysslink-repro-1 /tmp/abysslink-repro-2
 
 ## clean: remove build artifacts
 clean:
