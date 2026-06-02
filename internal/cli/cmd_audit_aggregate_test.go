@@ -130,6 +130,29 @@ func TestAuditAggregate(t *testing.T) {
 	})
 }
 
+// TestAuditAggregateIncludesMod3 guards B1: collectAggregateFindings must run
+// the Phase-21 mod3DoctorFindings source so `abysslink audit verify` does not
+// silently drop the optional-module checks. Enabling Upsnap makes the FATAL
+// wol-apply-gate finding deterministic.
+func TestAuditAggregateIncludesMod3(t *testing.T) {
+	cc := newAggregateTestContext(t)
+	cc.cfg.Modules.Upsnap.Enabled = true
+	logPath, kc := newSignedLog(t, 2)
+
+	var out, errOut bytes.Buffer
+	p := NewJSONPrinterTo(&out, &errOut)
+	_ = runAuditAggregate(context.Background(), cc, p, logPath, kc, aggregateOpts{format: "json"})
+
+	var got []doctorFinding
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got))
+
+	checks := make(map[string]bool, len(got))
+	for _, f := range got {
+		checks[f.Check] = true
+	}
+	assert.True(t, checks["wol-apply-gate"], "aggregate must include the Phase-21 wol-apply-gate mod3 check (B1)")
+}
+
 func TestAuditPentest(t *testing.T) {
 	t.Run("no_pentest_no_panic", func(t *testing.T) {
 		logPath, kc := newSignedLog(t, 2)
