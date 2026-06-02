@@ -363,6 +363,11 @@ func (h *Handlers) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 	// Project newest-first. ReadLog returns oldest-first, so reverse after
 	// projecting. The projection guarantees no Hash/PrevHash/Sig field exists.
+	// limit 0 = project every entry, then paginate in memory. For the expected
+	// single-rig audit-log size this full projection is acceptable; the positive
+	// limit path on projectAuditEntries is exercised by tests and kept for a
+	// future windowed projection if logs grow (performance is out of v1 scope,
+	// IN-03).
 	all := projectAuditEntries(entries, 0)
 	reverseViews(all)
 
