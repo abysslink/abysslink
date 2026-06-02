@@ -207,6 +207,7 @@ func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingB
 		Ring:         ring,
 		AuditLogPath: auditLogPath,
 		RigHostname:  cfg.Tailnet.Hostname,
+		AllowNotify:  cfg.WebUI.AllowNotify,
 	})
 	if err != nil {
 		_ = ln.Close()

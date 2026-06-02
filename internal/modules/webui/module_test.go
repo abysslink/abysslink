@@ -20,9 +20,12 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -600,6 +603,85 @@ func TestRenderErrorView(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, prec.Code)
 	assert.Contains(t, prec.Body.String(), "Boom")
 	assert.NotContains(t, prec.Body.String(), "<html", "partial error render must omit the base shell")
+}
+
+func TestNotifyFormCSRFToken(t *testing.T) {
+	// With allow_notify enabled, the notify view must emit the safeweb CSRF
+	// token field, and the end-to-end POST must require it (WR-02, WEB-05).
+	h, err := NewHandlers(HandlerDeps{
+		Status: stubStatusProvider{}, Doctor: stubDoctorProvider{},
+		Ring: NewNotifyRingBuffer(), AuditLogPath: "", RigHostname: "rig-a",
+		AllowNotify: true,
+	})
+	require.NoError(t, err)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	sw, err := newSafewebServer(mux)
+	require.NoError(t, err)
+	// safeweb sets a Secure CSRF cookie (SecureContext: true), so the positive
+	// path must run over TLS or the cookie jar would never replay the cookie on
+	// POST. httptest.NewTLSServer + its trusting client provides that.
+	srv := httptest.NewTLSServer(sw)
+	defer srv.Close()
+
+	// A cookie jar is required so the CSRF cookie set on GET is replayed on POST.
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := srv.Client()
+	client.Jar = jar
+
+	resp, err := client.Get(srv.URL + "/notify")
+	require.NoError(t, err)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	body := string(bodyBytes)
+
+	assert.Contains(t, body, `name="gorilla.csrf.Token"`, "notify form must include the safeweb CSRF token field (WR-02)")
+
+	// Extract the masked token value emitted by safeweb.CSRFTemplateField.
+	token := extractCSRFToken(t, body)
+	require.NotEmpty(t, token, "CSRF token value must be present in the form")
+
+	// postForm issues a POST with the values, a form content-type, and a Referer
+	// matching the origin (gorilla/csrf requires a matching Referer over HTTPS).
+	postForm := func(values url.Values) *http.Response {
+		req, rerr := http.NewRequest(http.MethodPost, srv.URL+"/notify", strings.NewReader(values.Encode()))
+		require.NoError(t, rerr)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Referer", srv.URL+"/notify")
+		out, derr := client.Do(req)
+		require.NoError(t, derr)
+		return out
+	}
+
+	// POST without the token must be rejected by the CSRF gate.
+	noTok := postForm(url.Values{"title": {"hello"}})
+	_ = noTok.Body.Close()
+	assert.Equal(t, http.StatusForbidden, noTok.StatusCode, "POST without CSRF token must be 403 (WEB-05)")
+
+	// POST WITH the token must pass the CSRF gate and reach the handler (501).
+	withTok := postForm(url.Values{"title": {"hello"}, "gorilla.csrf.Token": {token}})
+	_ = withTok.Body.Close()
+	assert.Equal(t, http.StatusNotImplemented, withTok.StatusCode,
+		"POST with a valid CSRF token must reach handleNotifyPost (501 scaffold)")
+}
+
+// extractCSRFToken pulls the masked token value out of the hidden input that
+// safeweb.CSRFTemplateField emits (<input ... name="gorilla.csrf.Token" value="...">).
+func extractCSRFToken(t *testing.T, body string) string {
+	t.Helper()
+	const marker = `name="gorilla.csrf.Token" value="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 // writeAuditLog writes entries as JSONL to path for handler tests.
