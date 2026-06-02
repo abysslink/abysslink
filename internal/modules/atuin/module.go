@@ -210,8 +210,18 @@ func (m *Module) appendShellInit() error {
 		return fmt.Errorf("atuin apply: audit not available")
 	}
 
+	// Preserve the existing rc file mode (WR-04): audit.WriteFile performs a full
+	// atomic overwrite, so passing a fixed 0o600 would silently narrow a
+	// conventional 0o644 shell rc to owner-only and surprise the user. Reuse the
+	// current perms when the file exists; only a freshly-created rc gets the
+	// conventional 0o644 default for shell init files.
+	perm := os.FileMode(0o644)
+	if fi, statErr := os.Stat(rcPath); statErr == nil {
+		perm = fi.Mode().Perm()
+	}
+
 	newData := append(data, []byte("\n"+initLine+"\n")...)
-	if err := m.audit.WriteFile(rcPath, newData, 0o600, false); err != nil {
+	if err := m.audit.WriteFile(rcPath, newData, perm, false); err != nil {
 		return fmt.Errorf("atuin apply: append shell integration: %w", err)
 	}
 	slog.Info("atuin apply: appended shell integration", "rc", rcPath)
