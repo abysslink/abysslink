@@ -37,7 +37,7 @@ Phases 11–14 (18 plans) — backend-pluggable (Tailscale/Headscale/NetBird) + 
 
 Phases 16–21 (6 phases) — supply-chain hardening + tamper-evident audit + observability/metrics + opt-in Web UI dashboard + security audit pass + optional modules & fleet polish. Every new listener is opt-in, tailnet-bound, auth-gated, and gets its own FATAL doctor checks. No immutable v1/v2 floor is weakened.
 
-- [ ] **Phase 16: Supply-Chain Hardening & CI Gates** - govulncheck, semgrep, dependency-review, SLSA L2, cosign v3 keyless, SPDX+CycloneDX SBOM, harden-runner, reproducible builds, `abysslink verify`
+- [x] **Phase 16: Supply-Chain Hardening & CI Gates** - govulncheck, semgrep, dependency-review, SLSA L2, cosign v3 keyless, SPDX+CycloneDX SBOM, harden-runner, reproducible builds, `abysslink verify` (completed 2026-06-02)
 - [ ] **Phase 17: Tamper-Evident Audit Log + Fuzzing** - Hash-chained/HMAC-signed audit entries, external anchor, `abysslink audit` command surface, fuzz targets with seed corpus and gitleaks pre-commit hook
 - [ ] **Phase 18: Observability & Metrics** - `internal/metrics.Registry`, tailnet-IP-bound Prometheus endpoint, `abysslink report`, daemon `GET /status`, fleet daily digest
 - [ ] **Phase 19: Web UI Dashboard (opt-in)** - `//go:build webui` opt-in module, safeweb CSRF, WhoIs auth, TLS via Tailscale cert, read-only gate, CSP self, separate goreleaser artifact
@@ -242,10 +242,10 @@ Plans:
 
 Plans:
 
-- [ ] 16-01-PLAN.md — PR security scan gates: govulncheck (module mode), semgrep OSS, dependency-review-action, harden-runner, dependabot (SCH-01, SCH-05)
-- [ ] 16-02-PLAN.md — Reproducible builds: -trimpath + {{.CommitDate}} + SOURCE_DATE_EPOCH; dual SBOM (SPDX+CycloneDX via syft); repro-check CI job (SCH-04, SCH-06)
-- [ ] 16-03-PLAN.md — Release workflow hardening: split build/sign/attest jobs, cosign v3 bundle, actions/attest@v4 SLSA L2, pinned SHAs, harden-runner (SCH-02, SCH-03, SCH-05)
-- [ ] 16-04-PLAN.md — CLI: abysslink verify + version --provenance + cosign v3 upgrade path + supply-cosign-bundle/supply-slsa-source doctor checks + install.sh fail-closed (SCH-07)
+- [x] 16-01-PLAN.md — PR security scan gates: govulncheck (module mode), semgrep OSS, dependency-review-action, harden-runner, dependabot (SCH-01, SCH-05)
+- [x] 16-02-PLAN.md — Reproducible builds: -trimpath + {{.CommitDate}} + SOURCE_DATE_EPOCH; dual SBOM (SPDX+CycloneDX via syft); repro-check CI job (SCH-04, SCH-06)
+- [x] 16-03-PLAN.md — Release workflow hardening: split build/sign/attest jobs, cosign v3 bundle, actions/attest@v4 SLSA L2, pinned SHAs, harden-runner (SCH-02, SCH-03, SCH-05)
+- [x] 16-04-PLAN.md — CLI: abysslink verify + version --provenance + cosign v3 upgrade path + supply-cosign-bundle/supply-slsa-source doctor checks + install.sh fail-closed (SCH-07)
 
 
 ### Phase 17: Tamper-Evident Audit Log + Fuzzing
@@ -262,7 +262,12 @@ Plans:
   5. An external anchor is written every 100 entries or 1 hour (whichever comes first), including the entry count; `audit-anchor-age` WARN fires if the newest anchor is older than 24 hours; `audit-count-vs-anchor` FATAL fires if the current entry count is less than the anchor's recorded count (truncation detected)
   6. `FuzzConfigLoad`, `FuzzHuJSONParse`, and `FuzzHMACVerify` fuzz targets each have a seed corpus covering empty, single-token, max-length, and known-malformed inputs; a `len(b) > 4096` guard prevents CI OOM; a gitleaks pre-commit hook blocks any real secret from entering `testdata/fuzz/`; running each target for 60s in CI does not produce a panic or hang
 
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 17-01-PLAN.md — audit library core: Entry extension, SignedAudit, anchor, chain verifier, forbidigo lint rule
+- [ ] 17-02-PLAN.md — CLI surface: audit verify/tail/ls/export, backup verify, doctor checks, daemon SignedAudit wiring
+- [ ] 17-03-PLAN.md — fuzz targets: FuzzHMACVerify, FuzzConfigLoad, FuzzHuJSONParse with seed corpora, gitleaks hook, fuzz.yml CI
 
 ### Phase 18: Observability & Metrics
 
@@ -364,7 +369,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 12. Headscale Backend | 5/5 | Complete    | 2026-05-31 |
 | 13. NetBird Backend | 5/5 | Complete   | 2026-06-01 |
 | 14. Multi-Rig Fleet | 5/5 | Complete    | 2026-06-01 |
-| 16. Supply-Chain Hardening & CI Gates | 0/4 | In progress | - |
+| 16. Supply-Chain Hardening & CI Gates | 4/4 | Complete    | 2026-06-02 |
 | 17. Tamper-Evident Audit Log + Fuzzing | 0/? | Not started | - |
 | 18. Observability & Metrics | 0/? | Not started | - |
 | 19. Web UI Dashboard (opt-in) | 0/? | Not started | - |
