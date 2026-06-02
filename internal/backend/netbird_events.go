@@ -75,13 +75,17 @@ func (a *netbirdAdapter) ListEvents(ctx context.Context) ([]nbAuditEvent, error)
 //
 // When follow is false, it fetches the snapshot once and returns.
 //
-// When follow is true, it enters a bounded-backoff polling loop: it tracks a
-// watermark (the count of events already printed) and prints only the events
-// appended since the last poll, preventing duplicate output (the audit endpoint
-// is a full snapshot with no cursor). The poll interval starts at
-// a.eventPollStart, doubles on each idle poll (no new events), caps at
-// a.eventPollMax, and resets to the start interval when new events arrive. The
-// loop exits cleanly (nil) when ctx is cancelled.
+// When follow is true, it enters a bounded-backoff polling loop. The audit
+// endpoint is a full snapshot with no cursor, so dedup keys off the last-printed
+// event ID (falling back to its timestamp): each poll prints only the events
+// newer than the watermark. This is robust to the snapshot shrinking then
+// regrowing (rotation/purge) — a count-based watermark silently dropped events
+// in that case (WR-02). If the watermark ID is absent from a new snapshot (the
+// event it pointed at was rotated out), the tail is reprinted from the start
+// rather than dropped silently. The poll interval starts at a.eventPollStart,
+// doubles on each idle poll, caps at a.eventPollMax, and resets to the start
+// interval when new events arrive. The loop exits cleanly (nil) when ctx is
+// cancelled.
 func (a *netbirdAdapter) TailEvents(ctx context.Context, out io.Writer, follow bool) error {
 	events, err := a.ListEvents(ctx)
 	if err != nil {
@@ -99,7 +103,7 @@ func (a *netbirdAdapter) TailEvents(ctx context.Context, out io.Writer, follow b
 		return nil
 	}
 
-	lastCount := len(events)
+	watermark := newestWatermark(events)
 	interval := a.eventPollStart
 	if interval <= 0 {
 		interval = defaultEventPollStart
@@ -126,11 +130,12 @@ func (a *netbirdAdapter) TailEvents(ctx context.Context, out io.Writer, follow b
 				timer.Reset(interval)
 				continue
 			}
-			if len(newEvents) > lastCount {
-				if err := writeEventLines(out, newEvents[lastCount:]); err != nil {
+			fresh := eventsAfter(newEvents, watermark)
+			if len(fresh) > 0 {
+				if err := writeEventLines(out, fresh); err != nil {
 					return err
 				}
-				lastCount = len(newEvents)
+				watermark = newestWatermark(newEvents)
 				interval = a.eventPollStart
 				if interval <= 0 {
 					interval = defaultEventPollStart
@@ -141,6 +146,51 @@ func (a *netbirdAdapter) TailEvents(ctx context.Context, out io.Writer, follow b
 			timer.Reset(interval)
 		}
 	}
+}
+
+// eventWatermark identifies the last event already printed by the follow loop.
+// id is the primary key; ts is a fallback for events without an id. zero
+// reports whether no event has been seen yet (initial empty snapshot).
+type eventWatermark struct {
+	id   string
+	ts   time.Time
+	zero bool
+}
+
+// newestWatermark returns the watermark for the newest (last) event in the
+// snapshot, treating the slice as time-ordered oldest→newest (NetBird's audit
+// endpoint returns events in chronological order). An empty snapshot yields the
+// zero watermark.
+func newestWatermark(events []nbAuditEvent) eventWatermark {
+	if len(events) == 0 {
+		return eventWatermark{zero: true}
+	}
+	last := events[len(events)-1]
+	return eventWatermark{id: last.ID, ts: last.Timestamp}
+}
+
+// eventsAfter returns the suffix of events strictly newer than wm. It locates wm
+// by id (or by timestamp when the event has no id) and returns everything after
+// it. If wm is the zero watermark, all events are returned. If wm cannot be
+// found in the snapshot (its event was rotated/purged out), the whole snapshot
+// is returned rather than silently dropping events (WR-02) — duplicates on a
+// rotation boundary are preferable to silent loss.
+func eventsAfter(events []nbAuditEvent, wm eventWatermark) []nbAuditEvent {
+	if wm.zero {
+		return events
+	}
+	for i, ev := range events {
+		match := false
+		if wm.id != "" {
+			match = ev.ID == wm.id
+		} else {
+			match = ev.Timestamp.Equal(wm.ts)
+		}
+		if match {
+			return events[i+1:]
+		}
+	}
+	return events
 }
 
 // nextInterval doubles cur, capping at maxInterval (bounded exponential backoff).
