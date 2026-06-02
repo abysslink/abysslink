@@ -181,7 +181,7 @@ func collectReportFindings(ctx context.Context, cc *cmdContext) ([]modules.Findi
 	} else {
 		slog.Warn("report: audit log path unavailable; skipping audit checks", "err", lpErr)
 	}
-	findings = append(findings, metricsDoctorFindings(cc.cfg, deps.MetricsRegistry())...)
+	findings = append(findings, metricsDoctorFindings(cc.cfg, deps.MetricsRegistry(), resolveTailnetIP(ctx, cc))...)
 	return findings, nil
 }
 
