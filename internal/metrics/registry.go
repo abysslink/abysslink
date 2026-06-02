@@ -218,6 +218,8 @@ func (r *memRegistry) Snapshot() []MetricFamily {
 func (e *metricEntry) read() float64 {
 	raw := e.value.Load()
 	if e.metricType == "gauge" {
+		// #nosec G115 -- bit reinterpretation, not a value conversion: gauges
+		// store math.Float64bits in the int64; reading back is lossless.
 		return math.Float64frombits(uint64(raw))
 	}
 	return float64(raw)
@@ -225,11 +227,16 @@ func (e *metricEntry) read() float64 {
 
 type memCounter struct{ entry *metricEntry }
 
-func (c *memCounter) Inc()              { c.entry.value.Add(1) }
-func (c *memCounter) Add(delta int64)   { c.entry.value.Add(delta) }
-func (c *memCounter) Value() float64    { return float64(c.entry.value.Load()) }
+func (c *memCounter) Inc()            { c.entry.value.Add(1) }
+func (c *memCounter) Add(delta int64) { c.entry.value.Add(delta) }
+func (c *memCounter) Value() float64  { return float64(c.entry.value.Load()) }
 
 type memGauge struct{ entry *metricEntry }
 
-func (g *memGauge) Set(v float64)  { g.entry.value.Store(int64(math.Float64bits(v))) }
+// #nosec G115 -- bit reinterpretation of a float64's IEEE-754 representation
+// into the atomic int64 store; the round-trip via Float64bits/Float64frombits
+// is lossless, not a numeric range conversion.
+func (g *memGauge) Set(v float64) { g.entry.value.Store(int64(math.Float64bits(v))) }
+
+// #nosec G115 -- see Set: lossless float64<->int64 bit reinterpretation.
 func (g *memGauge) Value() float64 { return math.Float64frombits(uint64(g.entry.value.Load())) }
