@@ -111,6 +111,93 @@ func TestVerify_LegacyEntriesSkipped(t *testing.T) {
 	assert.Equal(t, -1, res.At)
 }
 
+// TestVerify_TailStripDowngradeRejected reproduces CR-01 (iteration 2): an
+// attacker who blanks prev_hash+sig on the LAST (signed) entry and rewrites its
+// op/target/dry_run/hash must be caught. The legacy skip only applies to a
+// contiguous unsigned HEAD prefix; a stripped tail after a started chain is
+// CHAIN BROKEN tampering, not a genuine legacy entry.
+func TestVerify_TailStripDowngradeRejected(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	writeSomeEntries(t, sa, 3)
+
+	// Sanity: the intact signed chain verifies.
+	res0, verr0 := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr0)
+	require.True(t, res0.OK)
+
+	// Attacker: strip prev_hash+sig from the tail entry and rewrite its metadata.
+	data, _ := os.ReadFile(logPath) //nolint:gosec
+	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
+	last := len(lines) - 1
+	var e audit.Entry
+	require.NoError(t, json.Unmarshal(lines[last], &e))
+	e.PrevHash = "" // downgrade to "legacy"
+	e.Sig = ""
+	e.Target = "/etc/evil" // rewrite the audited target
+	e.Op = "delete"        // rewrite the op
+	e.DryRun = false       // make a planned action look real
+	e.Hash = hex.EncodeToString(bytes.Repeat([]byte{0xcd}, 32))
+	bad, _ := json.Marshal(e)
+	lines[last] = bad
+	require.NoError(t, os.WriteFile(logPath, append(bytes.Join(lines, []byte("\n")), '\n'), 0o600))
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.False(t, res.OK, "stripped tail after chain start must be rejected as tampering")
+	assert.Equal(t, last, res.At)
+	assert.Equal(t, "CHAIN BROKEN: prev_hash stripped after chain start (tamper)", res.Reason)
+}
+
+// TestVerify_PureLegacyLogStillVerifies asserts a wholly-unsigned v1/v2 log (an
+// all-empty-prev_hash prefix with no signed entries) still verifies gracefully,
+// preserving backward compatibility after the CR-01 contiguous-prefix fix.
+func TestVerify_PureLegacyLogStillVerifies(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+
+	legacy := audit.New(logPath)
+	require.NoError(t, legacy.Append("write", "/etc/a", []byte("a"), false))
+	require.NoError(t, legacy.Append("write", "/etc/b", []byte("b"), false))
+	require.NoError(t, legacy.Append("write", "/etc/c", []byte("c"), false))
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.True(t, res.OK, "pure legacy log must verify gracefully")
+	assert.Equal(t, -1, res.At)
+	assert.Equal(t, 0, res.SigsVerified)
+}
+
+// TestVerify_MixedLegacyHeadThenSignedVerifies asserts a log that begins with a
+// contiguous legacy prefix and then transitions to signed entries verifies — the
+// legacy skip applies to the head prefix only, and the signed tail is checked.
+func TestVerify_MixedLegacyHeadThenSignedVerifies(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+
+	// Two genuine legacy (unsigned) head entries.
+	legacy := audit.New(logPath)
+	require.NoError(t, legacy.Append("write", "/etc/a", []byte("a"), false))
+	require.NoError(t, legacy.Append("write", "/etc/b", []byte("b"), false))
+
+	// Then the chain begins (SignedAudit links its first entry to the last raw
+	// line, so the chain is continuous over the legacy head).
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	writeSomeEntries(t, sa, 3)
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.True(t, res.OK, "legacy-head-then-signed log must verify")
+	assert.Equal(t, -1, res.At)
+	assert.Greater(t, res.SigsVerified, 0, "signed tail must be HMAC-verified")
+}
+
 func TestVerify_TruncationDetected(t *testing.T) {
 	dir := t.TempDir()
 	kc := seededStore(t)
