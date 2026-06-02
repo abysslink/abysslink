@@ -104,6 +104,35 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 
 	// Check 3 — audit-count-vs-anchor (FATAL when the log is shorter than the anchor).
 	if anchor != nil {
+		// CR-01: the anchor's EntryCount is only trustworthy if its HMAC is
+		// valid. A local attacker can rewrite audit.anchor.json with a smaller
+		// EntryCount to hide truncation; without authenticating the HMAC the
+		// count comparison is meaningless. A forged/unsigned anchor is itself a
+		// tamper signal and must be reported FATAL, not silently trusted. We can
+		// only authenticate when a keychain is available.
+		if kc == nil {
+			findings = append(findings, modules.Finding{
+				Module:   "audit",
+				Check:    "audit-count-vs-anchor",
+				Severity: modules.SeverityFatal,
+				Message:  "Audit anchor cannot be authenticated — keychain unavailable; anchor HMAC unverifiable (AUD-02)",
+			})
+			return findings
+		}
+		anchorOK, verr := audit.VerifyAnchor(logPath, kc)
+		if verr != nil {
+			slog.Warn("doctor: verify audit anchor failed", "err", verr)
+			return findings
+		}
+		if !anchorOK {
+			findings = append(findings, modules.Finding{
+				Module:   "audit",
+				Check:    "audit-count-vs-anchor",
+				Severity: modules.SeverityFatal,
+				Message:  "Audit anchor HMAC is invalid — anchor forged or tampered (truncation detection compromised)",
+			})
+			return findings
+		}
 		entries, rerr := audit.ReadLog(logPath)
 		if rerr != nil {
 			slog.Warn("doctor: read audit log failed", "err", rerr)
