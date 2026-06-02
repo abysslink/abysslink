@@ -559,6 +559,14 @@ Exit codes:
 			// the underlying checks run exactly once (RESEARCH Pitfall 3).
 			findings = append(findings, secDoctorFindings(ctx, cc, deps, false, metFinds, webuiFinds, auditFinds)...)
 
+			// Phase 21 optional-module posture (MOD3-01..05): wol-apply-gate,
+			// upsnap-bind/no-public, atuin-bind/key-backed-up, asciinema-rec-warning,
+			// sandbox-landlock-supported, nb-posture-active. Each finding group is
+			// emitted only when its module is enabled (and nb-posture-active only
+			// when backend.type==netbird). Defined in cmd_doctor_mod3.go (same
+			// package), so no import is needed.
+			findings = append(findings, mod3DoctorFindings(ctx, cc.cfg, cc.runner)...)
+
 			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
 			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")
 			strictFlag, _ := cmd.Flags().GetBool("strict")
