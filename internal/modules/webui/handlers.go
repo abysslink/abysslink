@@ -46,6 +46,102 @@ type doctorProvider interface {
 	DoctorFindings(ctx context.Context) []modules.Finding
 }
 
+// RigStatusRow is the EXPORTED, presentation-free fleet-status row a status
+// provider returns. The daemon entrypoint (package main, //go:build webui)
+// builds these from the real status source; this package projects them to the
+// internal rigRow (which carries CSS classes). Keeping the exported type free
+// of CSS keeps the boundary clean: the entrypoint never imports webui CSS
+// conventions, and webui never imports internal/cli.
+//
+// Reachable / Lock are honest enums: "online"|"offline"|"unknown" and
+// "locked"|"unlocked"|"" (empty = N/A). A provider MUST NOT fabricate "online"
+// when it could not probe (WR-05) — it passes "unknown" and the dashboard
+// renders the unknown dot.
+type RigStatusRow struct {
+	Name       string
+	Reachable  string // "online" | "offline" | "unknown"
+	Lock       string // "locked" | "unlocked" | "" (N/A)
+	LastSeen   string // relative time, e.g. "2m ago"; "" = N/A
+	CertDays   int    // days until cert expiry; only used when HasCert is true
+	HasCert    bool   // false = cert expiry unknown (render N/A, never "0d")
+	IsLocalRig bool
+}
+
+// StatusFunc is an EXPORTED adapter that lets the daemon entrypoint supply the
+// fleet-status snapshot as a plain function (over the exported RigStatusRow
+// type) without implementing the unexported statusProvider interface. The webui
+// package converts the rows to its internal rigRow presentation.
+type StatusFunc func(ctx context.Context) (online, total int, rigs []RigStatusRow)
+
+// DoctorFunc is an EXPORTED adapter for the doctor findings source. modules.Finding
+// is already a neutral (CSS-free) type, so it is returned directly.
+type DoctorFunc func(ctx context.Context) []modules.Finding
+
+// statusFuncAdapter bridges a StatusFunc to the unexported statusProvider,
+// converting exported RigStatusRow values to internal presentation rigRows.
+type statusFuncAdapter struct{ fn StatusFunc }
+
+func (a statusFuncAdapter) FleetStatus(ctx context.Context) (int, int, []rigRow) {
+	online, total, rows := a.fn(ctx)
+	out := make([]rigRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, projectRigRow(r))
+	}
+	return online, total, out
+}
+
+// doctorFuncAdapter bridges a DoctorFunc to the unexported doctorProvider.
+type doctorFuncAdapter struct{ fn DoctorFunc }
+
+func (a doctorFuncAdapter) DoctorFindings(ctx context.Context) []modules.Finding {
+	return a.fn(ctx)
+}
+
+// projectRigRow maps an exported, CSS-free RigStatusRow to the internal rigRow,
+// resolving every visual distinction to a CSS class string in Go (WEB-06: never
+// an inline style). Honest enums map to honest classes — "unknown" reachability
+// becomes dot-unknown, an absent cert becomes lock/cert N/A, never a fabricated
+// "online" or "0d".
+func projectRigRow(r RigStatusRow) rigRow {
+	statusClass, statusLabel := "dot-unknown", "unknown"
+	switch r.Reachable {
+	case "online":
+		statusClass, statusLabel = "dot-online", "online"
+	case "offline":
+		statusClass, statusLabel = "dot-offline", "offline"
+	}
+
+	lockClass, lockStatus := "lock-na", "N/A"
+	switch r.Lock {
+	case "locked":
+		lockClass, lockStatus = "lock-ok", "Locked"
+	case "unlocked":
+		lockClass, lockStatus = "lock-warn", "Unlocked"
+	}
+
+	certClass, certDays := "", "N/A"
+	if r.HasCert {
+		certDays = strconv.Itoa(r.CertDays) + "d"
+		switch {
+		case r.CertDays < 7:
+			certClass = "cert-fatal"
+		case r.CertDays < 30:
+			certClass = "cert-warn"
+		}
+	}
+
+	return rigRow{
+		Name:        r.Name,
+		StatusClass: statusClass,
+		StatusLabel: statusLabel,
+		LastSeen:    r.LastSeen,
+		CertClass:   certClass,
+		CertDays:    certDays,
+		LockClass:   lockClass,
+		LockStatus:  lockStatus,
+	}
+}
+
 // HandlerDeps are the injected dependencies for the dashboard handlers. Keeping
 // them in a struct makes the wiring (daemon seam, Plan 04) and the tests
 // symmetric.
