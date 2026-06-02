@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abysslink Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/secrets"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// findingByCheck returns the first finding with the given Check name, or nil.
+func findingByCheck(findings []modules.Finding, check string) *modules.Finding {
+	for i := range findings {
+		if findings[i].Check == check {
+			return &findings[i]
+		}
+	}
+	return nil
+}
+
+func TestAuditDoctor_KeychainNil(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	findings := auditDoctorFindings(context.Background(), logPath, nil)
+	f := findingByCheck(findings, "audit-keychain")
+	require.NotNil(t, f, "audit-keychain finding must be present when kc is nil")
+	assert.Equal(t, modules.SeverityFatal, f.Severity)
+}
+
+func TestAuditDoctor_AnchorAgeWarnWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	kc := secrets.NewMockStore()
+	findings := auditDoctorFindings(context.Background(), logPath, kc)
+	f := findingByCheck(findings, "audit-anchor-age")
+	require.NotNil(t, f, "missing anchor should produce an anchor-age WARN")
+	assert.Equal(t, modules.SeverityWarning, f.Severity)
+}
+
+func TestAuditDoctor_AnchorAgeWarnWhenStale(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	// Write a stale anchor (Time older than 24h). HMAC need not match for the
+	// age check, which only parses Time.
+	stale := audit.Anchor{
+		EntryCount: 0,
+		LastHash:   "",
+		Time:       time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(stale)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "audit.anchor.json"), data, 0o600))
+
+	findings := auditDoctorFindings(context.Background(), logPath, secrets.NewMockStore())
+	f := findingByCheck(findings, "audit-anchor-age")
+	require.NotNil(t, f)
+	assert.Equal(t, modules.SeverityWarning, f.Severity)
+}
+
+func TestAuditDoctor_CountVsAnchorFatal(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	// Fresh anchor recording 5 entries, but the log has 0 — truncation.
+	anchor := audit.Anchor{
+		EntryCount: 5,
+		LastHash:   "abc",
+		Time:       time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(anchor)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "audit.anchor.json"), data, 0o600))
+
+	findings := auditDoctorFindings(context.Background(), logPath, secrets.NewMockStore())
+	f := findingByCheck(findings, "audit-count-vs-anchor")
+	require.NotNil(t, f, "count < anchor.EntryCount must be FATAL")
+	assert.Equal(t, modules.SeverityFatal, f.Severity)
+}
