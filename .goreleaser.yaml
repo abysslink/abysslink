@@ -90,13 +90,11 @@ sboms:
 
 signs:
   - cmd: cosign
-    certificate: "${artifact}.pem"
     args:
       - sign-blob
-      - "--output-certificate=${certificate}"
-      - "--output-signature=${signature}"
-      - "${artifact}"
+      - "--bundle=${artifact}.bundle"
       - "--yes"
+      - "${artifact}"
     artifacts: checksum
     output: true
 
@@ -151,15 +149,14 @@ release:
     ```sh
     VERSION={{ .Tag }}
 
-    # Download cosign artifacts for the checksum manifest
-    curl -fsSL https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt     -o checksums.txt
-    curl -fsSL https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt.sig -o checksums.txt.sig
-    curl -fsSL https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt.pem -o checksums.txt.pem
+    # Download the checksum manifest and its cosign v3 bundle
+    curl -fsSL https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt        -o checksums.txt
+    curl -fsSL https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt.bundle -o checksums.txt.bundle
 
-    # Verify cosign signature
+    # Verify cosign signature (offline — the bundle embeds the cert chain + Rekor proof)
     cosign verify-blob \
-      --certificate checksums.txt.pem \
-      --signature   checksums.txt.sig \
+      --bundle checksums.txt.bundle \
+      --offline \
       --certificate-identity-regexp "https://github.com/abysslink/abysslink/.github/workflows/release.yml@refs/tags/.*" \
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
       checksums.txt
