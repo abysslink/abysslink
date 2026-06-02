@@ -229,7 +229,13 @@ type memCounter struct{ entry *metricEntry }
 
 func (c *memCounter) Inc()            { c.entry.value.Add(1) }
 func (c *memCounter) Add(delta int64) { c.entry.value.Add(delta) }
-func (c *memCounter) Value() float64  { return float64(c.entry.value.Load()) }
+
+// Value routes through entry.read() so the stored int64 is interpreted per the
+// entry's actual metricType (WR-06). getOrCreate returns the existing entry on a
+// name collision, so a name first registered as a gauge then fetched via
+// Counter() would otherwise have its Float64bits storage misread as a plain
+// integer here. read() reinterprets correctly regardless of which accessor is held.
+func (c *memCounter) Value() float64 { return c.entry.read() }
 
 type memGauge struct{ entry *metricEntry }
 
@@ -238,5 +244,7 @@ type memGauge struct{ entry *metricEntry }
 // is lossless, not a numeric range conversion.
 func (g *memGauge) Set(v float64) { g.entry.value.Store(int64(math.Float64bits(v))) }
 
-// #nosec G115 -- see Set: lossless float64<->int64 bit reinterpretation.
-func (g *memGauge) Value() float64 { return math.Float64frombits(uint64(g.entry.value.Load())) }
+// Value routes through entry.read() (type-aware) for the same reason as
+// memCounter.Value (WR-06): a gauge handle to a counter-typed entry must read
+// the raw integer, not reinterpret it as float bits.
+func (g *memGauge) Value() float64 { return g.entry.read() }
