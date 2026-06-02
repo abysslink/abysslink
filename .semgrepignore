@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+#
+# webui templates use html/template, which auto-escapes all dynamic values.
+# The generic.html-templates.security.unquoted-attribute-var rule cannot
+# distinguish html/template (context-aware auto-escaping, safe) from raw
+# text/template (unsafe). The flagged attributes (e.g.
+# class="{{ if eq .ActiveView "status" }}nav-active{{ end }}") render only
+# static, compile-time string literals into the attribute — no user-controlled
+# value reaches the attribute. unquoted-attribute-var is a verified
+# false-positive for these html/template files (SEC-02, RESEARCH Pitfall 5).
+internal/modules/webui/templates/

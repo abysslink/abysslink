@@ -225,7 +225,12 @@ func webuiInsecureClient() *http.Client {
 	return &http.Client{
 		Timeout: webuiProbeTimeout,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // operator-initiated read-only doctor probe (T-19-17)
+			// nosemgrep: go.lang.security.audit.crypto.missing-ssl-minversion.missing-ssl-minversion
+			TLSClientConfig: &tls.Config{ //nolint:gosec // G402: operator-initiated read-only doctor probe against tailnet-local endpoint (T-19-17); MinVersion pins TLS 1.2 floor
+				MinVersion: tls.VersionTLS12,
+				// #nosec G402 -- operator-initiated read-only doctor probe against tailnet-local endpoint (T-19-17)
+				InsecureSkipVerify: true,
+			},
 		},
 	}
 }
