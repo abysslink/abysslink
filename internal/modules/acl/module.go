@@ -43,7 +43,7 @@ type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
 	bknd   backend.Client
-	audit  *audit.Audit
+	audit  audit.AuditWriter
 	prompt func(ctx context.Context, msg string) error
 }
 

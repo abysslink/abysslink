@@ -48,7 +48,7 @@ type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
 	plat   platform.Platform
-	audit  *audit.Audit
+	audit  audit.AuditWriter
 }
 
 // New returns a new Module.

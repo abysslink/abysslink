@@ -38,7 +38,7 @@ type Deps struct {
 	Backend  backend.Client
 	Platform platform.Platform
 	Keychain secrets.KeychainStore
-	Audit    *audit.Audit
+	Audit    audit.AuditWriter
 	// Prompt displays msg to the user and blocks until they press Enter. It is
 	// wired by the CLI layer (the only layer allowed to write to stdout), so
 	// modules can trigger interactive pauses without violating the no-stdout-in-

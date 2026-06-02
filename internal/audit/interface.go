@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abysslink Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package audit
+
+import "os"
+
+// AuditWriter is the file-mutation contract satisfied by both *Audit (unsigned,
+// backward-compatible v1/v2 path) and *SignedAudit (HMAC-chained, tamper-evident
+// path introduced in Phase 17). Callers depend on this interface so the concrete
+// writer can be swapped via dependency injection (modules.Deps.Audit).
+//
+// The method intentionally carries NO context.Context parameter. This keeps the
+// signature drop-in compatible with the pre-existing *Audit.WriteFile, so no
+// caller needs to change when *SignedAudit is injected instead. *SignedAudit's
+// implementation uses context.Background() internally (see signed.go) — that is
+// explicitly justified because WriteFile is a convenience wrapper over Append,
+// not a hot path, and the audit-then-write ordering invariant is enforced inside
+// the implementation rather than expressed in the interface.
+type AuditWriter interface {
+	// WriteFile records the intended mutation in the audit log (recording only
+	// the SHA-256 of content, never the content itself), then writes content to
+	// path atomically. When dryRun is true the intent is logged but no file is
+	// written or backed up.
+	WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error
+}
+
+// Compile-time assertions that both writers satisfy AuditWriter.
+var (
+	_ AuditWriter = (*Audit)(nil)
+	_ AuditWriter = (*SignedAudit)(nil)
+)

@@ -60,7 +60,7 @@ type Module struct {
 	cfg      *config.Config
 	plat     platform.Platform
 	keychain secrets.KeychainStore
-	audit    *audit.Audit
+	audit    audit.AuditWriter
 }
 
 // New returns a new code-server Module.
