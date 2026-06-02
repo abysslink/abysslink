@@ -541,7 +541,7 @@ Exit codes:
 			// aliases (sec-metrics-bind, sec-webui-bind, sec-audit-anchor-age)
 			// reuse the metFinds / webuiFinds / auditFinds slices computed above so
 			// the underlying checks run exactly once (RESEARCH Pitfall 3).
-			findings = append(findings, secDoctorFindings(ctx, cc, deps, metFinds, webuiFinds, auditFinds)...)
+			findings = append(findings, secDoctorFindings(ctx, cc, deps, false, metFinds, webuiFinds, auditFinds)...)
 
 			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
 			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")
