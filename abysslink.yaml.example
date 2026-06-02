@@ -72,3 +72,11 @@ hardening:
   firewall_stealth: true   # macOS
   ufw_default_deny: true   # Linux (ufw or firewalld)
   disable_macos_sshd: true # if mode != openssh-fallback
+
+# Opt-in browser dashboard served by abysslinkd over the tailnet.
+# Only present in the `abysslinkd-webui` build (goreleaser -tags webui).
+webui:
+  enabled: false           # default OFF — listener never starts unless opted in
+  bind_addr: ""            # resolved to tailnet IP at runtime; never set to 0.0.0.0 or ::
+  port: 8443
+  read_only: true          # MUST be true — mutations are disabled in the web UI (WEB-02)

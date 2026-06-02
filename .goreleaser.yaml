@@ -54,12 +54,55 @@ builds:
       - -X github.com/abysslink/abysslink/internal/cli.slsaURL=https://github.com/abysslink/abysslink/attestations
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+  # Separate opt-in build that links the Web UI dashboard (Phase 19, WEB-01).
+  # Identical to abysslinkd but with `-tags webui`, so the Tailscale SDK is only
+  # linked into this artifact — the base abysslinkd binary stays SDK-free (T-19-02).
+  - id: abysslinkd-webui
+    binary: abysslinkd-webui
+    main: ./cmd/abysslinkd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    tags:
+      - webui
+    ldflags:
+      - -s -w
+      - -X github.com/abysslink/abysslink/internal/cli.version={{.Version}}
+      - -X github.com/abysslink/abysslink/internal/cli.commit={{.Commit}}
+      - -X github.com/abysslink/abysslink/internal/cli.buildDate={{.CommitDate}}
+      - -X github.com/abysslink/abysslink/internal/cli.bundleURL=https://github.com/abysslink/abysslink/releases/download/{{.Tag}}/{{.ProjectName}}_{{.Version}}_checksums.txt.bundle
+      - -X github.com/abysslink/abysslink/internal/cli.slsaURL=https://github.com/abysslink/abysslink/attestations
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
 archives:
   - id: default
     ids:
       - abysslink
       - abysslinkd
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+      - NOTICE
+      - abysslink.yaml.example
+
+  # Separate archive for the opt-in Web UI daemon variant (WEB-01). Distinct
+  # name_template keeps the webui artifact unambiguous alongside the default set.
+  - id: webui
+    ids:
+      - abysslinkd-webui
+    name_template: "{{ .ProjectName }}-webui_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
         formats:
