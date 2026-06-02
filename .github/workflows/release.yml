@@ -7,44 +7,156 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  packages: write
-  id-token: write  # required for cosign OIDC signing (Phase 8)
+# Workflow-level permissions: deny-all by default; each job grants only what it needs.
+permissions: {}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  release:
-    name: Release
+  build:
+    name: Build & SBOM
     runs-on: ubuntu-latest
-
+    timeout-minutes: 30
+    permissions:
+      contents: read      # checkout only; no write access
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            objects.githubusercontent.com:443
+            github.com:443
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0  # goreleaser needs full history for changelog
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: "1.23"
           cache: true
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
-        # Phase 8: cosign signing enabled in .goreleaser.yaml
-
       - name: Install Syft
-        uses: anchore/sbom-action/download-syft@v0
-        # Phase 8: SBOM generation enabled in .goreleaser.yaml
+        uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+      - name: Run GoReleaser (build + SBOM only, no signing)
+        uses: goreleaser/goreleaser-action@9c156ee8a17a598857849441385a2041ef570552 # v6.3.0
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --skip=sign
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No COSIGN_PASSWORD needed — using keyless OIDC signing.
+
+      - name: Extract version tag
+        id: meta
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dist artifacts for subsequent jobs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  sign:
+    name: Sign (cosign v3 bundle)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write     # upload release assets
+      id-token: write     # OIDC token for cosign keyless signing
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            objects.githubusercontent.com:443
+            github.com:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            oauth2.sigstore.dev:443
+            token.actions.githubusercontent.com:443
+            tuf-repo-cdn.sigstore.dev:443
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
+        with:
+          cosign-release: v3.0.6
+
+      - name: Sign checksums with cosign v3 bundle
+        run: |
+          # cosign v3: --bundle produces a self-contained bundle (cert + proof + sig).
+          # Offline verification works from the bundle file alone (Pitfall 14 mitigation).
+          for checksums_file in dist/*checksums.txt; do
+            cosign sign-blob \
+              --bundle="${checksums_file}.bundle" \
+              --yes \
+              "${checksums_file}"
+          done
+
+      - name: Upload .bundle files to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ needs.build.outputs.version }}"
+          for bundle in dist/*.bundle; do
+            gh release upload "${tag}" "${bundle}" --clobber
+          done
+
+  attest:
+    name: SLSA L2 Provenance (actions/attest)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: write  # publish SLSA provenance attestation
+      id-token: write      # OIDC token required by actions/attest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            objects.githubusercontent.com:443
+            github.com:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Generate SLSA L2 provenance
+        # Binds the attestation to the exact source commit SHA (github.sha) —
+        # immutable for tag pushes (Pitfall 15 mitigation). SLSA Build L2.
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            dist/*_checksums.txt
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.deb
+            dist/*.rpm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
