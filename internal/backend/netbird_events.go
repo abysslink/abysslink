@@ -22,7 +22,17 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/abysslink/abysslink/internal/config"
 )
+
+// NetBirdTailEvents constructs a netbirdAdapter from cfg and tails audit events
+// to out. When follow is false it fetches the snapshot once; when true it polls
+// with bounded backoff (watermark-deduplicated, ctx-cancellable). CLI-facing
+// accessor for the unexported adapter (D-05: reuse doRequest, no new client).
+func NetBirdTailEvents(ctx context.Context, cfg *config.Config, out io.Writer, follow bool) error {
+	return newNetBirdAdapter(cfg, nil).TailEvents(ctx, out, follow)
+}
 
 // defaultEventPollStart / defaultEventPollMax bound the --follow polling backoff.
 // NetBird's audit-events endpoint (GET /api/events/audit) has no streaming or
