@@ -9,8 +9,10 @@ GOLANGCI   ?= golangci-lint
 GORELEASER ?= goreleaser
 
 # Build info
+# COMMIT uses the FULL SHA to match goreleaser's {{.Commit}} injection, so a
+# `make build` and the released binary agree on the embedded commit ldflag.
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+COMMIT     ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 LDFLAGS    := -s -w \
