@@ -210,6 +210,31 @@ func TestAuditFix(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm(), "sshd config left unchanged")
 	})
+
+	t.Run("symlink_target_refused", func(t *testing.T) {
+		// WR-02: if the flagged path is (or is swapped to) a symlink pointing at a
+		// sensitive file, --fix --apply must REFUSE and must NOT chmod the target.
+		// Isolate the audit-log path so the pre-chmod audit append (which runs
+		// before the symlink guard refuses) never touches the developer's log.
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		dir := t.TempDir()
+		secret := filepath.Join(dir, "authorized_keys")
+		require.NoError(t, os.WriteFile(secret, []byte("ssh-ed25519 AAAA...\n"), 0o600))
+		require.NoError(t, os.Chmod(secret, 0o644)) // distinguishable from 0o600
+
+		link := filepath.Join(dir, "abysslink.yaml")
+		require.NoError(t, os.Symlink(secret, link))
+
+		var out bytes.Buffer
+		p := NewHumanPrinterTo(&out, &out)
+		applied := secFixChmod(p, link, false) // dryRun=false → would apply if not refused
+		assert.False(t, applied, "symlinked path must be refused")
+
+		fi, err := os.Lstat(secret)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm(),
+			"chmod must not follow the symlink to the sensitive target")
+	})
 }
 
 // newAggregateTestContext builds a cmdContext with default config pointed at an
