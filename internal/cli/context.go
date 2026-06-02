@@ -160,13 +160,28 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 		return modules.Deps{}, fmt.Errorf("audit init: %w", err)
 	}
 
+	// Prefer the signed, hash-chained audit writer when a keychain is available;
+	// fall back to the unsigned writer (backward compat) otherwise. Both satisfy
+	// audit.AuditWriter so Deps.Audit accepts either without a type assertion.
+	var auditWriter audit.AuditWriter
+	if kc != nil {
+		if sa, saErr := audit.NewSigned(logPath, kc); saErr == nil {
+			auditWriter = sa
+		} else {
+			slog.Warn("signed audit unavailable; falling back to unsigned audit log", "err", saErr)
+			auditWriter = audit.New(logPath)
+		}
+	} else {
+		auditWriter = audit.New(logPath)
+	}
+
 	return modules.Deps{
 		Cfg:      cc.cfg,
 		Runner:   cc.runner,
 		Backend:  b,
 		Platform: plat,
 		Keychain: kc,
-		Audit:    audit.New(logPath),
+		Audit:    auditWriter,
 		// Prompt routes module prompts through the interactive gate + tui.Pause:
 		// never raw stdout (which would corrupt --json) and never a bare stdin
 		// read (which would block in non-TTY/CI/--json contexts). CR-01 / T-10-16.
