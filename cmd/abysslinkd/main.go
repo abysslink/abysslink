@@ -104,6 +104,18 @@ func main() {
 	// exits cleanly on ctx cancellation; a disabled digest launches no goroutine.
 	daemon.StartDigestScheduler(ctx, cfg, directNotifier{m: nm}, runner)
 
+	// Opt-in browser dashboard (Phase 19, //go:build webui, default OFF). The
+	// base build links a no-op stub (start_webui_stub.go); the webui build wires
+	// the TLS+WhoIs server goroutine and prints the loud one-time security note
+	// to stderr (cmd entrypoint, not library code — CLAUDE.md). startWebUI also
+	// injects the notify-history ring into srv via SetRing so deliveries appear
+	// in the /notify view. A disabled webui returns immediately (no goroutine).
+	if logPath, lpErr := audit.DefaultLogPath(); lpErr == nil {
+		startWebUI(ctx, cfg, srv, logPath)
+	} else {
+		startWebUI(ctx, cfg, srv, "")
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		slog.Error("abysslinkd: exited with error", "err", err)
 		os.Exit(1)

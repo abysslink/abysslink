@@ -91,9 +91,16 @@ func newSafewebServer(mux *http.ServeMux) (*safeweb.Server, error) {
 //
 // The serve goroutine begins with a deferred recover so a panic in any handler
 // or in Serve cannot crash the daemon process (T-19-18 / WARNING 6).
-func StartWebUIServer(ctx context.Context, cfg *config.Config) error {
+// ring may be nil, in which case StartWebUIServer constructs its own empty ring
+// (the notify-history view then stays empty). The daemon entrypoint passes the
+// same ring it injected into the daemon Server via SetRing so deliveries
+// recorded in handleNotify appear in the /notify view (WEB-07).
+func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingBuffer) error {
 	if err := config.ValidateWebUI(cfg); err != nil {
 		return err
+	}
+	if ring == nil {
+		ring = NewNotifyRingBuffer()
 	}
 
 	addr := webuiAddr(cfg)
@@ -121,7 +128,7 @@ func StartWebUIServer(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("webui: audit log path: %w", err)
 	}
 	handlers, err := NewHandlers(HandlerDeps{
-		Ring:         NewNotifyRingBuffer(),
+		Ring:         ring,
 		AuditLogPath: auditLogPath,
 		RigHostname:  cfg.Tailnet.Hostname,
 	})
