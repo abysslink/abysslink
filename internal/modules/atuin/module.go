@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -173,8 +174,78 @@ func (m *Module) Apply(ctx context.Context) error {
 		slog.Debug("atuin apply: config already exists, not overwriting", "path", cfgPath)
 	}
 
-	slog.Info("atuin apply: add `eval \"$(atuin init zsh)\"` to ~/.zshrc to enable shell integration")
+	// Append the atuin shell-init line to the user's shell rc. This is an
+	// audited file mutation and is idempotent: if the rc already contains the
+	// init line, no second write happens (Pitfall 3 — never duplicate the line).
+	if err := m.appendShellInit(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// appendShellInit ensures the atuin shell-init `eval` line is present in the
+// user's shell rc file (~/.zshrc for zsh, ~/.bashrc otherwise). The write goes
+// through audit.WriteFile (never bare os.WriteFile) and is idempotent via a
+// strings.Contains guard so repeated `abysslink up --apply` runs do not append
+// the line more than once.
+func (m *Module) appendShellInit() error {
+	initLine, rcPath, err := atuinShellInit()
+	if err != nil {
+		return fmt.Errorf("atuin apply: resolve shell rc: %w", err)
+	}
+
+	// Read existing content; a missing rc file is non-fatal (treat as empty).
+	data, err := os.ReadFile(rcPath) //nolint:gosec // G304: rcPath is the user's shell rc resolved from $HOME, not external input
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("atuin apply: read shell rc: %w", err)
+	}
+
+	if strings.Contains(string(data), initLine) {
+		slog.Debug("atuin apply: shell integration already present, skipping", "rc", rcPath)
+		return nil
+	}
+
+	if m.audit == nil {
+		return fmt.Errorf("atuin apply: audit not available")
+	}
+
+	newData := append(data, []byte("\n"+initLine+"\n")...)
+	if err := m.audit.WriteFile(rcPath, newData, 0o600, false); err != nil {
+		return fmt.Errorf("atuin apply: append shell integration: %w", err)
+	}
+	slog.Info("atuin apply: appended shell integration", "rc", rcPath)
+	return nil
+}
+
+// atuinShellInit returns the atuin shell-init eval line and the rc file path to
+// append it to, based on the user's $SHELL. zsh uses `eval "$(atuin init zsh)"`
+// in ~/.zshrc; every other shell falls back to bash semantics in ~/.bashrc.
+func atuinShellInit() (initLine, rcPath string, err error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", err
+	}
+	if strings.HasSuffix(os.Getenv("SHELL"), "zsh") {
+		return `eval "$(atuin init zsh)"`, filepath.Join(home, ".zshrc"), nil
+	}
+	return `eval "$(atuin init bash)"`, filepath.Join(home, ".bashrc"), nil
+}
+
+// KeyPath returns the OS-specific path to the atuin sync encryption key.
+// It honours $XDG_DATA_HOME when set; otherwise it uses the platform default
+// ($HOME/Library/Application Support/atuin/key on darwin, $HOME/.local/share/
+// atuin/key on linux). Doctor checks use this with os.Stat only — they never
+// read the key contents (it is a secret).
+func KeyPath() string {
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "atuin", "key")
+	}
+	home, _ := os.UserHomeDir()
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(home, "Library", "Application Support", "atuin", "key")
+	}
+	return filepath.Join(home, ".local", "share", "atuin", "key")
 }
 
 // Verify re-runs Detect.

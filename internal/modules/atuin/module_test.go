@@ -19,6 +19,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -149,4 +150,83 @@ func TestVerify_DelegatesToDetect(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, findings, 1)
 	assert.Equal(t, "installed", findings[0].Check)
+}
+
+func TestApply_WritesShellRC_Zsh(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	auditLog := filepath.Join(dir, "audit.log")
+	a := audit.New(auditLog)
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Audit: a})
+	require.NoError(t, m.Apply(context.Background()))
+
+	data, err := os.ReadFile(filepath.Join(dir, ".zshrc"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `eval "$(atuin init zsh)"`)
+}
+
+func TestApply_WritesShellRC_Bash(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/bin/bash")
+
+	auditLog := filepath.Join(dir, "audit.log")
+	a := audit.New(auditLog)
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Audit: a})
+	require.NoError(t, m.Apply(context.Background()))
+
+	data, err := os.ReadFile(filepath.Join(dir, ".bashrc"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `eval "$(atuin init bash)"`)
+}
+
+// countingAudit wraps audit.AuditWriter to count WriteFile calls per path so
+// the idempotency test can assert the shell-rc line is written at most once.
+type countingAudit struct {
+	inner  *audit.Audit
+	counts map[string]int
+}
+
+func (c *countingAudit) WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error {
+	c.counts[path]++
+	return c.inner.WriteFile(path, content, perm, dryRun)
+}
+
+func TestApply_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	rcPath := filepath.Join(dir, ".zshrc")
+	require.NoError(t, os.WriteFile(rcPath, []byte("# user rc\neval \"$(atuin init zsh)\"\n"), 0o600))
+
+	a := &countingAudit{inner: audit.New(filepath.Join(dir, "audit.log")), counts: map[string]int{}}
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Audit: a})
+	require.NoError(t, m.Apply(context.Background()))
+
+	assert.Zero(t, a.counts[rcPath], "shell rc must not be rewritten when the init line is already present")
+}
+
+func TestKeyPath_Linux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-specific path layout")
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("HOME", dir)
+	assert.Equal(t, filepath.Join(dir, ".local", "share", "atuin", "key"), KeyPath())
+
+	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "xdgdata"))
+	assert.Equal(t, filepath.Join(dir, "xdgdata", "atuin", "key"), KeyPath())
 }
