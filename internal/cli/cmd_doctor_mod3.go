@@ -19,7 +19,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	atuin "github.com/abysslink/abysslink/internal/modules/atuin"
@@ -62,7 +64,7 @@ import (
 //     asciinema rec` requires an interactive TTY and shows a non-suppressible
 //     credential warning before any recording, with no bypass flag/env-var
 //     (T-21-02-01); enforced by TestAsciinemaRec_RequiresInteractiveTTY.
-func mod3DoctorFindings(_ context.Context, cfg *config.Config, _ shell.Runner) []modules.Finding {
+func mod3DoctorFindings(ctx context.Context, cfg *config.Config, _ shell.Runner) []modules.Finding {
 	var findings []modules.Finding
 
 	if cfg.Modules.Upsnap.Enabled {
@@ -115,7 +117,66 @@ func mod3DoctorFindings(_ context.Context, cfg *config.Config, _ shell.Runner) [
 		)
 	}
 
+	if cfg.Backend.Type == "netbird" {
+		findings = append(findings, nbPostureActiveFinding(ctx, cfg))
+	}
+
 	return findings
+}
+
+// nbPostureActiveFinding builds the nb-posture-active finding (MOD3-05). It is
+// emitted only when the NetBird backend is configured.
+//
+//   - WARN when ABYSSLINK_NB_API_KEY is unset — the API cannot be reached to
+//     count posture checks.
+//   - WARN when the NetBird API is unreachable or returns an error.
+//   - WARN when zero posture checks are configured — peers are unrestricted
+//     (informational, not fatal: posture validation is optional).
+//   - OK when one or more posture checks are active.
+//
+// The probe runs through the existing NetBird REST client (no new HTTP client;
+// D-05); the API key flows only into the Authorization header (T-21-04-01).
+func nbPostureActiveFinding(ctx context.Context, cfg *config.Config) modules.Finding {
+	const (
+		mod   = "netbird"
+		check = "nb-posture-active"
+	)
+
+	if os.Getenv("ABYSSLINK_NB_API_KEY") == "" {
+		return modules.Finding{
+			Module:   mod,
+			Check:    check,
+			Severity: modules.SeverityWarning,
+			Message:  "nb-posture-active — NetBird backend configured but ABYSSLINK_NB_API_KEY not set; cannot check posture status",
+		}
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	checks, err := backend.NetBirdListPostureChecks(probeCtx, cfg)
+	if err != nil {
+		return modules.Finding{
+			Module:   mod,
+			Check:    check,
+			Severity: modules.SeverityWarning,
+			Message:  "nb-posture-active — could not reach NetBird API to check posture status: " + err.Error(),
+		}
+	}
+	if len(checks) == 0 {
+		return modules.Finding{
+			Module:   mod,
+			Check:    check,
+			Severity: modules.SeverityWarning,
+			Message:  "nb-posture-active — no NetBird posture checks configured; all peers are unrestricted",
+		}
+	}
+	return modules.Finding{
+		Module:   mod,
+		Check:    check,
+		Severity: modules.SeverityOK,
+		Message:  fmt.Sprintf("nb-posture-active — %d posture check(s) active", len(checks)),
+	}
 }
 
 // atuinKeyBackedUpFinding builds the atuin-key-backed-up WARN finding. It only
