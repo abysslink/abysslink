@@ -131,6 +131,7 @@ Run 'abysslink <command> --help' for details on any command.`,
 		newEnableCmd(),
 		newDisableCmd(),
 		newThreatModelCmd(),
+		newWolCmd(),
 		newUninstallCmd(),
 	}
 	for _, c := range advancedCmds {
