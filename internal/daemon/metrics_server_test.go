@@ -101,6 +101,47 @@ func TestMetricsServerNilBackend(t *testing.T) {
 	assert.Error(t, err, "no listener should bind with nil backend")
 }
 
+// TestMetricsServerEmptyIPFailsClosed is the CR-01 regression: when the backend
+// resolves an empty tailnet IP (LocalClient.IP returns ("", nil) before
+// tailscaled reports an address), the listener MUST NOT fall back to a wildcard
+// bind. No socket may be listening on the configured port (OBS-03).
+func TestMetricsServerEmptyIPFailsClosed(t *testing.T) {
+	port := freePort(t)
+	cfg := metricsEnabledCfg(port)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Empty IP, no error — exactly LocalClient.IP's degraded return.
+	daemon.StartMetricsServer(ctx, cfg, metrics.NewMemRegistry(), &localMockBackend{ip: ""})
+	time.Sleep(100 * time.Millisecond)
+
+	// Probe the wildcard form (":port") — this is what a faulty
+	// net.JoinHostPort("", port) bind would have exposed on all interfaces.
+	_, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", itoa(port)), 50*time.Millisecond)
+	assert.Error(t, err, "no listener may bind when the tailnet IP is empty (OBS-03 fail-closed)")
+}
+
+// TestMetricsServerHonorsBindAddr is the WR-01 regression: when bind_addr is
+// set to a legitimate (loopback, non-wildcard) host:port, the listener binds
+// THAT address and port — not backend.Client.IP / the default port.
+func TestMetricsServerHonorsBindAddr(t *testing.T) {
+	port := freePort(t)
+	cfg := metricsEnabledCfg(0) // no Port: bind_addr supplies it
+	cfg.Observability.Metrics.BindAddr = net.JoinHostPort("127.0.0.1", itoa(port))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reg := metrics.NewMemRegistry()
+	reg.Gauge("test_up", "up", nil).Set(1)
+	// Backend IP differs from bind_addr; bind_addr must win.
+	daemon.StartMetricsServer(ctx, cfg, reg, &localMockBackend{ip: "100.64.0.1"})
+
+	body := waitForMetrics(t, port)
+	assert.NotEmpty(t, body, "listener must honor the configured bind_addr")
+}
+
 func TestMetricsServerBindsTailnetIP(t *testing.T) {
 	port := freePort(t)
 	cfg := metricsEnabledCfg(port)
