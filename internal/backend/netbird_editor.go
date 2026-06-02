@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 )
@@ -185,7 +186,9 @@ func (e *netbirdEditor) RemoveAllowAllPolicies(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("netbird: remove allow-all: delete policy %s: %w", policy.ID, err)
 			}
-			resp.Body.Close() //nolint:errcheck
+			if cerr := resp.Body.Close(); cerr != nil {
+				slog.Warn("netbird: close delete-policy response body (best-effort)", "err", cerr)
+			}
 			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 				return fmt.Errorf("netbird: remove allow-all: delete policy %s: unexpected HTTP %d", policy.ID, resp.StatusCode)
 			}
