@@ -46,6 +46,13 @@ jobs:
           go-version: "1.23"
           cache: true
 
+      # ldflags below mirror .goreleaser.yaml exactly so the binary this gate
+      # proves byte-reproducible matches the one that ships:
+      #   - commit uses the FULL SHA (goreleaser injects {{.Commit}}), not --short
+      #   - buildDate uses the committer date (goreleaser injects {{.CommitDate}})
+      # The released artifact additionally carries {{.Tag}}-derived version,
+      # bundleURL, and slsaURL — those depend on the release tag and are not
+      # reproducible from an arbitrary HEAD, so they are deliberately omitted here.
       - name: Build binary (attempt 1)
         run: |
           SOURCE_DATE_EPOCH=$(git log -1 --format='%ct')
@@ -54,7 +61,7 @@ jobs:
           go build -trimpath \
             -ldflags "-s -w \
               -X github.com/abysslink/abysslink/internal/cli.version=$(git describe --tags --always) \
-              -X github.com/abysslink/abysslink/internal/cli.commit=$(git rev-parse --short HEAD) \
+              -X github.com/abysslink/abysslink/internal/cli.commit=$(git rev-parse HEAD) \
               -X github.com/abysslink/abysslink/internal/cli.buildDate=$(git log -1 --format='%cI')" \
             -o build1/abysslink ./cmd/abysslink
 
@@ -66,7 +73,7 @@ jobs:
           go build -trimpath \
             -ldflags "-s -w \
               -X github.com/abysslink/abysslink/internal/cli.version=$(git describe --tags --always) \
-              -X github.com/abysslink/abysslink/internal/cli.commit=$(git rev-parse --short HEAD) \
+              -X github.com/abysslink/abysslink/internal/cli.commit=$(git rev-parse HEAD) \
               -X github.com/abysslink/abysslink/internal/cli.buildDate=$(git log -1 --format='%cI')" \
             -o build2/abysslink ./cmd/abysslink
 
