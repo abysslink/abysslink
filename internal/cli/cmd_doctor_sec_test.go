@@ -348,7 +348,7 @@ func TestSecDoctorFindings(t *testing.T) {
 	webuiFindings := []modules.Finding{{Module: "webui", Check: "webui-bind", Severity: modules.SeverityOK}}
 	auditFindings := []modules.Finding{{Module: "audit", Check: "audit-anchor-age", Severity: modules.SeverityWarning}}
 
-	findings := secDoctorFindings(ctx, cc, deps, metFindings, webuiFindings, auditFindings)
+	findings := secDoctorFindings(ctx, cc, deps, false, metFindings, webuiFindings, auditFindings)
 
 	require.Len(t, findings, 18, "secDoctorFindings must return exactly 18 findings")
 
