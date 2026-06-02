@@ -101,7 +101,10 @@ verify_checksum() {
     _file="$1"
     _sums="$2"
     _basename="$(basename "${_file}")"
-    _expected="$(grep " ${_basename}$" "${_sums}" | awk '{print $1}')"
+    # Exact filename match via awk (not a grep regex): the basename is compared
+    # literally as field 2, accepting GNU sha256sum's optional binary-mode '*'
+    # marker. Avoids regex-metacharacter mismatches (e.g. the '.' in '.tar.gz').
+    _expected="$(awk -v f="${_basename}" '$2 == f || $2 == "*"f {print $1}' "${_sums}")"
     [ -n "${_expected}" ] || die "checksum entry not found for ${_basename}"
 
     if have_cmd sha256sum; then
