@@ -123,20 +123,20 @@ func applyUpgrade(ctx context.Context, p Printer, runner shell.Runner, tag strin
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	// Download all artifacts.
-	for _, name := range []string{tarball, checksums, checksums + ".sig", checksums + ".pem"} {
+	// Download all artifacts. The cosign v3 bundle embeds both the signature and
+	// the signing certificate, so a single .bundle file replaces the v2 .sig/.pem pair.
+	for _, name := range []string{tarball, checksums, checksums + ".bundle"} {
 		printerInfo(p, "  ↓  "+name)
 		if err := downloadFile(ctx, baseURL+"/"+name, filepath.Join(tmpDir, name)); err != nil {
 			return fmt.Errorf("upgrade: download %s: %w", name, err)
 		}
 	}
 
-	// Verify cosign signature on the checksum manifest.
+	// Verify cosign v3 bundle signature on the checksum manifest (offline — no Rekor).
 	printerInfo(p, "  ✦  verifying cosign signature...")
 	if err := verifyCosignBlob(ctx, runner,
 		filepath.Join(tmpDir, checksums),
-		filepath.Join(tmpDir, checksums+".sig"),
-		filepath.Join(tmpDir, checksums+".pem"),
+		filepath.Join(tmpDir, checksums+".bundle"),
 	); err != nil {
 		return fmt.Errorf("upgrade: cosign verification FAILED — refusing to install: %w", err)
 	}
@@ -176,24 +176,12 @@ func checkCosignInstalled() error {
 	return nil
 }
 
-// verifyCosignBlob verifies the cosign keyless signature on target using the
-// provided .sig and .pem files from the release.
-func verifyCosignBlob(ctx context.Context, runner shell.Runner, target, sigFile, certFile string) error {
-	res, err := runner.Run(ctx, "cosign", "verify-blob",
-		"--certificate", certFile,
-		"--signature", sigFile,
-		"--certificate-identity-regexp", upgradeIdentityRegexp,
-		"--certificate-oidc-issuer", upgradeOIDCIssuer,
-		target,
-	)
-	if err != nil {
-		return fmt.Errorf("cosign verify-blob: %w", err)
-	}
-	if res.ExitCode != 0 {
-		combined := strings.TrimSpace(res.Stdout + res.Stderr)
-		return fmt.Errorf("cosign verify-blob exited %d: %s", res.ExitCode, combined)
-	}
-	return nil
+// verifyCosignBlob verifies the cosign v3 keyless signature on target using the
+// provided .bundle file from the release. The bundle embeds the signature and
+// signing certificate, so no separate .sig/.pem files are needed. It delegates
+// to verifyCosignBundle, which runs cosign in --offline mode (no Rekor lookup).
+func verifyCosignBlob(ctx context.Context, runner shell.Runner, target, bundleFile string) error {
+	return verifyCosignBundle(ctx, runner, target, bundleFile)
 }
 
 // verifyChecksum reads the sha256 checksum file and checks that the file at
