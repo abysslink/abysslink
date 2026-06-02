@@ -33,12 +33,23 @@ var labelAllowlist = map[string]struct{}{
 	"rig":      {},
 }
 
+// IsAllowedLabel reports whether name is in the compile-time label allowlist
+// (OBS-04). Callers that need to distinguish "this label name is forbidden"
+// from "SanitizeLabel returned its catch-all sentinel" must use this predicate
+// rather than comparing SanitizeLabel's output to "other" — the latter couples
+// to an implementation detail and would misfire if a future allowlist entry
+// were literally named "other" (WR-04).
+func IsAllowedLabel(name string) bool {
+	_, ok := labelAllowlist[name]
+	return ok
+}
+
 // SanitizeLabel returns name unchanged when it is in the compile-time
 // allowlist, otherwise it returns "other". This collapses unknown label names
 // to a single bounded key so metric cardinality cannot be inflated by callers
 // (OBS-04, T-18-02).
 func SanitizeLabel(name string) string {
-	if _, ok := labelAllowlist[name]; ok {
+	if IsAllowedLabel(name) {
 		return name
 	}
 	return "other"

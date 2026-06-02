@@ -265,7 +265,10 @@ func metLabelAuditCheck(reg metrics.Registry) modules.Finding {
 	for _, fam := range reg.Snapshot() {
 		for _, sample := range fam.Samples {
 			for key := range sample.Labels {
-				if metrics.SanitizeLabel(key) == "other" {
+				// WR-04: check allowlist membership directly rather than inferring
+				// it from SanitizeLabel's "other" sentinel — the latter would
+				// misfire if an allowlist entry were ever named "other".
+				if !metrics.IsAllowedLabel(key) {
 					return modules.Finding{
 						Module:   "metrics",
 						Check:    check,
@@ -319,10 +322,11 @@ func metDisabledListenerCheck(cfg *config.Config, tailnetIP string) modules.Find
 	addr := cfg.Observability.Metrics.BindAddr
 	switch {
 	case addr != "":
-		// Honor an explicit host:port; a bare host gets the configured/default port.
+		// Honor an explicit host:port; a bare host gets the configured/default
+		// port. Reuse config.BindAddrHost for host extraction (IN-04) instead of
+		// a hand-rolled bracket trim, matching metMetricsBindCheck (line 231).
 		if _, _, err := net.SplitHostPort(addr); err != nil {
-			host := strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
-			addr = net.JoinHostPort(host, fmt.Sprintf("%d", port))
+			addr = net.JoinHostPort(config.BindAddrHost(addr), fmt.Sprintf("%d", port))
 		}
 	case tailnetIP != "":
 		addr = net.JoinHostPort(tailnetIP, fmt.Sprintf("%d", port))
