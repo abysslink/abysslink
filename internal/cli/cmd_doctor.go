@@ -169,14 +169,35 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 //   - met-disabled-listener (FATAL): metrics disabled but the configured port is
 //     still accepting connections (stale listener) — probed via net.DialTimeout
 //     with a 200ms timeout, no shellout (OBS-05).
-func metricsDoctorFindings(cfg *config.Config, reg metrics.Registry) []modules.Finding {
+func metricsDoctorFindings(cfg *config.Config, reg metrics.Registry, tailnetIP string) []modules.Finding {
 	return []modules.Finding{
 		metBindTailnetCheck(cfg),
 		metLabelAuditCheck(reg),
 		metCardinalityCheck(reg),
-		metDisabledListenerCheck(cfg),
+		metDisabledListenerCheck(cfg, tailnetIP),
 	}
 }
+
+// resolveTailnetIP best-effort resolves this node's tailnet IP for the
+// disabled-listener probe (WR-03). Any failure (no backend, backend not up,
+// node has no Tailscale address) yields "" — the probe then falls back to its
+// last-resort ":port" target. It never fails the doctor run.
+func resolveTailnetIP(ctx context.Context, cc *cmdContext) string {
+	b, err := cc.backend()
+	if err != nil || b == nil {
+		return ""
+	}
+	ip, err := b.IP(ctx)
+	if err != nil {
+		return ""
+	}
+	return ip
+}
+
+// defaultMetricsPort is the Prometheus exposition port used when
+// observability.metrics.port is unset. It mirrors daemon.defaultMetricsPort;
+// kept local to avoid a cli->daemon import for a single constant (IN-03).
+const defaultMetricsPort = 9090
 
 // metBindTailnetCheck enforces the OBS-03 tailnet-only bind floor.
 func metBindTailnetCheck(cfg *config.Config) modules.Finding {
@@ -234,17 +255,34 @@ func metCardinalityCheck(reg metrics.Registry) modules.Finding {
 // port is still listening. The probe uses net.DialTimeout (200ms) — never a
 // ss/lsof shellout (OBS-05). Disable is restart-scoped: this verifies the port
 // stays closed after a restart with enabled=false.
-func metDisabledListenerCheck(cfg *config.Config) modules.Finding {
+//
+// WR-03: the live listener binds the tailnet IP (or the configured bind_addr),
+// NOT ":port"/127.0.0.1, so the probe must target the same address the listener
+// would have bound. Precedence mirrors resolveMetricsAddr: an explicit
+// bind_addr wins; otherwise probe the resolved tailnetIP:port. Probing ":port"
+// would not reach a socket bound only to 100.x.y.z:port and would miss a stale
+// listener (false negative). When neither a bind_addr nor a tailnet IP is
+// available, fall back to ":port" as a best-effort last resort.
+func metDisabledListenerCheck(cfg *config.Config, tailnetIP string) modules.Finding {
 	const check = "met-disabled-listener"
 	if cfg.Observability.Metrics.Enabled {
 		return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metrics enabled — listener probe not applicable"}
 	}
+	port := cfg.Observability.Metrics.Port
+	if port <= 0 {
+		port = defaultMetricsPort
+	}
 	addr := cfg.Observability.Metrics.BindAddr
-	if addr == "" {
-		port := cfg.Observability.Metrics.Port
-		if port <= 0 {
-			port = 9090
+	switch {
+	case addr != "":
+		// Honor an explicit host:port; a bare host gets the configured/default port.
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			host := strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+			addr = net.JoinHostPort(host, fmt.Sprintf("%d", port))
 		}
+	case tailnetIP != "":
+		addr = net.JoinHostPort(tailnetIP, fmt.Sprintf("%d", port))
+	default:
 		addr = fmt.Sprintf(":%d", port)
 	}
 	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
@@ -463,8 +501,10 @@ Exit codes:
 			}
 
 			// Observability metrics posture (OBS-03/04/05): bind floor, label
-			// allowlist, cardinality budget, and stale-listener probe.
-			findings = append(findings, metricsDoctorFindings(cc.cfg, deps.MetricsRegistry())...)
+			// allowlist, cardinality budget, and stale-listener probe. The
+			// tailnet IP is resolved best-effort so the disabled-listener probe
+			// targets the same address the live listener binds (WR-03).
+			findings = append(findings, metricsDoctorFindings(cc.cfg, deps.MetricsRegistry(), resolveTailnetIP(ctx, cc))...)
 
 			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
 			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")
