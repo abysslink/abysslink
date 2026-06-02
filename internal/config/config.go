@@ -167,6 +167,7 @@ type RigConfig struct {
 	NtfyTopic string `yaml:"ntfy_topic"`          // abysslink-<name>-<8char> (D-NI-01)
 	Backend   string `yaml:"backend"`             // backend type at enrollment
 	LastSeen  string `yaml:"last_seen,omitempty"` // RFC3339 UTC; updated by fan-out status (Plan 05)
+	MAC       string `yaml:"mac,omitempty"`       // hardware MAC for Wake-on-LAN (MOD3-01); empty disables WoL for this rig
 }
 
 // Identity holds the user's Tailscale and UNIX identifiers.
