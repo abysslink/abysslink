@@ -96,6 +96,7 @@ Run 'abysslink <command> --help' for details on any command.`,
 		newUpCmd(),
 		newStatusCmd(),
 		newDoctorCmd(),
+		newReportCmd(),
 		newRepairCmd(),
 		newEnrollCmd(),
 	}
