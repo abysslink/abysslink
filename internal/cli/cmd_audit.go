@@ -382,30 +382,36 @@ func runAuditFix(p Printer, logPath string, dryRun bool) {
 	}
 }
 
-// secFixChmod records the chmod in the audit log (before mutating) and tightens
-// path to 0600. When dryRun is true it only previews the change. It REFUSES any
-// path containing "sshd" (CONTEXT: --fix never edits sshd config; T-20-03-01).
-// Returns true when a chmod was applied (or would be applied in dry-run).
+// secFixChmod records the intended/actual mutation in the audit log (BEFORE
+// acting, with the dryRun flag distinguishing a preview from a real chmod) and,
+// when dryRun is false, tightens path to 0600. It REFUSES any path containing
+// "sshd" (CONTEXT: --fix never edits sshd config; T-20-03-01). Returns true when
+// a chmod was applied (or would be applied in dry-run).
+//
+// WR-01: the dry-run is recorded too (tagged dryRun=true), matching the
+// established mutation-path pattern (e.g. audit.WriteFile) so a --fix dry-run
+// that enumerates exactly which files would be chmod'd leaves an audit trail
+// rather than being a traceless reconnaissance action.
 func secFixChmod(p Printer, path string, dryRun bool) bool {
 	if strings.Contains(path, "sshd") {
 		slog.Warn("sec-fix: refusing to touch sshd config", "path", path)
 		printerError(p, "sec-fix: refusing to chmod sshd config "+path+" — edit it manually")
 		return false
 	}
-	if dryRun {
-		printerInfo(p, "sec-fix: would chmod 0600 "+path+" (run with --apply to apply)")
-		return true
-	}
-	// Record the mutation in the audit log BEFORE applying it. If the audit
-	// append fails, do NOT proceed with the chmod (never lose the audit trail).
+	// Record the intended/actual mutation in the audit log BEFORE acting. If the
+	// audit append fails, do NOT proceed (never lose the audit trail).
 	logPath, lpErr := audit.DefaultLogPath()
 	if lpErr != nil {
-		printerError(p, "sec-fix: cannot resolve audit log path; skipping chmod of "+path)
+		printerError(p, "sec-fix: cannot resolve audit log path; skipping "+path)
 		return false
 	}
 	if aerr := audit.New(logPath).Append("sec-fix", "chmod:"+path, nil, dryRun); aerr != nil {
 		printerError(p, "sec-fix: audit append failed; skipping chmod of "+path+": "+aerr.Error())
 		return false
+	}
+	if dryRun {
+		printerInfo(p, "sec-fix: would chmod 0600 "+path+" (run with --apply to apply)")
+		return true
 	}
 	if cerr := secChmodNoFollow(path, 0o600); cerr != nil {
 		printerError(p, "sec-fix: chmod failed for "+path+": "+cerr.Error())
