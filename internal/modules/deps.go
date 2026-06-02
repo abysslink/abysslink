@@ -21,6 +21,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -39,9 +40,24 @@ type Deps struct {
 	Platform platform.Platform
 	Keychain secrets.KeychainStore
 	Audit    audit.AuditWriter
+	// Registry is the metrics sink for all modules. Use NoopRegistry when
+	// metrics are disabled or unavailable — modules must call Registry methods
+	// unconditionally (never nil-check before calling).
+	Registry metrics.Registry
 	// Prompt displays msg to the user and blocks until they press Enter. It is
 	// wired by the CLI layer (the only layer allowed to write to stdout), so
 	// modules can trigger interactive pauses without violating the no-stdout-in-
 	// library-code rule. Nil means no-op (tests, non-interactive contexts).
 	Prompt func(ctx context.Context, msg string) error
+}
+
+// MetricsRegistry returns d.Registry, or a NoopRegistry when the field is nil.
+// Modules call this instead of touching d.Registry directly so a zero-value
+// Deps (tests, callers that have not wired metrics) behaves as if a nil-safe
+// NoopRegistry were present — metrics calls are always safe to make.
+func (d Deps) MetricsRegistry() metrics.Registry {
+	if d.Registry == nil {
+		return metrics.NoopRegistry{}
+	}
+	return d.Registry
 }
