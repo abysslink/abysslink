@@ -18,6 +18,7 @@ package audit
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,15 +45,36 @@ func TestVerifyHMAC_MatchAndMismatch(t *testing.T) {
 		"wrong title must not verify")
 }
 
-func TestSignBytes_NullSeparator(t *testing.T) {
-	// Canonical layout (CR-03): title \0 target \0 time \0 dryRun \0 prevHash \0 32 DiffHash bytes.
+func TestSignBytes_LengthPrefixedFraming(t *testing.T) {
+	// Canonical layout (WR-01): each variable-length field is preceded by its
+	// length as a big-endian uint32, removing the field-boundary ambiguity the
+	// old single-NUL separator depended on.
+	//
+	//	len(title) title len(target) target len(time) time dryRun(1) len(prevHash) prevHash 32 DiffHash
 	in := SignInput{Title: "ab", Target: "t", Time: "T", DryRun: true, PrevHash: "p", DiffHash: [32]byte{0xff}}
 	got := signBytes(in)
-	assert.Equal(t, byte(0x00), got[2], "null byte separator after title")
-	// 2(title) +1 +1(target) +1 +1(time) +1 +1(dryRun) +1 +1(prevHash) +1 +32(digest)
-	wantLen := len("ab") + 1 + len("t") + 1 + len("T") + 1 + 1 + 1 + len("p") + 1 + 32
+
+	// First four bytes are the big-endian length of Title ("ab" -> 2).
+	assert.Equal(t, uint32(2), binary.BigEndian.Uint32(got[0:4]), "title length prefix")
+	assert.Equal(t, "ab", string(got[4:6]), "title bytes follow their length")
+
+	// Total length: 4 length prefixes + field bytes + 1 dryRun byte + 32 digest.
+	wantLen := 4 + len("ab") + 4 + len("t") + 4 + len("T") + 1 + 4 + len("p") + 32
 	assert.Len(t, got, wantLen)
-	assert.Equal(t, byte(1), got[len("ab")+1+len("t")+1+len("T")+1], "dry_run true encoded as 0x01")
+
+	// dryRun=true encodes as a single 0x01 byte after the time field.
+	dryRunIdx := 4 + len("ab") + 4 + len("t") + 4 + len("T")
+	assert.Equal(t, byte(1), got[dryRunIdx], "dry_run true encoded as 0x01")
+}
+
+// TestSignBytes_NoBoundaryCollision is the WR-01 regression: two distinct field
+// splits that the old NUL separator would serialise identically must now produce
+// DIFFERENT signed bytes under length-prefixed framing.
+func TestSignBytes_NoBoundaryCollision(t *testing.T) {
+	a := SignInput{Title: "a\x00b", Target: "c"}
+	b := SignInput{Title: "a", Target: "b\x00c"}
+	assert.False(t, bytes.Equal(signBytes(a), signBytes(b)),
+		"NUL-containing fields must not collide across the Title/Target boundary")
 }
 
 func TestSignBytes_CoversAllMetadataFields(t *testing.T) {

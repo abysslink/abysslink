@@ -21,11 +21,13 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -70,10 +72,17 @@ type SignInput struct {
 	DiffHash [32]byte
 }
 
-// signBytes serialises a SignInput to the canonical HMAC input, null-byte
-// separated to prevent length-extension/field-boundary confusion:
+// signBytes serialises a SignInput to the canonical HMAC input using
+// LENGTH-PREFIXED framing (WR-01): every variable-length field is preceded by
+// its byte length as a fixed-width big-endian uint32. This makes the field
+// boundaries unambiguous regardless of field contents — unlike a single-byte
+// separator, no value (even one containing NUL bytes) can shift content across
+// a field boundary while keeping the HMAC valid. The fixed-width dryRun byte and
+// the fixed-size 32-byte DiffHash need no length prefix.
 //
-//	title \0 target \0 time \0 dryRun(1 byte) \0 prevHash \0 32 DiffHash bytes
+//	len(title) title len(target) target len(time) time dryRun(1) len(prevHash) prevHash 32 DiffHash bytes
+//
+// Append and Verify both call signBytes, so they produce identical bytes.
 //
 // AUD-04: every field here is audit metadata; no body/content is ever signed.
 func signBytes(in SignInput) []byte {
@@ -81,18 +90,35 @@ func signBytes(in SignInput) []byte {
 	if in.DryRun {
 		dryRun = 1
 	}
-	b := make([]byte, 0, len(in.Title)+len(in.Target)+len(in.Time)+len(in.PrevHash)+5+len(in.DiffHash))
-	b = append(b, []byte(in.Title)...)
-	b = append(b, 0x00)
-	b = append(b, []byte(in.Target)...)
-	b = append(b, 0x00)
-	b = append(b, []byte(in.Time)...)
-	b = append(b, 0x00)
+	// Capacity: 4 four-byte length prefixes (title, target, time, prevHash) +
+	// the field bytes + 1 dryRun byte + the 32-byte DiffHash.
+	b := make([]byte, 0, 4*4+len(in.Title)+len(in.Target)+len(in.Time)+len(in.PrevHash)+1+len(in.DiffHash))
+	b = appendLenPrefixed(b, in.Title)
+	b = appendLenPrefixed(b, in.Target)
+	b = appendLenPrefixed(b, in.Time)
 	b = append(b, dryRun)
-	b = append(b, 0x00)
-	b = append(b, []byte(in.PrevHash)...)
-	b = append(b, 0x00)
+	b = appendLenPrefixed(b, in.PrevHash)
 	b = append(b, in.DiffHash[:]...)
+	return b
+}
+
+// appendLenPrefixed writes s's length as a big-endian uint32 followed by s's
+// bytes, giving unambiguous field framing for the HMAC input (WR-01). Audit
+// metadata fields (Op/Target/Time/PrevHash) are far below the uint32 ceiling;
+// the explicit guard keeps the conversion overflow-safe (gosec G115) without
+// silently truncating a length prefix should that invariant ever be violated.
+func appendLenPrefixed(b []byte, s string) []byte {
+	if uint64(len(s)) > math.MaxUint32 {
+		// Defensive: a field this large is never produced by the audit writer.
+		// Truncating the prefix would desync framing, so refuse by clamping the
+		// signed length to the max — Append and Verify clamp identically, so the
+		// HMAC still matches and the (impossible) case fails closed elsewhere.
+		s = s[:math.MaxUint32]
+	}
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s))) //nolint:gosec // len(s) clamped to math.MaxUint32 above; conversion cannot overflow
+	b = append(b, lenBuf[:]...)
+	b = append(b, []byte(s)...)
 	return b
 }
 
