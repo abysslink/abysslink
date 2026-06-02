@@ -55,6 +55,11 @@ linters-settings:
             desc: "NetBird relay packages are AGPLv3 (NB-04)"
           - pkg: "github.com/netbirdio/netbird/signal"
             desc: "NetBird signal packages are AGPLv3 (NB-04)"
+      no-prometheus-client:
+        list-mode: lax
+        deny:
+          - pkg: "github.com/prometheus/client_golang"
+            desc: "OBS-01: metrics are hand-rolled in internal/daemon/metrics_server.go — no prometheus client lib permitted anywhere in this module"
 
 issues:
   exclusions:

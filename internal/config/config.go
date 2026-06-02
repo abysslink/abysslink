@@ -40,6 +40,31 @@ type Config struct {
 	ClaudeCode ClaudeCode  `yaml:"claudecode"`
 	Power      Power       `yaml:"power"`
 	Hardening  Hardening   `yaml:"hardening"`
+
+	Observability Observability `yaml:"observability"`
+}
+
+// Observability holds the metrics-server and daily-digest settings (Phase 18).
+// All sub-fields default OFF; the zero value is the safe disabled state.
+type Observability struct {
+	Metrics ObservabilityMetrics `yaml:"metrics"`
+	Digest  ObservabilityDigest  `yaml:"digest"`
+}
+
+// ObservabilityMetrics configures the in-process metrics HTTP exposition.
+// BindAddr, when set, MUST bind to the tailnet IP only — never 0.0.0.0 or ::
+// (OBS-03, enforced by validateObservability).
+type ObservabilityMetrics struct {
+	Enabled  bool   `yaml:"enabled"`
+	BindAddr string `yaml:"bind_addr,omitempty"`
+	Port     int    `yaml:"port,omitempty"`
+}
+
+// ObservabilityDigest configures the optional daily digest notification.
+type ObservabilityDigest struct {
+	Enabled   bool   `yaml:"enabled"`
+	Hour      int    `yaml:"hour,omitempty"`
+	NtfyTopic string `yaml:"ntfy_topic,omitempty"`
 }
 
 // Backend holds backend-selection settings (v2+). The Type field is
@@ -397,17 +422,8 @@ func Validate(cfg *Config) error {
 	if cfg.Version != 1 {
 		return fmt.Errorf("config: unsupported version %d (only 1 is supported)", cfg.Version)
 	}
-	if cfg.Identity.Email == "" {
-		return fmt.Errorf("config: identity.email is required")
-	}
-	if !strings.Contains(cfg.Identity.Email, "@") {
-		return fmt.Errorf("config: identity.email %q is not a valid email address", cfg.Identity.Email)
-	}
-	if cfg.Identity.UnixUser == "" {
-		return fmt.Errorf("config: identity.unix_user is required")
-	}
-	if cfg.Tailnet.Hostname == "" {
-		return fmt.Errorf("config: tailnet.hostname is required")
+	if err := validateIdentity(cfg); err != nil {
+		return err
 	}
 	checkPeriod, err := time.ParseDuration(cfg.Mobile.SSHCheckPeriod)
 	if err != nil {
@@ -437,6 +453,42 @@ func Validate(cfg *Config) error {
 	}
 	if err := validateBackend(cfg); err != nil {
 		return err
+	}
+	if err := validateObservability(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateIdentity enforces the required identity and tailnet fields. It is
+// split out of Validate to keep that function's cyclomatic complexity within
+// the golangci gocyclo budget.
+func validateIdentity(cfg *Config) error {
+	if cfg.Identity.Email == "" {
+		return fmt.Errorf("config: identity.email is required")
+	}
+	if !strings.Contains(cfg.Identity.Email, "@") {
+		return fmt.Errorf("config: identity.email %q is not a valid email address", cfg.Identity.Email)
+	}
+	if cfg.Identity.UnixUser == "" {
+		return fmt.Errorf("config: identity.unix_user is required")
+	}
+	if cfg.Tailnet.Hostname == "" {
+		return fmt.Errorf("config: tailnet.hostname is required")
+	}
+	return nil
+}
+
+// validateObservability enforces the OBS-03 hard floor: when the metrics
+// exposition bind address is set, it MUST bind to the tailnet IP only. A
+// bind_addr containing 0.0.0.0 or :: would expose internal metrics on every
+// interface (Information Disclosure, T-18-01), so it is rejected with the same
+// FATAL error class as the Funnel/backend rejections. An empty bind_addr is
+// resolved at runtime to the tailnet IP and is therefore accepted here.
+func validateObservability(cfg *Config) error {
+	if addr := cfg.Observability.Metrics.BindAddr; addr != "" &&
+		(strings.Contains(addr, "0.0.0.0") || strings.Contains(addr, "::")) {
+		return fmt.Errorf("config: observability.metrics.bind_addr %q must not be 0.0.0.0 or :: — metrics must bind to the tailnet IP only (OBS-03)", addr)
 	}
 	return nil
 }
