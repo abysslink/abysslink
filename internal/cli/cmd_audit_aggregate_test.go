@@ -28,6 +28,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -165,10 +166,12 @@ func TestAuditFormatJSON(t *testing.T) {
 }
 
 func TestAuditFix(t *testing.T) {
-	t.Run("dry_run_does_not_chmod", func(t *testing.T) {
-		// WR-01: a dry-run now records the would-be mutation, so isolate the
-		// audit-log path (DefaultLogPath honors XDG_STATE_HOME) to keep the
-		// developer's real log clean.
+	t.Run("dry_run_does_not_chmod_or_record", func(t *testing.T) {
+		// CR-01/WR-01: a --fix dry-run is a PURE read-only preview — it must not
+		// chmod and must record NOTHING in the audit log (recording a dry-run made
+		// the preview non-idempotent and, with the unsigned writer, poisoned the
+		// signed chain). Isolate the default audit-log path so any stray write
+		// would be detectable here, not in the developer's real log.
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		logPath := filepath.Join(t.TempDir(), "audit.log")
 		require.NoError(t, os.WriteFile(logPath, []byte("x"), 0o600))
@@ -176,24 +179,21 @@ func TestAuditFix(t *testing.T) {
 
 		var out bytes.Buffer
 		p := NewHumanPrinterTo(&out, &out)
-		// dryRun=true (no --apply): print would-be chmod, do NOT mutate.
-		runAuditFix(p, logPath, true)
+		// dryRun=true (no --apply): print would-be chmod, do NOT mutate or record.
+		runAuditFix(context.Background(), p, logPath, nil, true)
 
 		fi, err := os.Stat(logPath)
 		require.NoError(t, err)
 		assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm(), "dry-run must not chmod")
 		assert.Contains(t, out.String(), "would chmod")
 
-		// WR-01: the dry-run must leave an audit record (DryRun=true) so a --fix
-		// preview that enumerates targets is not a traceless action.
+		// The dry-run must NOT append to the default log (no traceless-vs-trail
+		// trade-off: a read-only preview writes nothing — CR-01).
 		defLog, err := audit.DefaultLogPath()
 		require.NoError(t, err)
 		entries, err := audit.ReadLog(defLog)
 		require.NoError(t, err)
-		require.NotEmpty(t, entries, "dry-run --fix must record the would-be mutation")
-		last := entries[len(entries)-1]
-		assert.Equal(t, "sec-fix", last.Op)
-		assert.True(t, last.DryRun, "dry-run record must be tagged DryRun=true")
+		assert.Empty(t, entries, "dry-run --fix must record NOTHING")
 	})
 
 	t.Run("apply_chmods_audit_log", func(t *testing.T) {
@@ -203,7 +203,7 @@ func TestAuditFix(t *testing.T) {
 
 		var out bytes.Buffer
 		p := NewHumanPrinterTo(&out, &out)
-		runAuditFix(p, logPath, false) // dryRun=false → apply
+		runAuditFix(context.Background(), p, logPath, nil, false) // dryRun=false → apply
 
 		fi, err := os.Stat(logPath)
 		require.NoError(t, err)
@@ -219,7 +219,7 @@ func TestAuditFix(t *testing.T) {
 
 		var out bytes.Buffer
 		p := NewHumanPrinterTo(&out, &out)
-		applied := secFixChmod(p, sshdPath, false) // dryRun=false → would apply if not refused
+		applied := secFixChmod(context.Background(), p, sshdPath, sshdPath, nil, false) // dryRun=false → would apply if not refused
 		assert.False(t, applied, "sshd path must be refused")
 
 		fi, err := os.Stat(sshdPath)
@@ -230,8 +230,8 @@ func TestAuditFix(t *testing.T) {
 	t.Run("symlink_target_refused", func(t *testing.T) {
 		// WR-02: if the flagged path is (or is swapped to) a symlink pointing at a
 		// sensitive file, --fix --apply must REFUSE and must NOT chmod the target.
-		// Isolate the audit-log path so the pre-chmod audit append (which runs
-		// before the symlink guard refuses) never touches the developer's log.
+		// The audit append now runs only AFTER a successful chmod (CR-01), so the
+		// refused path writes nothing; the isolation here is belt-and-braces.
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		dir := t.TempDir()
 		secret := filepath.Join(dir, "authorized_keys")
@@ -243,13 +243,94 @@ func TestAuditFix(t *testing.T) {
 
 		var out bytes.Buffer
 		p := NewHumanPrinterTo(&out, &out)
-		applied := secFixChmod(p, link, false) // dryRun=false → would apply if not refused
+		applied := secFixChmod(context.Background(), p, link, link, nil, false) // dryRun=false → would apply if not refused
 		assert.False(t, applied, "symlinked path must be refused")
 
 		fi, err := os.Lstat(secret)
 		require.NoError(t, err)
 		assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm(),
 			"chmod must not follow the symlink to the sensitive target")
+	})
+}
+
+// TestAuditFixSignedChainIntact is the CR-01 regression: --fix --apply against a
+// real SIGNED chain must EXTEND it (signed sec-fix entry), so the very next
+// audit.Verify still returns OK. The iteration-1 bug appended an UNSIGNED entry
+// (empty prev_hash) into the signed chain, which walkChain reported as CHAIN
+// BROKEN → false tamper alarm. It also asserts a dry-run writes nothing.
+func TestAuditFixSignedChainIntact(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("apply_extends_signed_chain", func(t *testing.T) {
+		// Build a real signed chain at the resolved DEFAULT log path (the chain
+		// appendSecFixRecord extends when --apply is used), with lax perms so the
+		// fix walk flags it.
+		state := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", state)
+		logPath, err := audit.DefaultLogPath()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Dir(logPath), 0o700))
+
+		kc := secrets.NewMockStore()
+		sa, err := audit.NewSigned(logPath, kc)
+		require.NoError(t, err)
+		for i := 0; i < 3; i++ {
+			var dh [32]byte
+			dh[0] = byte(i)
+			require.NoError(t, sa.Append(ctx, audit.SignInput{Title: "write", DiffHash: dh}, "/tmp/x", false))
+		}
+		require.NoError(t, os.Chmod(logPath, 0o644)) // lax perms → fix flags it
+
+		// Pre-condition: the seeded chain verifies.
+		pre, err := audit.Verify(ctx, logPath, kc)
+		require.NoError(t, err)
+		require.True(t, pre.OK, "seeded signed chain must verify before --fix")
+
+		var out bytes.Buffer
+		p := NewHumanPrinterTo(&out, &out)
+		// --fix --apply: chmod the log to 0600 and record via the SIGNED writer.
+		runAuditFix(ctx, p, logPath, kc, false)
+
+		fi, err := os.Stat(logPath)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm(), "apply tightens to 0600")
+
+		// CR-01 core assertion: the chain still verifies (no CHAIN BROKEN). The
+		// sec-fix entry must extend the signed chain, not break it.
+		post, err := audit.Verify(ctx, logPath, kc)
+		require.NoError(t, err)
+		assert.True(t, post.OK, "signed chain must still verify after --fix --apply; reason: %s", post.Reason)
+		assert.NotContains(t, post.Reason, "CHAIN BROKEN")
+
+		// The applied (non-dry-run) sec-fix record was appended and signed.
+		entries, err := audit.ReadLog(logPath)
+		require.NoError(t, err)
+		require.NotEmpty(t, entries)
+		last := entries[len(entries)-1]
+		assert.Equal(t, "sec-fix", last.Op)
+		assert.False(t, last.DryRun, "applied record must NOT be tagged DryRun")
+		assert.NotEmpty(t, last.Sig, "sec-fix entry must be signed on a signed chain")
+		assert.NotEmpty(t, last.PrevHash, "sec-fix entry must chain (non-empty prev_hash)")
+	})
+
+	t.Run("dry_run_writes_nothing_to_signed_chain", func(t *testing.T) {
+		logPath, kc := newSignedLog(t, 2)
+		require.NoError(t, os.Chmod(logPath, 0o644)) // lax perms → fix flags it
+
+		before, err := audit.ReadLog(logPath)
+		require.NoError(t, err)
+
+		var out bytes.Buffer
+		p := NewHumanPrinterTo(&out, &out)
+		runAuditFix(ctx, p, logPath, kc, true) // dryRun → preview only
+
+		after, err := audit.ReadLog(logPath)
+		require.NoError(t, err)
+		assert.Len(t, after, len(before), "dry-run must not append to the signed chain")
+
+		res, err := audit.Verify(ctx, logPath, kc)
+		require.NoError(t, err)
+		assert.True(t, res.OK, "chain unchanged by dry-run must still verify")
 	})
 }
 
