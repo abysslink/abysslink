@@ -41,7 +41,10 @@ jobs:
           cache: true
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        # Pinned (not @latest) — a supply-chain-hardening gate must itself be
+        # reproducible and immune to upstream tool compromise. Bump via Dependabot
+        # (gomod ecosystem) or a documented manual cadence.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       - name: Run govulncheck (module mode)
         # Module mode reports ALL vulnerabilities in the dependency graph
