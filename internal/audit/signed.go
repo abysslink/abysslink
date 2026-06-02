@@ -116,7 +116,8 @@ func appendLenPrefixed(b []byte, s string) []byte {
 		s = s[:math.MaxUint32]
 	}
 	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s))) //nolint:gosec // len(s) clamped to math.MaxUint32 above; conversion cannot overflow
+	// #nosec G115 -- len(s) clamped to math.MaxUint32 above; conversion cannot overflow
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s))) //nolint:gosec // G115: len(s) clamped to math.MaxUint32 above; conversion cannot overflow
 	b = append(b, lenBuf[:]...)
 	b = append(b, []byte(s)...)
 	return b

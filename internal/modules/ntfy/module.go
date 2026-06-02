@@ -288,7 +288,9 @@ func (m *Module) applyNative(ctx context.Context, tailnetIP, home string) error 
 	if m.plat.OS() == "darwin" && m.ntfyDockerRunning(ctx) {
 		if m.ntfyDockerIPDrift(ctx, tailnetIP) {
 			slog.Info("ntfy: tailnet IP changed — recreating Docker container", "ip", tailnetIP)
-			m.runner.Run(ctx, "docker", "rm", "-f", dockerContainerName) //nolint:errcheck
+			if _, err := m.runner.Run(ctx, "docker", "rm", "-f", dockerContainerName); err != nil {
+				slog.Warn("ntfy: docker rm cleanup (best-effort)", "err", err)
+			}
 			return m.applyDocker(ctx, tailnetIP, home)
 		}
 		return nil
@@ -387,7 +389,9 @@ behind-proxy: false
 	}
 
 	// Remove any existing container before (re)creating.
-	m.runner.Run(ctx, "docker", "rm", "-f", dockerContainerName) //nolint:errcheck
+	if _, err := m.runner.Run(ctx, "docker", "rm", "-f", dockerContainerName); err != nil {
+		slog.Warn("ntfy: docker rm cleanup (best-effort)", "err", err)
+	}
 
 	slog.Info("ntfy: starting Docker container", "name", dockerContainerName, "bind", tailnetIP+":"+port)
 	runRes, err := m.runner.Run(ctx, "docker", "run", "-d",

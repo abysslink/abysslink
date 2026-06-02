@@ -261,6 +261,7 @@ func extractBinary(tarPath, outDir string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// nosemgrep: go.lang.security.decompression_bomb.potential-dos-via-decompression-bomb
 		if _, err := io.Copy(out, io.LimitReader(tr, 200<<20)); err != nil { //nolint:gosec
 			_ = out.Close()
 			return "", err
