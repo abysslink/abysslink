@@ -35,8 +35,8 @@ import (
 // asciinema, and netbird checks (which is why it already accepts ctx and runner
 // even though the WoL checks are config-only).
 //
-// The function is NOT yet wired into the doctor RunE — that wiring lands in
-// Plan 05 to avoid a file conflict. It is unit-tested directly here.
+// This function is wired into the doctor RunE at cmd_doctor.go (its findings are
+// appended to the doctor finding set there). It is also unit-tested directly.
 //
 // WoL/upsnap findings (emitted only when cfg.Modules.Upsnap.Enabled):
 //   - wol-apply-gate (FATAL): structural advisory that every WoL send is audited
