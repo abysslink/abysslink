@@ -84,6 +84,8 @@ func newAuditVerifyCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "verify",
 		Short: "Verify the integrity of the audit log hash chain",
+		Example: `  # Verify the tamper-evident audit log chain (exit 2 on a break)
+  abysslink audit verify`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -144,6 +146,11 @@ func newAuditTailCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tail",
 		Short: "Show the most recent audit log entries (default 20)",
+		Example: `  # Show the last 20 audit entries
+  abysslink audit tail
+
+  # Show the last 5 entries as JSON
+  abysslink audit tail --n 5 --json`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			n, _ := cmd.Flags().GetInt("n")
 			jsonOut, _ := cmd.Flags().GetBool("json")
@@ -181,6 +188,8 @@ func newAuditLsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ls",
 		Short: "List every audit log entry",
+		Example: `  # List all audit entries as a table
+  abysslink audit ls`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			jsonOut, _ := cmd.Flags().GetBool("json")
 			p := newPrinter(cmd)
@@ -217,6 +226,8 @@ func newAuditExportCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "export",
 		Short: "Export every audit log entry as raw JSONL (one object per line)",
+		Example: `  # Export the full audit log as JSONL for archival or analysis
+  abysslink audit export > audit.jsonl`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			logPath, err := audit.DefaultLogPath()
 			if err != nil {

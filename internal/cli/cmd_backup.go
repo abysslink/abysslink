@@ -33,8 +33,34 @@ func newBackupCmd() *cobra.Command {
 		Use:   "backup",
 		Short: "List and restore backups of files abysslink has changed",
 	}
-	backup.AddCommand(newBackupLsCmd(), newBackupRestoreCmd())
+	backup.AddCommand(newBackupLsCmd(), newBackupRestoreCmd(), newBackupVerifyCmd())
 	return backup
+}
+
+// newBackupVerifyCmd verifies the integrity of the audit-log hash chain. It uses
+// the SAME audit.Verify path as `abysslink audit verify` (T-17-12: no separate,
+// weaker verification), exiting 0 on a clean chain and 2 with
+// "CHAIN BROKEN at entry N" on any break or detected truncation.
+func newBackupVerifyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "verify",
+		Short: "Verify the integrity of the audit log chain",
+		Example: `  # Verify the tamper-evident audit log chain
+  abysslink backup verify`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+			p := newPrinter(cmd)
+			logPath, err := audit.DefaultLogPath()
+			if err != nil {
+				return fmt.Errorf("backup verify: %w", err)
+			}
+			return runAuditVerify(ctx, p, logPath, auditKeychain(ctx, cc))
+		},
+	}
 }
 
 func newBackupLsCmd() *cobra.Command {

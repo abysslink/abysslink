@@ -18,11 +18,13 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/modules"
@@ -30,6 +32,97 @@ import (
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
+
+// auditDefaultLogPath is a package var so the doctor RunE can resolve the audit
+// log path; indirection keeps it swappable in focused tests.
+var auditDefaultLogPath = audit.DefaultLogPath
+
+// auditDoctorFindings runs the three Phase 17 tamper-evident audit posture
+// checks against logPath. kc may be nil (no keychain backend); the keychain
+// check fails closed in that case.
+//
+//   - audit-keychain (FATAL): the signed audit path cannot reach the keychain
+//     (kc nil or audit.NewSigned fails) — signed entries cannot be written.
+//   - audit-anchor-age (WARN): newest anchor.json is missing or older than 24h —
+//     the daemon may not be running / anchor writes are failing.
+//   - audit-count-vs-anchor (FATAL): the log holds fewer entries than the anchor
+//     records — truncation detected.
+//
+// T-17-10: error messages describe the failure class only; key material is never
+// logged. T-17-13: a brand-new install with no anchor emits WARN, never FATAL.
+func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.KeychainStore) []modules.Finding {
+	var findings []modules.Finding
+
+	// Check 1 — audit-keychain (FATAL when the signed path cannot reach the keychain).
+	if kc == nil {
+		findings = append(findings, modules.Finding{
+			Module:   "audit",
+			Check:    "audit-keychain",
+			Severity: modules.SeverityFatal,
+			Message:  "HMAC signing key unavailable — keychain not accessible; signed entries cannot be written (AUD-02)",
+		})
+	} else if _, err := audit.NewSigned(logPath, kc); err != nil {
+		findings = append(findings, modules.Finding{
+			Module:   "audit",
+			Check:    "audit-keychain",
+			Severity: modules.SeverityFatal,
+			Message:  "HMAC signing key unavailable — keychain not accessible; signed entries cannot be written (AUD-02)",
+		})
+	}
+
+	anchor, err := audit.ReadAnchor(logPath)
+	if err != nil {
+		slog.Warn("doctor: read audit anchor failed", "err", err)
+		return findings
+	}
+
+	// Check 2 — audit-anchor-age (WARN when missing or > 24h old).
+	switch {
+	case anchor == nil:
+		findings = append(findings, modules.Finding{
+			Module:   "audit",
+			Check:    "audit-anchor-age",
+			Severity: modules.SeverityWarning,
+			Message:  "No audit anchor found — run `abysslink up --apply` or start the daemon to create one",
+		})
+	default:
+		if anchorTime, perr := time.Parse(time.RFC3339, anchor.Time); perr == nil {
+			if age := time.Since(anchorTime); age > 24*time.Hour {
+				findings = append(findings, modules.Finding{
+					Module:   "audit",
+					Check:    "audit-anchor-age",
+					Severity: modules.SeverityWarning,
+					Message: fmt.Sprintf(
+						"Audit anchor is %s old (threshold 24h) — daemon may not be running or anchor writes are failing",
+						age.Round(time.Minute)),
+				})
+			}
+		} else {
+			slog.Warn("doctor: parse anchor time failed", "err", perr)
+		}
+	}
+
+	// Check 3 — audit-count-vs-anchor (FATAL when the log is shorter than the anchor).
+	if anchor != nil {
+		entries, rerr := audit.ReadLog(logPath)
+		if rerr != nil {
+			slog.Warn("doctor: read audit log failed", "err", rerr)
+			return findings
+		}
+		if int64(len(entries)) < anchor.EntryCount {
+			findings = append(findings, modules.Finding{
+				Module:   "audit",
+				Check:    "audit-count-vs-anchor",
+				Severity: modules.SeverityFatal,
+				Message: fmt.Sprintf(
+					"Audit log has %d entries but anchor records %d — truncation detected",
+					len(entries), anchor.EntryCount),
+			})
+		}
+	}
+
+	return findings
+}
 
 // fleetKeychain is the subset of secrets.KeychainStore consumed by the fleet
 // doctor helpers (avoids exposing secrets package import in the helper signature).
@@ -197,6 +290,13 @@ Exit codes:
 
 			// Supply-chain integrity advisories (cosign v3 bundle + SLSA provenance).
 			findings = append(findings, supplyChainFindings(ctx, cc.runner, version, "")...)
+
+			// Tamper-evident audit-log posture (anchor age, count-vs-anchor, keychain).
+			if logPath, lpErr := auditDefaultLogPath(); lpErr == nil {
+				findings = append(findings, auditDoctorFindings(ctx, logPath, deps.Keychain)...)
+			} else {
+				slog.Warn("doctor: audit log path unavailable; skipping audit checks", "err", lpErr)
+			}
 
 			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
 			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")

@@ -24,7 +24,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
 	notifymod "github.com/abysslink/abysslink/internal/modules"
@@ -68,10 +70,56 @@ func main() {
 	nm := notify.New(notifymod.Deps{Cfg: cfg, Runner: runner, Keychain: kc, Platform: plat})
 	srv := daemon.NewServer(directNotifier{m: nm}, runner, cfg)
 
+	// Hourly tamper-evident anchor writer. When a keychain is available and the
+	// signed-audit path is reachable, the daemon refreshes the external anchor
+	// every hour so `doctor` can detect a stalled daemon or log truncation. The
+	// goroutine exits cleanly on context cancellation (no leak) and never blocks
+	// the daemon's shutdown path.
+	startAnchorWriter(ctx, kc)
+
 	if err := srv.Run(ctx); err != nil {
 		slog.Error("abysslinkd: exited with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// startAnchorWriter launches the hourly WriteAnchor goroutine when the signed
+// audit path is reachable. Each WriteAnchor call runs under a 30s timeout
+// derived from ctx (T-17-11: a stuck keychain must not wedge the daemon). On a
+// nil keychain, an unresolvable log path, or an unreachable signed path the
+// daemon continues in degraded mode (no signed anchoring); the doctor
+// audit-keychain check surfaces the degradation.
+func startAnchorWriter(ctx context.Context, kc secrets.KeychainStore) {
+	if kc == nil {
+		slog.Warn("abysslinkd: keychain unavailable; anchor writer disabled (degraded mode)")
+		return
+	}
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		slog.Error("abysslinkd: audit log path unavailable; anchor writer disabled", "err", err)
+		return
+	}
+	if _, saErr := audit.NewSigned(logPath, kc); saErr != nil {
+		slog.Warn("abysslinkd: signed audit unavailable; anchor writer disabled (degraded mode)", "err", saErr)
+		return
+	}
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				writeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				if werr := audit.WriteAnchor(writeCtx, logPath, kc); werr != nil {
+					slog.Warn("abysslinkd: anchor write failed", "err", werr)
+				}
+				cancel()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // configPath returns the abysslink.yaml path under XDG_CONFIG_HOME.
