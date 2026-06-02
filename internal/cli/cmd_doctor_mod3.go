@@ -17,9 +17,12 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"os"
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	atuin "github.com/abysslink/abysslink/internal/modules/atuin"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -40,6 +43,18 @@ import (
 //     the tailnet IP only, never 0.0.0.0.
 //   - upsnap-no-public (WARN): WoL broadcast stays LAN-local; do not expose any
 //     UpSnap HTTP interface to the public internet.
+//
+// atuin findings (emitted only when cfg.Modules.Atuin.Enabled):
+//   - atuin-bind (FATAL): sync_address must stay local-only ("") and never point
+//     at a public cloud endpoint (T-21-02-02).
+//   - atuin-key-backed-up (WARN): the sync key must be backed up in a password
+//     manager; the check only os.Stats the key path, never reads its contents.
+//
+// asciinema findings (emitted only when cfg.Modules.Asciinema.Enabled):
+//   - asciinema-rec-warning (FATAL): structural invariant that `abysslink
+//     asciinema rec` requires an interactive TTY and shows a non-suppressible
+//     credential warning before any recording, with no bypass flag/env-var
+//     (T-21-02-01); enforced by TestAsciinemaRec_RequiresInteractiveTTY.
 func mod3DoctorFindings(_ context.Context, cfg *config.Config, _ shell.Runner) []modules.Finding {
 	var findings []modules.Finding
 
@@ -66,5 +81,46 @@ func mod3DoctorFindings(_ context.Context, cfg *config.Config, _ shell.Runner) [
 		)
 	}
 
+	if cfg.Modules.Atuin.Enabled {
+		findings = append(findings,
+			modules.Finding{
+				Module:   "atuin",
+				Check:    "atuin-bind",
+				Severity: modules.SeverityFatal,
+				Message:  `atuin-bind — atuin sync_address must not point to a public cloud endpoint; local-only mode is enforced by abysslink config (sync_address = "")`,
+			},
+			atuinKeyBackedUpFinding(),
+		)
+	}
+
+	if cfg.Modules.Asciinema.Enabled {
+		findings = append(findings,
+			modules.Finding{
+				Module:   "asciinema",
+				Check:    "asciinema-rec-warning",
+				Severity: modules.SeverityFatal,
+				Message:  "asciinema-rec-warning — structural invariant: `abysslink asciinema rec` requires an interactive TTY and shows a non-suppressible credential warning before any recording; no bypass env-var or flag exists; verified by TestAsciinemaRec_RequiresInteractiveTTY",
+			},
+		)
+	}
+
 	return findings
+}
+
+// atuinKeyBackedUpFinding builds the atuin-key-backed-up WARN finding. It only
+// os.Stats the key path to report presence — it never reads the key contents
+// (the key is a secret). Both "key present" and "key absent" are WARN states:
+// the user must back up the key if present, or generate one if absent.
+func atuinKeyBackedUpFinding() modules.Finding {
+	keyPath := atuin.KeyPath()
+	msg := fmt.Sprintf("atuin-key-backed-up — atuin sync key not found at %s; run `atuin key` after setup to get your backup key", keyPath)
+	if _, err := os.Stat(keyPath); err == nil {
+		msg = fmt.Sprintf("atuin-key-backed-up — atuin sync key found at %s; back it up with `atuin key` and store it in your password manager", keyPath)
+	}
+	return modules.Finding{
+		Module:   "atuin",
+		Check:    "atuin-key-backed-up",
+		Severity: modules.SeverityWarning,
+		Message:  msg,
+	}
 }
