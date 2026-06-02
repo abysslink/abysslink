@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -97,8 +98,12 @@ func CollectFleetStatus(ctx context.Context, cfg *config.Config, runner shell.Ru
 	local := localRigStatus(ctx, cc)
 	rigs = append(rigs, local)
 
-	// Remote rigs from the fleet config.
-	rigs = append(rigs, remoteRigStatuses(ctx, runner, cfg.Rigs)...)
+	// Remote rigs from the fleet config. Skip any entry that names the local rig
+	// (IN-03): if an operator lists the daemon's own host in cfg.Rigs it would
+	// otherwise appear twice — once authoritatively as row 0, once as a remote
+	// SSH probe — and double-count in total.
+	remotes := filterOutLocalRig(cfg.Rigs, cfg.Tailnet.Hostname)
+	rigs = append(rigs, remoteRigStatuses(ctx, runner, remotes)...)
 
 	total = len(rigs)
 	for _, r := range rigs {
@@ -111,13 +116,44 @@ func CollectFleetStatus(ctx context.Context, cfg *config.Config, runner shell.Ru
 
 // localRigStatus builds the local rig's posture: reachable iff the backend
 // resolves a tailnet IP (the daemon is up and on the tailnet), lock from config.
-func localRigStatus(ctx context.Context, cc *cmdContext) RigStatus {
+//
+// The local reachability probe is wrapped in a panic-recover that degrades to
+// RigUnknown, mirroring the daemon's resolveReachable (internal/daemon/
+// server.go): LocalClient.IP dereferences Status.Self without a nil guard
+// (internal/tailscale/local.go) and can panic when Status returns (nil, nil)
+// — tailscaled absent (CI, or a not-yet-started daemon). A panic here would
+// otherwise propagate through webuiStatusProvider → buildStatusData and crash
+// the in-flight dashboard render, violating CollectFleetStatus' "never panics"
+// contract. A recovered panic is fail-honest: RigUnknown (NOT online, NOT a
+// fabricated offline), logged via slog (CLAUDE.md: library code logs, never
+// prints). The two posture paths are thus symmetric — /status and the
+// dashboard status view both degrade to honest-unknown when tailscaled is gone.
+func localRigStatus(ctx context.Context, cc *cmdContext) (rs RigStatus) {
 	name := cc.cfg.Tailnet.Hostname
 	if name == "" {
 		name = "this-rig"
 	}
 
+	lock := LockUnlocked
+	if cc.cfg.Tailnet.Lock.Enabled {
+		lock = LockLocked
+	}
+
 	reach := RigUnknown
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("fleet-status: local reachability probe panicked; reporting unknown", "recovered", r)
+			rs = RigStatus{
+				Name:       name,
+				Reachable:  RigUnknown, // fail-honest: not online, not a fabricated offline.
+				Lock:       lock,
+				LastSeen:   "now",
+				HasCert:    false,
+				IsLocalRig: true,
+			}
+		}
+	}()
+
 	if b, err := cc.backend(); err == nil && b != nil {
 		if ip, ipErr := b.IP(ctx); ipErr == nil && ip != "" {
 			reach = RigOnline
@@ -127,11 +163,6 @@ func localRigStatus(ctx context.Context, cc *cmdContext) RigStatus {
 		}
 	} else if err != nil {
 		slog.Warn("fleet-status: local backend unavailable", "err", err)
-	}
-
-	lock := LockUnlocked
-	if cc.cfg.Tailnet.Lock.Enabled {
-		lock = LockLocked
 	}
 
 	return RigStatus{
@@ -144,10 +175,33 @@ func localRigStatus(ctx context.Context, cc *cmdContext) RigStatus {
 	}
 }
 
+// filterOutLocalRig drops any cfg.Rigs entry whose name or hostname matches the
+// local rig's hostname (IN-03), so the daemon's own host is not probed remotely
+// in addition to being reported authoritatively as row 0. An empty localHost
+// (hostname unset) matches nothing — every entry is kept.
+func filterOutLocalRig(rigs []config.RigConfig, localHost string) []config.RigConfig {
+	if localHost == "" || len(rigs) == 0 {
+		return rigs
+	}
+	out := make([]config.RigConfig, 0, len(rigs))
+	for _, rc := range rigs {
+		if rc.Name == localHost || rc.Hostname == localHost {
+			continue
+		}
+		out = append(out, rc)
+	}
+	return out
+}
+
 // remoteRigStatuses probes every enrolled remote rig's reachability with a
 // bounded concurrent SSH fan-out. Lock/cert posture is not collected remotely
 // (rendered N/A). A fan-out construction error (e.g. an invalid rig name)
 // leaves every remote rig RigUnknown rather than dropping it from the table.
+//
+// Per-rig outcomes are mapped honestly (WR-05): a rig that answered with a
+// non-zero exit, or timed out (context.DeadlineExceeded), is RigOffline; a
+// transport failure where the probe could NOT run at all (ssh missing, DNS/auth
+// failure) is RigUnknown, never a fabricated "offline".
 func remoteRigStatuses(ctx context.Context, runner shell.Runner, rigConfigs []config.RigConfig) []RigStatus {
 	if len(rigConfigs) == 0 {
 		return nil
@@ -168,9 +222,19 @@ func remoteRigStatuses(ctx context.Context, runner shell.Runner, rigConfigs []co
 
 	out := make([]RigStatus, 0, len(results))
 	for _, res := range results {
+		// Distinguish "probed-and-offline" from "probe-could-not-run" (WR-05:
+		// never fabricate a definite negative). FanOut sets Reachable=false for
+		// BOTH a remote that answered with a non-zero exit (an honest offline,
+		// Err==nil) and a transport failure where the probe never ran (Err!=nil:
+		// ssh binary missing, DNS/auth failure). A deadline-exceeded is an honest
+		// timeout → offline; any OTHER transport error means the probe could not
+		// complete → RigUnknown, not a fabricated "offline".
 		reach := RigOffline
-		if res.Reachable {
+		switch {
+		case res.Reachable:
 			reach = RigOnline
+		case res.Err != nil && !errors.Is(res.Err, context.DeadlineExceeded):
+			reach = RigUnknown // probe could not run — honest unknown, never definitive offline.
 		}
 		out = append(out, RigStatus{
 			Name:      res.Rig.Name,
