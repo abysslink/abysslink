@@ -21,6 +21,7 @@ LDFLAGS    := -s -w \
   -X $(MODULE)/internal/cli.buildDate=$(BUILD_DATE)
 
 .PHONY: build test lint cover release install clean conformance security-audit repro-check
+.PHONY: check-webui-isolation check-webui-build-tags check-htmx-sri vendor-htmx
 
 ## build: compile CLI and daemon binaries (reproducible: SOURCE_DATE_EPOCH from git)
 build:
@@ -33,10 +34,67 @@ build:
 test:
 	$(GO) test -race -count=1 ./...
 
-## lint: run golangci-lint and gofmt check
-lint:
+## lint: run golangci-lint and gofmt check, then the webui build-tag gates
+lint: check-webui-build-tags check-webui-isolation
 	$(GOLANGCI) run ./...
 	@gofmt -l . | grep -v vendor | grep . && echo "gofmt: files need formatting (run gofmt -w .)" && exit 1 || true
+
+## check-webui-build-tags: assert every .go file under internal/modules/webui/
+## carries //go:build webui (Pitfall 5 — a single untagged file leaks the package
+## into the base build). WEB-01.
+check-webui-build-tags:
+	@missing=$$(grep -rL '//go:build webui' internal/modules/webui/*.go 2>/dev/null); \
+	  if [ -n "$$missing" ]; then \
+	    printf 'FAIL: files missing //go:build webui:\n%s\n' "$$missing"; exit 1; \
+	  fi
+	@echo "OK: all webui .go files carry the build tag"
+
+## check-webui-isolation: build abysslinkd WITHOUT -tags webui and assert the
+## base binary links zero webui-module / Tailscale-SDK packages. Uses
+## `go list -deps` (authoritative, no false positives) as the primary gate and a
+## precise `go tool nm` symbol scan as a belt-and-suspenders check. The patterns
+## are the exact package import paths — NOT the bare string "webui", which would
+## falsely match the base-package config.WebUIConfig type. WEB-01 / T-19-02.
+check-webui-isolation:
+	@$(GO) build -o /tmp/abysslinkd-base ./cmd/abysslinkd
+	@deps=$$($(GO) list -deps ./cmd/abysslinkd | grep -c 'internal/modules/webui\|tailscale.com/safeweb\|tailscale.com/client/local' || true); \
+	  if [ "$$deps" -ne 0 ]; then \
+	    echo "FAIL: base binary depends on $$deps webui/SDK package(s)"; \
+	    $(GO) list -deps ./cmd/abysslinkd | grep 'internal/modules/webui\|tailscale.com/safeweb\|tailscale.com/client/local'; \
+	    rm -f /tmp/abysslinkd-base; exit 1; \
+	  fi
+	@syms=$$($(GO) tool nm /tmp/abysslinkd-base | grep -c 'internal/modules/webui\|tailscale.com/safeweb\|tailscale.com/client/local' || true); \
+	  if [ "$$syms" -ne 0 ]; then \
+	    echo "FAIL: base binary contains $$syms webui/SDK symbol(s)"; \
+	    rm -f /tmp/abysslinkd-base; exit 1; \
+	  fi
+	@rm -f /tmp/abysslinkd-base
+	@echo "OK: base binary contains zero webui symbols"
+
+## check-htmx-sri: verify the SHA-384 of the vendored htmx.min.js matches the
+## HTMXIntegrity constant in sri_const_gen.go. Until Plan 03 vendors the real
+## file, this exits 0 with a NOTICE when the asset is absent. WEB-06.
+check-htmx-sri:
+	@if [ ! -f internal/modules/webui/assets/htmx.min.js ]; then \
+	  echo "NOTICE: htmx.min.js not yet vendored — run 'make vendor-htmx' first"; \
+	else \
+	  actual=$$(openssl dgst -sha384 -binary internal/modules/webui/assets/htmx.min.js | openssl base64 -A); \
+	  expected=$$(grep 'HTMXIntegrity' internal/modules/webui/sri_const_gen.go | cut -d'"' -f2 | sed 's/^sha384-//'); \
+	  if [ "$$actual" != "$$expected" ]; then \
+	    echo "FAIL: htmx SRI mismatch — re-run go generate ./internal/modules/webui/..."; exit 1; \
+	  fi; \
+	  echo "OK: htmx SHA-384 SRI matches sri_const_gen.go"; \
+	fi
+
+## vendor-htmx: download htmx 2.0.10 from the official GitHub release into the
+## embedded assets dir (one-time setup; the executor runs this in Plan 03). Run
+## `make check-htmx-sri` afterwards to verify integrity.
+vendor-htmx:
+	@mkdir -p internal/modules/webui/assets
+	@curl -fsSL \
+	  https://github.com/bigskysoftware/htmx/releases/download/v2.0.10/htmx.min.js \
+	  -o internal/modules/webui/assets/htmx.min.js
+	@echo "Downloaded htmx 2.0.10 — run 'make check-htmx-sri' to verify SRI"
 
 ## cover: run tests with coverage report
 cover:

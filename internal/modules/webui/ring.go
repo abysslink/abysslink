@@ -40,10 +40,10 @@ type NotifyEvent struct {
 // NotifyEvents. When full, the oldest event is dropped. The zero value is not
 // usable; construct via NewNotifyRingBuffer.
 type NotifyRingBuffer struct {
-	mu    sync.Mutex
-	buf   []NotifyEvent
-	next  int  // index of the next write slot
-	full  bool // whether the ring has wrapped at least once
+	mu   sync.Mutex
+	buf  []NotifyEvent
+	next int  // index of the next write slot
+	full bool // whether the ring has wrapped at least once
 }
 
 // NewNotifyRingBuffer returns an empty ring with the compiled-in capacity.
