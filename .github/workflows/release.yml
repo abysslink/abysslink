@@ -160,3 +160,32 @@ jobs:
             dist/*.deb
             dist/*.rpm
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    name: Publish release (gate draft on sign + attest)
+    # Only flip the draft to published AFTER both the cosign bundle (sign)
+    # and the SLSA provenance (attest) jobs succeed. This guarantees no
+    # published release ever exists without its .bundle and provenance,
+    # closing the partial-signing availability gap (WR-02): install.sh
+    # hard-fails when the bundle is missing, so a published-but-unsigned
+    # release would be un-installable.
+    needs: [build, sign, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write     # edit the release to clear the draft flag
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ needs.build.outputs.version }}"
+          gh release edit "${tag}" --repo "${{ github.repository }}" --draft=false
