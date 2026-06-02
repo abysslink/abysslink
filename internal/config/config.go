@@ -509,14 +509,21 @@ func ValidateObservability(cfg *Config) error {
 // "[host]:port", or a bare host; a bare/un-splittable value is treated as the
 // host itself. A non-IP host (e.g. a DNS name) is not unspecified.
 func IsUnspecifiedBindAddr(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		// Not host:port (bare host, or bracketed host without port). Strip any
-		// surrounding brackets so "[::]" parses as "::".
-		host = strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
-	}
-	ip := net.ParseIP(host)
+	ip := net.ParseIP(BindAddrHost(addr))
 	return ip != nil && ip.IsUnspecified()
+}
+
+// BindAddrHost extracts the host part of a bind address that may be "host:port",
+// "[host]:port", or a bare host. A bare/un-splittable value (including a
+// bracketed host without a port) is treated as the host itself, with any
+// surrounding brackets stripped so "[::1]" yields "::1". It is exported so the
+// doctor metrics-bind-tailnet check can apply the same OBS-03 tailnet-IP-match
+// predicate the daemon enforces at the listener seam (WR-01).
+func BindAddrHost(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
 }
 
 // validateBackend enforces backend-specific config invariants.

@@ -142,12 +142,15 @@ func TestMetricsServerRejectsWildcardBindAddr(t *testing.T) {
 	assert.Error(t, err, "wildcard bind_addr must be rejected at runtime; no listener (OBS-03)")
 }
 
-// TestMetricsServerHonorsBindAddr is the WR-01 regression: when bind_addr is
-// set to a legitimate (loopback, non-wildcard) host:port, the listener binds
-// THAT address and port — not backend.Client.IP / the default port.
+// TestMetricsServerHonorsBindAddr is the WR-01 regression: when bind_addr is set
+// to the tailnet IP (matching the backend) and supplies its own port, the
+// listener binds THAT address and port — not the default port. The host must
+// equal the backend-resolved tailnet IP under the tightened OBS-03 floor.
 func TestMetricsServerHonorsBindAddr(t *testing.T) {
 	port := freePort(t)
 	cfg := metricsEnabledCfg(0) // no Port: bind_addr supplies it
+	// bind_addr host MUST equal the backend tailnet IP. Use 127.0.0.1 (a
+	// bindable address in CI) for both so the listener actually comes up.
 	cfg.Observability.Metrics.BindAddr = net.JoinHostPort("127.0.0.1", itoa(port))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -155,11 +158,48 @@ func TestMetricsServerHonorsBindAddr(t *testing.T) {
 
 	reg := metrics.NewMemRegistry()
 	reg.Gauge("test_up", "up", nil).Set(1)
-	// Backend IP differs from bind_addr; bind_addr must win.
-	daemon.StartMetricsServer(ctx, cfg, reg, &localMockBackend{ip: "100.64.0.1"})
+	daemon.StartMetricsServer(ctx, cfg, reg, &localMockBackend{ip: "127.0.0.1"})
 
 	body := waitForMetrics(t, port)
-	assert.NotEmpty(t, body, "listener must honor the configured bind_addr")
+	assert.NotEmpty(t, body, "listener must honor a bind_addr that matches the tailnet IP")
+}
+
+// TestMetricsServerRejectsMismatchedBindAddr is the WR-01 regression for a
+// hand-edited bind_addr that differs from the backend-resolved tailnet IP (here a
+// loopback while the tailnet IP is a CGNAT address). It must fail closed: no
+// listener on the configured port.
+func TestMetricsServerRejectsMismatchedBindAddr(t *testing.T) {
+	port := freePort(t)
+	cfg := metricsEnabledCfg(0)
+	cfg.Observability.Metrics.BindAddr = net.JoinHostPort("127.0.0.1", itoa(port))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Backend tailnet IP differs from bind_addr → mismatch → fail closed.
+	daemon.StartMetricsServer(ctx, cfg, metrics.NewMemRegistry(), &localMockBackend{ip: "100.64.0.1"})
+	time.Sleep(100 * time.Millisecond)
+
+	_, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", itoa(port)), 50*time.Millisecond)
+	assert.Error(t, err, "bind_addr that is not the tailnet IP must be rejected; no listener (OBS-03)")
+}
+
+// TestMetricsServerRejectsPublicBindAddr is the WR-01 regression for a routable
+// public IP fat-fingered into bind_addr. It differs from the tailnet IP and must
+// fail closed — no internet-exposed listener.
+func TestMetricsServerRejectsPublicBindAddr(t *testing.T) {
+	port := freePort(t)
+	cfg := metricsEnabledCfg(0)
+	cfg.Observability.Metrics.BindAddr = net.JoinHostPort("203.0.113.7", itoa(port))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	daemon.StartMetricsServer(ctx, cfg, metrics.NewMemRegistry(), &localMockBackend{ip: "100.64.0.1"})
+	time.Sleep(100 * time.Millisecond)
+
+	_, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", itoa(port)), 50*time.Millisecond)
+	assert.Error(t, err, "public bind_addr must be rejected; no listener (OBS-03)")
 }
 
 func TestMetricsServerBindsTailnetIP(t *testing.T) {
