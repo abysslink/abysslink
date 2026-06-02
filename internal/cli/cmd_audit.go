@@ -18,11 +18,18 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/spf13/cobra"
 )
@@ -97,25 +104,311 @@ func runAuditVerify(ctx context.Context, p Printer, logPath string, kc audit.Key
 }
 
 func newAuditVerifyCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "verify",
-		Short: "Verify the integrity of the audit log hash chain",
-		Example: `  # Verify the tamper-evident audit log chain (exit 2 on a break)
-  abysslink audit verify`,
+		Short: "Verify the audit chain and aggregate the full security posture",
+		Long: `Verify the tamper-evident audit log hash chain AND aggregate every
+security-posture finding (doctor sec-* checks, audit/metrics/webui checks) into
+a single read-only readout (SEC-01).
+
+Exit codes:
+  0  — clean: chain OK and no findings.
+  1  — warnings only: chain OK, WARN findings present.
+  2  — fatal: any FATAL finding OR the chain is broken.
+
+Flags:
+  --pentest        run the full sec-* suite (attempts sshd -T even when not root)
+  --fix            apply mechanically-safe permission fixes (chmod 0600); the
+                   change is a dry-run preview unless --apply is also set. Never
+                   edits sshd_config.
+  --format=json    emit a machine-parseable JSON array of findings (read-only)`,
+		Example: `  # Aggregate read-only security posture (exit 0/1/2)
+  abysslink audit verify
+
+  # Full sec-* suite including sshd -T attempts
+  abysslink audit verify --pentest
+
+  # Preview the mechanically-safe permission fixes (dry-run)
+  abysslink audit verify --fix
+
+  # Apply the permission fixes
+  abysslink audit verify --fix --apply
+
+  # Machine-parseable JSON array of findings
+  abysslink audit verify --format=json`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
 			if err != nil {
 				return err
 			}
-			p := newPrinter(cmd)
+			pentest, _ := cmd.Flags().GetBool("pentest")
+			fix, _ := cmd.Flags().GetBool("fix")
+			format, _ := cmd.Flags().GetString("format")
+			// --format=json forces a JSON printer even when the root --json flag
+			// is absent, so the findings array reaches stdout (PrintJSON is a
+			// no-op on the human printer).
+			var p Printer
+			if format == "json" {
+				p = NewJSONPrinterTo(cmd.OutOrStdout(), cmd.ErrOrStderr())
+			} else {
+				p = newPrinter(cmd)
+			}
 			logPath, err := audit.DefaultLogPath()
 			if err != nil {
 				return fmt.Errorf("audit verify: %w", err)
 			}
-			return runAuditVerify(ctx, p, logPath, auditKeychain(ctx, cc))
+			opts := aggregateOpts{pentest: pentest, fix: fix, format: format, dryRun: cc.dryRun}
+			return runAuditAggregate(ctx, cc, p, logPath, auditKeychain(ctx, cc), opts)
 		},
 	}
+	cmd.Flags().Bool("pentest", false, "run the full sec-* suite (attempts sshd -T even when not root)")
+	cmd.Flags().Bool("fix", false, "apply mechanically-safe permission fixes (chmod 0600); requires --apply to mutate")
+	cmd.Flags().String("format", "", "output format: \"json\" emits a machine-parseable findings array")
+	return cmd
+}
+
+// stderrOnlyPrinter wraps a Printer and redirects Print (stdout) to Error
+// (stderr). It is used in --format=json mode so the chain-verify info banner
+// never pollutes the JSON-array stdout payload. PrintJSON is suppressed (the
+// aggregate emits the single canonical JSON array itself).
+type stderrOnlyPrinter struct{ inner Printer }
+
+func (s stderrOnlyPrinter) Print(msg string)         { s.inner.Error(msg) }
+func (s stderrOnlyPrinter) Printv(key, value string) { s.inner.Error(key + ": " + value) }
+func (s stderrOnlyPrinter) Error(msg string)         { s.inner.Error(msg) }
+func (s stderrOnlyPrinter) PrintJSON(_ any)          {}
+
+// jsonModeChainPrinter returns a Printer that keeps the chain-verify step's
+// human text off stdout while preserving stderr diagnostics.
+func jsonModeChainPrinter(p Printer) Printer { return stderrOnlyPrinter{inner: p} }
+
+// aggregateOpts carries the audit-verify aggregate flags. dryRun mirrors the
+// root --apply gate (true when --apply is absent): the --fix path only mutates
+// permissions when dryRun is false.
+type aggregateOpts struct {
+	pentest bool
+	fix     bool
+	format  string
+	dryRun  bool
+}
+
+// runAuditAggregate is the SEC-01 read-only security-posture aggregate. It runs
+// the chain-integrity check FIRST (propagating immediately on a break — exit 2,
+// RESEARCH Pitfall 7), then collects every doctor finding source exactly once,
+// dedups by check ID, and rolls the severities up into an exit code. With
+// --format=json it emits the findings as a JSON array; with --fix it applies the
+// mechanically-safe permission fixes (gated by --apply via opts.dryRun).
+func runAuditAggregate(ctx context.Context, cc *cmdContext, p Printer, logPath string, kc audit.KeychainStore, opts aggregateOpts) error {
+	// 1. Chain integrity first. A break is exit 2; do NOT collect findings after.
+	// In --format=json mode the chain-OK info banner must not pollute stdout (the
+	// JSON array is the only stdout payload), so route the verify step's Printer
+	// output to stderr. Chain-break errors are still surfaced (stderr) and the
+	// exit code is unchanged.
+	verifyP := p
+	if opts.format == "json" {
+		verifyP = jsonModeChainPrinter(p)
+	}
+	if err := runAuditVerify(ctx, verifyP, logPath, kc); err != nil {
+		var ee *exitError
+		if errors.As(err, &ee) && ee.ExitCode() == exitCodeFatal {
+			return err // CHAIN BROKEN — propagate exit 2 immediately.
+		}
+		// A non-fatal chain result (e.g. exit 1 when kc==nil: chain walked but
+		// signatures unauthenticated) does not abort the aggregate — the posture
+		// findings still matter. Fall through and let the roll-up decide.
+	}
+
+	// 2. Obtain deps with graceful degradation (mirrors cmd_doctor.go).
+	deps, depsErr := buildDeps(ctx, cc)
+	if depsErr != nil {
+		slog.Warn("audit-aggregate: deps unavailable; sec checks will degrade", "err", depsErr)
+		deps = modules.Deps{}
+	}
+
+	// 3. Collect every finding source exactly once (run-once pattern).
+	allFindings := collectAggregateFindings(ctx, cc, deps, opts.pentest, logPath)
+
+	// 4. Dedup by check ID (first occurrence wins).
+	allFindings = dedupFindings(allFindings)
+
+	// 5. --fix: apply mechanically-safe permission fixes (gated by --apply).
+	if opts.fix {
+		runAuditFix(p, logPath, opts.dryRun)
+	}
+
+	// 6. --format=json: emit a machine-parseable JSON array and roll up.
+	if opts.format == "json" {
+		p.PrintJSON(buildDoctorFindings(allFindings))
+		return exitCodeToError(aggregateExitCode(allFindings))
+	}
+
+	// 7. Human output + severity roll-up.
+	if len(allFindings) == 0 {
+		printerInfo(p, "All checks passed — security posture is clean.")
+		return nil
+	}
+	doctorHumanOutput(p, allFindings)
+	printerInfo(p, doctorSeverityCounts(allFindings))
+	return exitCodeToError(aggregateExitCode(allFindings))
+}
+
+// collectAggregateFindings runs every doctor finding source exactly once and
+// returns the concatenated slice. The 3 sec-* cross-ref aliases reuse the
+// pre-computed met/webui/audit slices so the underlying checks run once
+// (RESEARCH Pitfall 3).
+func collectAggregateFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, pentest bool, logPath string) []modules.Finding {
+	var all []modules.Finding
+
+	// Module-runner doctor pass (best-effort; nil deps degrade gracefully).
+	if r, rerr := modules.NewRunner(allModules(deps), cc.cfg); rerr == nil {
+		if mf, derr := r.Doctor(ctx); derr == nil {
+			all = append(all, mf...)
+		} else {
+			slog.Warn("audit-aggregate: module doctor pass failed", "err", derr)
+		}
+	}
+
+	// Backend + fleet findings.
+	all = appendBackendAndFleetFindings(ctx, cc, deps.Keychain, all)
+
+	// Supply-chain advisories.
+	all = append(all, supplyChainFindings(ctx, cc.runner, version, "")...)
+
+	// Audit posture (Phase 17) — captured for the sec-audit-anchor-age alias.
+	auditFinds := auditDoctorFindings(ctx, logPath, deps.Keychain)
+	all = append(all, auditFinds...)
+
+	// Metrics posture (Phase 18) — captured for the sec-metrics-bind alias.
+	metFinds := metricsDoctorFindings(cc.cfg, deps.MetricsRegistry(), resolveTailnetIP(ctx, cc))
+	all = append(all, metFinds...)
+
+	// Web UI posture (Phase 19) — captured for the sec-webui-bind alias.
+	webuiFinds := webuiDoctorFindings(ctx, cc.cfg)
+	all = append(all, webuiFinds...)
+
+	// 18 sec-* checks; the 3 aliases reuse the slices above (run-once).
+	all = append(all, secDoctorFindings(ctx, cc, deps, pentest, metFinds, webuiFinds, auditFinds)...)
+
+	return all
+}
+
+// dedupFindings collapses findings sharing a check ID, keeping the first
+// occurrence. The doctor pattern already avoids duplicates by design; this
+// guards the aggregate's run-once contract explicitly (RESEARCH Pitfall 3).
+func dedupFindings(in []modules.Finding) []modules.Finding {
+	seen := make(map[string]bool, len(in))
+	out := make([]modules.Finding, 0, len(in))
+	for _, f := range in {
+		if seen[f.Check] {
+			continue
+		}
+		seen[f.Check] = true
+		out = append(out, f)
+	}
+	return out
+}
+
+// aggregateExitCode rolls findings up into an exit code: any FATAL → 2, any
+// WARN → 1, else 0 (RESEARCH Pattern 3 exit-code design).
+func aggregateExitCode(findings []modules.Finding) int {
+	code := exitCodeOK
+	for _, f := range findings {
+		switch f.Severity {
+		case modules.SeverityFatal:
+			return exitCodeFatal
+		case modules.SeverityWarning:
+			code = exitCodeError
+		case modules.SeverityOK:
+			// no-op
+		}
+	}
+	return code
+}
+
+// exitCodeToError maps a roll-up exit code to a RunE return value (nil for 0,
+// an *exitError otherwise) so cobra exits with the right process code.
+func exitCodeToError(code int) error {
+	if code == exitCodeOK {
+		return nil
+	}
+	return &exitError{code: code}
+}
+
+// runAuditFix applies (or, when dryRun, previews) the mechanically-safe
+// permission fixes: tighten the audit log, any world/group-writable config
+// file, and the daemon socket to 0600. Every mutation goes through
+// internal/audit and is recorded BEFORE the chmod (CLAUDE.md hard rule).
+//
+// T-20-03-01: every fix target is derived from a trusted source function
+// (logPath argument / abysslinkConfigDir() / daemon.SocketPath()) — never parsed
+// from a Finding.Message — so a crafted finding cannot redirect a chmod.
+func runAuditFix(p Printer, logPath string, dryRun bool) {
+	// 1. Audit log perms.
+	if logPath != "" {
+		if fi, err := os.Stat(logPath); err == nil && fi.Mode().Perm()&0o077 != 0 {
+			secFixChmod(p, logPath, dryRun)
+		}
+	}
+
+	// 2. World/group-writable config files (re-walk the trusted config dir).
+	if dir := abysslinkConfigDir(); dir != "" {
+		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || !d.Type().IsRegular() {
+				return nil
+			}
+			fi, ferr := d.Info()
+			if ferr != nil {
+				return nil
+			}
+			if fi.Mode().Perm()&0o022 != 0 {
+				secFixChmod(p, path, dryRun)
+			}
+			return nil
+		})
+	}
+
+	// 3. Daemon socket perms (durable fix is a daemon restart).
+	if sock := daemon.SocketPath(); sock != "" {
+		if fi, err := os.Stat(sock); err == nil && fi.Mode().Perm()&0o077 != 0 {
+			if secFixChmod(p, sock, dryRun) {
+				printerInfo(p, "note: restart abysslinkd — the socket is recreated on restart, so the durable fix is a restart")
+			}
+		}
+	}
+}
+
+// secFixChmod records the chmod in the audit log (before mutating) and tightens
+// path to 0600. When dryRun is true it only previews the change. It REFUSES any
+// path containing "sshd" (CONTEXT: --fix never edits sshd config; T-20-03-01).
+// Returns true when a chmod was applied (or would be applied in dry-run).
+func secFixChmod(p Printer, path string, dryRun bool) bool {
+	if strings.Contains(path, "sshd") {
+		slog.Warn("sec-fix: refusing to touch sshd config", "path", path)
+		printerError(p, "sec-fix: refusing to chmod sshd config "+path+" — edit it manually")
+		return false
+	}
+	if dryRun {
+		printerInfo(p, "sec-fix: would chmod 0600 "+path+" (run with --apply to apply)")
+		return true
+	}
+	// Record the mutation in the audit log BEFORE applying it. If the audit
+	// append fails, do NOT proceed with the chmod (never lose the audit trail).
+	logPath, lpErr := audit.DefaultLogPath()
+	if lpErr != nil {
+		printerError(p, "sec-fix: cannot resolve audit log path; skipping chmod of "+path)
+		return false
+	}
+	if aerr := audit.New(logPath).Append("sec-fix", "chmod:"+path, nil, dryRun); aerr != nil {
+		printerError(p, "sec-fix: audit append failed; skipping chmod of "+path+": "+aerr.Error())
+		return false
+	}
+	if cerr := os.Chmod(path, 0o600); cerr != nil {
+		printerError(p, "sec-fix: chmod failed for "+path+": "+cerr.Error())
+		return false
+	}
+	printerInfo(p, "sec-fix: chmod 0600 "+path)
+	return true
 }
 
 // tailEntries returns the last n entries of the log. A missing log yields an
