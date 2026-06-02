@@ -17,48 +17,27 @@ package upsnap
 
 import (
 	"context"
-	"strings"
+	"net"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
-	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// mockPlatform is a no-op platform for tests.
-type mockPlatform struct {
-	serviceInstallErr error
-	installedSpec     platform.ServiceSpec
-}
-
-func (p *mockPlatform) OS() string                                       { return "test" }
-func (p *mockPlatform) Distro() platform.Distro                          { return platform.DistroUnknown }
-func (p *mockPlatform) PackageManager() platform.PackageManager          { return "" }
-func (p *mockPlatform) InstallPackage(_ context.Context, _ string) error { return nil }
-func (p *mockPlatform) RemovePackage(_ context.Context, _ string) error  { return nil }
-func (p *mockPlatform) ServiceInstall(_ context.Context, spec platform.ServiceSpec) error {
-	p.installedSpec = spec
-	return p.serviceInstallErr
-}
-func (p *mockPlatform) ServiceUninstall(_ context.Context, _ string) error { return nil }
-func (p *mockPlatform) ServiceStart(_ context.Context, _ string) error     { return nil }
-func (p *mockPlatform) ServiceStop(_ context.Context, _ string) error      { return nil }
-func (p *mockPlatform) ServiceStatus(_ context.Context, _ string) (platform.ServiceStatus, error) {
-	return platform.ServiceUnknown, nil
-}
-func (p *mockPlatform) DiskEncryptionStatus(_ context.Context) (platform.DiskState, error) {
-	return platform.DiskUnknown, nil
-}
-func (p *mockPlatform) Firewall() platform.FirewallController                       { return nil }
-func (p *mockPlatform) KeepAwake(_ context.Context, _ platform.KeepAwakeMode) error { return nil }
-
 // enabledCfg returns a config with the upsnap module enabled.
 func enabledCfg() *config.Config {
 	cfg := config.Defaults()
 	cfg.Modules.Upsnap.Enabled = true
+	return cfg
+}
+
+// enabledCfgWithMAC returns an enabled config with one rig carrying a MAC.
+func enabledCfgWithMAC() *config.Config {
+	cfg := enabledCfg()
+	cfg.Rigs = []config.RigConfig{{Name: "rig1", MAC: "aa:bb:cc:dd:ee:ff"}}
 	return cfg
 }
 
@@ -69,22 +48,38 @@ func disabledCfg() *config.Config {
 	return cfg
 }
 
-// TestDetect_NotInstalled verifies that a missing upsnap binary produces an
-// "installed" fatal finding.
-func TestDetect_NotInstalled(t *testing.T) {
-	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 127, Stderr: "command not found"}},
-	)
-	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
-	findings, err := m.Detect(context.Background())
+// TestBuildMagicPacket verifies the hand-rolled 102-byte packet layout.
+func TestBuildMagicPacket(t *testing.T) {
+	mac, err := net.ParseMAC("aa:bb:cc:dd:ee:ff")
 	require.NoError(t, err)
-	require.Len(t, findings, 1)
-	assert.Equal(t, "installed", findings[0].Check)
-	assert.Equal(t, modules.SeverityFatal, findings[0].Severity)
+
+	pkt, err := BuildMagicPacket(mac)
+	require.NoError(t, err)
+	require.Len(t, pkt, 102, "magic packet must be exactly 102 bytes")
+
+	// Bytes 0-5 must be 0xFF.
+	for i := range 6 {
+		assert.Equal(t, byte(0xFF), pkt[i], "byte %d must be 0xFF", i)
+	}
+
+	// Bytes 6-101 must be 16 repetitions of the 6-byte MAC.
+	for rep := range 16 {
+		off := 6 + rep*6
+		assert.Equal(t, []byte(mac), pkt[off:off+6], "repetition %d must equal the MAC", rep)
+	}
 }
 
-// TestDetect_Disabled verifies that a disabled module returns no findings.
-func TestDetect_Disabled(t *testing.T) {
+// TestBuildMagicPacket_InvalidMAC verifies a non-6-byte MAC returns an error.
+func TestBuildMagicPacket_InvalidMAC(t *testing.T) {
+	// A 4-byte hardware address (not a valid EUI-48).
+	_, err := BuildMagicPacket(net.HardwareAddr{0x01, 0x02, 0x03, 0x04})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid MAC address length")
+}
+
+// TestModule_Detect_Disabled verifies a disabled module returns no findings
+// and makes no runner calls.
+func TestModule_Detect_Disabled(t *testing.T) {
 	r := shell.NewMockRunner()
 	m := New(modules.Deps{Cfg: disabledCfg(), Runner: r})
 	findings, err := m.Detect(context.Background())
@@ -93,46 +88,47 @@ func TestDetect_Disabled(t *testing.T) {
 	assert.True(t, r.Done(), "no runner calls expected when disabled")
 }
 
-// TestPlan_Disabled verifies that Plan returns nil when the module is disabled.
-func TestPlan_Disabled(t *testing.T) {
+// TestModule_Detect_NoRigMAC verifies an enabled module with no rig MAC emits a
+// wol-no-rig-mac WARN.
+func TestModule_Detect_NoRigMAC(t *testing.T) {
 	r := shell.NewMockRunner()
-	m := New(modules.Deps{Cfg: disabledCfg(), Runner: r})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+	assert.Equal(t, "wol-no-rig-mac", findings[0].Check)
+	assert.Equal(t, modules.SeverityWarning, findings[0].Severity)
+}
+
+// TestModule_Detect_WithRigMAC verifies an enabled module with a rig MAC emits
+// no findings (WoL is configured and ready).
+func TestModule_Detect_WithRigMAC(t *testing.T) {
+	r := shell.NewMockRunner()
+	m := New(modules.Deps{Cfg: enabledCfgWithMAC(), Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, findings)
+}
+
+// TestModule_Plan_Disabled verifies Plan returns nil when disabled.
+func TestModule_Plan_Disabled(t *testing.T) {
+	m := New(modules.Deps{Cfg: disabledCfg(), Runner: shell.NewMockRunner()})
 	actions, err := m.Plan(context.Background(), false)
 	require.NoError(t, err)
 	assert.Nil(t, actions)
 }
 
-// TestPlan_NotInstalled verifies that Plan produces an install action when
-// upsnap is not on PATH.
-func TestPlan_NotInstalled(t *testing.T) {
-	// Plan calls Detect which runs "upsnap --version" and gets exit 127.
-	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 127, Stderr: "command not found"}},
-	)
-	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+// TestModule_Plan_Enabled verifies Plan returns the WoL-ready action.
+func TestModule_Plan_Enabled(t *testing.T) {
+	m := New(modules.Deps{Cfg: enabledCfgWithMAC(), Runner: shell.NewMockRunner()})
 	actions, err := m.Plan(context.Background(), false)
 	require.NoError(t, err)
-	require.NotEmpty(t, actions)
-
-	var hasInstall bool
-	for _, a := range actions {
-		if a.Module == "upsnap" && strings.Contains(a.Description, "install") {
-			hasInstall = true
-		}
-	}
-	assert.True(t, hasInstall, "expected an install action referencing download URL")
+	require.Len(t, actions, 1)
+	assert.Contains(t, actions[0].Description, "WoL")
 }
 
-// TestApply_NotOnPATH verifies that Apply returns an error containing the
-// download URL when upsnap is not found.
-func TestApply_NotOnPATH(t *testing.T) {
-	r := shell.NewMockRunner(
-		// upsnap --version: not found, no "upsnap" in combined output.
-		shell.Call{Result: shell.Result{ExitCode: 127, Stdout: "", Stderr: "command not found"}},
-	)
-	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: &mockPlatform{}})
-	err := m.Apply(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "https://github.com/seriousm4x/UpSnap/releases",
-		"error must contain the download URL")
+// TestModule_Apply_Noop verifies Apply never mutates and never errors.
+func TestModule_Apply_Noop(t *testing.T) {
+	m := New(modules.Deps{Cfg: enabledCfgWithMAC(), Runner: shell.NewMockRunner()})
+	require.NoError(t, m.Apply(context.Background()))
 }
