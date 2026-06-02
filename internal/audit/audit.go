@@ -26,11 +26,13 @@ import (
 // Entry is a single immutable audit-log record. Hash is the SHA-256 of the
 // content at mutation time — the content itself is never stored here.
 type Entry struct {
-	Time   time.Time `json:"time"`
-	Op     string    `json:"op"`
-	Target string    `json:"target"`
-	Hash   string    `json:"hash"` // hex-encoded SHA-256 of mutated content
-	DryRun bool      `json:"dry_run"`
+	Time     time.Time `json:"time"`
+	Op       string    `json:"op"`
+	Target   string    `json:"target"`
+	Hash     string    `json:"hash"` // hex-encoded SHA-256 of mutated content
+	DryRun   bool      `json:"dry_run"`
+	PrevHash string    `json:"prev_hash,omitempty"` // genesis or hex(sha256(prior raw JSONL line))
+	Sig      string    `json:"sig,omitempty"`       // hex HMAC-SHA256 of the signing input
 }
 
 // Audit writes append-only audit-log entries and is the sole authorised path
