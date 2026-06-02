@@ -78,13 +78,31 @@ func Verify(ctx context.Context, logPath string, kc KeychainStore) (VerifyResult
 // walkChain validates each entry's prev_hash link and (when key != nil) HMAC
 // signature, returning the first failure or an OK result with sig counts. A nil
 // key skips HMAC checks (documented fail-open-chain-walk; CR-02).
+//
+// CR-01 (iteration 2): the legacy "empty prev_hash → skip link+sig" allowance is
+// honoured ONLY for a CONTIGUOUS HEAD PREFIX of genuinely-unsigned v1/v2 entries.
+// Genuine legacy logs are always a wholly-unsigned prefix; signed entries always
+// carry a non-empty PrevHash (genesis or a hex link). Once the first signed entry
+// is observed (chainStarted), any later entry with an empty PrevHash — or any
+// entry carrying a Sig but no PrevHash — is a downgrade/strip attack (an attacker
+// blanking prev_hash+sig on the tail to rewrite op/target/dry_run/hash undetected)
+// and is REJECTED as CHAIN BROKEN. Without this, the unprotected tail entry could
+// be silently downgraded to "legacy", defeating CR-03's expanded HMAC.
 func walkChain(rawLines [][]byte, entries []Entry, key []byte) VerifyResult {
 	result := VerifyResult{OK: true, At: -1}
+	chainStarted := false
 	for i, e := range entries {
 		if e.PrevHash == "" {
-			result.SigsSkipped++ // pre-chain legacy entry — skip chain/sig checks
+			if chainStarted || e.Sig != "" {
+				// A signed chain has begun (or this entry still carries a Sig):
+				// a later/blanked empty prev_hash is a downgrade/strip attack,
+				// not a genuine pre-chain legacy entry.
+				return VerifyResult{OK: false, At: i, Reason: "CHAIN BROKEN: prev_hash stripped after chain start (tamper)"}
+			}
+			result.SigsSkipped++ // genuine contiguous-prefix legacy entry — skip chain/sig checks
 			continue
 		}
+		chainStarted = true
 
 		expectedPrev := genesisMarker
 		if i > 0 {
