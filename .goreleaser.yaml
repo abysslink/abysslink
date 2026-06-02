@@ -28,6 +28,8 @@ builds:
       - -X github.com/abysslink/abysslink/internal/cli.version={{.Version}}
       - -X github.com/abysslink/abysslink/internal/cli.commit={{.Commit}}
       - -X github.com/abysslink/abysslink/internal/cli.buildDate={{.CommitDate}}
+      - -X github.com/abysslink/abysslink/internal/cli.bundleURL=https://github.com/abysslink/abysslink/releases/download/{{.Tag}}/{{.ProjectName}}_{{.Version}}_checksums.txt.bundle
+      - -X github.com/abysslink/abysslink/internal/cli.slsaURL=https://github.com/abysslink/abysslink/attestations
     mod_timestamp: "{{ .CommitTimestamp }}"
 
   - id: abysslinkd
@@ -48,6 +50,8 @@ builds:
       - -X github.com/abysslink/abysslink/internal/cli.version={{.Version}}
       - -X github.com/abysslink/abysslink/internal/cli.commit={{.Commit}}
       - -X github.com/abysslink/abysslink/internal/cli.buildDate={{.CommitDate}}
+      - -X github.com/abysslink/abysslink/internal/cli.bundleURL=https://github.com/abysslink/abysslink/releases/download/{{.Tag}}/{{.ProjectName}}_{{.Version}}_checksums.txt.bundle
+      - -X github.com/abysslink/abysslink/internal/cli.slsaURL=https://github.com/abysslink/abysslink/attestations
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
