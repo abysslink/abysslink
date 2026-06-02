@@ -198,7 +198,7 @@ func TestApply_PreservesShellRCPerms(t *testing.T) {
 	t.Setenv("SHELL", "/bin/zsh")
 
 	rcPath := filepath.Join(dir, ".zshrc")
-	require.NoError(t, os.WriteFile(rcPath, []byte("# user rc\n"), 0o644))
+	require.NoError(t, os.WriteFile(rcPath, []byte("# user rc\n"), 0o644)) //nolint:gosec // G306: test fixture deliberately created world-readable (0o644, the conventional shell-rc mode) to verify the perm is preserved, not narrowed
 
 	a := audit.New(filepath.Join(dir, "audit.log"))
 	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
