@@ -183,9 +183,14 @@ type daemonDoctorSummary struct {
 }
 
 // handleStatus serves GET /status: a read-only JSON posture snapshot of the
-// daemon. It is tailnet-bound and unauthenticated this phase (Phase 19 adds
-// WhoIs + TLS). Reachability is true because the daemon is running; full doctor
-// wiring is deferred to Phase 19.
+// daemon. This route is served ONLY over the local Unix socket (chmod 0600,
+// see Run), which is the local-only trust boundary — it is NOT a tailnet/TCP
+// endpoint and carries no WhoIs/TLS of its own. The Phase-19 web UI is a
+// SEPARATE TLS+WhoIs-gated listener (internal/modules/webui) that reads the
+// same posture data; it does not expose this mux. These /status, /notify, and
+// /health routes MUST NOT be moved onto a network listener without first
+// routing them through the webui's WhoIs gate (WR-04). Reachability is true
+// because the daemon is running; full doctor wiring is deferred (OBS-07).
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
