@@ -324,7 +324,7 @@ func metDisabledListenerCheck(cfg *config.Config, tailnetIP string) modules.Find
 	case addr != "":
 		// Honor an explicit host:port; a bare host gets the configured/default
 		// port. Reuse config.BindAddrHost for host extraction (IN-04) instead of
-		// a hand-rolled bracket trim, matching metMetricsBindCheck (line 231).
+		// a hand-rolled bracket trim, matching metBindTailnetCheck's host extraction.
 		if _, _, err := net.SplitHostPort(addr); err != nil {
 			addr = net.JoinHostPort(config.BindAddrHost(addr), fmt.Sprintf("%d", port))
 		}
