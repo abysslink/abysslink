@@ -260,13 +260,134 @@ func TestTLSProbeFailClose(t *testing.T) {
 	require.NotNil(t, tlsFinding, "Verify must emit a webui-tls finding on a non-Tailscale backend")
 	assert.Equal(t, modules.SeverityFatal, tlsFinding.Severity, "webui-tls must be FATAL on headscale (WEB-03 fail-closed)")
 
-	// Fail-closed: no listener may be bound on the configured webui address.
-	addr := webuiAddr(cfg)
+	// Fail-closed: no listener may be bound on the resolved webui address.
+	addr, ok := resolveWebUIAddr(context.Background(), cfg, stubTailnetResolver{ip: "100.64.0.1"})
+	require.True(t, ok, "resolveWebUIAddr must succeed for a valid tailnet IP")
 	conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 	if dialErr == nil {
 		_ = conn.Close()
 		t.Fatalf("a listener is bound on %s but TLS probe should have failed closed", addr)
 	}
+}
+
+// stubTailnetResolver is a test double for tailnetIPResolver: it returns a fixed
+// IP (and optional error) without consulting a live tailscaled.
+type stubTailnetResolver struct {
+	ip  string
+	err error
+}
+
+func (s stubTailnetResolver) IP(_ context.Context) (string, error) {
+	return s.ip, s.err
+}
+
+func TestResolveWebUIAddrFailClosed(t *testing.T) {
+	cases := []struct {
+		name     string
+		bindAddr string
+		resolver stubTailnetResolver
+		wantOK   bool
+		wantAddr string
+	}{
+		{
+			name:     "empty bind_addr resolves to tailnet IP",
+			bindAddr: "",
+			resolver: stubTailnetResolver{ip: "100.64.0.7"},
+			wantOK:   true,
+			wantAddr: "100.64.0.7:8443",
+		},
+		{
+			name:     "empty tailnet IP fails closed (no wildcard bind)",
+			bindAddr: "",
+			resolver: stubTailnetResolver{ip: ""},
+			wantOK:   false,
+		},
+		{
+			name:     "resolver error fails closed",
+			bindAddr: "",
+			resolver: stubTailnetResolver{err: assert.AnError},
+			wantOK:   false,
+		},
+		{
+			name:     "unspecified resolved IP fails closed",
+			bindAddr: "",
+			resolver: stubTailnetResolver{ip: "0.0.0.0"},
+			wantOK:   false,
+		},
+		{
+			name:     "explicit bind_addr matching tailnet IP is accepted",
+			bindAddr: "100.64.0.7",
+			resolver: stubTailnetResolver{ip: "100.64.0.7"},
+			wantOK:   true,
+			wantAddr: "100.64.0.7:8443",
+		},
+		{
+			name:     "explicit wildcard bind_addr fails closed",
+			bindAddr: "0.0.0.0",
+			resolver: stubTailnetResolver{ip: "100.64.0.7"},
+			wantOK:   false,
+		},
+		{
+			name:     "explicit bind_addr mismatching tailnet IP fails closed",
+			bindAddr: "10.0.0.1",
+			resolver: stubTailnetResolver{ip: "100.64.0.7"},
+			wantOK:   false,
+		},
+		{
+			name:     "explicit bind_addr with embedded port is honored",
+			bindAddr: "100.64.0.7:9443",
+			resolver: stubTailnetResolver{ip: "100.64.0.7"},
+			wantOK:   true,
+			wantAddr: "100.64.0.7:9443",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.WebUI.Enabled = true
+			cfg.WebUI.BindAddr = tc.bindAddr
+			addr, ok := resolveWebUIAddr(context.Background(), cfg, tc.resolver)
+			assert.Equal(t, tc.wantOK, ok, "fail-closed decision (WEB-02)")
+			if tc.wantOK {
+				assert.Equal(t, tc.wantAddr, addr, "resolved bind address")
+			} else {
+				assert.Empty(t, addr, "no address may be returned when failing closed (WEB-02)")
+			}
+		})
+	}
+}
+
+func TestStaticAssetsServed(t *testing.T) {
+	mux := http.NewServeMux()
+	ServeStaticAssets(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cases := []struct {
+		path            string
+		wantContentType string // substring
+	}{
+		{"/static/style.css", "css"},
+		{"/static/htmx.min.js", "javascript"},
+		{"/static/error-handler.js", "javascript"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			resp, err := http.Get(srv.URL + tc.path)
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+			require.Equal(t, http.StatusOK, resp.StatusCode, "embedded asset must be served, not 404 (CR-02)")
+			assert.Contains(t, resp.Header.Get("Content-Type"), tc.wantContentType,
+				"asset must carry the correct content-type")
+		})
+	}
+
+	// The templates/ subtree must NOT be reachable under /static/ (CR-02).
+	resp, err := http.Get(srv.URL + "/static/base.html")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "templates must not be exposed under /static/")
 }
 
 func TestVerifyTailscaleNoTLSFatal(t *testing.T) {
