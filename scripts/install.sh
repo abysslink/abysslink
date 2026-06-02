@@ -130,7 +130,7 @@ verify_cosign_bundle() {
         cosign verify-blob \
             --bundle "${_bundle}" \
             --offline \
-            --certificate-identity-regexp "https://github.com/${REPO}" \
+            --certificate-identity-regexp "^https://github\.com/${REPO}/\.github/workflows/release\.yml@refs/tags/.*$" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${_artifact}" || die "cosign bundle verification FAILED — refusing to install (Pitfall 14: fail closed)"
         info "cosign bundle OK"
