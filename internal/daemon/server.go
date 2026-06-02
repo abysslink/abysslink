@@ -134,15 +134,15 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 // Phase 19 Web UI. rig_id is opaque (SHA-256 prefix of the hostname) — no raw
 // hostname, IP, or node_id is exposed (OBS-04).
 type daemonStatusResponse struct {
-	Version    string               `json:"version"`
-	Backend    string               `json:"backend"`
-	RigID      string               `json:"rig_id"`
-	Reachable  bool                 `json:"reachable"`
-	LockStatus string               `json:"lock_status"`
-	Doctor     daemonDoctorSummary  `json:"doctor"`
-	CertExpiry string               `json:"cert_expiry,omitempty"`
-	LastSeen   string               `json:"last_seen,omitempty"`
-	Uptime     string               `json:"uptime"`
+	Version    string              `json:"version"`
+	Backend    string              `json:"backend"`
+	RigID      string              `json:"rig_id"`
+	Reachable  bool                `json:"reachable"`
+	LockStatus string              `json:"lock_status"`
+	Doctor     daemonDoctorSummary `json:"doctor"`
+	CertExpiry string              `json:"cert_expiry,omitempty"`
+	LastSeen   string              `json:"last_seen,omitempty"`
+	Uptime     string              `json:"uptime"`
 }
 
 // daemonDoctorSummary is the per-severity doctor finding count in /status.

@@ -37,19 +37,19 @@ import (
 // Only IP is exercised by the metrics server; every other method is a stub that
 // is never called in these tests.
 type localMockBackend struct {
-	ip     string
-	ipErr  error
+	ip    string
+	ipErr error
 }
 
 func (m *localMockBackend) Status(_ context.Context) (*backend.Status, error) { return nil, nil }
 func (m *localMockBackend) IP(_ context.Context) (string, error)              { return m.ip, m.ipErr }
 func (m *localMockBackend) Hostname(_ context.Context) (string, error)        { return "", nil }
-func (m *localMockBackend) SSHConfig() backend.SSHConfig                       { return backend.SSHConfig{} }
-func (m *localMockBackend) LockCapability() backend.LockCapability             { return backend.LockCapability("") }
-func (m *localMockBackend) Capabilities() backend.Capabilities                 { return backend.Capabilities{} }
-func (m *localMockBackend) Up(_ context.Context, _ backend.UpOpts) error       { return nil }
-func (m *localMockBackend) Set(_ context.Context, _ backend.SetOpts) error     { return nil }
-func (m *localMockBackend) Down(_ context.Context) error                       { return nil }
+func (m *localMockBackend) SSHConfig() backend.SSHConfig                      { return backend.SSHConfig{} }
+func (m *localMockBackend) LockCapability() backend.LockCapability            { return backend.LockCapability("") }
+func (m *localMockBackend) Capabilities() backend.Capabilities                { return backend.Capabilities{} }
+func (m *localMockBackend) Up(_ context.Context, _ backend.UpOpts) error      { return nil }
+func (m *localMockBackend) Set(_ context.Context, _ backend.SetOpts) error    { return nil }
+func (m *localMockBackend) Down(_ context.Context) error                      { return nil }
 
 func metricsEnabledCfg(port int) *config.Config {
 	cfg := config.Defaults()
