@@ -218,8 +218,6 @@ func verifyChecksum(checksumFile, wantName, filePath string) error {
 
 // sha256File returns the lower-hex SHA-256 of a file.
 func sha256File(path string) (string, error) {
-	// Shell out to avoid adding crypto/sha256 import in this file.
-	// Use a pure-Go approach instead.
 	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return "", err
