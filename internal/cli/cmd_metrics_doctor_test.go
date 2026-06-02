@@ -34,7 +34,7 @@ func TestMetricsDoctorFindingsBindAddr0000(t *testing.T) {
 	cfg.Observability.Metrics.Enabled = true
 	cfg.Observability.Metrics.BindAddr = "0.0.0.0:9090"
 
-	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry())
+	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry(), "")
 	f, ok := findFinding(findings, "metrics-bind-tailnet")
 	require.True(t, ok, "metrics-bind-tailnet finding must be present")
 	assert.Equal(t, modules.SeverityFatal, f.Severity)
@@ -45,7 +45,7 @@ func TestMetricsDoctorFindingsBindAddrClean(t *testing.T) {
 	cfg.Observability.Metrics.Enabled = false
 	cfg.Observability.Metrics.BindAddr = ""
 
-	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry())
+	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry(), "")
 	f, ok := findFinding(findings, "metrics-bind-tailnet")
 	require.True(t, ok)
 	assert.Equal(t, modules.SeverityOK, f.Severity)
@@ -61,7 +61,7 @@ func TestMetDisabledListener_NoListener(t *testing.T) {
 	require.NoError(t, ln.Close())
 	cfg.Observability.Metrics.BindAddr = addr
 
-	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry())
+	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry(), "")
 	f, ok := findFinding(findings, "met-disabled-listener")
 	require.True(t, ok)
 	assert.Equal(t, modules.SeverityOK, f.Severity)
@@ -75,10 +75,34 @@ func TestMetDisabledListener_ListenerPresent(t *testing.T) {
 	defer ln.Close() //nolint:errcheck
 	cfg.Observability.Metrics.BindAddr = ln.Addr().String()
 
-	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry())
+	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry(), "")
 	f, ok := findFinding(findings, "met-disabled-listener")
 	require.True(t, ok)
 	assert.Equal(t, modules.SeverityFatal, f.Severity)
+}
+
+// TestMetDisabledListener_StaleTailnetBound is the WR-03 regression: with an
+// empty bind_addr, a stale listener bound to the tailnet IP (here a loopback
+// stand-in) must still be detected by probing the resolved tailnet IP:port,
+// not ":port"/127.0.0.1-by-default. The pre-fix code probed ":port" and missed
+// a socket bound only to the specific IP.
+func TestMetDisabledListener_StaleTailnetBound(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+	cfg.Observability.Metrics.BindAddr = "" // listener would have bound tailnetIP:port
+
+	// Bind a real socket on a specific loopback IP:port and feed that IP+port
+	// as the "tailnet" address the probe should target.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close() //nolint:errcheck
+	tcpAddr := ln.Addr().(*net.TCPAddr)
+	cfg.Observability.Metrics.Port = tcpAddr.Port
+
+	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry(), tcpAddr.IP.String())
+	f, ok := findFinding(findings, "met-disabled-listener")
+	require.True(t, ok)
+	assert.Equal(t, modules.SeverityFatal, f.Severity, "stale tailnet-bound listener must be detected (WR-03)")
 }
 
 func TestMetCardinality_Under500(t *testing.T) {
@@ -88,7 +112,7 @@ func TestMetCardinality_Under500(t *testing.T) {
 	reg.Counter("abysslink_b", "help", map[string]string{"result": "pass"}).Inc()
 	reg.Gauge("abysslink_c", "help", nil).Set(1)
 
-	findings := metricsDoctorFindings(cfg, reg)
+	findings := metricsDoctorFindings(cfg, reg, "")
 	f, ok := findFinding(findings, "met-cardinality")
 	require.True(t, ok)
 	assert.Equal(t, modules.SeverityOK, f.Severity)
@@ -101,7 +125,7 @@ func TestMetCardinality_Over500(t *testing.T) {
 	for i := 0; i < 501; i++ {
 		reg.Counter("abysslink_series", "help", map[string]string{"check_id": fmt.Sprintf("c%d", i)}).Inc()
 	}
-	findings := metricsDoctorFindings(cfg, reg)
+	findings := metricsDoctorFindings(cfg, reg, "")
 	f, ok := findFinding(findings, "met-cardinality")
 	require.True(t, ok)
 	assert.Equal(t, modules.SeverityWarning, f.Severity)
@@ -112,7 +136,7 @@ func TestMetLabelAudit_AllAllowed(t *testing.T) {
 	reg := metrics.NewMemRegistry()
 	reg.Counter("abysslink_ok", "help", map[string]string{"severity": "ok", "rig": "abc"}).Inc()
 
-	findings := metricsDoctorFindings(cfg, reg)
+	findings := metricsDoctorFindings(cfg, reg, "")
 	f, ok := findFinding(findings, "met-label-audit")
 	require.True(t, ok)
 	assert.Equal(t, modules.SeverityOK, f.Severity)
