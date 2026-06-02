@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -236,7 +237,7 @@ func runAuditAggregate(ctx context.Context, cc *cmdContext, p Printer, logPath s
 
 	// 5. --fix: apply mechanically-safe permission fixes (gated by --apply).
 	if opts.fix {
-		runAuditFix(p, logPath, opts.dryRun)
+		runAuditFix(ctx, p, logPath, kc, opts.dryRun)
 	}
 
 	// 6. --format=json: emit a machine-parseable JSON array and roll up.
@@ -339,17 +340,27 @@ func exitCodeToError(code int) error {
 
 // runAuditFix applies (or, when dryRun, previews) the mechanically-safe
 // permission fixes: tighten the audit log, any world/group-writable config
-// file, and the daemon socket to 0600. Every mutation goes through
-// internal/audit and is recorded BEFORE the chmod (CLAUDE.md hard rule).
+// file, and the daemon socket to 0600. A real chmod (--apply) is recorded in
+// the audit log AFTER it succeeds, via the chain-correct writer (CLAUDE.md hard
+// rule). A dry-run is a pure read-only preview: it prints what WOULD change and
+// records nothing (CR-01/WR-01 — recording a dry-run with the unsigned writer
+// broke the signed hash chain, and even a chain-correct dry-run record would
+// make a read-only preview non-idempotent and grow the log unbounded).
+//
+// kc selects the writer: when a keychain is present the production log is a
+// signed hash chain, so the record MUST extend it via the signed writer; only a
+// genuinely unsigned legacy log (kc == nil) uses the unsigned writer. This
+// mirrors buildDeps so a sec-fix entry is never an unsigned entry injected into
+// a signed chain (which audit.Verify reports as CHAIN BROKEN).
 //
 // T-20-03-01: every fix target is derived from a trusted source function
 // (logPath argument / abysslinkConfigDir() / daemon.SocketPath()) — never parsed
 // from a Finding.Message — so a crafted finding cannot redirect a chmod.
-func runAuditFix(p Printer, logPath string, dryRun bool) {
+func runAuditFix(ctx context.Context, p Printer, logPath string, kc audit.KeychainStore, dryRun bool) {
 	// 1. Audit log perms.
 	if logPath != "" {
 		if fi, err := os.Stat(logPath); err == nil && fi.Mode().Perm()&0o077 != 0 {
-			secFixChmod(p, logPath, dryRun)
+			secFixChmod(ctx, p, logPath, logPath, kc, dryRun)
 		}
 	}
 
@@ -366,7 +377,7 @@ func runAuditFix(p Printer, logPath string, dryRun bool) {
 				return nil
 			}
 			if fi.Mode().Perm()&looseConfigBits != 0 {
-				secFixChmod(p, path, dryRun)
+				secFixChmod(ctx, p, logPath, path, kc, dryRun)
 			}
 			return nil
 		})
@@ -375,41 +386,36 @@ func runAuditFix(p Printer, logPath string, dryRun bool) {
 	// 3. Daemon socket perms (durable fix is a daemon restart).
 	if sock := daemon.SocketPath(); sock != "" {
 		if fi, err := os.Stat(sock); err == nil && fi.Mode().Perm()&0o077 != 0 {
-			if secFixChmod(p, sock, dryRun) {
+			if secFixChmod(ctx, p, logPath, sock, kc, dryRun) {
 				printerInfo(p, "note: restart abysslinkd — the socket is recreated on restart, so the durable fix is a restart")
 			}
 		}
 	}
 }
 
-// secFixChmod records the intended/actual mutation in the audit log (BEFORE
-// acting, with the dryRun flag distinguishing a preview from a real chmod) and,
-// when dryRun is false, tightens path to 0600. It REFUSES any path containing
-// "sshd" (CONTEXT: --fix never edits sshd config; T-20-03-01). Returns true when
-// a chmod was applied (or would be applied in dry-run).
+// secFixChmod tightens path to 0600 when dryRun is false, then records the
+// mutation in the audit log. It REFUSES any path containing "sshd" (CONTEXT:
+// --fix never edits sshd config; T-20-03-01). Returns true when a chmod was
+// applied (or, in dry-run, would be applied).
 //
-// WR-01: the dry-run is recorded too (tagged dryRun=true), matching the
-// established mutation-path pattern (e.g. audit.WriteFile) so a --fix dry-run
-// that enumerates exactly which files would be chmod'd leaves an audit trail
-// rather than being a traceless reconnaissance action.
-func secFixChmod(p Printer, path string, dryRun bool) bool {
+// CR-01: the audit record is written ONLY on --apply, ONLY after the chmod
+// actually succeeds, and through the chain-correct writer (the signed writer
+// when a keychain is present, the unsigned writer only for a genuinely unsigned
+// legacy log). A dry-run is a pure read-only preview that writes NOTHING to the
+// log — both because a chain-correct dry-run record would make the preview
+// non-idempotent (WR-01) and because the prior unsigned dry-run append poisoned
+// the signed chain (CHAIN BROKEN on the next verify). The audit-after-chmod
+// ordering is acceptable here: chmod is reversible (re-runnable) and a crash
+// between the chmod and the append leaves the file correctly tightened, not in a
+// dangerous lax state — the opposite risk profile from a content WriteFile.
+func secFixChmod(ctx context.Context, p Printer, logPath, path string, kc audit.KeychainStore, dryRun bool) bool {
 	if strings.Contains(path, "sshd") {
 		slog.Warn("sec-fix: refusing to touch sshd config", "path", path)
 		printerError(p, "sec-fix: refusing to chmod sshd config "+path+" — edit it manually")
 		return false
 	}
-	// Record the intended/actual mutation in the audit log BEFORE acting. If the
-	// audit append fails, do NOT proceed (never lose the audit trail).
-	logPath, lpErr := audit.DefaultLogPath()
-	if lpErr != nil {
-		printerError(p, "sec-fix: cannot resolve audit log path; skipping "+path)
-		return false
-	}
-	if aerr := audit.New(logPath).Append("sec-fix", "chmod:"+path, nil, dryRun); aerr != nil {
-		printerError(p, "sec-fix: audit append failed; skipping chmod of "+path+": "+aerr.Error())
-		return false
-	}
 	if dryRun {
+		// Pure read-only preview: print what WOULD change, record nothing.
 		printerInfo(p, "sec-fix: would chmod 0600 "+path+" (run with --apply to apply)")
 		return true
 	}
@@ -417,8 +423,41 @@ func secFixChmod(p Printer, path string, dryRun bool) bool {
 		printerError(p, "sec-fix: chmod failed for "+path+": "+cerr.Error())
 		return false
 	}
+	// Record the applied mutation AFTER the chmod succeeds, through the
+	// chain-correct writer so a signed chain is only ever extended by the signed
+	// writer (never an unsigned entry injected into a signed chain — CR-01).
+	if aerr := appendSecFixRecord(ctx, kc, logPath, path); aerr != nil {
+		// The chmod already succeeded and is durable; surface the audit failure
+		// but do not report the chmod as un-applied.
+		printerError(p, "sec-fix: chmod 0600 "+path+" applied but audit append failed: "+aerr.Error())
+		return true
+	}
 	printerInfo(p, "sec-fix: chmod 0600 "+path)
 	return true
+}
+
+// appendSecFixRecord records an applied sec-fix chmod in the RESOLVED audit log
+// (logPath — the same chain audit verify walks, not necessarily
+// DefaultLogPath()) via the chain-correct writer. With a keychain it extends the
+// signed hash chain (audit.NewSigned — the key already exists for a signed
+// install, so no key is rotated); without one it appends to a genuinely
+// unsigned legacy log (audit.New). The target carries the path; no file content
+// is recorded.
+func appendSecFixRecord(ctx context.Context, kc audit.KeychainStore, logPath, path string) error {
+	if logPath == "" {
+		return fmt.Errorf("audit log path is empty")
+	}
+	if kc != nil {
+		sa, saErr := audit.NewSigned(logPath, kc)
+		if saErr != nil {
+			return fmt.Errorf("signed audit writer: %w", saErr)
+		}
+		return sa.Append(ctx, audit.SignInput{
+			Title:    "sec-fix",
+			DiffHash: sha256.Sum256([]byte("chmod:" + path)),
+		}, "chmod:"+path, false)
+	}
+	return audit.New(logPath).Append("sec-fix", "chmod:"+path, nil, false)
 }
 
 // secChmodNoFollow tightens path's permissions without following symlinks
