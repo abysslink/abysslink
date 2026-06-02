@@ -44,7 +44,7 @@ func NetBirdListPostureChecks(ctx context.Context, cfg *config.Config) ([]Postur
 	}
 	out := make([]PostureCheck, len(checks))
 	for i, c := range checks {
-		out[i] = PostureCheck{ID: c.ID, Name: c.Name, Description: c.Description}
+		out[i] = PostureCheck(c)
 	}
 	return out, nil
 }
@@ -61,7 +61,7 @@ func NetBirdCreatePostureCheck(ctx context.Context, cfg *config.Config, name, de
 	if err != nil {
 		return PostureCheck{}, err
 	}
-	return PostureCheck{ID: created.ID, Name: created.Name, Description: created.Description}, nil
+	return PostureCheck(created), nil
 }
 
 // NetBirdDeletePostureCheck deletes a posture check by ID via
