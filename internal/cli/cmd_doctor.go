@@ -510,62 +510,12 @@ Exit codes:
 			if err != nil {
 				return fmt.Errorf("doctor: %w", err)
 			}
-			mods := allModules(deps)
-			r, err := modules.NewRunner(mods, cc.cfg)
-			if err != nil {
-				return err
-			}
 
-			findings, err := r.Doctor(ctx)
-			if err != nil {
-				return fmt.Errorf("doctor: %w", err)
-			}
-
-			// Backend-specific + fleet: append all backend and fleet findings.
-			findings = appendBackendAndFleetFindings(ctx, cc, deps.Keychain, findings)
-
-			// Supply-chain integrity advisories (cosign v3 bundle + SLSA provenance).
-			findings = append(findings, supplyChainFindings(ctx, cc.runner, version, "")...)
-
-			// Tamper-evident audit-log posture (anchor age, count-vs-anchor, keychain).
-			// Captured into a local so the sec-audit-anchor-age cross-ref alias can
-			// reuse it (run-once pattern, RESEARCH Pitfall 3).
-			var auditFinds []modules.Finding
-			if logPath, lpErr := auditDefaultLogPath(); lpErr == nil {
-				auditFinds = auditDoctorFindings(ctx, logPath, deps.Keychain)
-				findings = append(findings, auditFinds...)
-			} else {
-				slog.Warn("doctor: audit log path unavailable; skipping audit checks", "err", lpErr)
-			}
-
-			// Observability metrics posture (OBS-03/04/05): bind floor, label
-			// allowlist, cardinality budget, and stale-listener probe. The
-			// tailnet IP is resolved best-effort so the disabled-listener probe
-			// targets the same address the live listener binds (WR-03).
-			metFinds := metricsDoctorFindings(cc.cfg, deps.MetricsRegistry(), resolveTailnetIP(ctx, cc))
-			findings = append(findings, metFinds...)
-
-			// Web UI posture (WEB-02..WEB-06): 8 HARD-FLOOR checks, all FATAL on
-			// misconfiguration. Config-layer checks plus net.Dial / net/http live
-			// probes — no tailscale.com import, so the base binary stays free of
-			// webui/SDK symbols (T-19-08). All checks are no-ops (SeverityOK) when
-			// webui is disabled, except webui-bind which fires even when disabled.
-			webuiFinds := webuiDoctorFindings(ctx, cc.cfg)
-			findings = append(findings, webuiFinds...)
-
-			// Security audit posture (SEC-04): 18 sec-* checks. The 3 cross-ref
-			// aliases (sec-metrics-bind, sec-webui-bind, sec-audit-anchor-age)
-			// reuse the metFinds / webuiFinds / auditFinds slices computed above so
-			// the underlying checks run exactly once (RESEARCH Pitfall 3).
-			findings = append(findings, secDoctorFindings(ctx, cc, deps, false, metFinds, webuiFinds, auditFinds)...)
-
-			// Phase 21 optional-module posture (MOD3-01..05): wol-apply-gate,
-			// upsnap-bind/no-public, atuin-bind/key-backed-up, asciinema-rec-warning,
-			// sandbox-landlock-supported, nb-posture-active. Each finding group is
-			// emitted only when its module is enabled (and nb-posture-active only
-			// when backend.type==netbird). Defined in cmd_doctor_mod3.go (same
-			// package), so no import is needed.
-			findings = append(findings, mod3DoctorFindings(ctx, cc.cfg, cc.runner)...)
+			// All local finding families run in their canonical order via the
+			// shared collector — the SAME single source of truth the abysslinkd
+			// web-UI dashboard uses (CollectDoctorFindings, B3). Keeping the
+			// ordering in one place stops the CLI and the dashboard from drifting.
+			findings := collectDoctorFindings(ctx, cc, deps)
 
 			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
 			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")
