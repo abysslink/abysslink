@@ -122,6 +122,26 @@ func TestMetricsServerEmptyIPFailsClosed(t *testing.T) {
 	assert.Error(t, err, "no listener may bind when the tailnet IP is empty (OBS-03 fail-closed)")
 }
 
+// TestMetricsServerRejectsWildcardBindAddr is the CR-02 regression: a
+// hand-written bind_addr of 0.0.0.0:port must be rejected at the runtime path
+// (StartMetricsServer enforces config.ValidateObservability) and start no
+// listener, regardless of whether the global config.Validate is wired into
+// config.Load.
+func TestMetricsServerRejectsWildcardBindAddr(t *testing.T) {
+	port := freePort(t)
+	cfg := metricsEnabledCfg(0)
+	cfg.Observability.Metrics.BindAddr = net.JoinHostPort("0.0.0.0", itoa(port))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	daemon.StartMetricsServer(ctx, cfg, metrics.NewMemRegistry(), &localMockBackend{ip: "100.64.0.1"})
+	time.Sleep(100 * time.Millisecond)
+
+	_, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", itoa(port)), 50*time.Millisecond)
+	assert.Error(t, err, "wildcard bind_addr must be rejected at runtime; no listener (OBS-03)")
+}
+
 // TestMetricsServerHonorsBindAddr is the WR-01 regression: when bind_addr is
 // set to a legitimate (loopback, non-wildcard) host:port, the listener binds
 // THAT address and port — not backend.Client.IP / the default port.
