@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/abysslink/abysslink/internal/config"
 )
@@ -129,13 +131,34 @@ func (a *netbirdAdapter) CreatePostureCheck(ctx context.Context, req nbCreatePos
 // DeletePostureCheck removes a posture check via DELETE /api/posture-checks/{id}.
 // Expects HTTP 204 No Content; no body decode is performed.
 func (a *netbirdAdapter) DeletePostureCheck(ctx context.Context, id string) error {
-	resp, err := a.doRequest(ctx, http.MethodDelete, "/api/posture-checks/"+id, nil)
+	if err := validatePostureCheckID(id); err != nil {
+		return fmt.Errorf("netbird: delete posture check: %w", err)
+	}
+	// url.PathEscape keeps the verb scoped to /api/posture-checks/{id}: a value
+	// containing "../", "/", "?", "#", or spaces cannot redirect the DELETE to a
+	// different resource or produce a malformed request target (WR-01).
+	resp, err := a.doRequest(ctx, http.MethodDelete, "/api/posture-checks/"+url.PathEscape(id), nil)
 	if err != nil {
 		return fmt.Errorf("netbird: delete posture check %s: %w", id, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("netbird: delete posture check %s: HTTP %d", id, resp.StatusCode)
+	}
+	return nil
+}
+
+// validatePostureCheckID rejects obviously-invalid posture-check IDs before they
+// are interpolated into a request path. It is a defence-in-depth complement to
+// url.PathEscape: an empty id, or one containing a path separator or path-
+// traversal segment, is never a legitimate NetBird resource id and is rejected
+// outright (WR-01).
+func validatePostureCheckID(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("posture check id is empty")
+	}
+	if strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("posture check id %q contains an illegal path segment", id)
 	}
 	return nil
 }
