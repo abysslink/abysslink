@@ -49,7 +49,7 @@ func TestReverse_RestoresAndDeletes(t *testing.T) {
 	require.Len(t, manifest, 2)
 
 	// Pre-existing file restored to its ORIGINAL content (not the latest backup).
-	got, err := os.ReadFile(pre) //nolint:gosec
+	got, err := os.ReadFile(pre) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Equal(t, "ORIGINAL", string(got))
 
@@ -90,7 +90,7 @@ func TestReverse_DryRunDoesNotMutate(t *testing.T) {
 	assert.Equal(t, audit.HashOf([]byte("ORIGINAL")), manifest[0].Hash)
 
 	// Dry-run must not touch the file or its backups.
-	got, err := os.ReadFile(target) //nolint:gosec
+	got, err := os.ReadFile(target) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Equal(t, "CHANGED", string(got))
 	baks, _ := audit.Backups(target)

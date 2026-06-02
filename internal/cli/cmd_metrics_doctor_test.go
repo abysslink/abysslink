@@ -72,7 +72,7 @@ func TestMetDisabledListener_ListenerPresent(t *testing.T) {
 	cfg.Observability.Metrics.Enabled = false
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer ln.Close() //nolint:errcheck
+	defer ln.Close() //nolint:errcheck // errcheck: close error in test teardown is non-actionable
 	cfg.Observability.Metrics.BindAddr = ln.Addr().String()
 
 	findings := metricsDoctorFindings(cfg, metrics.NewMemRegistry(), "")
@@ -95,7 +95,7 @@ func TestMetDisabledListener_StaleTailnetBound(t *testing.T) {
 	// as the "tailnet" address the probe should target.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer ln.Close() //nolint:errcheck
+	defer ln.Close() //nolint:errcheck // errcheck: close error in test teardown is non-actionable
 	tcpAddr := ln.Addr().(*net.TCPAddr)
 	cfg.Observability.Metrics.Port = tcpAddr.Port
 

@@ -179,7 +179,7 @@ func TestResolveAbysslink_Fallback(t *testing.T) {
 // writeFakeBinary creates an executable placeholder file at path.
 func writeFakeBinary(t *testing.T, path string) {
 	t.Helper()
-	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755)) //nolint:gosec
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755)) //nolint:gosec // G306: test writes an executable shell fixture requiring 0o755
 }
 
 // ensure strings is used even if assertions change.
