@@ -71,7 +71,7 @@ func TestThreatModelBackend(t *testing.T) {
 			assert.Contains(t, out, r)
 		}
 		assert.Contains(t, out, "Backend: tailscale")
-		for _, r := range []string{"lock_enabled", "acl_drift", "sec-funnel-schema"} {
+		for _, r := range []string{"Tailnet Lock enabled", "ACL policy not drifted", "sec-funnel-schema"} {
 			assert.Contains(t, out, r)
 		}
 	})
