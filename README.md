@@ -7,16 +7,22 @@
 **Vibe-code from your phone — securely.**
 *Drive Claude Code, Cursor, Aider, Codex, or any AI coding agent on your laptop straight from your phone — over hardened SSH on a private mesh VPN, audited and reversible by default. Kick off an agent, get a push the second it needs you, tap back in, type the next instruction. (Also rock-solid as plain secure SSH to your own box.) One static Go binary, macOS + Linux.*
 
-[![CI](https://img.shields.io/github/actions/workflow/status/abysslink/abysslink/test.yml?branch=main&label=ci&logo=github)](https://github.com/abysslink/abysslink/actions/workflows/test.yml)
-[![Security](https://img.shields.io/github/actions/workflow/status/abysslink/abysslink/security.yml?branch=main&label=security&logo=github)](https://github.com/abysslink/abysslink/actions/workflows/security.yml)
-[![Reproducible build](https://img.shields.io/github/actions/workflow/status/abysslink/abysslink/repro-check.yml?branch=main&label=repro&logo=github)](https://github.com/abysslink/abysslink/actions/workflows/repro-check.yml)
-[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/abysslink/abysslink?label=scorecard)](https://securityscorecards.dev/viewer/?uri=github.com/abysslink/abysslink)
-[![Latest release](https://img.shields.io/github/v/release/abysslink/abysslink?sort=semver&logo=github)](https://github.com/abysslink/abysslink/releases)
 [![Go version](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#supported-platforms)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-<!-- Badges resolve once the repo is public; OpenSSF Scorecard activates after the first scan. -->
+<!--
+  Live status badges — these query the GitHub API and render red ("repo not
+  found") while the repo is PRIVATE. Uncomment this block once the repo is
+  public (OpenSSF Scorecard also needs its first scan to land):
+
+  [![CI](https://img.shields.io/github/actions/workflow/status/abysslink/abysslink/test.yml?branch=main&label=ci&logo=github)](https://github.com/abysslink/abysslink/actions/workflows/test.yml)
+  [![Security](https://img.shields.io/github/actions/workflow/status/abysslink/abysslink/security.yml?branch=main&label=security&logo=github)](https://github.com/abysslink/abysslink/actions/workflows/security.yml)
+  [![Reproducible build](https://img.shields.io/github/actions/workflow/status/abysslink/abysslink/repro-check.yml?branch=main&label=repro&logo=github)](https://github.com/abysslink/abysslink/actions/workflows/repro-check.yml)
+  [![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/abysslink/abysslink?label=scorecard)](https://securityscorecards.dev/viewer/?uri=github.com/abysslink/abysslink)
+  [![Latest release](https://img.shields.io/github/v/release/abysslink/abysslink?sort=semver&logo=github)](https://github.com/abysslink/abysslink/releases)
+-->
 
 </div>
 
