@@ -8,6 +8,7 @@ linters:
   default: none
   enable:
     - errcheck
+    - forbidigo
     - gosec
     - revive
     - gocyclo
@@ -17,6 +18,11 @@ linters:
     - depguard
 
 linters-settings:
+  forbidigo:
+    analyze-types: true
+    forbid:
+      - p: '^audit\.(Entry|SignInput)\.(Body|Content|Data|Raw|Payload)$'
+        msg: "AUD-04: audit signing input must only contain title+diffHash — no body/content/data/raw/payload field"
   gocyclo:
     min-complexity: 15
   revive:
