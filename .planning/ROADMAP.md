@@ -40,7 +40,7 @@ Phases 16–21 (6 phases) — supply-chain hardening + tamper-evident audit + ob
 - [x] **Phase 16: Supply-Chain Hardening & CI Gates** - govulncheck, semgrep, dependency-review, SLSA L2, cosign v3 keyless, SPDX+CycloneDX SBOM, harden-runner, reproducible builds, `abysslink verify` (completed 2026-06-02)
 - [x] **Phase 17: Tamper-Evident Audit Log + Fuzzing** - Hash-chained/HMAC-signed audit entries, external anchor, `abysslink audit` command surface, fuzz targets with seed corpus and gitleaks pre-commit hook (completed 2026-06-02)
 - [x] **Phase 18: Observability & Metrics** - `internal/metrics.Registry`, tailnet-IP-bound Prometheus endpoint, `abysslink report`, daemon `GET /status`, fleet daily digest (completed 2026-06-02)
-- [ ] **Phase 19: Web UI Dashboard (opt-in)** - `//go:build webui` opt-in module, safeweb CSRF, WhoIs auth, TLS via Tailscale cert, read-only gate, CSP self, separate goreleaser artifact
+- [x] **Phase 19: Web UI Dashboard (opt-in)** - `//go:build webui` opt-in module, safeweb CSRF, WhoIs auth, TLS via Tailscale cert, read-only gate, CSP self, separate goreleaser artifact (completed 2026-06-02)
 - [ ] **Phase 20: Security Audit Pass & Doctor Checks** - `abysslink audit [--pentest]`, gosec/semgrep zero findings, refreshed threat model per backend, 18+ new sec-* doctor checks
 - [ ] **Phase 21: Optional Modules & Fleet Polish** - upsnap (WoL with --apply gate), atuin, sandbox (Linux-only Landlock), asciinema (credential warning), NetBird posture-check + events tail, scope-cut docs
 
@@ -311,10 +311,10 @@ Plans:
 
 Plans:
 
-- [ ] 19-01-PLAN.md — WebUI config struct + ValidateWebUI + goreleaser abysslinkd-webui build entry (WEB-01, WEB-02 schema layer)
-- [ ] 19-02-PLAN.md — webui package skeleton: security core (server, WhoIs middleware, safeweb CSRF, ring buffer, audit projection, SRI) + base-binary isolation tests (WEB-01, WEB-03, WEB-04, WEB-05)
-- [ ] 19-03-PLAN.md — HTTP handlers + templates + static assets (htmx vendor, style.css, error-handler.js) + CSP tests (WEB-06, WEB-07)
-- [ ] 19-04-PLAN.md — 8 FATAL webui doctor checks + daemon wiring + make lint test green + VALIDATION.md (WEB-02, WEB-03, WEB-04, WEB-05, WEB-06, WEB-07)
+- [x] 19-01-PLAN.md — WebUI config struct + ValidateWebUI + goreleaser abysslinkd-webui build entry (WEB-01, WEB-02 schema layer)
+- [x] 19-02-PLAN.md — webui package skeleton: security core (server, WhoIs middleware, safeweb CSRF, ring buffer, audit projection, SRI) + base-binary isolation tests (WEB-01, WEB-03, WEB-04, WEB-05)
+- [x] 19-03-PLAN.md — HTTP handlers + templates + static assets (htmx vendor, style.css, error-handler.js) + CSP tests (WEB-06, WEB-07)
+- [x] 19-04-PLAN.md — 8 FATAL webui doctor checks + daemon wiring + make lint test green + VALIDATION.md (WEB-02, WEB-03, WEB-04, WEB-05, WEB-06, WEB-07)
 
 ### Phase 20: Security Audit Pass & Doctor Checks
 
@@ -328,7 +328,13 @@ Plans:
   3. A refreshed threat-model document covers all three backends (Tailscale, Headscale, NetBird), the fleet, and every v3 surface (metrics endpoint, Web UI, audit chain); `abysslink threat-model --backend=<name>` renders the backend-specific section
   4. At least 18 new `sec-*` doctor checks are registered and produce the correct severity: `sec-ssh-permitroot` (FATAL), `sec-ssh-x11forwarding` (WARN), `sec-ssh-agentforwarding` (WARN), `sec-ssh-maxauthtries` (WARN), `sec-ssh-logingracetime` (WARN), `sec-ssh-ciphers` (WARN), `sec-audit-log-exists` (FATAL), `sec-audit-log-perms` (FATAL, mode 0600), `sec-no-world-readable-config` (FATAL), `sec-daemon-socket-perms` (FATAL), `sec-listener-bind` (FATAL), `sec-funnel-schema` (FATAL), `sec-disk-encryption` (FATAL), `sec-binary-signed` (WARN), `sec-upgrade-verified` (WARN), plus checks covering metrics-bind, webui-bind, and audit-anchor-age
 
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 20-01-PLAN.md — gosec/semgrep zero-unsuppressed: nolintlint gate + fix real findings + annotate 95 bare directives + gosec CI job
+- [ ] 20-02-PLAN.md — 18 new sec-* doctor checks (cmd_doctor_sec.go) wired into doctor RunE
+- [ ] 20-03-PLAN.md — audit verify aggregate: --pentest/--fix/--format=json flags + exit 0/1/2 + tests
+- [ ] 20-04-PLAN.md — threat-model doc refresh (per-backend + fleet + v3) + --backend rendering
 
 ### Phase 21: Optional Modules & Fleet Polish
 
@@ -384,6 +390,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 16. Supply-Chain Hardening & CI Gates | 4/4 | Complete    | 2026-06-02 |
 | 17. Tamper-Evident Audit Log + Fuzzing | 3/3 | Complete    | 2026-06-02 |
 | 18. Observability & Metrics | 4/4 | Complete    | 2026-06-02 |
-| 19. Web UI Dashboard (opt-in) | 0/4 | Not started | - |
+| 19. Web UI Dashboard (opt-in) | 4/4 | Complete    | 2026-06-02 |
 | 20. Security Audit Pass & Doctor Checks | 0/? | Not started | - |
 | 21. Optional Modules & Fleet Polish | 0/? | Not started | - |
