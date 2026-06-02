@@ -51,21 +51,46 @@ const (
 
 // SignInput is the ONLY permitted input to the HMAC signer.
 //
-// AUD-04: only Title + DiffHash — no Body, Content, Data, Raw, or Payload field
-// may ever be added. The [32]byte type for DiffHash prevents slicing tricks that
-// could smuggle extra data into the signed payload, and the forbidigo lint rule
-// in .golangci.yml rejects any future field with a forbidden name.
+// AUD-04: the signer covers ONLY audit-metadata fields — Title, Target, Time,
+// DryRun, PrevHash, and the DiffHash digest. No Body, Content, Data, Raw, or
+// Payload field may ever be added; the [32]byte type for DiffHash prevents
+// slicing tricks that could smuggle extra data into the signed payload, and the
+// forbidigo lint rule in .golangci.yml rejects any future field with a
+// forbidden name. The expansion (CR-03) authenticates the tamper-sensitive
+// metadata of the tail entry — which has no successor and is therefore not
+// protected by the hash chain — so Target/Time/DryRun cannot be rewritten
+// undetected. Title maps to Entry.Op, Time is the RFC3339 UTC timestamp, and
+// PrevHash is the chain link; none of these carry file content.
 type SignInput struct {
 	Title    string
+	Target   string
+	Time     string // RFC3339 UTC, must match Entry.Time serialisation
+	DryRun   bool
+	PrevHash string
 	DiffHash [32]byte
 }
 
-// signBytes serialises a SignInput to the canonical HMAC input:
-// title_bytes + 0x00 + 32 DiffHash bytes. The null-byte separator prevents
-// length-extension confusion between the title and the digest.
+// signBytes serialises a SignInput to the canonical HMAC input, null-byte
+// separated to prevent length-extension/field-boundary confusion:
+//
+//	title \0 target \0 time \0 dryRun(1 byte) \0 prevHash \0 32 DiffHash bytes
+//
+// AUD-04: every field here is audit metadata; no body/content is ever signed.
 func signBytes(in SignInput) []byte {
-	b := make([]byte, 0, len(in.Title)+1+len(in.DiffHash))
+	dryRun := byte(0)
+	if in.DryRun {
+		dryRun = 1
+	}
+	b := make([]byte, 0, len(in.Title)+len(in.Target)+len(in.Time)+len(in.PrevHash)+5+len(in.DiffHash))
 	b = append(b, []byte(in.Title)...)
+	b = append(b, 0x00)
+	b = append(b, []byte(in.Target)...)
+	b = append(b, 0x00)
+	b = append(b, []byte(in.Time)...)
+	b = append(b, 0x00)
+	b = append(b, dryRun)
+	b = append(b, 0x00)
+	b = append(b, []byte(in.PrevHash)...)
 	b = append(b, 0x00)
 	b = append(b, in.DiffHash[:]...)
 	return b
@@ -251,8 +276,18 @@ func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, d
 		a.mu.Unlock()
 		return err
 	}
+	now := time.Now().UTC()
+	// Build the FULL signing input so the HMAC authenticates every
+	// tamper-sensitive metadata field (CR-03). Verify reconstructs the
+	// identical input from the parsed Entry, so the two must agree byte-for-byte
+	// — in particular Time must serialise to the same RFC3339 form Verify reads
+	// back from the JSON entry.
+	in.Target = target
+	in.Time = now.Format(time.RFC3339)
+	in.DryRun = dryRun
+	in.PrevHash = prevHash
 	entry := Entry{
-		Time:     time.Now().UTC(),
+		Time:     now,
 		Op:       in.Title,
 		Target:   target,
 		Hash:     hex.EncodeToString(in.DiffHash[:]),
