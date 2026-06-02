@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"tailscale.com/client/local"
 	"tailscale.com/safeweb"
@@ -108,10 +109,28 @@ func StartWebUIServer(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("webui: tls listen %s: %w", addr, err)
 	}
 
-	// Routes land in Plan 03; until then every path is a 404. The mux is wrapped
-	// by safeweb (CSRF + CSP), then the read-only gate, then the WhoIs gate as
-	// the OUTERMOST handler so unauthenticated peers never reach routing.
+	// The mux carries the four read-only view routes plus the embedded static
+	// assets, and is wrapped by safeweb (CSRF + CSP), then the read-only gate,
+	// then the WhoIs gate as the OUTERMOST handler so unauthenticated peers
+	// never reach routing. The status/doctor providers are nil here; the daemon
+	// entrypoint (Plan 04) injects the live data sources via a future seam. With
+	// nil providers the views render their empty states rather than panicking.
+	auditLogPath, err := audit.DefaultLogPath()
+	if err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("webui: audit log path: %w", err)
+	}
+	handlers, err := NewHandlers(HandlerDeps{
+		Ring:         NewNotifyRingBuffer(),
+		AuditLogPath: auditLogPath,
+		RigHostname:  cfg.Tailnet.Hostname,
+	})
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
 	mux := http.NewServeMux()
+	handlers.Register(mux)
 	sw, err := newSafewebServer(mux)
 	if err != nil {
 		_ = ln.Close()
