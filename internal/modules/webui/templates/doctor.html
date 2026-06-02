@@ -1,0 +1,33 @@
+{{- /*
+SPDX-License-Identifier: Apache-2.0
+Copyright 2026 Abysslink Contributors
+
+Doctor Findings view. Three native <details>/<summary> groups (no JS): FATAL
+and WARNING open by default, OK closed. Severity color is a CSS class on the
+group header's 4px left border — never an inline style (WEB-06).
+*/ -}}
+{{- define "content" -}}
+<h1 class="t-title">Doctor</h1>
+{{ if .Groups }} {{ range .Groups }}
+<details class="doctor-group" {{ if .Open }}open{{ end }}>
+  <summary class="doctor-group-header {{ .SeverityClass }}">
+    {{ .Label }} ({{ len .Findings }})
+  </summary>
+  {{ range .Findings }}
+  <div class="finding-row">
+    <span
+      class="{{ .BadgeClass }}"
+      aria-label="severity: {{ .BadgeText }}"
+      >{{ .BadgeText }}</span
+    >
+    <span class="t-mono c-muted">{{ .Check }}</span>
+    <span class="t-body">{{ .Message }}</span>
+  </div>
+  {{ end }}
+</details>
+{{ end }} {{ else }}
+<div class="empty-state">
+  <div class="empty-heading">All checks passed. No findings.</div>
+</div>
+{{ end }}
+{{- end -}}

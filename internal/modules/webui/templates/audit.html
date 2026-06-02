@@ -1,0 +1,52 @@
+{{- /*
+SPDX-License-Identifier: Apache-2.0
+Copyright 2026 Abysslink Contributors
+
+Audit Log timeline. The template receives []AuditEntryView — the projection
+struct that has NO Hash/PrevHash/Sig/body field by construction (WEB-07 HARD
+FLOOR). Only time/op/target/dry_run can ever be rendered here.
+*/ -}}
+{{- define "content" -}}
+<h1 class="t-title">Audit Log</h1>
+{{ if .Entries }}
+<ol reversed class="audit-list" id="audit-list">
+  {{ range .Entries }}
+  <li>
+    <span class="t-mono c-muted">{{ .Time }}</span>
+    <span class="t-body audit-op">{{ .Op }}</span>
+    <span class="t-mono c-fg">{{ .Target }}</span>
+    {{ if .DryRun }}<span class="badge-dryrun">dry-run</span>{{ end }}
+  </li>
+  {{ end }}
+</ol>
+{{ if gt .NextPage 0 }}
+<button
+  class="btn-secondary"
+  hx-get="/audit?page={{ .NextPage }}"
+  hx-target="#audit-list"
+  hx-swap="beforeend"
+>
+  Load older
+</button>
+{{ end }} {{ else }}
+<div class="empty-state">
+  <div class="empty-heading">No audit entries</div>
+  <div class="t-body">
+    Audit entries appear here after the first
+    <span class="t-mono">abysslink up --apply</span> or file mutation.
+  </div>
+</div>
+{{ end }}
+{{- end -}}
+
+{{- /* Pagination fragment: only the <li> rows, appended via hx-swap=beforeend */ -}}
+{{- define "audit-rows" -}}
+{{ range .Entries }}
+<li>
+  <span class="t-mono c-muted">{{ .Time }}</span>
+  <span class="t-body audit-op">{{ .Op }}</span>
+  <span class="t-mono c-fg">{{ .Target }}</span>
+  {{ if .DryRun }}<span class="badge-dryrun">dry-run</span>{{ end }}
+</li>
+{{ end }}
+{{- end -}}

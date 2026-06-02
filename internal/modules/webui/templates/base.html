@@ -1,0 +1,80 @@
+{{- /*
+SPDX-License-Identifier: Apache-2.0
+Copyright 2026 Abysslink Contributors
+
+Outer page shell. Rendered by stdlib html/template (auto-escaping). No inline
+styles, no inline style blocks, no inline scripts, no CDN — every asset is
+loaded same-origin from /static so the default-src 'self' CSP permits it (WEB-06).
+*/ -}}
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Abysslink</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script
+      src="/static/htmx.min.js"
+      integrity="{{ .HTMXIntegrity }}"
+      crossorigin="anonymous"
+    ></script>
+    <script src="/static/error-handler.js" crossorigin="anonymous"></script>
+  </head>
+  <body>
+    <header class="page-header">
+      <span class="header-logo">abysslink</span>
+      <span class="c-muted">rig: {{ .RigHostname }}</span>
+      <span class="header-spacer"></span>
+      <span class="header-login">login: {{ .LoginName }}</span>
+    </header>
+    <div class="layout">
+      <nav class="nav-rail" aria-label="Main navigation">
+        <a
+          href="/"
+          hx-get="/"
+          hx-target="#main-content"
+          hx-swap="innerHTML"
+          hx-push-url="true"
+          class="{{ if eq .ActiveView "status" }}nav-active{{ end }}"
+          >Fleet Status</a
+        >
+        <a
+          href="/doctor"
+          hx-get="/doctor"
+          hx-target="#main-content"
+          hx-swap="innerHTML"
+          hx-push-url="true"
+          class="{{ if eq .ActiveView "doctor" }}nav-active{{ end }}"
+          >Doctor</a
+        >
+        <a
+          href="/audit"
+          hx-get="/audit"
+          hx-target="#main-content"
+          hx-swap="innerHTML"
+          hx-push-url="true"
+          class="{{ if eq .ActiveView "audit" }}nav-active{{ end }}"
+          >Audit Log</a
+        >
+        <a
+          href="/notify"
+          hx-get="/notify"
+          hx-target="#main-content"
+          hx-swap="innerHTML"
+          hx-push-url="true"
+          class="{{ if eq .ActiveView "notify" }}nav-active{{ end }}"
+          >Notifications</a
+        >
+      </nav>
+      <main class="main-content">
+        <div
+          id="error-banner"
+          role="alert"
+          aria-live="polite"
+          class="error-banner"
+        ></div>
+        <div id="main-content">{{ template "content" . }}</div>
+      </main>
+    </div>
+  </body>
+</html>
