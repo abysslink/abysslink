@@ -19,9 +19,11 @@ package webui
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -312,6 +314,156 @@ func validWhoIs() *apitype.WhoIsResponse {
 	return &apitype.WhoIsResponse{
 		Node:        &tailcfg.Node{},
 		UserProfile: &tailcfg.UserProfile{LoginName: "alice@example.com", DisplayName: "Alice"},
+	}
+}
+
+// --- Plan 03: handler + CSP + template tests ---
+
+// stubStatusProvider returns a fixed status snapshot for handler tests.
+type stubStatusProvider struct {
+	online int
+	total  int
+	rigs   []rigRow
+}
+
+func (s stubStatusProvider) FleetStatus(_ context.Context) (int, int, []rigRow) {
+	return s.online, s.total, s.rigs
+}
+
+// stubDoctorProvider returns fixed findings for handler tests.
+type stubDoctorProvider struct {
+	findings []modules.Finding
+}
+
+func (s stubDoctorProvider) DoctorFindings(_ context.Context) []modules.Finding {
+	return s.findings
+}
+
+// newTestHandlers builds a Handlers with stub providers and a temp audit log.
+func newTestHandlers(t *testing.T) *Handlers {
+	t.Helper()
+	h, err := NewHandlers(HandlerDeps{
+		Status: stubStatusProvider{
+			online: 1, total: 1,
+			rigs: []rigRow{{Name: "rig-a", StatusClass: "dot-online", StatusLabel: "online", LastSeen: "2m ago", CertClass: "", CertDays: "90d", LockClass: "lock-ok", LockStatus: "Locked"}},
+		},
+		Doctor: stubDoctorProvider{findings: []modules.Finding{
+			{Module: "ssh", Check: "ssh-checkperiod", Severity: modules.SeverityFatal, Message: "checkPeriod too long"},
+			{Module: "net", Check: "net-bind", Severity: modules.SeverityWarning, Message: "bind addr broad"},
+			{Module: "fs", Check: "fs-encrypt", Severity: modules.SeverityOK, Message: "disk encrypted"},
+		}},
+		Ring:         NewNotifyRingBuffer(),
+		AuditLogPath: "",
+		RigHostname:  "rig-a",
+	})
+	require.NoError(t, err)
+	return h
+}
+
+func TestCSPHeader(t *testing.T) {
+	h := newTestHandlers(t)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	sw, err := newSafewebServer(mux)
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(sw)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	csp := resp.Header.Get("Content-Security-Policy")
+	require.NotEmpty(t, csp, "every response must carry a CSP header (WEB-06)")
+	assert.Contains(t, csp, "default-src 'self'", "CSP must pin default-src 'self'")
+	assert.NotContains(t, csp, "unsafe-inline", "CSP must never permit unsafe-inline (WEB-06 HARD FLOOR)")
+}
+
+func TestAuditTemplateNoHashes(t *testing.T) {
+	dir := t.TempDir()
+	logPath := dir + "/audit.log"
+	// Two entries carrying secret chain fields that must NEVER render.
+	const secretHash = "sha256:deadbeefcafef00ddeadbeefcafef00d"
+	entries := []audit.Entry{
+		{Time: time.Now(), Op: "write", Target: "abysslink.yaml", DryRun: true, Hash: secretHash, PrevHash: secretHash, Sig: "secret-sig"},
+		{Time: time.Now(), Op: "read", Target: "config.yaml", Hash: secretHash, Sig: "secret-sig"},
+	}
+	writeAuditLog(t, logPath, entries)
+
+	h, err := NewHandlers(HandlerDeps{
+		Status: stubStatusProvider{}, Doctor: stubDoctorProvider{},
+		Ring: NewNotifyRingBuffer(), AuditLogPath: logPath, RigHostname: "rig-a",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/audit", nil)
+	req.RemoteAddr = "100.64.0.5:40000"
+	rec := httptest.NewRecorder()
+	h.handleAudit(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.NotContains(t, body, "sha256:", "audit HTML must never contain a hash prefix (WEB-07 HARD FLOOR)")
+	assert.NotContains(t, body, "deadbeef", "audit HTML must never contain Hash/PrevHash bytes")
+	assert.NotContains(t, body, "secret-sig", "audit HTML must never contain Sig bytes")
+	// The permitted projection fields still render.
+	assert.Contains(t, body, "abysslink.yaml")
+	assert.Contains(t, body, "write")
+}
+
+func TestStatusFragment(t *testing.T) {
+	h := newTestHandlers(t)
+	req := httptest.NewRequest(http.MethodGet, "/status-fragment", nil)
+	req.RemoteAddr = "100.64.0.5:40000"
+	rec := httptest.NewRecorder()
+	h.handleStatusFragment(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "status-panel", "fragment must contain the htmx swap div id")
+	assert.Contains(t, rec.Body.String(), "every 10s", "fragment must carry the 10s auto-poll trigger")
+}
+
+func TestDoctorView(t *testing.T) {
+	h := newTestHandlers(t)
+	req := httptest.NewRequest(http.MethodGet, "/doctor", nil)
+	req.RemoteAddr = "100.64.0.5:40000"
+	rec := httptest.NewRecorder()
+	h.handleDoctor(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "FATAL", "doctor view must show the FATAL severity group")
+	assert.Contains(t, body, "WARN", "doctor view must show the WARNING severity group")
+}
+
+func TestNotifyView(t *testing.T) {
+	ring := NewNotifyRingBuffer()
+	ring.Add(NotifyEvent{Time: time.Now(), Title: "Build finished", Topic: "rig-a", Priority: "high"})
+	h, err := NewHandlers(HandlerDeps{
+		Status: stubStatusProvider{}, Doctor: stubDoctorProvider{},
+		Ring: ring, AuditLogPath: "", RigHostname: "rig-a",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/notify", nil)
+	req.RemoteAddr = "100.64.0.5:40000"
+	rec := httptest.NewRecorder()
+	h.handleNotify(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Build finished", "notify view must render the event title")
+}
+
+// writeAuditLog writes entries as JSONL to path for handler tests.
+func writeAuditLog(t *testing.T, path string, entries []audit.Entry) {
+	t.Helper()
+	f, err := os.Create(path) //nolint:gosec // test temp file
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+	enc := json.NewEncoder(f)
+	for _, e := range entries {
+		require.NoError(t, enc.Encode(e))
 	}
 }
 
