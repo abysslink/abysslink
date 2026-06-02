@@ -43,6 +43,23 @@ type Config struct {
 	Hardening  Hardening   `yaml:"hardening"`
 
 	Observability Observability `yaml:"observability"`
+
+	WebUI WebUIConfig `yaml:"webui"`
+}
+
+// WebUIConfig configures the opt-in (//go:build webui, default OFF) browser
+// dashboard served by abysslinkd over the tailnet (Phase 19, WEB-01/WEB-02).
+// The zero value is the safe disabled state. BindAddr, when set, MUST bind to
+// the tailnet IP only — never 0.0.0.0 or :: (WEB-02, enforced by ValidateWebUI).
+// ReadOnly MUST be true; a false value is rejected by ValidateWebUI (the
+// config-layer half of the two-layer read-only gate; the HTTP-layer half lives
+// in the webui module).
+type WebUIConfig struct {
+	Enabled     bool   `yaml:"enabled"`             // default false — listener never starts unless explicitly opted in (WEB-01)
+	BindAddr    string `yaml:"bind_addr,omitempty"` // resolved to the tailnet IP at runtime when empty
+	Port        int    `yaml:"port,omitempty"`      // default 0 → use 8443
+	ReadOnly    bool   `yaml:"read_only"`           // MUST be true; false is rejected by ValidateWebUI (WEB-02)
+	AllowNotify bool   `yaml:"allow_notify,omitempty"` // scaffolded, default false (WEB-05)
 }
 
 // Observability holds the metrics-server and daily-digest settings (Phase 18).
@@ -360,6 +377,10 @@ func Defaults() *Config {
 			UFWDefaultDeny:   true,
 			DisableMacOSSSHD: true,
 		},
+		WebUI: WebUIConfig{
+			ReadOnly: true,
+			Port:     8443,
+		},
 	}
 }
 
@@ -457,6 +478,35 @@ func Validate(cfg *Config) error {
 	}
 	if err := ValidateObservability(cfg); err != nil {
 		return err
+	}
+	if err := ValidateWebUI(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateWebUI enforces the WEB-02 hard floor for the opt-in web dashboard.
+// It is the config-layer half of the two-layer read-only gate. Two checks fire:
+//
+//   - The bind address, when set, MUST bind to the tailnet IP only. A bind_addr
+//     that is unspecified (0.0.0.0 or ::) would expose the dashboard on every
+//     interface (Information Disclosure, T-19-01), so it is rejected with the
+//     same FATAL error class as the metrics/Funnel rejections. This check
+//     applies even when webui.enabled is false (mirrors the metrics pattern); an
+//     empty bind_addr is resolved at runtime to the tailnet IP and is accepted.
+//   - When webui.enabled is true, read_only MUST be true. A false value would
+//     unlock mutations through the dashboard (Tampering, T-19-01), so it is
+//     rejected fatally.
+//
+// It is exported so the daemon can enforce the floor at the point the webui
+// listener starts, independently of whether the global Validate is wired into
+// the config load path.
+func ValidateWebUI(cfg *Config) error {
+	if addr := cfg.WebUI.BindAddr; addr != "" && IsUnspecifiedBindAddr(addr) {
+		return fmt.Errorf("config: webui.bind_addr %q must not be 0.0.0.0 or :: — webui must bind to the tailnet IP only (WEB-02)", addr)
+	}
+	if cfg.WebUI.Enabled && !cfg.WebUI.ReadOnly {
+		return fmt.Errorf("config: webui.read_only must be true — mutations are disabled in the web UI (WEB-02)")
 	}
 	return nil
 }
