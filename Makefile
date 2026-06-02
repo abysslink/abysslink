@@ -8,6 +8,16 @@ GO         ?= go
 GOLANGCI   ?= golangci-lint
 GORELEASER ?= goreleaser
 
+# GOSEC_EXCLUDES is the SINGLE source of truth for the standalone-gosec rule
+# excludes (WR-06). Both `make lint` and the CI security gate
+# (.github/workflows/security.yml) reference this via `make security-gosec`, so
+# the two cannot drift. Each family is a project-wide verified false-positive /
+# accepted risk documented with an inline #nosec/#nolint justification (SEC-02):
+# G304 file-path-from-variable (internal trusted paths), G101 env-var/keychain
+# name FPs, G302/G306 executable-binary 0o755, G204 shell.Runner sanctioned exec
+# abstraction (CLAUDE.md). Genuine G115/G402 carry #nosec annotations.
+GOSEC_EXCLUDES := G304,G101,G302,G306,G204
+
 # Build info
 # COMMIT uses the FULL SHA to match goreleaser's {{.Commit}} injection, so a
 # `make build` and the released binary agree on the embedded commit ldflag.
@@ -21,7 +31,7 @@ LDFLAGS    := -s -w \
   -X $(MODULE)/internal/cli.buildDate=$(BUILD_DATE)
 
 .PHONY: build test lint cover release install clean conformance security-audit repro-check
-.PHONY: check-webui-isolation check-webui-build-tags check-htmx-sri vendor-htmx
+.PHONY: check-webui-isolation check-webui-build-tags check-htmx-sri vendor-htmx security-gosec
 
 ## build: compile CLI and daemon binaries (reproducible: SOURCE_DATE_EPOCH from git)
 build:
@@ -35,16 +45,22 @@ test:
 	$(GO) test -race -count=1 ./...
 
 ## lint: run golangci-lint (incl. gosec + nolintlint), gofmt, the webui build-tag
-## gates, then the standalone gosec + semgrep security scanners (SEC-02).
-## Requires: gosec (go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4),
-## semgrep (pipx install semgrep). The G304/G101/G302/G306/G204 excludes mirror
-## the golangci-lint gosec config + justified #nosec///nolint suppressions; the
+## gates, then the standalone gosec (via security-gosec) + semgrep scanners
+## (SEC-02). Requires: gosec (go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4),
+## semgrep (pipx install semgrep). The gosec excludes (GOSEC_EXCLUDES) mirror the
+## golangci-lint gosec config + justified #nosec///nolint suppressions; the
 ## remaining real findings are fixed at the root or carry inline justifications.
 lint: check-webui-build-tags check-webui-isolation
 	$(GOLANGCI) run ./...
 	@gofmt -l . | grep -v vendor | grep . && echo "gofmt: files need formatting (run gofmt -w .)" && exit 1 || true
-	gosec -quiet -exclude=G304,G101,G302,G306,G204 ./...
+	$(MAKE) security-gosec
 	semgrep --config p/r2c-security-audit --config p/golang --error --quiet .
+
+## security-gosec: run the standalone gosec scanner with the canonical exclude
+## set (WR-06). This is the single command both `make lint` and CI invoke so the
+## exclude list lives in exactly one place (GOSEC_EXCLUDES).
+security-gosec:
+	gosec -quiet -exclude=$(GOSEC_EXCLUDES) ./...
 
 ## check-webui-build-tags: assert every .go file under internal/modules/webui/
 ## carries //go:build webui (Pitfall 5 — a single untagged file leaks the package
