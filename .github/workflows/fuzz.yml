@@ -30,6 +30,8 @@ jobs:
             golang.org:443
             proxy.golang.org:443
             sum.golang.org:443
+            dl.google.com:443
+            go.dev:443
             objects.githubusercontent.com:443
             github.com:443
             api.github.com:443
@@ -64,6 +66,8 @@ jobs:
             golang.org:443
             proxy.golang.org:443
             sum.golang.org:443
+            dl.google.com:443
+            go.dev:443
             objects.githubusercontent.com:443
             github.com:443
             api.github.com:443
@@ -98,6 +102,8 @@ jobs:
             golang.org:443
             proxy.golang.org:443
             sum.golang.org:443
+            dl.google.com:443
+            go.dev:443
             objects.githubusercontent.com:443
             github.com:443
             api.github.com:443
