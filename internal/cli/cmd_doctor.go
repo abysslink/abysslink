@@ -712,8 +712,8 @@ func findingFix(check string) string {
 		"hs-proc-user":       "Ensure Headscale runs as the dedicated service user: check systemd User= or launchd UserName= in the service unit",
 		"hs-derp-failclosed": "Set derp.server.verify_clients: true in Headscale config.yaml (R-02 correct key)",
 		// NetBird backend (nb-* checks).
-		"nb-tls":       "Renew or replace the TLS certificate; ensure server.tls.certFile and server.tls.keyFile are set in NetBird config.yaml",
-		"nb-version":   "Upgrade netbird-server to >= v0.57.0 (CVE-2025-10678 fix): abysslink server netbird upgrade --binary-path /path/to/new-binary --apply",
+		"nb-tls":     "Renew or replace the TLS certificate; ensure server.tls.certFile and server.tls.keyFile are set in NetBird config.yaml",
+		"nb-version": "Upgrade netbird-server to >= v0.57.0 (CVE-2025-10678 fix): abysslink server netbird upgrade --binary-path /path/to/new-binary --apply",
 		// Version-floor checks (DOC-04) — keyed by versionFloor.checkID from cmd_doctor_versions.go.
 		"ntfy-version": "Upgrade ntfy to >= 2.21 (CVE-2026-39087 fix): see https://github.com/binwiederhier/ntfy/releases — stop container, pull new image, restart; or: brew upgrade ntfy",
 		"nb-zitadel":   "Remove the default ZITADEL admin account: run the ZITADEL cleanup script to delete zitadel-admin@ user",

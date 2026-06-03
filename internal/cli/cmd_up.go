@@ -518,10 +518,10 @@ func diskEncryptionGate(blockers []modules.Finding, forceUnsafe bool) error {
 	for _, b := range blockers {
 		if strings.Contains(b.Message, unknownDiskEncryptionMarker) {
 			return fmt.Errorf(
-				"up: refusing to apply — disk-encryption state could not be determined (UNKNOWN). " +
-					"Verify encryption status manually (e.g. `fdesetup status` on macOS or `lsblk` on Linux) " +
-					"and ensure full-disk encryption is enabled before configuring remote access. " +
-					"This state cannot be overridden.",
+				"up: refusing to apply — disk-encryption state could not be determined (UNKNOWN); " +
+					"verify encryption status manually (e.g. `fdesetup status` on macOS or `lsblk` on Linux) " +
+					"and ensure full-disk encryption is enabled before configuring remote access; " +
+					"this state cannot be overridden",
 			)
 		}
 	}
