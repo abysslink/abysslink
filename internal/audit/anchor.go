@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -115,6 +117,68 @@ func ReadAnchor(logPath string) (*Anchor, error) {
 		return nil, fmt.Errorf("audit: parse anchor: %w", uerr)
 	}
 	return &a, nil
+}
+
+// AUD-02: keychain counter constants — service/account mirror the HMAC key
+// naming convention in signed.go (hmacKeyService/hmacKeyAccount).
+const (
+	counterKeyService = "abysslink"
+	counterKeyAccount = "audit-counter" // full keychain id: abysslink-audit-counter
+)
+
+// ReadCounter reads the monotonic entry counter from the keychain.
+// It returns (n, true, nil) when the counter is present and parseable,
+// (0, false, nil) when the counter key is absent (first use — not an error),
+// and (0, false, err) when the keychain is unavailable or corrupt.
+//
+// The "not found" sentinel is detected by the error message substring
+// "secret not found", which is the shared convention used by MockStore,
+// DarwinStore, and LinuxStore in internal/secrets.
+func ReadCounter(ctx context.Context, kc KeychainStore) (n int64, found bool, err error) {
+	val, kerr := kc.Get(ctx, counterKeyService, counterKeyAccount)
+	if kerr != nil {
+		// Distinguish "key absent" from "keychain unavailable/error".
+		// All KeychainStore implementations return an error containing
+		// "secret not found" when the key does not exist — absent counter
+		// means first use, not a failure.
+		if strings.Contains(kerr.Error(), "secret not found") {
+			return 0, false, nil
+		}
+		return 0, false, kerr
+	}
+	n, perr := strconv.ParseInt(val, 10, 64)
+	if perr != nil {
+		return 0, false, fmt.Errorf("audit: parse counter %q: %w", val, perr)
+	}
+	return n, true, nil
+}
+
+// WriteCounter writes the monotonic entry counter to the keychain as a decimal
+// string. Any error is returned wrapped with an "audit: write counter:" prefix.
+func WriteCounter(ctx context.Context, kc KeychainStore, n int64) error {
+	if err := kc.Set(ctx, counterKeyService, counterKeyAccount, strconv.FormatInt(n, 10)); err != nil {
+		return fmt.Errorf("audit: write counter: %w", err)
+	}
+	return nil
+}
+
+// IncrementCounter reads the counter, increments it by 1, and writes it back.
+// A missing counter (found=false) initialises to 1 (0 base + 1 increment).
+// A genuine keychain error (kerr != nil and !found) is returned; absent key is
+// treated as first use.
+//
+// Exported so the external audit_test package can exercise it directly.
+// The production call site in signed.go uses this function.
+func IncrementCounter(ctx context.Context, kc KeychainStore) error {
+	n, found, err := ReadCounter(ctx, kc)
+	if err != nil && !found {
+		// Genuine keychain error (not "not found").
+		return err
+	}
+	if !found {
+		n = 0 // first use — will write 1
+	}
+	return WriteCounter(ctx, kc, n+1)
 }
 
 // VerifyAnchor returns true when the anchor's HMAC matches its contents. A
