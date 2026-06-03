@@ -343,9 +343,13 @@ func (m *Module) reloadSSHD(ctx context.Context) error {
 	return nil
 }
 
-// Verify re-runs Detect.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// Verify is a no-op for the ssh module — all checks run in Detect.
+// Pitfall 4: do NOT call Detect here — runner.Doctor calls both Detect and Verify;
+// re-running Detect would produce duplicate remote_login/sshd_running findings per
+// doctor pass. ssh Verify adds no new information beyond Detect; returning nil
+// avoids double-emission.
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair attempts to fix findings.
