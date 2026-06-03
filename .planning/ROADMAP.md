@@ -272,13 +272,13 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 23-01-PLAN.md — DOC-01 OK-emission backfill for 5 core-module checks (funnel, acl_drift, remote_login/sshd_running, lock_enabled, listen_address) + per-module OK tests
-- [ ] 23-02-PLAN.md — DOC-02 fail-closed disk encryption: checkLUKS/checkFileVault FATAL on unknown/in-progress + filevault/luks OK backfill (single-emission) + MockRunner tests
-- [ ] 23-03-PLAN.md — DOC-03 unconditional nb-lock advisory WARN + DOC-04 version-floor table/detector (ntfy <2.21 FATAL, CVE-2026-39087) + findingFix remediation
+- [x] 23-01-PLAN.md — DOC-01 OK-emission backfill for 5 core-module checks (funnel, acl_drift, remote_login/sshd_running, lock_enabled, listen_address) + per-module OK tests
+- [x] 23-02-PLAN.md — DOC-02 fail-closed disk encryption: checkLUKS/checkFileVault FATAL on unknown/in-progress + filevault/luks OK backfill (single-emission) + MockRunner tests
+- [x] 23-03-PLAN.md — DOC-03 unconditional nb-lock advisory WARN + DOC-04 version-floor table/detector (ntfy <2.21 FATAL, CVE-2026-39087) + findingFix remediation
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 23-04-PLAN.md — DOC-01 tri-state threat-model over collectDoctorFindings + DOC-04 floor wiring + DOC-02 up gate non-overridable for unknown + lint/test gate
+- [x] 23-04-PLAN.md — DOC-01 tri-state threat-model over collectDoctorFindings + DOC-04 floor wiring + DOC-02 up gate non-overridable for unknown + lint/test gate
 
 ---
 
@@ -310,4 +310,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 20. Security Audit Pass & Doctor Checks | 4/4 | Complete    | 2026-06-02 |
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
 | 22. Network & Dependency Lockdown | 4/4 | Complete    | 2026-06-03 |
-| 23. Doctor Honesty & Coverage | 0/4 | Pending | — |
+| 23. Doctor Honesty & Coverage | 4/4 | Complete   | 2026-06-03 |
