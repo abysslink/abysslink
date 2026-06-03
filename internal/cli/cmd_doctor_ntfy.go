@@ -108,16 +108,52 @@ func ntfyLoopbackReachCheck(ctx context.Context, cfg *config.Config) modules.Fin
 			"run: abysslink up --apply  to reprovision with tailnet-IP-only binding (T-22-11, D-01)", addr))
 }
 
-// ntfyBindFindings aggregates both D-02 ntfy posture checks and returns the
-// combined findings slice. The entire function is gated on
-// cfg.Modules.Ntfy.Enabled — when ntfy is disabled no findings are emitted
-// (Pitfall 6 prevention: no spurious failures against an unused module).
+// ntfyContainerPresent returns true when the named Docker container exists and
+// is reachable via `docker inspect` (exit 0). It returns false when the
+// container does not exist (exit non-zero, e.g. "no such container") OR when
+// Docker is not installed/running (runner error). It deliberately does NOT
+// return FATAL on absence — absence means native mode, which is checked by the
+// ntfy module's own Detect (listen_address / installed checks). The genuine
+// fail-closed case — "container present but uninspectable" — is handled by
+// ntfyBindCheck itself, which returns FATAL on any non-zero exit or runner
+// error once we know the container should exist (T-22-10, D-02).
+func ntfyContainerPresent(ctx context.Context, runner shell.Runner, containerName string) bool {
+	// `docker inspect <name>` exits 0 only when the container exists.
+	// Any error or non-zero exit means the container does not exist, Docker
+	// is absent, or we cannot reach the daemon — all equivalent to native mode.
+	res, err := runner.Run(ctx, "docker", "inspect", containerName)
+	return err == nil && res.ExitCode == 0
+}
+
+// ntfyBindFindings aggregates D-02 ntfy posture checks and returns the combined
+// findings slice. The function is gated on cfg.Modules.Ntfy.Enabled — when ntfy
+// is disabled no findings are emitted (Pitfall 6 prevention).
+//
+// The docker-inspect probe (ntfyBindCheck) runs ONLY when the abysslink-ntfy
+// container actually exists (ntfyContainerPresent exit 0). On a native Linux
+// install there is no container and docker inspect would always fail → FATAL,
+// but a correctly-configured native install is NOT a security failure. The ntfy
+// module's own Detect (listen_address) is authoritative for native binding
+// posture (CR-01 / NET-01-native-path).
+//
+// The fail-closed guarantee is preserved: if the container IS present but
+// ntfyBindCheck returns FATAL (any runner error or non-zero exit from the real
+// inspect), that FATAL propagates unchanged (T-22-10 silent-pass prevention).
 func ntfyBindFindings(ctx context.Context, runner shell.Runner, cfg *config.Config) []modules.Finding {
 	if !cfg.Modules.Ntfy.Enabled {
 		return nil
 	}
-	return []modules.Finding{
-		ntfyBindCheck(ctx, runner, ntfyDockerContainerName),
-		ntfyLoopbackReachCheck(ctx, cfg),
+	if ntfyContainerPresent(ctx, runner, ntfyDockerContainerName) {
+		// Docker mode: run the deterministic docker-inspect binding check and the
+		// corroborating loopback-reach check.
+		return []modules.Finding{
+			ntfyBindCheck(ctx, runner, ntfyDockerContainerName),
+			ntfyLoopbackReachCheck(ctx, cfg),
+		}
 	}
+	// Native mode: no container exists. The ntfy module's own Detect (run via the
+	// core-module family earlier in collectDoctorFindings) already validates the
+	// native listen_address. Run only the loopback reach probe here as a
+	// belt-and-suspenders check for native installs.
+	return []modules.Finding{ntfyLoopbackReachCheck(ctx, cfg)}
 }

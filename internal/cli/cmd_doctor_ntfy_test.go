@@ -104,6 +104,124 @@ func TestNtfyBindCheck(t *testing.T) {
 	}
 }
 
+// TestNtfyContainerPresent verifies that ntfyContainerPresent returns true only
+// when docker inspect exits 0, and false on non-zero exit or runner error.
+func TestNtfyContainerPresent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("present_exit0", func(t *testing.T) {
+		t.Parallel()
+		mr := shell.NewMockRunner(shell.Call{
+			Result: shell.Result{ExitCode: 0, Stdout: "[{...}]"},
+		})
+		assert.True(t, ntfyContainerPresent(ctx, mr, ntfyDockerContainerName))
+	})
+
+	t.Run("absent_nonzero_exit", func(t *testing.T) {
+		t.Parallel()
+		mr := shell.NewMockRunner(shell.Call{
+			Result: shell.Result{ExitCode: 1, Stderr: "Error: No such container: abysslink-ntfy"},
+		})
+		assert.False(t, ntfyContainerPresent(ctx, mr, ntfyDockerContainerName))
+	})
+
+	t.Run("absent_runner_error", func(t *testing.T) {
+		t.Parallel()
+		mr := shell.NewMockRunner(shell.Call{
+			Err: fmt.Errorf("docker: daemon not running"),
+		})
+		assert.False(t, ntfyContainerPresent(ctx, mr, ntfyDockerContainerName))
+	})
+}
+
+// TestNtfyBindFindings verifies the container-presence gate introduced by CR-01:
+// on a native (no-container) Linux install the docker-inspect FATAL is NOT
+// emitted; on a Docker install the full ntfyBindCheck + loopback checks run.
+func TestNtfyBindFindings(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Helper: grab a guaranteed-free port by binding then immediately closing.
+	freePort := func(t *testing.T) int {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		port := ln.Addr().(*net.TCPAddr).Port
+		_ = ln.Close()
+		return port
+	}
+
+	t.Run("native_no_container_no_FATAL", func(t *testing.T) {
+		t.Parallel()
+		// ntfyContainerPresent → exit 1 (no container).
+		// ntfyLoopbackReachCheck dials a free (closed) port → SeverityOK.
+		mr := shell.NewMockRunner(shell.Call{
+			Result: shell.Result{ExitCode: 1, Stderr: "Error: No such container"},
+		})
+		port := freePort(t)
+		cfg := &config.Config{}
+		cfg.Modules.Ntfy.Enabled = true
+		cfg.Modules.Ntfy.Port = port
+
+		finds := ntfyBindFindings(ctx, mr, cfg)
+		require.Len(t, finds, 1, "native mode: only loopback check expected")
+		assert.Equal(t, "ntfy-loopback", finds[0].Check)
+		assert.Equal(t, modules.SeverityOK, finds[0].Severity,
+			"native install with no loopback listener must not FATAL")
+	})
+
+	t.Run("docker_present_bad_hostip_FATAL", func(t *testing.T) {
+		t.Parallel()
+		// Call 1: ntfyContainerPresent → exit 0 (container exists).
+		// Call 2: ntfyBindCheck inspect → exit 0, HostIp=127.0.0.1 → FATAL.
+		mr := shell.NewMockRunner(
+			shell.Call{Result: shell.Result{ExitCode: 0}},
+			shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "127.0.0.1 "}},
+		)
+		port := freePort(t)
+		cfg := &config.Config{}
+		cfg.Modules.Ntfy.Enabled = true
+		cfg.Modules.Ntfy.Port = port
+
+		finds := ntfyBindFindings(ctx, mr, cfg)
+		require.GreaterOrEqual(t, len(finds), 1)
+		assert.Equal(t, "ntfy-bind", finds[0].Check)
+		assert.Equal(t, modules.SeverityFatal, finds[0].Severity,
+			"container present + loopback HostIp must FATAL")
+	})
+
+	t.Run("docker_present_inspect_error_FATAL", func(t *testing.T) {
+		t.Parallel()
+		// Call 1: ntfyContainerPresent → exit 0 (container exists).
+		// Call 2: ntfyBindCheck inspect → runner error → FATAL (T-22-10).
+		mr := shell.NewMockRunner(
+			shell.Call{Result: shell.Result{ExitCode: 0}},
+			shell.Call{Err: fmt.Errorf("docker: connection refused")},
+		)
+		port := freePort(t)
+		cfg := &config.Config{}
+		cfg.Modules.Ntfy.Enabled = true
+		cfg.Modules.Ntfy.Port = port
+
+		finds := ntfyBindFindings(ctx, mr, cfg)
+		require.GreaterOrEqual(t, len(finds), 1)
+		assert.Equal(t, "ntfy-bind", finds[0].Check)
+		assert.Equal(t, modules.SeverityFatal, finds[0].Severity,
+			"container present but uninspectable must FATAL (T-22-10)")
+	})
+
+	t.Run("disabled_no_findings", func(t *testing.T) {
+		t.Parallel()
+		mr := shell.NewMockRunner() // no calls expected
+		cfg := &config.Config{}
+		cfg.Modules.Ntfy.Enabled = false
+
+		finds := ntfyBindFindings(ctx, mr, cfg)
+		assert.Empty(t, finds, "disabled ntfy must emit no findings")
+	})
+}
+
 // TestNtfyLoopbackReachCheck verifies the secondary D-02 check: TCP dial to
 // 127.0.0.1:<port>. The FATAL case starts a real TCP listener on a free port
 // so the dial succeeds; the OK case uses a port with no listener.
