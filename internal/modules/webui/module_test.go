@@ -678,7 +678,7 @@ func TestSecurityHeaders(t *testing.T) {
 
 	assert.NotEmpty(t, resp.Header.Get("Content-Security-Policy"), "CSP header must be set")
 	assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
-	assert.Equal(t, "same-origin", resp.Header.Get("Referer-Policy"))
+	assert.Equal(t, "same-origin", resp.Header.Get("Referrer-Policy"))
 	assert.Equal(t, "same-origin", resp.Header.Get("Cross-Origin-Opener-Policy"))
 	assert.NotEmpty(t, resp.Header.Get("Strict-Transport-Security"), "HSTS header must be set")
 	assert.Contains(t, resp.Header.Get("Content-Security-Policy"), "default-src 'self'")

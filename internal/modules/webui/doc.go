@@ -30,7 +30,7 @@
 //     trusted-local bypass (WEB-04).
 //   - CrossOriginProtection (stdlib net/http, Go 1.26) wraps every route; cross-origin
 //     requests (Sec-Fetch-Site: cross-site) are rejected (WEB-05). securityHeadersMiddleware
-//     applies CSP (default-src 'self'), HSTS, X-Content-Type-Options, Referer-Policy,
+//     applies CSP (default-src 'self'), HSTS, X-Content-Type-Options, Referrer-Policy,
 //     and COOP on every response (WEB-06).
 //   - Mutations are blocked at two layers: config.ValidateWebUI (schema) and the
 //     readOnlyMiddleware (HTTP); only the explicitly-unlocked allow_notify path
