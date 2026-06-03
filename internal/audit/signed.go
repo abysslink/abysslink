@@ -353,10 +353,16 @@ func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, d
 		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
 	}
 	// AUD-02: keychain counter incremented after successful anchor write.
-	// Counter failure does NOT abort — anchor is already written; Verify
-	// will report CounterStatus="unknown" on the next run.
+	// Counter failure does NOT abort — anchor is already written (fail-soft
+	// contract). On failure the counter key is DELETED so the next ReadCounter
+	// returns found=false and verifyCounter reports CounterStatus="unknown"
+	// (honest tri-state: "cannot check") rather than leaving the stale value in
+	// place and causing a permanent false "mismatch"/TruncationDetected alarm on
+	// every subsequent Verify.
 	if cerr := IncrementCounter(ctx, a.kc); cerr != nil {
-		slog.Warn("audit: keychain counter increment failed", "err", cerr, "log", a.logPath)
+		_ = a.kc.Delete(ctx, counterKeyService, counterKeyAccount) // best-effort: clear stale counter to avoid false mismatch
+		slog.Warn("audit: keychain counter increment failed; counter key cleared to prevent false mismatch alarm",
+			"err", cerr, "log", a.logPath)
 	}
 	return nil
 }
