@@ -64,6 +64,9 @@ func StartMetricsServer(ctx context.Context, cfg *config.Config, reg metrics.Reg
 		slog.Error("abysslinkd: metrics: invalid observability config; listener disabled", "err", err)
 		return
 	}
+	// #nosec G118 -- long-lived metrics-server lifecycle goroutine: it uses the
+	// passed-in ctx for address resolution and stops when ctx is Done; it is not
+	// a per-request goroutine.
 	go func() {
 		// BLOCKER 3 guard: a nil interface value would panic on b.IP(ctx).
 		// This MUST be the first statement, before any method call on b

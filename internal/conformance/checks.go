@@ -126,6 +126,9 @@ func CheckNoTelemetry(_ context.Context, repoRoot string) error {
 			return nil
 		}
 
+		// #nosec G122 -- conformance tooling walks the project's own .go source
+		// tree (internally derived paths), not an attacker-controlled directory;
+		// there is no TOCTOU security boundary here.
 		data, readErr := os.ReadFile(path) //nolint:gosec // G304: path is a conformance-scenario file path derived internally, not user input
 		if readErr != nil {
 			return nil // best-effort; skip unreadable files

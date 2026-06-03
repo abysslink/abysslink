@@ -15,8 +15,10 @@ GORELEASER ?= goreleaser
 # accepted risk documented with an inline #nosec/#nolint justification (SEC-02):
 # G304 file-path-from-variable (internal trusted paths), G101 env-var/keychain
 # name FPs, G302/G306 executable-binary 0o755, G204 shell.Runner sanctioned exec
-# abstraction (CLAUDE.md). Genuine G115/G402 carry #nosec annotations.
-GOSEC_EXCLUDES := G304,G101,G302,G306,G204
+# abstraction (CLAUDE.md), G703 taint-based path-traversal (the gosec >= 2.22
+# successor to G304, same internal-trusted-path rationale). Genuine G115/G402
+# and the verified-FP G118/G117/G122/G602 carry inline #nosec annotations.
+GOSEC_EXCLUDES := G304,G101,G302,G306,G204,G703
 
 # Build info
 # COMMIT uses the FULL SHA to match goreleaser's {{.Commit}} injection, so a
@@ -46,7 +48,7 @@ test:
 
 ## lint: run golangci-lint (incl. gosec + nolintlint), gofmt, the webui build-tag
 ## gates, then the standalone gosec (via security-gosec) + semgrep scanners
-## (SEC-02). Requires: gosec (go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4),
+## (SEC-02). Requires: gosec (go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1),
 ## semgrep (pipx install semgrep). The gosec excludes (GOSEC_EXCLUDES) mirror the
 ## golangci-lint gosec config + justified #nosec///nolint suppressions; the
 ## remaining real findings are fixed at the root or carry inline justifications.
