@@ -42,8 +42,13 @@ Phases 16–21 (6 phases, 24 plans) — supply-chain hardening (cosign v3 / SLSA
 
 ## v3.0.1 — Network & Dependency Security Hotfix 🔧 IN PROGRESS
 
-Phase 22 — closes 6 CRITICAL/HIGH findings from the 2026-06-03 full security audit (11 agents).
+Phase 22 — closes 6 CRITICAL/HIGH network & dependency findings from the 2026-06-03 full security audit (11 agents).
 Requirements: NET-01 (CRITICAL A1), NET-02 (A7), NET-03 (A8), DEP-01 (A2), DEP-02 (A3), DEP-03 (A12).
+
+Phase 23 — restores doctor/threat-model honesty: one shared finding set, fail-closed disk encryption, NetBird Tailnet-Lock warning, and a doctor minimum-versions table.
+Requirements: DOC-01 (A4), DOC-02 (A5), DOC-03 (A6), DOC-04 (C).
+
+(AUD-01/02, DOS-01, CI-01 land in later v3.0.1 phases 24–25 — not yet added to roadmap.)
 
 ---
 
@@ -250,10 +255,27 @@ Plans:
 
 ---
 
+### Phase 23: Doctor Honesty & Coverage
+
+**Goal**: Make the security-posture surface honest — `threat-model` and `doctor` report from one shared finding set, disk-encryption verification fails closed on unknown/error state, the NetBird backend surfaces Tailnet-Lock-absent unconditionally, and `doctor` gains a minimum-versions table that FATALs on known-vulnerable component versions.
+**Depends on**: Phase 22
+**Requirements**: DOC-01, DOC-02, DOC-03, DOC-04
+**Success Criteria** (what must be TRUE):
+
+  1. `abysslink threat-model` derives every row's ✓/✗ from the SAME full finding set as `abysslink doctor` (`collectDoctorFindings`), not just core-module `Doctor()`; rows whose backing check did not run render "unknown/—", never ✓ (DOC-01)
+  2. Linux `checkLUKS` emits FATAL when `lsblk` is missing/errors/unparseable (not `nil,nil`); macOS treats FileVault in-progress/deferred as not-fully-enabled; `up`'s disk-encryption gate blocks on "unknown" (DOC-02)
+  3. The NetBird backend emits an unconditional `nb-lock` SeverityWarning (Tailnet Lock absent), mirroring the existing `hs-lock`, and the `threat-model` row reflects it (DOC-03)
+  4. `abysslink doctor` surfaces a minimum-versions table that FATALs on known-vulnerable versions — at minimum ntfy < 2.21 (CVE-2026-39087, CVSS 9.8); structured to add Tailscale/tmux/mosh floors; distinguishes vendored-stdlib CVEs from protocol CVEs (DOC-04)
+  5. `make lint test` green; new tests cover threat-model/doctor finding-set parity, fail-closed disk-encryption states, the `nb-lock` warning, and the version-floor table
+
+**Plans**: TBD
+
+---
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 16 → 17 → 18 → 19 → 20 → 21 → 22
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 16 → 17 → 18 → 19 → 20 → 21 → 22 → 23
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -278,3 +300,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 20. Security Audit Pass & Doctor Checks | 4/4 | Complete    | 2026-06-02 |
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
 | 22. Network & Dependency Lockdown | 0/4 | In Progress | — |
+| 23. Doctor Honesty & Coverage | 0/TBD | Pending | — |

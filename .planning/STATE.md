@@ -98,6 +98,12 @@ Last activity: 2026-06-02
 
 ## Accumulated Context
 
+### Roadmap Evolution
+
+- Phase 22 (Network & Dependency Lockdown) detail block added to ROADMAP.md during planning — NET-01/02/03, DEP-01/02/03 (v3.0.1).
+- Phase 23 (Doctor Honesty & Coverage) added to ROADMAP.md — DOC-01/02/03/04 (v3.0.1). Plans TBD.
+- v3.0.1 milestone continues with phases 24 (AUD-01/02, DOS-01) and 25 (CI-01) per REQUIREMENTS.md traceability — not yet added to roadmap.
+
 ### Decisions
 
 - Roadmap: Phases follow IMPLEMENTATION-TASKS.md Phase 0–8 structure exactly (user explicit choice)
