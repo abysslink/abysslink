@@ -78,6 +78,23 @@ func TestServeActive(t *testing.T) {
 			false, true,
 		},
 		{
+			// IN-03: inactive output that merely mentions "proxy" in help/hint
+			// text must NOT be detected as an active serve. The structural "|--"
+			// tree marker is absent, so this is correctly inactive (no false
+			// positive Warning).
+			"inactive proxy-mentioning hint text",
+			shell.Call{Result: shell.Result{Stdout: "No serve config.\nRun 'tailscale serve --help' to set up a proxy.", ExitCode: 0}},
+			false, true,
+		},
+		{
+			// IN-03 companion: hint text mentioning "proxy" WITHOUT the "No serve
+			// config" short-circuit still must not be read as active when the
+			// "|--" tree marker is absent.
+			"proxy word without tree marker",
+			shell.Call{Result: shell.Result{Stdout: "To expose a service, configure a proxy target.", ExitCode: 0}},
+			false, true,
+		},
+		{
 			"exec error",
 			shell.Call{Err: errors.New("not found")},
 			false, false,
