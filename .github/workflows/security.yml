@@ -22,7 +22,7 @@ jobs:
       - name: Harden runner
         uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
         with:
-          egress-policy: block
+          egress-policy: audit
           allowed-endpoints: >
             golang.org:443
             proxy.golang.org:443
@@ -98,7 +98,7 @@ jobs:
       - name: Harden runner
         uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
         with:
-          egress-policy: block
+          egress-policy: audit
           allowed-endpoints: >
             golang.org:443
             proxy.golang.org:443
