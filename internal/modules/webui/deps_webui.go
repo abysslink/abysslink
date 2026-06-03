@@ -17,8 +17,8 @@
 
 // This file pins the Tailscale SDK packages the dashboard depends on so that
 // `go mod tidy` retains tailscale.com as a direct module requirement. The
-// package-level documentation lives in doc.go. The blank imports here are
-// belt-and-suspenders: server.go and middleware.go import these packages
+// package-level documentation lives in doc.go. The blank import here is
+// belt-and-suspenders: server.go and middleware.go import this package
 // directly, but keeping the pin avoids tidy churn should those imports move.
 package webui
 
@@ -26,6 +26,4 @@ import (
 	// local.Client.GetCertificate supplies the Tailscale TLS cert (WEB-03) and
 	// WhoIs identity (WEB-04).
 	_ "tailscale.com/client/local"
-	// safeweb provides the CSRF-protected mux for the dashboard (WEB-05).
-	_ "tailscale.com/safeweb"
 )

@@ -30,7 +30,6 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"tailscale.com/client/local"
-	"tailscale.com/safeweb"
 )
 
 // tailnetIPResolver yields this node's tailnet IP. It is a seam so the bind
@@ -106,36 +105,36 @@ func resolveWebUIAddr(ctx context.Context, cfg *config.Config, resolver tailnetI
 	return net.JoinHostPort(tailnetIP, strconv.Itoa(port)), true
 }
 
-// buildCSP returns the Content-Security-Policy for all browser responses. It
-// starts from safeweb's hardened default and pins default-src to 'self' only —
-// no unsafe-inline and no external origins/CDN (WEB-06). All styling lives in
-// the embedded same-origin stylesheet.
-func buildCSP() safeweb.CSP {
-	csp := safeweb.DefaultCSP()
-	csp.Set("default-src", "'self'")
-	return csp
+// securityHeadersMiddleware applies the five non-CSRF security response headers
+// that safeweb's serveBrowser() provided (tailscale.com@v1.98.5/safeweb/http.go:377-384).
+// CSP string: derived from DefaultCSP() + Set("default-src","'self'") — no change to content.
+// HSTS is always set because the listener is TLS-only (SecureContext was always true).
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	const csp = "default-src 'self'; frame-ancestors 'none'; form-action 'self'; " +
+		"base-uri 'self'; block-all-mixed-content"
+	const hsts = "max-age=31536000"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", csp)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referer-Policy", "same-origin")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Strict-Transport-Security", hsts)
+		next.ServeHTTP(w, r)
+	})
 }
 
-// newSafewebServer constructs the safeweb.Server that wraps mux with CSRF
-// protection and the restrictive CSP. Routes MUST be registered on BrowserMux
-// (not via Config.HTTPServer.Handler, which safeweb ignores — Pitfall 2). The
-// CSRF secret is auto-generated (crypto/rand) when omitted, which is the
-// correct ephemeral-per-restart posture for the daemon (WEB-05).
-func newSafewebServer(mux *http.ServeMux) (*safeweb.Server, error) {
-	sw, err := safeweb.NewServer(safeweb.Config{
-		SecureContext: true, // Secure CSRF cookie + HSTS
-		BrowserMux:    mux,  // all routes get CSRF + CSP
-		CSP:           buildCSP(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("webui: safeweb: %w", err)
-	}
-	return sw, nil
+// buildWebHandler composes the gorilla-free security middleware chain:
+// CrossOriginProtection (CSRF replacement) → securityHeaders → mux.
+// Replaces newSafewebServer (DEP-03 / D-08). Infallible — no error return.
+func buildWebHandler(mux *http.ServeMux) http.Handler {
+	cop := http.NewCrossOriginProtection()
+	return cop.Handler(securityHeadersMiddleware(mux))
 }
 
 // StartWebUIServer builds the TLS listener, composes the security middleware
-// chain (whoIsMiddleware -> readOnlyMiddleware -> safeweb), and serves until ctx
-// is cancelled. It is LIBRARY code: every log line uses log/slog — nothing in
+// chain (whoIsMiddleware -> readOnlyMiddleware -> CrossOriginProtection + securityHeaders),
+// and serves until ctx is cancelled. It is LIBRARY code: every log line uses log/slog — nothing in
 // this file writes to stdout or stderr via the fmt print family (CLAUDE.md hard
 // rule). The loud one-time security note lives in the daemon entrypoint (Plan
 // 04), not here.
@@ -213,9 +212,9 @@ func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingB
 	}
 
 	// The mux carries the four read-only view routes plus the embedded static
-	// assets, and is wrapped by safeweb (CSRF + CSP), then the read-only gate,
-	// then the WhoIs gate as the OUTERMOST handler so unauthenticated peers
-	// never reach routing. The status/doctor providers come from the daemon
+	// assets, and is wrapped by CrossOriginProtection+securityHeaders (CSRF/CSP),
+	// then the read-only gate, then the WhoIs gate as the OUTERMOST handler so
+	// unauthenticated peers never reach routing. The status/doctor providers come from the daemon
 	// entrypoint via WithStatusProvider/WithDoctorProvider (B3): it adapts
 	// internal/cli's CollectFleetStatus/CollectDoctorFindings so the dashboard
 	// renders REAL posture data. When a provider is nil (e.g. the module.go
@@ -245,12 +244,8 @@ func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingB
 	}
 	mux := http.NewServeMux()
 	handlers.Register(mux)
-	sw, err := newSafewebServer(mux)
-	if err != nil {
-		_ = ln.Close()
-		return err
-	}
-	readOnly := readOnlyMiddleware(&cfg.WebUI, sw)
+	webHandler := buildWebHandler(mux)
+	readOnly := readOnlyMiddleware(&cfg.WebUI, webHandler)
 	outer := whoIsMiddleware(&lc, readOnly)
 
 	srv := &http.Server{
