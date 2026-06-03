@@ -362,6 +362,20 @@ func metDisabledListenerCheck(cfg *config.Config, tailnetIP string) modules.Find
 	// (timeout, EHOSTUNREACH, ENETUNREACH, DNS failure) is inconclusive — the
 	// probe did NOT verify the port is closed, so returning SeverityOK would be
 	// a false-OK on an unproven security control (OBS-05 / CR-01 / DOC-10).
+	//
+	// WR-01 (Unix-only by design): the SeverityOK "closed port" proof below
+	// keys exclusively on syscall.ECONNREFUSED, a Unix errno. Abysslink v1
+	// targets macOS and Linux only (see CLAUDE.md "decisions you must not
+	// relitigate"), so this gate is correct and complete on every supported
+	// host. On a hypothetical non-Unix host (e.g. Windows, where the connection-
+	// refused errno is WSAECONNREFUSED and net.DialTimeout does not normalize
+	// the two), a genuinely closed port would NOT match this errors.Is and would
+	// instead fall through to the met-listener-unknown SeverityWarning branch
+	// below. That is the intended fail-honest direction: erring toward
+	// "listener state unknown" never yields a false SeverityOK on an unproven
+	// control. We deliberately do NOT add a build-tag-guarded portable match,
+	// because no non-Unix target is in scope for v1 and a portable broaden would
+	// add untested platform code paths.
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "no stale metrics listener detected"}
 	}
