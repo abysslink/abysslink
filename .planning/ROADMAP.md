@@ -248,10 +248,10 @@ Plans:
 
 Plans:
 
-- [ ] 22-01-PLAN.md — Go toolchain + x/crypto bump: go.mod go 1.26.3→1.26.4 + x/crypto v0.52.0 + all 6 CI workflows aligned (DEP-01, DEP-02)
-- [ ] 22-02-PLAN.md — Config validation: NET-02 NetBird https guard + NET-03 safeHostnamePat + hostname/server_url charset gates (NET-02, NET-03)
-- [ ] 22-03-PLAN.md — ntfy tailnet-bind floor: remove loopback -p from module.go + new cmd_doctor_ntfy.go with dual-signal doctor check (NET-01)
-- [ ] 22-04-PLAN.md — WebUI CSRF migration: safeweb→stdlib CrossOriginProtection + 5 security headers + gorilla-free go.mod (DEP-03)
+- [x] 22-01-PLAN.md — Go toolchain + x/crypto bump: go.mod go 1.26.3→1.26.4 + x/crypto v0.52.0 + all 6 CI workflows aligned (DEP-01, DEP-02)
+- [x] 22-02-PLAN.md — Config validation: NET-02 NetBird https guard + NET-03 safeHostnamePat + hostname/server_url charset gates (NET-02, NET-03)
+- [x] 22-03-PLAN.md — ntfy tailnet-bind floor: remove loopback -p from module.go + new cmd_doctor_ntfy.go with dual-signal doctor check (NET-01)
+- [x] 22-04-PLAN.md — WebUI CSRF migration: safeweb→stdlib CrossOriginProtection + 5 security headers + gorilla-free go.mod (DEP-03)
 
 ---
 
@@ -299,5 +299,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 19. Web UI Dashboard (opt-in) | 4/4 | Complete    | 2026-06-02 |
 | 20. Security Audit Pass & Doctor Checks | 4/4 | Complete    | 2026-06-02 |
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
-| 22. Network & Dependency Lockdown | 0/4 | In Progress | — |
+| 22. Network & Dependency Lockdown | 4/4 | Complete    | 2026-06-03 |
 | 23. Doctor Honesty & Coverage | 0/TBD | Pending | — |

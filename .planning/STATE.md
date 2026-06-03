@@ -2,15 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
-status: executing
-last_updated: "2026-06-03T01:48:10.462Z"
-last_activity: 2026-06-03 -- Phase 22 execution started
+status: ready_to_plan
+last_updated: 2026-06-03T02:49:52.527Z
+last_activity: 2026-06-03
 progress:
   total_phases: 12
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 4
-  completed_plans: 0
-  percent: 0
+  completed_plans: 4
+  percent: 8
+stopped_at: Phase 22 complete (4/4) — ready to discuss Phase 23
 ---
 
 # Project State
@@ -20,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Phase 22 — network-dependency-lockdown
+**Current focus:** Phase 23 — doctor honesty coverage
 
 ## Current Position
 
-Phase: 22 (network-dependency-lockdown) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase 22
-Last activity: 2026-06-03 -- Phase 22 execution started
+Phase: 23
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-06-03
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 70 (v1.0.0)
+- Total plans completed: 74 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 
@@ -94,6 +95,9 @@ Last activity: 2026-06-03 -- Phase 22 execution started
 | Phase 21 P03 | 12 | 1 tasks | 9 files |
 | Phase 21 P04 | 9min | 2 tasks | 12 files |
 | Phase 21 P05 | 7min | 2 tasks | 4 files |
+| Phase 22 P01 | 5m | 2 tasks | 7 files |
+| Phase 22 P03 | 5m | 2 tasks | 5 files |
+| Phase 22 P04 | 8m | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -162,6 +166,9 @@ Last activity: 2026-06-03 -- Phase 22 execution started
 - [Phase ?]: 21-04: NetBird posture/events via exported wrappers over netbirdAdapter.doRequest (no new client/interface); events --follow count-watermark dedup with 2s->30s bounded backoff, ctx-cancellable; nb-posture-active WARN gated on backend.type==netbird
 - [Phase 21]: 21-05: mod3DoctorFindings wired into doctor RunE (after secDoctorFindings, before --all-rigs fan-out); all 9 Phase-21 checks now appear in abysslink doctor + --json. root.go needed no change (wol/asciinema/netbird already registered by plans 01/02/04)
 - [Phase 21]: 21-05: Headscale HA + NetBird SCIM published as scope-cut docs (docs/headscale-ha.md, docs/netbird-scim.md) — out of scope, workarounds documented not implemented (MOD3-06). Phase 21 CLOSED: make lint test green, GOOS=linux Landlock build clean. Final phase of v3.0.0.
+- [Phase ?]: 22-01 dependency lockdown
+- [Phase ?]: ntfyOKFinding/ntfyFatalFinding set Module:'ntfy' not 'webui' — Phase-23 doctor-honesty grouping boundary
+- [Phase ?]: DEP-03 path (b): drop safeweb; CrossOriginProtection + securityHeadersMiddleware replaces gorilla/csrf; both gorilla packages removed from go.mod after go mod tidy
 
 ### Pending Todos
 
@@ -210,6 +217,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-02T20:14:11.978Z
-Stopped at: Completed 21-05-PLAN.md (final plan; Phase 21 complete; v3.0.0 ready for verification)
+Last session: 2026-06-03T02:22:19.724Z
+Stopped at: Completed 22-04-PLAN.md
 Resume file: None
