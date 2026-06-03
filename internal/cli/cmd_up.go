@@ -405,13 +405,13 @@ func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []mo
 	if blockers := diskEncryptionBlockers(findings); len(blockers) > 0 {
 		emitSecurityNote(p, cc.jsonOut, "disk-encryption") // §7 note 5
 		forceUnsafe, _ := cmd.Flags().GetBool("force-unsafe")
-		if !forceUnsafe {
-			for _, b := range blockers {
-				printerError(p, "  ✗  "+b.Message)
-			}
-			return fmt.Errorf("up: refusing to apply — full-disk encryption is required (fail-closed); enable it, or re-run with --force-unsafe to override (NOT recommended)")
+		// Emit blocker messages for the user before the gate decision.
+		for _, b := range blockers {
+			printerError(p, "  ✗  "+b.Message)
 		}
-		slog.Warn("up: --force-unsafe set — applying despite disk encryption being disabled; remote access on an unencrypted disk is dangerous")
+		if err := diskEncryptionGate(blockers, forceUnsafe); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -490,6 +490,48 @@ func diskEncryptionBlockers(findings []modules.Finding) []modules.Finding {
 		}
 	}
 	return out
+}
+
+// unknownDiskEncryptionMarker is the stable substring set in Plan 02 to
+// distinguish a genuinely-unknown disk-encryption state (cannot be determined)
+// from a known-off state (disk is confirmed unencrypted). Plan 04 gates on this
+// substring to refuse --force-unsafe for unknown-state FATALs (D-05).
+const unknownDiskEncryptionMarker = "disk-encryption state is UNKNOWN"
+
+// diskEncryptionGate applies the gate logic over a pre-filtered blocker slice
+// (output of diskEncryptionBlockers). It is extracted here so tests can exercise
+// it directly without standing up a full command context.
+//
+// Gate rules (D-05, CLAUDE.md immutable default):
+//   - Any blocker carrying the UNKNOWN-state marker ⇒ refuse unconditionally;
+//     --force-unsafe does NOT bypass it; error explains manual verification.
+//   - Remaining (known-off) blockers ⇒ refuse unless forceUnsafe is set
+//     (existing behavior, unchanged).
+//   - Empty blockers ⇒ nil (no error).
+func diskEncryptionGate(blockers []modules.Finding, forceUnsafe bool) error {
+	if len(blockers) == 0 {
+		return nil
+	}
+
+	// First pass: check for any UNKNOWN-state blocker. These are non-overridable
+	// regardless of --force-unsafe (zero bypass, D-05).
+	for _, b := range blockers {
+		if strings.Contains(b.Message, unknownDiskEncryptionMarker) {
+			return fmt.Errorf(
+				"up: refusing to apply — disk-encryption state could not be determined (UNKNOWN). " +
+					"Verify encryption status manually (e.g. `fdesetup status` on macOS or `lsblk` on Linux) " +
+					"and ensure full-disk encryption is enabled before configuring remote access. " +
+					"This state cannot be overridden.",
+			)
+		}
+	}
+
+	// Second pass: known-off blockers — refuse unless --force-unsafe is set.
+	if !forceUnsafe {
+		return fmt.Errorf("up: refusing to apply — full-disk encryption is required (fail-closed); enable it, or re-run with --force-unsafe to override (NOT recommended)")
+	}
+	slog.Warn("up: --force-unsafe set — applying despite disk encryption being disabled; remote access on an unencrypted disk is dangerous")
+	return nil
 }
 
 // optionalACLPort describes a module that needs a non-default Tailscale ACL grant.
