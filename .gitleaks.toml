@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+#
+# gitleaks configuration. Extends the upstream default ruleset and allowlists
+# known false positives only. Keep allowlist entries as narrow as possible —
+# never allowlist a real secret pattern (e.g. a full tskey-disablement key).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Abysslink false positives: deliberate test fixtures and git-ignored local scratch dirs"
+
+# .mine/ is git-ignored local scratch (absent from CI checkout); only seen by
+# local filesystem scans. Listed so `gitleaks dir .` matches CI behaviour.
+paths = [
+  '''\.mine/''',
+]
+
+# Deliberately fake Tailnet Lock disablement keys used in unit tests. Matched
+# by exact suffix so a genuinely random tskey-disablement-* key is NOT exempt.
+regexes = [
+  '''tskey-disablement-(abc123|def456)''',
+]

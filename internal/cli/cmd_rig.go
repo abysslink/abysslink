@@ -148,14 +148,14 @@ func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
 
 	// Human table: name / hostname / backend / last-seen.
 	if len(records) == 0 {
-		fmt.Fprintln(out, styleMuted.Render("No rigs enrolled. Use `abysslink enroll rig <name> --apply` to add one."))
+		_, _ = fmt.Fprintln(out, styleMuted.Render("No rigs enrolled. Use `abysslink enroll rig <name> --apply` to add one."))
 		return nil
 	}
 
 	// Header.
 	hdr := fmt.Sprintf("  %-20s %-30s %-12s %-25s", "NAME", "HOSTNAME", "BACKEND", "LAST SEEN")
-	fmt.Fprintln(out, styleBold.Render(hdr))
-	fmt.Fprintln(out, styleMuted.Render("  "+repeatStr("─", 87)))
+	_, _ = fmt.Fprintln(out, styleBold.Render(hdr))
+	_, _ = fmt.Fprintln(out, styleMuted.Render("  "+repeatStr("─", 87)))
 
 	for _, r := range records {
 		lastSeen := r.LastSeen
@@ -164,7 +164,7 @@ func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
 		}
 		row := fmt.Sprintf("  %-20s %-30s %-12s %-25s",
 			r.Name, r.Hostname, r.Backend, lastSeen)
-		fmt.Fprintln(out, row)
+		_, _ = fmt.Fprintln(out, row)
 	}
 	return nil
 }
@@ -254,7 +254,7 @@ func runRigImport(cfgPath, importPath string, apply bool, out io.Writer) error {
 	if !apply {
 		// Dry-run: report what would be imported via the io.Writer (WR-01: no fmt.Printf/Println).
 		for _, r := range incoming.Rigs {
-			fmt.Fprintf(out, "[dry-run] Would import rig %q (hostname=%s, backend=%s)\n", r.Name, r.Hostname, r.Backend)
+			_, _ = fmt.Fprintf(out, "[dry-run] Would import rig %q (hostname=%s, backend=%s)\n", r.Name, r.Hostname, r.Backend)
 		}
 		return nil
 	}

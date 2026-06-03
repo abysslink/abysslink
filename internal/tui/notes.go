@@ -24,6 +24,7 @@ import (
 // NoteLevel identifies the severity / intent of a Note callout box.
 type NoteLevel int
 
+// Note severity levels, ordered from least to most urgent.
 const (
 	NoteInfo     NoteLevel = iota // blue border; informational
 	NoteWarn                      // yellow border; advisory

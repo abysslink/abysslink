@@ -80,8 +80,8 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 	}
 
 	// Check 2 — audit-anchor-age (WARN when missing or > 24h old).
-	switch {
-	case anchor == nil:
+	switch anchor {
+	case nil:
 		findings = append(findings, modules.Finding{
 			Module:   "audit",
 			Check:    "audit-anchor-age",
