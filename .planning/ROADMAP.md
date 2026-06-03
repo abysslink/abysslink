@@ -285,10 +285,19 @@ Plans:
 **Goal:** Close the final 4 v3.0.1 security requirements so the milestone reaches 20/20: bind backups to the tamper-evident HMAC chain and resist tail-truncation (AUD-01, AUD-02), bound every attacker-influenceable read (DOS-01), and add `govulncheck ./...` as a blocking CI gate (CI-01).
 **Requirements**: AUD-01 (A9 HMAC-bound backups), AUD-02 (A10 anchor-refresh truncation resistance), DOS-01 (A11 bounded reads), CI-01 (govulncheck blocking CI gate)
 **Depends on:** Phase 23.2
-**Plans:** 0 plans
+**Plans:** 5 plans
+
+**Wave 1** *(parallel)*
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 24 to break down)
+- [ ] 24-01-PLAN.md — AUD-01: BackupWithChain + RestoreGated (HMAC-bound backup + chain-walk restore gate)
+- [ ] 24-02-PLAN.md — CI-01: harden-runner on lint.yml + test.yml + REQUIREMENTS.md:93 Phase 24 fix
+
+**Wave 2** *(depends on Wave 1)*
+
+- [ ] 24-03-PLAN.md — AUD-02: per-Append anchor (fatal) + ReadCounter/WriteCounter + Verify CounterStatus UNKNOWN tri-state
+- [ ] 24-04-PLAN.md — DOS-01 Part A: limitedWriter (exec.go) + MaxBytesReader (/notify) + readLimited on 15 NetBird seam sites
+- [ ] 24-05-PLAN.md — DOS-01 Part B: tailscale/limit.go + readLimited on 7 admin.go + 8 Headscale seam sites
 
 ---
 
