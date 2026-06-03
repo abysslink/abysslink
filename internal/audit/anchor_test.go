@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -150,6 +151,148 @@ func TestIncrementCounter_Existing(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, int64(8), n)
+}
+
+// ─── AUD-02: Append anchor-every-entry / anchor-fail-aborts / Verify tri-state ─
+
+// errAfterNStore wraps MockStore and makes kc.Get fail after N successful calls.
+// Used to simulate a keychain becoming unavailable after SignedAudit construction.
+type errAfterNStore struct {
+	inner    *secrets.MockStore
+	limit    int
+	getCalls int
+}
+
+func (e *errAfterNStore) Set(ctx context.Context, service, account, secret string) error {
+	return e.inner.Set(ctx, service, account, secret)
+}
+func (e *errAfterNStore) Get(ctx context.Context, service, account string) (string, error) {
+	e.getCalls++
+	if e.getCalls > e.limit {
+		return "", fmt.Errorf("keychain unavailable (simulated)")
+	}
+	return e.inner.Get(ctx, service, account)
+}
+func (e *errAfterNStore) Delete(ctx context.Context, service, account string) error {
+	return e.inner.Delete(ctx, service, account)
+}
+
+// TestAppend_AnchorEveryEntry: WriteAnchor is called after EVERY Append call
+// (not every 100). After two Appends the anchor file must exist and record
+// entry_count=2.
+func TestAppend_AnchorEveryEntry(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+
+	// Append entry 1 — anchor must exist with count=1.
+	require.NoError(t, sa.Append(context.Background(), audit.SignInput{
+		Title:    "write",
+		DiffHash: sha256.Sum256([]byte("a")),
+	}, "/etc/a", false))
+
+	a1, rerr := audit.ReadAnchor(logPath)
+	require.NoError(t, rerr)
+	require.NotNil(t, a1, "anchor must exist after first Append")
+	assert.Equal(t, int64(1), a1.EntryCount, "anchor entry_count must be 1 after first Append")
+
+	// Append entry 2 — anchor must update to count=2.
+	require.NoError(t, sa.Append(context.Background(), audit.SignInput{
+		Title:    "write",
+		DiffHash: sha256.Sum256([]byte("b")),
+	}, "/etc/b", false))
+
+	a2, rerr2 := audit.ReadAnchor(logPath)
+	require.NoError(t, rerr2)
+	require.NotNil(t, a2, "anchor must exist after second Append")
+	assert.Equal(t, int64(2), a2.EntryCount, "anchor entry_count must be 2 after second Append")
+}
+
+// TestAppend_FailsOnAnchorWriteError: when WriteAnchor fails (keychain becomes
+// unavailable after construction), Append must return an error containing
+// "anchor write failed (mutation aborted)" and WriteFile must NOT write the
+// physical file.
+func TestAppend_FailsOnAnchorWriteError(t *testing.T) {
+	dir := t.TempDir()
+	inner := seededStore(t)
+	// Allow exactly 2 Get calls: one for NewSigned (key existence check) and
+	// one for Append's hmacKey call. The third Get (inside WriteAnchor's
+	// fetchHMACKey) will fail, triggering anchor write failure.
+	kc := &errAfterNStore{inner: inner, limit: 2}
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+
+	targetFile := filepath.Join(dir, "target.txt")
+	werr := sa.WriteFile(targetFile, []byte("content"), 0o600, false)
+	require.Error(t, werr, "WriteFile must fail when anchor write fails")
+	assert.Contains(t, werr.Error(), "anchor write failed (mutation aborted)")
+
+	// Physical file must NOT have been written.
+	_, serr := os.Stat(targetFile)
+	assert.True(t, os.IsNotExist(serr), "target file must not exist when anchor write aborts the mutation")
+}
+
+// TestVerify_CounterAbsent_Unknown: a signed log with entries but no keychain
+// counter must produce CounterStatus="unknown" (never coerced to PASS).
+func TestVerify_CounterAbsent_Unknown(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t) // has HMAC key; counter key is absent
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	writeSomeEntries(t, sa, 3)
+
+	// Manually delete the counter key if it was set (by Append's incrementCounter).
+	// In a pre-AUD-02 scenario, the counter does not exist; here we clear it to
+	// simulate that.
+	_ = kc.Delete(context.Background(), "abysslink", "audit-counter")
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.Equal(t, "unknown", res.CounterStatus,
+		"absent keychain counter must produce CounterStatus=unknown, never PASS")
+	assert.False(t, res.TruncationDetected,
+		"absent counter must not falsely set TruncationDetected")
+}
+
+// TestVerify_CounterMismatch_TruncationDetected: keychain counter=3 but log
+// has 5 entries → TruncationDetected=true and CounterStatus="mismatch".
+func TestVerify_CounterMismatch_TruncationDetected(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	writeSomeEntries(t, sa, 5) // writes 5 entries + sets counter=5
+
+	// Simulate tail-deletion: reset counter to 3 (as if 2 tail entries deleted).
+	require.NoError(t, audit.WriteCounter(context.Background(), kc, 3))
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.True(t, res.TruncationDetected,
+		"counter mismatch must set TruncationDetected=true")
+	assert.Equal(t, "mismatch", res.CounterStatus)
+}
+
+// TestVerify_CounterVerified: 5 entries appended normally → counter=5;
+// Verify must produce CounterStatus="verified" and TruncationDetected=false.
+func TestVerify_CounterVerified(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	writeSomeEntries(t, sa, 5)
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.Equal(t, "verified", res.CounterStatus,
+		"counter matching log entry count must produce CounterStatus=verified")
+	assert.False(t, res.TruncationDetected)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
