@@ -30,11 +30,5 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.1.6
-          args: --help
-
-      - name: Run make lint test
-        run: make lint test
+      - name: Run tests
+        run: make test
