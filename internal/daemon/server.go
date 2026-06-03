@@ -111,6 +111,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.startWatchers(ctx)
 
+	// #nosec G118 -- graceful-shutdown goroutine: by the time it runs, ctx is
+	// already Done, so a fresh context.Background with a timeout is the correct
+	// context for srv.Shutdown (the request-scoped ctx is cancelled).
 	go func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
