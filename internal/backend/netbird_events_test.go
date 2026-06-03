@@ -126,15 +126,15 @@ func TestTailEvents_Follow_ShrinkThenRegrow(t *testing.T) {
 		n := atomic.AddInt32(&poll, 1)
 		w.WriteHeader(http.StatusOK)
 		var events []nbAuditEvent
-		switch {
-		case n == 1:
+		switch n {
+		case 1:
 			// Initial: three events (high-water mark = 3).
 			events = []nbAuditEvent{
 				{ID: "e1", Activity: "a1"},
 				{ID: "e2", Activity: "a2"},
 				{ID: "e3", Activity: "a3"},
 			}
-		case n == 2:
+		case 2:
 			// Snapshot shrinks (e1/e2 rotated out) — fewer events than before.
 			events = []nbAuditEvent{
 				{ID: "e3", Activity: "a3"},
