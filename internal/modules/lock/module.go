@@ -155,9 +155,13 @@ func (m *Module) Apply(ctx context.Context) error {
 	return nil
 }
 
-// Verify re-runs Detect.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// Verify is a no-op for the lock module — all checks run in Detect.
+// Pitfall 4: do NOT call Detect here — runner.Doctor calls both Detect and Verify;
+// re-running Detect would produce duplicate lock_enabled findings per doctor pass.
+// lock is report-only (Apply handles actual remediation); Verify adds no new
+// information beyond Detect; returning nil avoids double-emission.
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair attempts to fix findings.
