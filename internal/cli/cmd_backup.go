@@ -113,7 +113,10 @@ func newBackupRestoreCmd() *cobra.Command {
   abysslink backup restore /etc/ssh/sshd_config
 
   # Restore a file from its most recent backup
-  abysslink backup restore /etc/ssh/sshd_config --apply`,
+  abysslink backup restore /etc/ssh/sshd_config --apply
+
+  # Override the chain gate for a backup with no chain entry (auditable — A9)
+  abysslink backup restore /etc/ssh/sshd_config --accept-unverified-backup --apply`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -123,7 +126,7 @@ func newBackupRestoreCmd() *cobra.Command {
 			}
 			p := newPrinter(cmd)
 
-			// Resolve to absolute path; audit.Restore requires absolute dst.
+			// Resolve to absolute path; audit.RestoreGated requires absolute dst.
 			target, err := filepath.Abs(args[0])
 			if err != nil {
 				return fmt.Errorf("backup restore: resolve path %q: %w", args[0], err)
@@ -164,7 +167,19 @@ func newBackupRestoreCmd() *cobra.Command {
 				return nil
 			}
 
-			if err := audit.Restore(target, latest); err != nil {
+			// AUD-01 / T-24-07-01: gate the restore through the signed chain.
+			// Build a *SignedAudit so RestoreGated can walk the chain and verify
+			// the backup's hash. Fail-closed: if the keychain is unavailable, the
+			// chain cannot be consulted at all — we refuse even with
+			// --accept-unverified-backup, because the gate itself requires a
+			// working keychain. Do not fall back to the unchained audit.Restore.
+			acceptUnverified, _ := cmd.Flags().GetBool("accept-unverified-backup")
+			sa, saErr := cmdSignedAudit(ctx, cc)
+			if saErr != nil {
+				return fmt.Errorf("backup restore: chain-verified restore requires a keychain (%w); "+
+					"--accept-unverified-backup does not bypass a missing keychain", saErr)
+			}
+			if err := audit.RestoreGated(ctx, target, latest, sa, acceptUnverified); err != nil {
 				return fmt.Errorf("backup restore: %w", err)
 			}
 			printerInfo(p, fmt.Sprintf("Restored %s from backup dated %s", target, backupLabel))
@@ -172,6 +187,11 @@ func newBackupRestoreCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Bool("original", false, "Restore the earliest (pre-abysslink) backup instead of the most recent")
+	// AUD-01 / A9: override the fail-closed chain gate for unchained backups.
+	// Defaults to false — passing this flag records an auditable "restore-unverified"
+	// entry and does NOT bypass a missing keychain (chain must be consultable).
+	cmd.Flags().Bool("accept-unverified-backup", false,
+		"Override the chain-gate and restore a backup without a signed chain entry (records an auditable non-OK entry; does not bypass a missing keychain)")
 	return cmd
 }
 

@@ -61,6 +61,28 @@ func auditKeychain(ctx context.Context, cc *cmdContext) audit.KeychainStore {
 	return kc
 }
 
+// cmdSignedAudit resolves a *audit.SignedAudit from the command context.
+// It calls DefaultLogPath, auditKeychain, and audit.NewSigned. Returns an error
+// when the keychain is unavailable or NewSigned fails — callers must treat this
+// as a fail-closed condition (e.g. refuse a chain-gated restore rather than
+// falling back to the unchained path). Used by the restore command and all server
+// backup commands (AUD-01).
+func cmdSignedAudit(ctx context.Context, cc *cmdContext) (*audit.SignedAudit, error) {
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return nil, fmt.Errorf("audit log path: %w", err)
+	}
+	kc := auditKeychain(ctx, cc)
+	if kc == nil {
+		return nil, fmt.Errorf("keychain unavailable — cannot build signed audit writer")
+	}
+	sa, saErr := audit.NewSigned(logPath, kc)
+	if saErr != nil {
+		return nil, fmt.Errorf("signed audit init: %w", saErr)
+	}
+	return sa, nil
+}
+
 // runAuditVerify walks the chain and anchor at logPath. It returns nil (exit 0)
 // on a clean chain and an *exitError{code:2} on any gap, fork, HMAC mismatch, or
 // detected truncation — emitting the exact "CHAIN BROKEN at entry N" string on
