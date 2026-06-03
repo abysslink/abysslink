@@ -151,13 +151,13 @@ func TestACLDriftOK(t *testing.T) {
 	r := shell.NewMockRunner()
 	realBknd, err := backend.New(cfg, r)
 	require.NoError(t, err)
-	realAclMgr, ok := realBknd.(backend.ACLManager)
+	realACLMgr, ok := realBknd.(backend.ACLManager)
 	require.True(t, ok)
 
 	// Build the already-converged ACL (default ACL already contains the required grant).
-	raw := realAclMgr.DefaultACL(cfg.Identity.Email, cfg.Identity.UnixUser)
+	raw := realACLMgr.DefaultACL(cfg.Identity.Email, cfg.Identity.UnixUser)
 
-	mock := &mockACLBackend{Client: realBknd, aclMgr: realAclMgr, raw: raw}
+	mock := &mockACLBackend{Client: realBknd, aclMgr: realACLMgr, raw: raw}
 	m := New(modules.Deps{Cfg: cfg, Runner: r, Backend: mock})
 
 	findings, verifyErr := m.Verify(context.Background())
