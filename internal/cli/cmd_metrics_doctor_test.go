@@ -235,6 +235,62 @@ func TestMetDisabledListener_DefaultFallbackPort(t *testing.T) {
 	assert.Equal(t, modules.SeverityOK, f.Severity, "a provably-closed ':port' default fallback must return the ECONNREFUSED-gated SeverityOK")
 }
 
+// TestMetDisabledListener_ExplicitBindAddrPortProbed is the WR-03 regression:
+// when bind_addr already carries an explicit host:port, THAT port must be the
+// one probed — the configured cfg.Observability.Metrics.Port must be ignored
+// (explicit bind_addr wins). We bind a real listener on a specific loopback
+// port, set bind_addr to that host:port, and set Metrics.Port to a DIFFERENT
+// (closed) port. A correct probe dials the bind_addr port, finds the live
+// listener, and returns SeverityFatal. A regression that dialed Metrics.Port
+// instead would miss the stale listener (false-OK).
+func TestMetDisabledListener_ExplicitBindAddrPortProbed(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+
+	// Live listener on a specific loopback port — this is the stale listener.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close() //nolint:errcheck // errcheck: close error in test teardown is non-actionable
+	bindPort := ln.Addr().(*net.TCPAddr).Port
+	cfg.Observability.Metrics.BindAddr = ln.Addr().String() // explicit host:bindPort
+
+	// A DIFFERENT, provably-closed port in the config. If the probe wrongly
+	// honored Metrics.Port it would dial here, find nothing, and return OK.
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	otherPort := closed.Addr().(*net.TCPAddr).Port
+	require.NoError(t, closed.Close())
+	require.NotEqual(t, bindPort, otherPort, "test setup: config port must differ from bind_addr port")
+	cfg.Observability.Metrics.Port = otherPort
+
+	f := metDisabledListenerCheck(cfg, "")
+	assert.Equal(t, "met-disabled-listener", f.Check)
+	assert.Equal(t, modules.SeverityFatal, f.Severity, "explicit bind_addr port must be the one probed; configured Port must be ignored (WR-03)")
+}
+
+// TestMetDisabledListener_ZeroPortNormalized is the WR-03 degenerate-port
+// regression: a bind_addr like "127.0.0.1:0" parses cleanly but port 0 means
+// "any free port" and must NOT be dialed verbatim. The check must substitute
+// the configured/default port so the probe targets a deterministic address. We
+// bind a live listener on a known port, set that as Metrics.Port, and give a
+// "host:0" bind_addr; a correct normalization dials host:Port, finds the
+// listener, and returns SeverityFatal. The pre-fix code dialed port 0.
+func TestMetDisabledListener_ZeroPortNormalized(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close() //nolint:errcheck // errcheck: close error in test teardown is non-actionable
+	port := ln.Addr().(*net.TCPAddr).Port
+	cfg.Observability.Metrics.Port = port
+	cfg.Observability.Metrics.BindAddr = "127.0.0.1:0" // degenerate explicit zero port
+
+	f := metDisabledListenerCheck(cfg, "")
+	assert.Equal(t, "met-disabled-listener", f.Check)
+	assert.Equal(t, modules.SeverityFatal, f.Severity, "a 'host:0' bind_addr must normalize to the configured port, not dial port 0 (WR-03)")
+}
+
 func TestMetLabelAudit_AllAllowed(t *testing.T) {
 	cfg := config.Defaults()
 	reg := metrics.NewMemRegistry()
