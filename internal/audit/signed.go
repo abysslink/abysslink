@@ -161,6 +161,11 @@ func (a *SignedAudit) LogPath() string { return a.logPath }
 // (T-17-14): if the process crashes between the log append and the write, an
 // operator sees the recorded intent without the effect.
 //
+// Pre-overwrite backups are recorded as signed chain entries via BackupWithChain
+// (AUD-01) so RestoreGated can later locate and verify them. This replaces the
+// former unchained Backup call — every backup created by WriteFile is now
+// vouched for by an HMAC-signed chain entry.
+//
 // It uses context.Background() internally — justified by the AuditWriter
 // interface omitting ctx for drop-in *Audit compatibility (WriteFile is a
 // convenience wrapper over Append, not a hot path; see interface.go).
@@ -178,8 +183,11 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 	}
 
 	// Back up an existing file before overwriting it so the change is reversible.
+	// AUD-01: use BackupWithChain so the backup is recorded as a signed chain
+	// entry and RestoreGated can later find and verify it. If BackupWithChain
+	// returns an error (chain-append failed + .bak rolled back), abort the write.
 	if _, statErr := os.Stat(path); statErr == nil {
-		if _, bErr := Backup(path); bErr != nil {
+		if _, bErr := BackupWithChain(ctx, path, a); bErr != nil {
 			return fmt.Errorf("audit: backup before write %s: %w", path, bErr)
 		}
 	}
