@@ -18,8 +18,10 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +29,11 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"gopkg.in/yaml.v3"
 )
+
+// safeHostnamePat mirrors fleet.safeHostname (internal/fleet/fanout.go:38).
+// Defined here to avoid config→fleet→config import cycle (RESEARCH.md Pitfall 4).
+// Any change to this pattern MUST also be applied in internal/fleet/fanout.go:38.
+var safeHostnamePat = regexp.MustCompile(`^[a-z0-9][a-z0-9\-.]{0,252}[a-z0-9]$`)
 
 // Config is the top-level abysslink.yaml structure.
 type Config struct {
@@ -484,6 +491,9 @@ func Validate(cfg *Config) error {
 	if err := ValidateWebUI(cfg); err != nil {
 		return err
 	}
+	if err := validateWatchPanes(cfg); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -528,6 +538,11 @@ func validateIdentity(cfg *Config) error {
 	}
 	if cfg.Tailnet.Hostname == "" {
 		return fmt.Errorf("config: tailnet.hostname is required")
+	}
+	if !safeHostnamePat.MatchString(cfg.Tailnet.Hostname) {
+		return fmt.Errorf("config: tailnet.hostname %q is not a valid hostname — "+
+			"only [a-z0-9] and internal hyphens/dots allowed, no leading dash (A8)",
+			cfg.Tailnet.Hostname)
 	}
 	return nil
 }
@@ -629,6 +644,38 @@ func validateBackend(cfg *Config) error {
 	if cfg.Backend.Type == "netbird" {
 		if cfg.Server.NetBird.ServerURL == "" {
 			return fmt.Errorf("config: server.netbird.server_url is required when backend.type is %q", cfg.Backend.Type)
+		}
+		if !strings.HasPrefix(cfg.Server.NetBird.ServerURL, "https://") {
+			return fmt.Errorf("config: server.netbird.server_url %q must use https:// — "+
+				"plaintext http would leak the NetBird PAT on every REST call (A7)",
+				cfg.Server.NetBird.ServerURL)
+		}
+	}
+	for _, rawURL := range []string{cfg.Server.Headscale.ServerURL, cfg.Server.NetBird.ServerURL} {
+		if rawURL == "" {
+			continue
+		}
+		u, err := url.Parse(rawURL)
+		if err != nil || u.Hostname() == "" {
+			return fmt.Errorf("config: server_url %q is not a valid URL", rawURL)
+		}
+		if !safeHostnamePat.MatchString(u.Hostname()) {
+			return fmt.Errorf("config: server_url hostname %q is invalid — "+
+				"only DNS-safe chars allowed; leading dash rejects flag injection (A8)", u.Hostname())
+		}
+	}
+	return nil
+}
+
+// validateWatchPanes enforces that every tmux pane name in cfg.Modules.Watch.Panes passes
+// the DNS-safe charset gate (D-06/NET-03). Each pane name is passed verbatim to
+// `tmux capture-pane -t <pane>` by the daemon (daemon/server.go:333); a value beginning
+// with `-` would be parsed as a tmux flag (A8 — same class as tailscale hostname injection).
+func validateWatchPanes(cfg *Config) error {
+	for _, pane := range cfg.Modules.Watch.Panes {
+		if !safeHostnamePat.MatchString(pane) {
+			return fmt.Errorf("config: modules.watch.panes element %q is not a valid pane name — "+
+				"only [a-z0-9] and internal hyphens/dots allowed, no leading dash (A8/NET-03)", pane)
 		}
 	}
 	return nil
