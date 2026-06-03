@@ -131,6 +131,38 @@ func TestMetCardinality_Over500(t *testing.T) {
 	assert.Equal(t, modules.SeverityWarning, f.Severity)
 }
 
+// TestMetBindTailnetCheck_EmptyIP_NonWildcard verifies WR-03: when the backend
+// is unavailable (tailnetIP=="") and bind_addr is a non-wildcard address,
+// metBindTailnetCheck must emit SeverityWarning with Check="met-bind-unknown"
+// (a distinct check ID from "metrics-bind-tailnet") so the threat-model row
+// renders — (did-not-run), not a false ✓.
+func TestMetBindTailnetCheck_EmptyIP_NonWildcard(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = true
+	cfg.Observability.Metrics.BindAddr = "192.168.1.50:9090"
+
+	f := metBindTailnetCheck(cfg, "")
+
+	require.Equal(t, modules.SeverityWarning, f.Severity, "expected SeverityWarning when backend unavailable and bind_addr is non-wildcard")
+	require.Equal(t, "met-bind-unknown", f.Check, "expected distinct check ID met-bind-unknown (not metrics-bind-tailnet)")
+	assert.NotEqual(t, "metrics-bind-tailnet", f.Check, "must not use the confirmed-tailnet-scoped check ID for an unverified address")
+	assert.NotEqual(t, modules.SeverityOK, f.Severity, "must not return SeverityOK when tailnetIP is unknown")
+}
+
+// TestMetBindTailnetCheck_EmptyIP_Wildcard is the regression guard: when
+// tailnetIP=="" and bind_addr is wildcard (0.0.0.0), the check must still
+// return SeverityFatal (the wildcard-fatal path must not be regressed by the
+// new met-bind-unknown branch).
+func TestMetBindTailnetCheck_EmptyIP_Wildcard(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = true
+	cfg.Observability.Metrics.BindAddr = "0.0.0.0:9090"
+
+	f := metBindTailnetCheck(cfg, "")
+
+	require.Equal(t, modules.SeverityFatal, f.Severity, "wildcard bind_addr must still be SeverityFatal when tailnetIP is empty")
+}
+
 func TestMetLabelAudit_AllAllowed(t *testing.T) {
 	cfg := config.Defaults()
 	reg := metrics.NewMemRegistry()
