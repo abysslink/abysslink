@@ -36,6 +36,28 @@ func TestDetect_LockEnabled_NoFindings(t *testing.T) {
 	assert.Empty(t, findings, "lock is on, config requires it: no findings expected")
 }
 
+func TestLockEnabledOK(t *testing.T) {
+	// Clean path: lock is enabled and config requires it → expect SeverityOK
+	// finding with Check=="lock_enabled".
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: `{"Enabled":true}`}})
+	cfg := config.Defaults()
+	cfg.Tailnet.Lock.Enabled = true
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "lock_enabled" {
+			found = &findings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected a finding with Check==\"lock_enabled\" on clean path, got none")
+	}
+	assert.Equal(t, modules.SeverityOK, found.Severity, "clean path must emit SeverityOK for lock_enabled")
+}
+
 func TestDetect_LockDisabled_ConfigRequires_Warning(t *testing.T) {
 	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: `{"Enabled":false}`}})
 	cfg := config.Defaults()
