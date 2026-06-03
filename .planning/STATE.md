@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
 status: executing
-last_updated: "2026-06-03T16:03:30.697Z"
-last_activity: 2026-06-03 -- Phase 24 planning complete
+last_updated: "2026-06-03T16:36:38.690Z"
+last_activity: 2026-06-03
 progress:
   total_phases: 15
   completed_phases: 3
   total_plans: 17
-  completed_plans: 14
+  completed_plans: 16
   percent: 20
 ---
 
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Milestone complete
+**Current focus:** Phase 24 — v3-0-1-security-closeout-audit-chain-integrity-bounded-reads
 
 ## Current Position
 
-Phase: 23.2
-Plan: Not started
+Phase: 24 (v3-0-1-security-closeout-audit-chain-integrity-bounded-reads) — EXECUTING
+Plan: 3 of 5
 Status: Ready to execute
-Last activity: 2026-06-03 -- Phase 24 planning complete
+Last activity: 2026-06-03
 
 ## Performance Metrics
 
@@ -105,6 +105,8 @@ Last activity: 2026-06-03 -- Phase 24 planning complete
 | Phase 23.1 P03 | 6m | 2 tasks | 2 files |
 | Phase 23.1 P04 | 5m | 2 tasks | 5 files |
 | Phase 23.2 P02 | 5m | 2 tasks | 2 files |
+| Phase 24 P01 | 3m | 2 tasks | 3 files |
+| Phase 24 P04 | 439 | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -185,6 +187,8 @@ Last activity: 2026-06-03 -- Phase 24 planning complete
 - [Phase ?]: 23-03: checkID 'ntfy-version' for ntfy floor; versionFloorFindings exported detector wired by Plan 04 into collectDoctorFindings
 - [Phase ?]: diskEncryptionGate extracted as testable helper; UNKNOWN-state non-overridable via stable marker substring (Plan 04)
 - [Phase ?]: WR-03: met-bind-unknown is a distinct check ID from metrics-bind-tailnet; SeverityWarning not OK when tailnetIP unavailable; threat-model row stays at — not ✓
+- [Phase ?]: AUD-01: BackupWithChain + RestoreGated with fail-closed chain gate; acceptUnverified records non-OK entry
+- [Phase ?]: DOS-01 Part A (A11): limitedWriter(16MiB)+MaxBytesReader(256KiB)+readLimited(8MiB) close all three subprocess/daemon/REST attack surfaces with hard errors, no silent truncation
 
 ### Pending Todos
 
@@ -233,6 +237,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-03T14:49:53.798Z
+Last session: 2026-06-03T16:36:33.789Z
 Stopped at: Phase 24 context gathered
-Resume file: .planning/phases/24-v3-0-1-security-closeout-audit-chain-integrity-bounded-reads/24-CONTEXT.md
+Resume file: None
