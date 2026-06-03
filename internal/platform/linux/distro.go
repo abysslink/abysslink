@@ -50,47 +50,45 @@ func ParseOSRelease(r io.Reader) (map[string]string, error) {
 	return fields, scanner.Err()
 }
 
+// distroByID maps an os-release ID value to its Distro constant.
+var distroByID = map[string]platform.Distro{
+	"debian":    platform.DistroDebian,
+	"ubuntu":    platform.DistroUbuntu,
+	"fedora":    platform.DistroFedora,
+	"rhel":      platform.DistroRHEL,
+	"centos":    platform.DistroCentOS,
+	"rocky":     platform.DistroRHEL,
+	"almalinux": platform.DistroRHEL,
+	"arch":      platform.DistroArch,
+	"manjaro":   platform.DistroArch,
+	"nixos":     platform.DistroNixOS,
+}
+
+// distroByIDLike maps an os-release ID_LIKE token to its Distro constant.
+// Narrower than distroByID: derivative-specific IDs (rocky, manjaro, ...) never
+// appear in ID_LIKE, only their upstream family names.
+var distroByIDLike = map[string]platform.Distro{
+	"debian": platform.DistroDebian,
+	"ubuntu": platform.DistroUbuntu,
+	"fedora": platform.DistroFedora,
+	"rhel":   platform.DistroRHEL,
+	"centos": platform.DistroCentOS,
+	"arch":   platform.DistroArch,
+}
+
 // DetectDistro maps the ID and ID_LIKE fields from os-release to a Distro constant.
 // Falls back to DistroUnknown if unrecognised.
 func DetectDistro(fields map[string]string) platform.Distro {
 	id := strings.ToLower(strings.TrimSpace(fields["ID"]))
-	idLike := strings.ToLower(strings.TrimSpace(fields["ID_LIKE"]))
-
-	switch id {
-	case "debian":
-		return platform.DistroDebian
-	case "ubuntu":
-		return platform.DistroUbuntu
-	case "fedora":
-		return platform.DistroFedora
-	case "rhel":
-		return platform.DistroRHEL
-	case "centos":
-		return platform.DistroCentOS
-	case "rocky", "almalinux":
-		return platform.DistroRHEL
-	case "arch", "manjaro":
-		return platform.DistroArch
-	case "nixos":
-		return platform.DistroNixOS
+	if d, ok := distroByID[id]; ok {
+		return d
 	}
 
 	// Fall back to ID_LIKE inspection.
-	likes := strings.Fields(idLike)
-	for _, like := range likes {
-		switch like {
-		case "debian":
-			return platform.DistroDebian
-		case "ubuntu":
-			return platform.DistroUbuntu
-		case "fedora":
-			return platform.DistroFedora
-		case "rhel":
-			return platform.DistroRHEL
-		case "centos":
-			return platform.DistroCentOS
-		case "arch":
-			return platform.DistroArch
+	idLike := strings.ToLower(strings.TrimSpace(fields["ID_LIKE"]))
+	for _, like := range strings.Fields(idLike) {
+		if d, ok := distroByIDLike[like]; ok {
+			return d
 		}
 	}
 
