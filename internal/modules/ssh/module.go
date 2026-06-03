@@ -218,6 +218,9 @@ func (m *Module) Apply(ctx context.Context) error {
 	}
 
 	for _, f := range findings {
+		if f.Severity == modules.SeverityOK {
+			continue // OK findings represent passing checks; no action needed
+		}
 		switch f.Check {
 		case "remote_login":
 			// Disable macOS Remote Login — Tailscale SSH handles auth.
