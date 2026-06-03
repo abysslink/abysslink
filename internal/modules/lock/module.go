@@ -82,6 +82,15 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 			Severity: modules.SeverityWarning,
 			Message:  "config requires Tailnet Lock but it is not enabled on this tailnet",
 		})
+	} else if status.Enabled {
+		// Emit explicit OK so "check ran and passed" is distinguishable from
+		// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "lock_enabled",
+			Severity: modules.SeverityOK,
+			Message:  "lock_enabled: Tailnet Lock is enabled on this tailnet",
+		})
 	}
 
 	return findings, nil
@@ -96,6 +105,9 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 
 	var actions []modules.Action
 	for _, f := range findings {
+		if f.Severity == modules.SeverityOK {
+			continue // OK findings represent passing checks; no action needed
+		}
 		if f.Check == "lock_enabled" {
 			actions = append(actions, modules.Action{
 				Module: m.Name(),
@@ -124,6 +136,9 @@ func (m *Module) Apply(ctx context.Context) error {
 		return err
 	}
 	for _, f := range findings {
+		if f.Severity == modules.SeverityOK {
+			continue // OK findings represent passing checks; no action needed
+		}
 		if f.Check == "lock_enabled" {
 			return fmt.Errorf(
 				"lock: Tailnet Lock is required but not yet enabled.\n\n" +
@@ -140,9 +155,13 @@ func (m *Module) Apply(ctx context.Context) error {
 	return nil
 }
 
-// Verify re-runs Detect.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// Verify is a no-op for the lock module — all checks run in Detect.
+// Pitfall 4: do NOT call Detect here — runner.Doctor calls both Detect and Verify;
+// re-running Detect would produce duplicate lock_enabled findings per doctor pass.
+// lock is report-only (Apply handles actual remediation); Verify adds no new
+// information beyond Detect; returning nil avoids double-emission.
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair attempts to fix findings.

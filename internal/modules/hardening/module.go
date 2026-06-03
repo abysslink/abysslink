@@ -56,9 +56,12 @@ func (m *Module) Apply(_ context.Context) error {
 	return nil
 }
 
-// Verify runs the same checks as Detect.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return detectPlatform(ctx, m)
+// Verify is a no-op for the hardening module — all checks run in Detect.
+// Detect and Verify both call detectPlatform, which would produce duplicate
+// findings per doctor pass (Pitfall 4). Since hardening is report-only (no
+// Apply), Verify adds no new information; returning nil avoids double-emission.
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair is a no-op — hardening issues require manual operator action.

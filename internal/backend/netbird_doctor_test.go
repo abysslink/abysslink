@@ -118,7 +118,7 @@ func TestNetBirdDoctorChecks_Returns9Findings(t *testing.T) {
 	runner := shell.NewMockRunner(mockCalls...)
 
 	findings := backend.NetBirdDoctorChecks(context.Background(), cfg, runner, nil)
-	assert.Len(t, findings, 9, "NetBirdDoctorChecks must return exactly 9 findings")
+	assert.Len(t, findings, 10, "NetBirdDoctorChecks must return exactly 10 findings (nb-lock added DOC-03)")
 }
 
 // ── nb-zitadel tests ──────────────────────────────────────────────────────────
@@ -530,6 +530,47 @@ func TestNbRuntime_MacOSFail(t *testing.T) {
 	}
 	require.NotNil(t, found)
 	assert.Equal(t, backend.DoctorFatal, found.Severity, "all runtimes absent = FAIL")
+}
+
+// ── nb-lock tests ─────────────────────────────────────────────────────────────
+
+// TestNbDoctorChecks_NbLockAlwaysPresent asserts that NetBirdDoctorChecks always
+// emits an unconditional nb-lock DoctorWarning (mirrors hs-lock for NetBird).
+// The nb-lock finding must be present regardless of NetBird state and must
+// contain the required advisory substring (D-07).
+func TestNbDoctorChecks_NbLockAlwaysPresent(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeNbConfig(t, cfgPath, nil)
+	cfg := nbDoctorCfg("https://nb.example.com", cfgPath)
+
+	// Use a minimal MockRunner that supplies no version/proc output.
+	// On darwin BinaryPath is empty → nb-version/nb-proc-user use no runner call;
+	// on linux provide stubs so those checks don't consume the queue.
+	var runner shell.Runner
+	if runtime.GOOS == "darwin" {
+		runner = shell.NewMockRunner()
+	} else {
+		cfg.Server.NetBird.BinaryPath = "/usr/local/bin/netbird-server"
+		runner = shell.NewMockRunner(
+			shell.Call{Result: shell.Result{Stdout: "netbird-server version v0.71.4\n", ExitCode: 0}},
+			shell.Call{Result: shell.Result{Stdout: "User=netbird-server\n", ExitCode: 0}},
+		)
+	}
+
+	findings := backend.NetBirdDoctorChecks(context.Background(), cfg, runner, nil)
+
+	var found *backend.DoctorFinding
+	for i := range findings {
+		if findings[i].Check == "nb-lock" {
+			found = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "nb-lock finding must be present unconditionally")
+	assert.Equal(t, backend.DoctorWarning, found.Severity, "nb-lock must be DoctorWarning")
+	assert.Contains(t, found.Message, "No Tailnet Lock on NetBird — permanent advisory",
+		"nb-lock message must contain the D-07 required substring")
 }
 
 // TestNbRuntime_LinuxSkip verifies that on Linux, nb-runtime returns DoctorOK
