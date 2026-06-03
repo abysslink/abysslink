@@ -17,12 +17,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -356,7 +358,19 @@ func metDisabledListenerCheck(cfg *config.Config, tailnetIP string) modules.Find
 			Message:  fmt.Sprintf("port %s is listening but metrics.enabled=false — stale listener (OBS-05)", addr),
 		}
 	}
-	return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "no stale metrics listener detected"}
+	// Only ECONNREFUSED proves the port is genuinely closed. Any other error
+	// (timeout, EHOSTUNREACH, ENETUNREACH, DNS failure) is inconclusive — the
+	// probe did NOT verify the port is closed, so returning SeverityOK would be
+	// a false-OK on an unproven security control (OBS-05 / CR-01 / DOC-10).
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "no stale metrics listener detected"}
+	}
+	return modules.Finding{
+		Module:   "metrics",
+		Check:    "met-listener-unknown",
+		Severity: modules.SeverityWarning,
+		Message:  fmt.Sprintf("could not probe metrics port %s (%v) — listener state unknown; re-run abysslink doctor", addr, err),
+	}
 }
 
 // countMetricSeries returns the number of unique (metric name, sorted label-set)
@@ -693,12 +707,13 @@ func findingFix(check string) string {
 		"sshd_running": "sudo systemctl disable --now sshd  (Linux)  |  System Settings → General → Sharing → Remote Login → turn off  (macOS)",
 		"checkperiod":  "Lower ssh_check_period in abysslink.yaml (max 12h)",
 		// Tailscale.
-		"needs_login":       "tailscale login",
-		"ssh_sandboxed":     "brew install tailscale  (replaces App Store version)",
-		"installed":         "abysslink up --apply",
-		"funnel-probe-fail": "ensure tailscaled is running: tailscale status — then re-run abysslink doctor",
-		"serve-probe-fail":  "ensure tailscaled is running: tailscale status — then re-run abysslink doctor",
-		"met-bind-unknown":  "start tailscaled so backend IP can be resolved, then re-run abysslink doctor",
+		"needs_login":          "tailscale login",
+		"ssh_sandboxed":        "brew install tailscale  (replaces App Store version)",
+		"installed":            "abysslink up --apply",
+		"funnel-probe-fail":    "ensure tailscaled is running: tailscale status — then re-run abysslink doctor",
+		"serve-probe-fail":     "ensure tailscaled is running: tailscale status — then re-run abysslink doctor",
+		"met-bind-unknown":     "start tailscaled so backend IP can be resolved, then re-run abysslink doctor",
+		"met-listener-unknown": "verify network reachability to the metrics address then re-run abysslink doctor",
 		// Tailnet Lock.
 		"lock_enabled": "tailscale lock init   (then abysslink up --apply)",
 		"lock_status":  "ensure tailscale is running: brew services restart tailscale",
