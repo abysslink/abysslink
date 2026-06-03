@@ -340,8 +340,18 @@ func metDisabledListenerCheck(cfg *config.Config, tailnetIP string) modules.Find
 		// Honor an explicit host:port; a bare host gets the configured/default
 		// port. Reuse config.BindAddrHost for host extraction (IN-04) instead of
 		// a hand-rolled bracket trim, matching metBindTailnetCheck's host extraction.
-		if _, _, err := net.SplitHostPort(addr); err != nil {
+		//
+		// WR-03: reject/normalize a zero or absent port rather than dialing it.
+		// A degenerate bind_addr like "host:0" parses cleanly via SplitHostPort
+		// but port 0 means "any free port" — dialing it would probe a port no
+		// listener could deterministically bind, masking a stale listener on the
+		// real runtime port (false-OK, the OBS-05 failure this check guards). When
+		// the parsed port is missing or zero, substitute the configured/default
+		// port so the probe targets the address the runtime listener would bind.
+		if host, portStr, err := net.SplitHostPort(addr); err != nil {
 			addr = net.JoinHostPort(config.BindAddrHost(addr), fmt.Sprintf("%d", port))
+		} else if portStr == "" || portStr == "0" {
+			addr = net.JoinHostPort(host, fmt.Sprintf("%d", port))
 		}
 	case tailnetIP != "":
 		addr = net.JoinHostPort(tailnetIP, fmt.Sprintf("%d", port))
