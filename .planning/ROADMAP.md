@@ -285,7 +285,7 @@ Plans:
 **Goal:** Close the final 4 v3.0.1 security requirements so the milestone reaches 20/20: bind backups to the tamper-evident HMAC chain and resist tail-truncation (AUD-01, AUD-02), bound every attacker-influenceable read (DOS-01), and add `govulncheck ./...` as a blocking CI gate (CI-01).
 **Requirements**: AUD-01 (A9 HMAC-bound backups), AUD-02 (A10 anchor-refresh truncation resistance), DOS-01 (A11 bounded reads), CI-01 (govulncheck blocking CI gate)
 **Depends on:** Phase 23.2
-**Plans:** 5/5 plans complete
+**Plans:** 7 plans (5 original complete + 2 gap-closure for AUD-01/AUD-02)
 
 **Wave 1** *(parallel)*
 
@@ -298,6 +298,11 @@ Plans:
 
 - [x] 24-03-PLAN.md — AUD-02: per-Append anchor (fatal) + ReadCounter/WriteCounter + Verify CounterStatus UNKNOWN tri-state *(blocked on 24-01)*
 - [x] 24-05-PLAN.md — DOS-01 Part B: tailscale/limit.go + readLimited on 7 admin.go + 8 Headscale seam sites *(blocked on 24-04)*
+
+**Wave 3 — gap closure** *(VERIFICATION.md found AUD-01 + AUD-02 BLOCKERs; AUD-01/AUD-02 chain functions were dead code / counter-failure faked a permanent truncation alarm)*
+
+- [ ] 24-06-PLAN.md — AUD-02 gap: Append deletes the keychain counter key on IncrementCounter failure so Verify degrades to CounterStatus="unknown" instead of a permanent false "mismatch"/TRUNCATION_DETECTED
+- [ ] 24-07-PLAN.md — AUD-01 gap: wire BackupWithChain (WriteFile + netbird + headscale) and RestoreGated (live `backup restore` + --accept-unverified-backup, fail-closed) into production so the A9 chain gate is live *(blocked on 24-06: shared signed.go)*
 
 ---
 
