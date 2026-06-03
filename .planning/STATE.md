@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
-status: ready_to_plan
-last_updated: 2026-06-03T10:58:23.484Z
+status: planning
+last_updated: "2026-06-03T11:07:27.012Z"
 last_activity: 2026-06-03
 progress:
   total_phases: 13
@@ -11,7 +11,6 @@ progress:
   total_plans: 8
   completed_plans: 8
   percent: 15
-stopped_at: Phase 23 complete (4/4) — ready to discuss Phase 23.1
 ---
 
 # Project State
@@ -229,6 +228,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-03T10:21:45.546Z
-Stopped at: Completed Phase 23 Plan 01 — OK-emission backfill for 5 core-module checks
-Resume file: None
+Last session: 2026-06-03T11:07:27.006Z
+Stopped at: Phase 23.1 context gathered
+Resume file: .planning/phases/23.1-doctor-probe-failure-honesty-no-false-ok-on-unknown-or-faile/23.1-CONTEXT.md
