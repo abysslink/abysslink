@@ -111,3 +111,75 @@ func TestListenAddressOK(t *testing.T) {
 	}
 	assert.Equal(t, modules.SeverityOK, found.Severity, "tailnet-bound listen_address must emit SeverityOK")
 }
+
+func TestHasWildcardListenIPv6(t *testing.T) {
+	// IPv6 wildcard forms must return true.
+	assert.True(t, hasWildcardListen(`listen-http: "[::]:2586"`), "[::]:PORT binds to all IPv6 interfaces")
+	assert.True(t, hasWildcardListen(`listen-http: "[::]:80"`), "[::]:80 binds to all IPv6 interfaces")
+	assert.True(t, hasWildcardListen(`listen-http: "::"`), "bare :: binds to all IPv6 interfaces")
+
+	// Existing IPv4 cases must still return true (regression).
+	assert.True(t, hasWildcardListen(`listen-http: ":2586"`), "bare :port binds to all interfaces")
+
+	// Valid tailnet IP must return false (regression).
+	assert.False(t, hasWildcardListen(`listen-http: "100.64.0.1:2586"`), "tailnet IP must not be flagged as wildcard")
+}
+
+func TestListenAddressIPv6Wildcard(t *testing.T) {
+	// Config with IPv6 wildcard bind ([::]:2586) must produce SeverityFatal,
+	// not SeverityOK (WR-04 fix validation).
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfgDir := filepath.Join(dir, ".config", "ntfy")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	cfgContent := `listen-http: "[::]:2586"` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "server.yml"), []byte(cfgContent), 0o600))
+
+	// Mock runner: ntfyBinaryPresent returns true; docker inspect returns non-zero
+	// (not running in Docker mode), so Docker-mode guard does not apply.
+	r := shell.NewMockRunner(
+		// ntfyBinaryPresent: ntfy --help → includes "serve"
+		shell.Call{Result: shell.Result{Stdout: "serve  Start ntfy server\n", ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+
+	var listenFinding *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "listen_address" {
+			listenFinding = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, listenFinding, "expected a finding with Check==\"listen_address\" for IPv6 wildcard config")
+	assert.Equal(t, modules.SeverityFatal, listenFinding.Severity,
+		"IPv6 wildcard bind [::]:2586 must emit SeverityFatal, not SeverityOK")
+
+	// Also assert no SeverityOK on listen_address: a false-OK would mask the misconfiguration.
+	for _, f := range findings {
+		if f.Check == "listen_address" {
+			assert.NotEqual(t, modules.SeverityOK, f.Severity,
+				"no listen_address finding should be SeverityOK when config has IPv6 wildcard")
+		}
+	}
+}
+
+func TestVerifyReturnsNil(t *testing.T) {
+	// ntfy Verify must return nil (no findings, no error) — Pitfall-4 fix.
+	// runner.Doctor calls both Detect and Verify; Verify delegating to Detect
+	// would double every listen_address finding. Verify must return nil, nil.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// Use a minimal runner with no calls expected — Verify should return
+	// immediately without touching the runner.
+	r := shell.NewMockRunner()
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	findings, err := m.Verify(context.Background())
+	assert.NoError(t, err, "Verify must return nil error")
+	assert.Empty(t, findings, "Verify must return nil/empty findings (Pitfall-4: no double-emit)")
+}
