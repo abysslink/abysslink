@@ -85,9 +85,13 @@ func TestUpDryRunParity(t *testing.T) {
 	// CLICOLOR=0 suppresses any residual color paths not gated by NO_COLOR.
 	t.Setenv("CLICOLOR", "0")
 
-	// Skip on unsupported OS to keep the golden platform-scoped (darwin in CI).
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		t.Skip("parity golden only captured on darwin/linux")
+	// The golden is captured on darwin and the `up --dry-run` output is
+	// platform-specific (e.g. ntfy installs via Docker Desktop on macOS but a
+	// native package on Linux), so scope the assertion to darwin. The macOS CI
+	// job exercises this guard; other platforms skip rather than diff a golden
+	// that does not describe their install strategy.
+	if runtime.GOOS != "darwin" {
+		t.Skip("parity golden is darwin-scoped; up --dry-run output differs per-OS")
 	}
 
 	// Inject noopRunner; restore in Cleanup so other tests are unaffected.
