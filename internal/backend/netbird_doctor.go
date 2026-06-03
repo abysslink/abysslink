@@ -89,6 +89,16 @@ func NetBirdDoctorChecks(
 			"Setup-key-enrolled peers have no periodic re-auth mechanism in NetBird.",
 	})
 
+	// ── Finding 0b: nb-lock (DOC-03, always present, unconditional WARN) ─────────
+	// Mirrors hs-lock in headscale_doctor.go: NetBird has no Tailnet Lock (TKA).
+	// EXACT REQUIRED SUBSTRING (D-07) — must contain this for threatRow key.
+	findings = append(findings, DoctorFinding{
+		Module:   "netbird",
+		Check:    "nb-lock",
+		Severity: DoctorWarning,
+		Message:  "WARN: No Tailnet Lock on NetBird — permanent advisory (nb-lock). NetBird does not support Tailnet Lock (TKA); server-trust model only.",
+	})
+
 	// ── Findings 1–7: 7 canonical nb-* checks from ROADMAP SC-5 ─────────────────
 
 	// nb-tls: TLS certificate validity.
