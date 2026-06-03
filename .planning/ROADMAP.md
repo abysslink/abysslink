@@ -292,12 +292,12 @@ Plans:
 Plans:
 - [ ] 24-01-PLAN.md — AUD-01: BackupWithChain + RestoreGated (HMAC-bound backup + chain-walk restore gate)
 - [ ] 24-02-PLAN.md — CI-01: harden-runner on lint.yml + test.yml + REQUIREMENTS.md:93 Phase 24 fix
+- [ ] 24-04-PLAN.md — DOS-01 Part A: limitedWriter (exec.go) + MaxBytesReader (/notify) + readLimited on 15 NetBird seam sites
 
 **Wave 2** *(depends on Wave 1)*
 
-- [ ] 24-03-PLAN.md — AUD-02: per-Append anchor (fatal) + ReadCounter/WriteCounter + Verify CounterStatus UNKNOWN tri-state
-- [ ] 24-04-PLAN.md — DOS-01 Part A: limitedWriter (exec.go) + MaxBytesReader (/notify) + readLimited on 15 NetBird seam sites
-- [ ] 24-05-PLAN.md — DOS-01 Part B: tailscale/limit.go + readLimited on 7 admin.go + 8 Headscale seam sites
+- [ ] 24-03-PLAN.md — AUD-02: per-Append anchor (fatal) + ReadCounter/WriteCounter + Verify CounterStatus UNKNOWN tri-state *(blocked on 24-01)*
+- [ ] 24-05-PLAN.md — DOS-01 Part B: tailscale/limit.go + readLimited on 7 admin.go + 8 Headscale seam sites *(blocked on 24-04)*
 
 ---
 
