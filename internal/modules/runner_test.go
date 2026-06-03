@@ -17,10 +17,14 @@ package modules_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	lockmod "github.com/abysslink/abysslink/internal/modules/lock"
+	sshmod "github.com/abysslink/abysslink/internal/modules/ssh"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -191,4 +195,54 @@ func TestRunner_Doctor(t *testing.T) {
 	assert.Equal(t, 1, m2.verifyCalls)
 	// Each module's finding appears twice (once from Detect, once from Verify).
 	assert.Len(t, findings, 4)
+}
+
+// TestRunnerDoctor_NoDoubleEmit is the D-02 regression guard asserting that no
+// (Module, Check) pair appears more than once across a full runner.Doctor pass.
+//
+// It uses real lock and ssh module instances (not fakeModule) with MockRunners
+// primed to their clean-path responses. Since both Verify methods now return nil
+// (Pitfall-4 fix applied in this phase), each check must appear exactly once.
+func TestRunnerDoctor_NoDoubleEmit(t *testing.T) {
+	t.Helper()
+
+	// ---- lock module: clean path → tailscale lock status returns {"Enabled":true} ----
+	lockCfg := config.Defaults()
+	lockCfg.Tailnet.Lock.Enabled = true
+	lockRunner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: `{"Enabled":true}`, ExitCode: 0}},
+	)
+	lockMod := lockmod.New(modules.Deps{Cfg: lockCfg, Runner: lockRunner})
+
+	// ---- ssh module: clean path — platform-specific ----
+	// On darwin: systemsetup -getremotelogin → "Remote Login: Off" (sshd correctly off).
+	// On linux: systemctl is-active sshd → "inactive".
+	// On other platforms the ssh module skips Detect, so a single call placeholder
+	// is safe (it will never be consumed).
+	sshCfg := config.Defaults()
+	sshCfg.Modules.SSH.Enabled = true
+	sshCfg.Modules.SSH.Mode = "tailscale"
+	sshRunner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "Remote Login: Off\n", ExitCode: 0}}, // darwin
+		shell.Call{Result: shell.Result{Stdout: "inactive\n", ExitCode: 0}},          // linux (sshd)
+		shell.Call{Result: shell.Result{Stdout: "inactive\n", ExitCode: 0}},          // linux (ssh fallback)
+	)
+	sshMod := sshmod.New(modules.Deps{Cfg: sshCfg, Runner: sshRunner})
+
+	runner, err := modules.NewRunner([]modules.Module{lockMod, sshMod}, lockCfg)
+	require.NoError(t, err)
+
+	allFindings, err := runner.Doctor(context.Background())
+	require.NoError(t, err)
+
+	// Build a map["{Module}/{Check}"] → count. Assert every count is exactly 1.
+	seen := make(map[string]int, len(allFindings))
+	for _, f := range allFindings {
+		key := fmt.Sprintf("%s/%s", f.Module, f.Check)
+		seen[key]++
+	}
+	for key, count := range seen {
+		assert.Equal(t, 1, count,
+			"D-02 violation: (Module/Check) pair %q appears %d times in a single Doctor pass — double-emission regression", key, count)
+	}
 }
