@@ -51,7 +51,7 @@ func TestDistroDetection(t *testing.T) {
 			t.Parallel()
 			f, err := os.Open("testdata/os-release/" + tc.fixture)
 			require.NoError(t, err)
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 
 			fields, err := linuxpkg.ParseOSRelease(f)
 			require.NoError(t, err)
