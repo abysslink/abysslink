@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -105,6 +106,53 @@ func TestVerifyAnchor_MissingIsNotViolation(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 }
+
+// ─── AUD-02: ReadCounter / WriteCounter / incrementCounter ───────────────────
+
+// TestReadCounter_Absent: a fresh MockKeychain has no counter; ReadCounter must
+// return (0, false, nil) — absent is first use, not an error.
+func TestReadCounter_Absent(t *testing.T) {
+	kc := secrets.NewMockStore() // no counter key set
+	n, found, err := audit.ReadCounter(context.Background(), kc)
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Equal(t, int64(0), n)
+}
+
+// TestReadCounter_Present: after WriteCounter(42), ReadCounter must return
+// (42, true, nil).
+func TestReadCounter_Present(t *testing.T) {
+	kc := secrets.NewMockStore()
+	require.NoError(t, audit.WriteCounter(context.Background(), kc, 42))
+	n, found, err := audit.ReadCounter(context.Background(), kc)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, int64(42), n)
+}
+
+// TestIncrementCounter_FirstUse: incrementCounter on a fresh store must write
+// counter=1 (0 base + 1 increment).
+func TestIncrementCounter_FirstUse(t *testing.T) {
+	kc := secrets.NewMockStore()
+	require.NoError(t, audit.IncrementCounter(context.Background(), kc))
+	n, found, err := audit.ReadCounter(context.Background(), kc)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, int64(1), n)
+}
+
+// TestIncrementCounter_Existing: increment counter from 7 → must produce 8.
+func TestIncrementCounter_Existing(t *testing.T) {
+	kc := secrets.NewMockStore()
+	require.NoError(t, audit.WriteCounter(context.Background(), kc, 7))
+	require.NoError(t, audit.IncrementCounter(context.Background(), kc))
+	n, found, err := audit.ReadCounter(context.Background(), kc)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, int64(8), n)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 func TestWriteAnchor_AtomicUnderConcurrentRead(t *testing.T) {
 	dir := t.TempDir()
