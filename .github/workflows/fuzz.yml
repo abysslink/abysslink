@@ -10,8 +10,8 @@ on:
     - cron: "0 6 * * 1"
 
 env:
-  # gitleaks-action v3 runs on Node 24; GitHub deprecated Node 20 (2026-06-02).
-  # Belt-and-suspenders so every JS action in this workflow uses Node 24.
+  # GitHub deprecated Node 20 (2026-06-02); force every JS action in this
+  # workflow (checkout, setup-go, harden-runner) onto Node 24.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -51,7 +51,12 @@ jobs:
         run: go test -fuzz=FuzzHMACVerify -fuzztime=60s -run='^$' ./internal/audit/...
 
       - name: Scan fuzz corpus for secrets
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        # OSS gitleaks CLI (Apache-2.0) instead of gitleaks-action, which
+        # paywalls organization repos. Built from source via the module proxy
+        # (already in the egress allowlist) — no license, no extra hosts.
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          "$(go env GOPATH)/bin/gitleaks" dir . --no-banner --redact --exit-code 1
 
   fuzz-config:
     name: fuzz FuzzConfigLoad
@@ -89,7 +94,12 @@ jobs:
         run: go test -fuzz=FuzzConfigLoad -fuzztime=60s -run='^$' ./internal/config/...
 
       - name: Scan fuzz corpus for secrets
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        # OSS gitleaks CLI (Apache-2.0) instead of gitleaks-action, which
+        # paywalls organization repos. Built from source via the module proxy
+        # (already in the egress allowlist) — no license, no extra hosts.
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          "$(go env GOPATH)/bin/gitleaks" dir . --no-banner --redact --exit-code 1
 
   fuzz-hujson:
     name: fuzz FuzzHuJSONParse
@@ -127,4 +137,9 @@ jobs:
         run: go test -fuzz=FuzzHuJSONParse -fuzztime=60s -run='^$' ./internal/tailscale/...
 
       - name: Scan fuzz corpus for secrets
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        # OSS gitleaks CLI (Apache-2.0) instead of gitleaks-action, which
+        # paywalls organization repos. Built from source via the module proxy
+        # (already in the egress allowlist) — no license, no extra hosts.
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          "$(go env GOPATH)/bin/gitleaks" dir . --no-banner --redact --exit-code 1
