@@ -311,3 +311,22 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
 | 22. Network & Dependency Lockdown | 4/4 | Complete    | 2026-06-03 |
 | 23. Doctor Honesty & Coverage | 4/4 | Complete   | 2026-06-03 |
+
+### Phase 23.1: Doctor probe-failure honesty — no false-OK on unknown or failed probes and no double-emit (INSERTED)
+
+**Goal:** Close the four deferred honesty WARNINGs from the Phase 23 code review (23-REVIEW.md). A doctor/threat-model check must never render a green ✓ for a control it could not actually confirm: probe failures and unresolvable backend state must surface as a distinct unknown/warning, not OK; the ntfy bind check must catch IPv6 wildcards; and report-only OK findings must be emitted exactly once (no Detect+Verify duplication inflating the "N ok" count).
+**Requirements**: DOC-05 (WR-02 funnel probe-failure false-OK), DOC-06 (WR-03 bind false-OK when tailnet IP unresolvable), DOC-07 (WR-04 ntfy IPv6 `[::]` wildcard miss), DOC-08 (WR-08 Detect+Verify double-emit dedup)
+**Depends on:** Phase 23
+**Source:** Phase 23 code review (`.planning/phases/23-doctor-honesty-coverage/23-REVIEW.md`) — WR-02, WR-03, WR-04, WR-08
+**Success Criteria** (what must be TRUE):
+
+  1. `funnelActive` (tailscale/module.go) distinguishes probe failure from confirmed-inactive: on exec error / non-zero exit it emits `SeverityWarning` ("could not determine Funnel state"), NOT a `SeverityOK` funnel finding; threat-model "No public exposure" row then renders `—`/`✗`, never a false ✓ (DOC-05 / WR-02)
+  2. `metBindTailnetCheck` (cmd_doctor.go) emits `SeverityWarning` when `tailnetIP == ""` and a non-wildcard `bind_addr` is configured (cannot verify tailnet-scope — backend unavailable), instead of falling through to OK (DOC-06 / WR-03)
+  3. ntfy `listen_address` check (ntfy/module.go) flags IPv6 wildcard binds (`[::]:PORT`, bare `::`) as non-compliant, mirroring the existing `0.0.0.0` / bare-`:PORT` detection; honors the immutable "ntfy binds tailnet IP only, never wildcard" default for externally-edited configs (DOC-07 / WR-04)
+  4. Report-only `SeverityOK` findings appear exactly ONCE per `abysslink doctor` pass for lock/ssh/ntfy/acl/tailscale — either emitted in only one of Detect/Verify (hardening-module precedent) or deduped on `(Module, Check)` in `runner.Doctor`; the "N ok" count is no longer inflated and no duplicate ✓ rows render (DOC-08 / WR-08)
+  5. `make lint test` green; new/updated tests cover each probe-failure → non-OK path and the single-emission/dedup guarantee
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 23.1 to break down)

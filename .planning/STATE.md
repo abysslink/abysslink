@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
 status: verifying
-last_updated: "2026-06-03T10:21:52.617Z"
+last_updated: "2026-06-03T10:57:18.231Z"
 last_activity: 2026-06-03
 progress:
-  total_phases: 12
+  total_phases: 13
   completed_phases: 2
   total_plans: 8
   completed_plans: 8
-  percent: 17
+  percent: 15
 ---
 
 # Project State
@@ -109,6 +109,7 @@ Last activity: 2026-06-03
 - Phase 22 (Network & Dependency Lockdown) detail block added to ROADMAP.md during planning — NET-01/02/03, DEP-01/02/03 (v3.0.1).
 - Phase 23 (Doctor Honesty & Coverage) added to ROADMAP.md — DOC-01/02/03/04 (v3.0.1). Plans TBD.
 - v3.0.1 milestone continues with phases 24 (AUD-01/02, DOS-01) and 25 (CI-01) per REQUIREMENTS.md traceability — not yet added to roadmap.
+- Phase 23.1 inserted after Phase 23: Doctor probe-failure honesty — close WR-02/03/04/08 false-OK + double-emit gaps from Phase 23 code review (URGENT)
 
 ### Decisions
 
