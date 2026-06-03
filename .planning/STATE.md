@@ -2,15 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
-status: executing
-last_updated: "2026-06-03T09:04:46.316Z"
-last_activity: 2026-06-03 -- Phase 23 planning complete
+status: milestone_complete
+last_updated: 2026-06-03T13:17:23.989Z
+last_activity: 2026-06-03
 progress:
-  total_phases: 12
-  completed_phases: 1
-  total_plans: 8
-  completed_plans: 4
-  percent: 8
+  total_phases: 14
+  completed_phases: 4
+  total_plans: 14
+  completed_plans: 14
+  percent: 29
+stopped_at: Milestone complete (Phase 23.2 was final phase)
 ---
 
 # Project State
@@ -20,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Phase 23 — doctor honesty coverage
+**Current focus:** Milestone complete
 
 ## Current Position
 
-Phase: 23
+Phase: 23.2
 Plan: Not started
-Status: Ready to execute
-Last activity: 2026-06-03 -- Phase 23 planning complete
+Status: Milestone complete
+Last activity: 2026-06-03
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 74 (v1.0.0)
+- Total plans completed: 84 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 
@@ -97,6 +98,14 @@ Last activity: 2026-06-03 -- Phase 23 planning complete
 | Phase 22 P01 | 5m | 2 tasks | 7 files |
 | Phase 22 P03 | 5m | 2 tasks | 5 files |
 | Phase 22 P04 | 8m | 2 tasks | 9 files |
+| Phase 23 P01 | 26m | 3 tasks | 10 files |
+| Phase 23-doctor-honesty-coverage P02 | 5m | 3 tasks | 5 files |
+| Phase 23 P03 | 5m | 3 tasks | 5 files |
+| Phase 23-doctor-honesty-coverage P04 | 8 | 4 tasks | 7 files |
+| Phase 23.1 P02 | 6m | 2 tasks | 2 files |
+| Phase 23.1 P03 | 6m | 2 tasks | 2 files |
+| Phase 23.1 P04 | 5m | 2 tasks | 5 files |
+| Phase 23.2 P02 | 5m | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -105,6 +114,7 @@ Last activity: 2026-06-03 -- Phase 23 planning complete
 - Phase 22 (Network & Dependency Lockdown) detail block added to ROADMAP.md during planning — NET-01/02/03, DEP-01/02/03 (v3.0.1).
 - Phase 23 (Doctor Honesty & Coverage) added to ROADMAP.md — DOC-01/02/03/04 (v3.0.1). Plans TBD.
 - v3.0.1 milestone continues with phases 24 (AUD-01/02, DOS-01) and 25 (CI-01) per REQUIREMENTS.md traceability — not yet added to roadmap.
+- Phase 23.1 inserted after Phase 23: Doctor probe-failure honesty — close WR-02/03/04/08 false-OK + double-emit gaps from Phase 23 code review (URGENT)
 
 ### Decisions
 
@@ -168,6 +178,14 @@ Last activity: 2026-06-03 -- Phase 23 planning complete
 - [Phase ?]: 22-01 dependency lockdown
 - [Phase ?]: ntfyOKFinding/ntfyFatalFinding set Module:'ntfy' not 'webui' — Phase-23 doctor-honesty grouping boundary
 - [Phase ?]: DEP-03 path (b): drop safeweb; CrossOriginProtection + securityHeadersMiddleware replaces gorilla/csrf; both gorilla packages removed from go.mod after go mod tidy
+- [Phase ?]: Plan loops in ssh/lock guard on SeverityOK to prevent spurious actions from new OK findings (Plan 23-01 backfill)
+- [Phase ?]: 23-01: testPlatform inline in ntfy test — stub package has darwin/linux build tag exclusion
+- [Phase ?]: 23-01: mockACLBackend inline in acl test — httptest-free ACLManager mock using interface embedding
+- [Phase ?]: 23-02: UNKNOWN-state FATAL uses Check==luks/filevault (not a new ID) + stable marker 'disk-encryption state is UNKNOWN' for Plan 04 gate to refuse --force-unsafe
+- [Phase ?]: 23-02: hardening Verify is no-op (returns nil) to prevent Detect+Verify double-emission; hardening is report-only so Verify adds no information
+- [Phase ?]: 23-03: checkID 'ntfy-version' for ntfy floor; versionFloorFindings exported detector wired by Plan 04 into collectDoctorFindings
+- [Phase ?]: diskEncryptionGate extracted as testable helper; UNKNOWN-state non-overridable via stable marker substring (Plan 04)
+- [Phase ?]: WR-03: met-bind-unknown is a distinct check ID from metrics-bind-tailnet; SeverityWarning not OK when tailnetIP unavailable; threat-model row stays at — not ✓
 
 ### Pending Todos
 
@@ -216,6 +234,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-03T08:33:45.406Z
-Stopped at: Phase 23 context gathered
-Resume file: .planning/phases/23-doctor-honesty-coverage/23-CONTEXT.md
+Last session: 2026-06-03T13:07:27.184Z
+Stopped at: Completed 23.1-03-PLAN.md
+Resume file: None

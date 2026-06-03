@@ -18,10 +18,101 @@
 package hardening
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// ---------------------------------------------------------------------------
+// checkLUKS MockRunner tests (DOC-02 fail-closed + DOC-01 OK backfill)
+// ---------------------------------------------------------------------------
+
+// luksEncryptedJSON is a minimal valid lsblk JSON with a crypt ancestor for /home.
+const luksEncryptedJSON = `{"blockdevices":[{"name":"sda","type":"disk","mountpoint":null,"children":[{"name":"sda1","type":"crypt","mountpoint":null,"children":[{"name":"dm-0","type":"lvm","mountpoint":"/"}]}]}]}`
+
+// TestCheckLUKS_FatalOnExecError asserts checkLUKS returns a FATAL finding
+// (not nil,nil) when lsblk fails to execute (DOC-02 / D-06).
+func TestCheckLUKS_FatalOnExecError(t *testing.T) {
+	r := shell.NewMockRunner(shell.Call{Err: fmt.Errorf("exec: lsblk not found")})
+	m := &Module{runner: r}
+	findings, err := checkLUKS(context.Background(), m)
+	require.NoError(t, err)
+	require.NotEmpty(t, findings, "should return a FATAL finding when lsblk is unavailable")
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "luks" {
+			found = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "must have a 'luks' check finding")
+	assert.Equal(t, modules.SeverityFatal, found.Severity)
+	assert.Contains(t, found.Message, "disk-encryption state is UNKNOWN")
+}
+
+// TestCheckLUKS_FatalOnNonZeroExit asserts checkLUKS returns FATAL when lsblk
+// exits non-zero (DOC-02 / D-06).
+func TestCheckLUKS_FatalOnNonZeroExit(t *testing.T) {
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "lsblk error"}})
+	m := &Module{runner: r}
+	findings, err := checkLUKS(context.Background(), m)
+	require.NoError(t, err)
+	require.NotEmpty(t, findings)
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "luks" {
+			found = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, modules.SeverityFatal, found.Severity)
+	assert.Contains(t, found.Message, "disk-encryption state is UNKNOWN")
+}
+
+// TestCheckLUKS_FatalOnGarbageJSON asserts checkLUKS returns FATAL when lsblk
+// returns unparseable output (DOC-02 / D-06).
+func TestCheckLUKS_FatalOnGarbageJSON(t *testing.T) {
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "this is not json"}})
+	m := &Module{runner: r}
+	findings, err := checkLUKS(context.Background(), m)
+	require.NoError(t, err)
+	require.NotEmpty(t, findings)
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "luks" {
+			found = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, modules.SeverityFatal, found.Severity)
+	assert.Contains(t, found.Message, "disk-encryption state is UNKNOWN")
+}
+
+// TestCheckLUKS_OKOnEncrypted asserts checkLUKS returns a SeverityOK finding
+// when the home directory is on a LUKS-encrypted device (DOC-01 backfill).
+func TestCheckLUKS_OKOnEncrypted(t *testing.T) {
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: luksEncryptedJSON}})
+	m := &Module{runner: r}
+	findings, err := checkLUKS(context.Background(), m)
+	require.NoError(t, err)
+	require.NotEmpty(t, findings, "should return an OK finding on clean encrypted path")
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "luks" {
+			found = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, modules.SeverityOK, found.Severity)
+}
 
 func TestIsUnderPath(t *testing.T) {
 	assert.True(t, isUnderPath("/home/alice", "/home"))

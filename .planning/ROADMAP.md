@@ -272,13 +272,13 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 23-01-PLAN.md — DOC-01 OK-emission backfill for 5 core-module checks (funnel, acl_drift, remote_login/sshd_running, lock_enabled, listen_address) + per-module OK tests
-- [ ] 23-02-PLAN.md — DOC-02 fail-closed disk encryption: checkLUKS/checkFileVault FATAL on unknown/in-progress + filevault/luks OK backfill (single-emission) + MockRunner tests
-- [ ] 23-03-PLAN.md — DOC-03 unconditional nb-lock advisory WARN + DOC-04 version-floor table/detector (ntfy <2.21 FATAL, CVE-2026-39087) + findingFix remediation
+- [x] 23-01-PLAN.md — DOC-01 OK-emission backfill for 5 core-module checks (funnel, acl_drift, remote_login/sshd_running, lock_enabled, listen_address) + per-module OK tests
+- [x] 23-02-PLAN.md — DOC-02 fail-closed disk encryption: checkLUKS/checkFileVault FATAL on unknown/in-progress + filevault/luks OK backfill (single-emission) + MockRunner tests
+- [x] 23-03-PLAN.md — DOC-03 unconditional nb-lock advisory WARN + DOC-04 version-floor table/detector (ntfy <2.21 FATAL, CVE-2026-39087) + findingFix remediation
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 23-04-PLAN.md — DOC-01 tri-state threat-model over collectDoctorFindings + DOC-04 floor wiring + DOC-02 up gate non-overridable for unknown + lint/test gate
+- [x] 23-04-PLAN.md — DOC-01 tri-state threat-model over collectDoctorFindings + DOC-04 floor wiring + DOC-02 up gate non-overridable for unknown + lint/test gate
 
 ---
 
@@ -310,4 +310,50 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 20. Security Audit Pass & Doctor Checks | 4/4 | Complete    | 2026-06-02 |
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
 | 22. Network & Dependency Lockdown | 4/4 | Complete    | 2026-06-03 |
-| 23. Doctor Honesty & Coverage | 0/4 | Pending | — |
+| 23. Doctor Honesty & Coverage | 4/4 | Complete   | 2026-06-03 |
+
+### Phase 23.1: Doctor probe-failure honesty — no false-OK on unknown or failed probes and no double-emit (INSERTED)
+
+**Goal:** Close the four deferred honesty WARNINGs from the Phase 23 code review (23-REVIEW.md). A doctor/threat-model check must never render a green ✓ for a control it could not actually confirm: probe failures and unresolvable backend state must surface as a distinct unknown/warning, not OK; the ntfy bind check must catch IPv6 wildcards; and report-only OK findings must be emitted exactly once (no Detect+Verify duplication inflating the "N ok" count).
+**Requirements**: DOC-05 (WR-02 funnel probe-failure false-OK), DOC-06 (WR-03 bind false-OK when tailnet IP unresolvable), DOC-07 (WR-04 ntfy IPv6 `[::]` wildcard miss), DOC-08 (WR-08 Detect+Verify double-emit dedup)
+**Depends on:** Phase 23
+**Source:** Phase 23 code review (`.planning/phases/23-doctor-honesty-coverage/23-REVIEW.md`) — WR-02, WR-03, WR-04, WR-08
+**Success Criteria** (what must be TRUE):
+
+  1. `funnelActive` (tailscale/module.go) distinguishes probe failure from confirmed-inactive: on exec error / non-zero exit it emits `SeverityWarning` ("could not determine Funnel state"), NOT a `SeverityOK` funnel finding; threat-model "No public exposure" row then renders `—`/`✗`, never a false ✓ (DOC-05 / WR-02)
+  2. `metBindTailnetCheck` (cmd_doctor.go) emits `SeverityWarning` when `tailnetIP == ""` and a non-wildcard `bind_addr` is configured (cannot verify tailnet-scope — backend unavailable), instead of falling through to OK (DOC-06 / WR-03)
+  3. ntfy `listen_address` check (ntfy/module.go) flags IPv6 wildcard binds (`[::]:PORT`, bare `::`) as non-compliant, mirroring the existing `0.0.0.0` / bare-`:PORT` detection; honors the immutable "ntfy binds tailnet IP only, never wildcard" default for externally-edited configs (DOC-07 / WR-04)
+  4. Report-only `SeverityOK` findings appear exactly ONCE per `abysslink doctor` pass for lock/ssh/ntfy/acl/tailscale — either emitted in only one of Detect/Verify (hardening-module precedent) or deduped on `(Module, Check)` in `runner.Doctor`; the "N ok" count is no longer inflated and no duplicate ✓ rows render (DOC-08 / WR-08)
+  5. `make lint test` green; new/updated tests cover each probe-failure → non-OK path and the single-emission/dedup guarantee
+
+**Plans:** 4/4 plans complete
+
+Plans:
+**Wave 1** *(all plans independent — parallel execution)*
+
+- [x] 23.1-01-PLAN.md — DOC-05 + DOC-08 (tailscale): funnelActive returns (bool, bool); probe-failure → SeverityWarning Check="funnel-probe-fail"; Verify calls only checkNoPublicExposure (no Detect delegation)
+- [x] 23.1-02-PLAN.md — DOC-07 + DOC-08 (ntfy): hasWildcardListen extended for `[::]:PORT` and bare `::`; content-level `[::]` check added; ntfy Verify returns nil
+- [x] 23.1-03-PLAN.md — DOC-06: metBindTailnetCheck tailnetIP="" + non-wildcard → SeverityWarning Check="met-bind-unknown"; findingFix entries for "funnel-probe-fail" and "met-bind-unknown"
+- [x] 23.1-04-PLAN.md — DOC-08 (lock + ssh): lock Verify returns nil; ssh Verify returns nil; TestRunnerDoctor_NoDoubleEmit integration test (D-02)
+
+### Phase 23.2: Doctor probe-failure honesty (round 2) — serve + metrics-listener probes must not report OK on unproven probes (INSERTED)
+
+**Goal:** Close the two CRITICAL false-OK-on-unknown findings from the Phase 23.1 code review (23.1-REVIEW.md). The same anti-pattern fixed for `funnelActive` in 23.1 survives in two sibling probes: `serveActive` collapses a failed serve probe into "not active" (emitting no warning while the funnel ✓ already rendered), and `metDisabledListenerCheck` treats *any* dial error as proof the port is closed (reporting SeverityOK for a fail-closed security control it never actually verified). A doctor/threat-model check must never render ✓ for a control whose backing probe could not run.
+**Requirements**: DOC-09 (CR-02 serveActive probe-failure false-OK), DOC-10 (CR-01 metDisabledListenerCheck false-OK on inconclusive dial error)
+**Depends on:** Phase 23.1
+**Source:** Phase 23.1 code review (`.planning/phases/23.1-doctor-probe-failure-honesty-no-false-ok-on-unknown-or-faile/23.1-REVIEW.md`) — CR-01, CR-02
+**Success Criteria** (what must be TRUE):
+
+  1. `serveActive` (tailscale/module.go) distinguishes serve-probe failure from confirmed-inactive: on exec error / non-zero exit, `checkNoPublicExposure` emits a distinct `serve-probe-fail` SeverityWarning ("could not determine Serve state"), NOT silence; the "No public exposure" promise never renders confirmed-clean when the serve probe could not run (DOC-09 / CR-02)
+  2. `metDisabledListenerCheck` (cmd_doctor.go) returns SeverityOK only for a genuine closed port (`errors.Is(err, syscall.ECONNREFUSED)`); timeout, unreachable, and resolution-failure dial errors return a distinct `met-listener-unknown` SeverityWarning instead of falsely asserting "no stale metrics listener detected" (DOC-10 / CR-01)
+  3. `findingFix` map gains human-readable remediation entries for both new check IDs (`serve-probe-fail`, `met-listener-unknown`), mirroring the 23.1 `funnel-probe-fail` / `met-bind-unknown` entries
+  4. New tests cover each probe-failure → non-OK path: serve-probe exec error / non-zero exit asserts `serve-probe-fail` Warning (distinct from `funnel`); metrics probe against an unroutable address (e.g. `192.0.2.1:9` TEST-NET-1) asserts it does NOT return SeverityOK; existing closed-port-on-loopback ECONNREFUSED test still asserts SeverityOK
+  5. `make lint test` green
+
+**Plans:** 2/2 plans complete
+
+Plans:
+**Wave 1** *(both plans independent — parallel execution)*
+
+- [x] 23.2-01-PLAN.md — DOC-09 (CR-02): serveActive returns (bool, bool); probe-failure emits SeverityWarning Check='serve-probe-fail'; findingFix entry; tests for exec-error + non-zero-exit + distinct-check-ID + serve-OK regression
+- [x] 23.2-02-PLAN.md — DOC-10 (CR-01): metDisabledListenerCheck ECONNREFUSED gate; non-ECONNREFUSED errors emit SeverityWarning Check='met-listener-unknown'; findingFix entry; TestMetDisabledListener_UnroutableAddr (192.0.2.1:9) + ECONNREFUSED regression

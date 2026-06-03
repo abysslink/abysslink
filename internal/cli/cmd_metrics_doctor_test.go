@@ -131,6 +131,166 @@ func TestMetCardinality_Over500(t *testing.T) {
 	assert.Equal(t, modules.SeverityWarning, f.Severity)
 }
 
+// TestMetBindTailnetCheck_EmptyIP_NonWildcard verifies WR-03: when the backend
+// is unavailable (tailnetIP=="") and bind_addr is a non-wildcard address,
+// metBindTailnetCheck must emit SeverityWarning with Check="met-bind-unknown"
+// (a distinct check ID from "metrics-bind-tailnet") so the threat-model row
+// renders — (did-not-run), not a false ✓.
+func TestMetBindTailnetCheck_EmptyIP_NonWildcard(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = true
+	cfg.Observability.Metrics.BindAddr = "192.168.1.50:9090"
+
+	f := metBindTailnetCheck(cfg, "")
+
+	require.Equal(t, modules.SeverityWarning, f.Severity, "expected SeverityWarning when backend unavailable and bind_addr is non-wildcard")
+	require.Equal(t, "met-bind-unknown", f.Check, "expected distinct check ID met-bind-unknown (not metrics-bind-tailnet)")
+	assert.NotEqual(t, "metrics-bind-tailnet", f.Check, "must not use the confirmed-tailnet-scoped check ID for an unverified address")
+	assert.NotEqual(t, modules.SeverityOK, f.Severity, "must not return SeverityOK when tailnetIP is unknown")
+}
+
+// TestMetBindTailnetCheck_EmptyIP_Wildcard is the regression guard: when
+// tailnetIP=="" and bind_addr is wildcard (0.0.0.0), the check must still
+// return SeverityFatal (the wildcard-fatal path must not be regressed by the
+// new met-bind-unknown branch).
+func TestMetBindTailnetCheck_EmptyIP_Wildcard(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = true
+	cfg.Observability.Metrics.BindAddr = "0.0.0.0:9090"
+
+	f := metBindTailnetCheck(cfg, "")
+
+	require.Equal(t, modules.SeverityFatal, f.Severity, "wildcard bind_addr must still be SeverityFatal when tailnetIP is empty")
+}
+
+// TestMetDisabledListener_UnroutableAddr verifies CR-01 / DOC-10: probing an
+// unroutable address (192.0.2.1:9 — TEST-NET-1, RFC 5737, guaranteed not to
+// route to any real host) must NOT return SeverityOK. The probe cannot
+// distinguish "port closed" from "host unreachable", so the honest result is
+// Check="met-listener-unknown" SeverityWarning.
+func TestMetDisabledListener_UnroutableAddr(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+	// 192.0.2.1:9 — TEST-NET-1 (RFC 5737); port 9 is the discard protocol.
+	// The OS will return EHOSTUNREACH / ENETUNREACH, not ECONNREFUSED, because
+	// no route exists to 192.0.2.0/24 on any standard host.
+	cfg.Observability.Metrics.BindAddr = "192.0.2.1:9"
+
+	f := metDisabledListenerCheck(cfg, "")
+
+	// The false-OK path must not be taken when the probe is inconclusive.
+	assert.NotEqual(t, modules.SeverityOK, f.Severity, "must not return SeverityOK for an unroutable address (CR-01)")
+	assert.Equal(t, "met-listener-unknown", f.Check, "inconclusive probe must use the met-listener-unknown check ID")
+	assert.Equal(t, modules.SeverityWarning, f.Severity, "inconclusive probe must return SeverityWarning, not SeverityOK")
+	assert.NotEqual(t, "met-disabled-listener", f.Check, "must not use the confirmed-closed check ID for an unproven probe")
+}
+
+// TestMetDisabledListener_UnroutableTailnetIP verifies WR-02: the
+// `case tailnetIP != ""` JoinHostPort branch (bind_addr empty, tailnetIP set)
+// must honestly report met-listener-unknown when the probe is inconclusive.
+// 192.0.2.2 is TEST-NET-1 (RFC 5737) — guaranteed unroutable on any standard
+// host, so the dial returns EHOSTUNREACH/ENETUNREACH (not ECONNREFUSED). The
+// honest result is Check="met-listener-unknown" SeverityWarning, never a false
+// SeverityOK, on the address built from tailnetIP rather than an explicit
+// bind_addr.
+func TestMetDisabledListener_UnroutableTailnetIP(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+	cfg.Observability.Metrics.BindAddr = "" // force the tailnetIP JoinHostPort branch
+
+	f := metDisabledListenerCheck(cfg, "192.0.2.2")
+
+	assert.NotEqual(t, modules.SeverityOK, f.Severity, "must not return SeverityOK for an unroutable tailnet IP (WR-02)")
+	assert.Equal(t, "met-listener-unknown", f.Check, "inconclusive probe on the tailnetIP branch must use the met-listener-unknown check ID")
+	assert.Equal(t, modules.SeverityWarning, f.Severity, "inconclusive probe must return SeverityWarning, not SeverityOK")
+}
+
+// TestMetDisabledListener_DefaultFallbackPort verifies WR-02: when both
+// bind_addr and tailnetIP are empty, metDisabledListenerCheck falls back to
+// dialing ":port" (the default branch at cmd_doctor.go). This pins that the
+// default-fallback address is constructed from the configured port and probed:
+// against a port we have proven closed (bound then released on loopback), the
+// honest result is the ECONNREFUSED-gated SeverityOK on the met-disabled-listener
+// check — confirming the ":port" fallback reaches a real socket address rather
+// than dialing something malformed. (The inconclusive arm of the ":port" path is
+// not loopback-deterministic; the tailnetIP unroutable case above pins the
+// met-listener-unknown emission for inconclusive dials.)
+func TestMetDisabledListener_DefaultFallbackPort(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+	cfg.Observability.Metrics.BindAddr = "" // empty bind_addr ...
+	// ... and empty tailnetIP forces the ":port" default fallback branch.
+
+	// Pick a free port, then release it so nothing listens there. Dialing
+	// ":port" reaches loopback and returns ECONNREFUSED for a closed port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	freePort := ln.Addr().(*net.TCPAddr).Port
+	require.NoError(t, ln.Close())
+	cfg.Observability.Metrics.Port = freePort
+
+	f := metDisabledListenerCheck(cfg, "")
+
+	assert.Equal(t, "met-disabled-listener", f.Check, "default ':port' fallback must probe the configured port and report the closed-port check ID")
+	assert.Equal(t, modules.SeverityOK, f.Severity, "a provably-closed ':port' default fallback must return the ECONNREFUSED-gated SeverityOK")
+}
+
+// TestMetDisabledListener_ExplicitBindAddrPortProbed is the WR-03 regression:
+// when bind_addr already carries an explicit host:port, THAT port must be the
+// one probed — the configured cfg.Observability.Metrics.Port must be ignored
+// (explicit bind_addr wins). We bind a real listener on a specific loopback
+// port, set bind_addr to that host:port, and set Metrics.Port to a DIFFERENT
+// (closed) port. A correct probe dials the bind_addr port, finds the live
+// listener, and returns SeverityFatal. A regression that dialed Metrics.Port
+// instead would miss the stale listener (false-OK).
+func TestMetDisabledListener_ExplicitBindAddrPortProbed(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+
+	// Live listener on a specific loopback port — this is the stale listener.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close() //nolint:errcheck // errcheck: close error in test teardown is non-actionable
+	bindPort := ln.Addr().(*net.TCPAddr).Port
+	cfg.Observability.Metrics.BindAddr = ln.Addr().String() // explicit host:bindPort
+
+	// A DIFFERENT, provably-closed port in the config. If the probe wrongly
+	// honored Metrics.Port it would dial here, find nothing, and return OK.
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	otherPort := closed.Addr().(*net.TCPAddr).Port
+	require.NoError(t, closed.Close())
+	require.NotEqual(t, bindPort, otherPort, "test setup: config port must differ from bind_addr port")
+	cfg.Observability.Metrics.Port = otherPort
+
+	f := metDisabledListenerCheck(cfg, "")
+	assert.Equal(t, "met-disabled-listener", f.Check)
+	assert.Equal(t, modules.SeverityFatal, f.Severity, "explicit bind_addr port must be the one probed; configured Port must be ignored (WR-03)")
+}
+
+// TestMetDisabledListener_ZeroPortNormalized is the WR-03 degenerate-port
+// regression: a bind_addr like "127.0.0.1:0" parses cleanly but port 0 means
+// "any free port" and must NOT be dialed verbatim. The check must substitute
+// the configured/default port so the probe targets a deterministic address. We
+// bind a live listener on a known port, set that as Metrics.Port, and give a
+// "host:0" bind_addr; a correct normalization dials host:Port, finds the
+// listener, and returns SeverityFatal. The pre-fix code dialed port 0.
+func TestMetDisabledListener_ZeroPortNormalized(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close() //nolint:errcheck // errcheck: close error in test teardown is non-actionable
+	port := ln.Addr().(*net.TCPAddr).Port
+	cfg.Observability.Metrics.Port = port
+	cfg.Observability.Metrics.BindAddr = "127.0.0.1:0" // degenerate explicit zero port
+
+	f := metDisabledListenerCheck(cfg, "")
+	assert.Equal(t, "met-disabled-listener", f.Check)
+	assert.Equal(t, modules.SeverityFatal, f.Severity, "a 'host:0' bind_addr must normalize to the configured port, not dial port 0 (WR-03)")
+}
+
 func TestMetLabelAudit_AllAllowed(t *testing.T) {
 	cfg := config.Defaults()
 	reg := metrics.NewMemRegistry()

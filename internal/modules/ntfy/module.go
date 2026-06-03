@@ -178,7 +178,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	}
 
 	cfgContent := string(data)
-	if strings.Contains(cfgContent, "0.0.0.0") || hasWildcardListen(cfgContent) {
+	if strings.Contains(cfgContent, "0.0.0.0") || strings.Contains(cfgContent, "[::]") || hasWildcardListen(cfgContent) {
 		// Docker mode intentionally uses 0.0.0.0 inside the container; port
 		// binding to the tailnet IP is enforced by the docker -p flag.
 		if !m.ntfyDockerRunning(ctx) {
@@ -189,19 +189,36 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 				Message:  "ntfy server.yml binds to 0.0.0.0 — must bind to tailnet IP only (or use Docker mode)",
 			})
 		}
+	} else {
+		// Emit explicit OK so "check ran and passed" is distinguishable from
+		// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "listen_address",
+			Severity: modules.SeverityOK,
+			Message:  "listen_address: ntfy server.yml binds to tailnet IP only",
+		})
 	}
 
 	return findings, nil
 }
 
-// hasWildcardListen returns true if the config contains a listen-http line with just a port (":PORT").
+// hasWildcardListen returns true if the config contains a listen-http line that
+// binds to all interfaces. It detects:
+//   - bare ":PORT" (IPv4 all-interfaces)
+//   - "[::]:PORT" or bare "::" (IPv6 wildcard)
 func hasWildcardListen(cfgContent string) bool {
 	for _, line := range strings.Split(cfgContent, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "listen-http:") {
 			val := strings.TrimSpace(strings.TrimPrefix(line, "listen-http:"))
 			val = strings.Trim(val, `"'`)
-			if strings.HasPrefix(val, ":") {
+			// Bare ":PORT" — IPv4 all-interfaces.
+			if strings.HasPrefix(val, ":") && !strings.HasPrefix(val, "::") && !strings.HasPrefix(val, "[::]") {
+				return true
+			}
+			// "[::]:PORT" or bare "::" — IPv6 wildcard.
+			if val == "::" || strings.HasPrefix(val, "[::]") {
 				return true
 			}
 		}
@@ -525,10 +542,14 @@ func (m *Module) getTailnetHostname(ctx context.Context) string {
 	return ip
 }
 
-// Verify checks that server.yml does not bind to 0.0.0.0 (native mode)
-// or that the Docker container is running (Docker mode).
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// Verify is a no-op for the ntfy module — all listen_address checks run in Detect.
+//
+// Pitfall 4: do NOT call Detect here — runner.Doctor calls both Detect and Verify;
+// re-running Detect would double every Detect finding (including listen_address OK
+// and listen_address Fatal). ntfy Verify adds no new information beyond Detect;
+// returning nil avoids double-emission.
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair re-applies configuration.
