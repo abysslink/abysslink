@@ -40,6 +40,13 @@ Phases 16–21 (6 phases, 24 plans) — supply-chain hardening (cosign v3 / SLSA
 
 ---
 
+## v3.0.1 — Network & Dependency Security Hotfix 🔧 IN PROGRESS
+
+Phase 22 — closes 6 CRITICAL/HIGH findings from the 2026-06-03 full security audit (11 agents).
+Requirements: NET-01 (CRITICAL A1), NET-02 (A7), NET-03 (A8), DEP-01 (A2), DEP-02 (A3), DEP-03 (A12).
+
+---
+
 ## Phase Details
 
 ### Phase 1: Repo Bootstrap
@@ -218,10 +225,35 @@ Plans:
 
 ---
 
+### Phase 22: Network & Dependency Lockdown
+
+**Goal**: Close 6 CRITICAL/HIGH security findings from the 2026-06-03 full audit: restore the ntfy tailnet-only bind floor (NET-01 CRITICAL), close the cleartext-PAT gap for NetBird (NET-02), close the flag-injection gap in hostname/server_url config (NET-03), and eliminate all reachable stdlib CVEs by bumping Go to 1.26.4 (DEP-01), x/crypto to v0.52.0 (DEP-02), and replacing the unmaintained gorilla/csrf (CVE-2025-47909) with stdlib CrossOriginProtection (DEP-03).
+**Depends on**: Phase 21
+**Requirements**: NET-01, NET-02, NET-03, DEP-01, DEP-02, DEP-03
+**Success Criteria** (what must be TRUE):
+
+  1. `govulncheck ./...` reports 0 reachable CVEs; go.mod `go` directive = `1.26.4`; all 6 CI workflows use `go-version: "1.26.4"`
+  2. `go list -m golang.org/x/crypto` ≥ v0.52.0
+  3. `go mod why github.com/gorilla/csrf` = "not needed"; `go mod graph | grep gorilla/csrf` = empty; `go build -tags webui ./...` = 0 errors
+  4. `config.Validate` rejects NetBird `server_url` with `http://` prefix and rejects `tailnet.hostname` with leading dash or non-DNS-safe chars
+  5. `abysslink doctor` includes ntfy-bind and ntfy-loopback findings; ntfy docker run argv has no `127.0.0.1` port mapping
+  6. `make lint test` green; all new tests (TestNtfyBindCheck, TestNtfyLoopbackReachCheck, TestValidateNetBirdHTTP, TestValidateHostname) pass
+
+**Plans**: 4 plans
+
+Plans:
+
+- [ ] 22-01-PLAN.md — Go toolchain + x/crypto bump: go.mod go 1.26.3→1.26.4 + x/crypto v0.52.0 + all 6 CI workflows aligned (DEP-01, DEP-02)
+- [ ] 22-02-PLAN.md — Config validation: NET-02 NetBird https guard + NET-03 safeHostnamePat + hostname/server_url charset gates (NET-02, NET-03)
+- [ ] 22-03-PLAN.md — ntfy tailnet-bind floor: remove loopback -p from module.go + new cmd_doctor_ntfy.go with dual-signal doctor check (NET-01)
+- [ ] 22-04-PLAN.md — WebUI CSRF migration: safeweb→stdlib CrossOriginProtection + 5 security headers + gorilla-free go.mod (DEP-03)
+
+---
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 16 → 17 → 18 → 19 → 20 → 21
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 16 → 17 → 18 → 19 → 20 → 21 → 22
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -245,3 +277,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 19. Web UI Dashboard (opt-in) | 4/4 | Complete    | 2026-06-02 |
 | 20. Security Audit Pass & Doctor Checks | 4/4 | Complete    | 2026-06-02 |
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
+| 22. Network & Dependency Lockdown | 0/4 | In Progress | — |
