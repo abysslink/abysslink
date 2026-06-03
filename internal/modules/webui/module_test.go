@@ -23,9 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -39,7 +37,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"tailscale.com/client/local"
 	"tailscale.com/client/tailscale/apitype"
-	"tailscale.com/safeweb"
 	"tailscale.com/tailcfg"
 )
 
@@ -130,23 +127,31 @@ func TestWhoIsSuccessPasses(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "an identified tailnet peer must pass")
 }
 
-func TestCSRFMissing403(t *testing.T) {
+func TestCSRFCrossOriginBlocked(t *testing.T) {
+	// CrossOriginProtection (DEP-03 replacement for gorilla/csrf) blocks cross-origin
+	// POSTs via Sec-Fetch-Site: cross-site. A POST carrying that header must be 403.
+	// Requests with no Sec-Fetch-Site (e.g. doctor probe) are treated as same-origin
+	// (non-browser) and allowed (per RESEARCH.md Pitfall 2).
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /notify", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	sw, err := newSafewebServer(mux)
-	require.NoError(t, err)
+	handler := buildWebHandler(mux)
 
-	srv := httptest.NewServer(sw)
+	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	// POST without a CSRF token must be rejected by safeweb's BrowserMux.
-	resp, err := http.Post(srv.URL+"/notify", "application/x-www-form-urlencoded", strings.NewReader(""))
+	// POST with Sec-Fetch-Site: cross-site must be rejected by CrossOriginProtection.
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/notify", strings.NewReader(""))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "POST without CSRF token must be 403 (WEB-05)")
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "cross-origin POST must be 403 (DEP-03 / WEB-05)")
 }
 
 func TestReadOnlyBlock(t *testing.T) {
@@ -424,12 +429,24 @@ func TestModuleDisabledByDefault(t *testing.T) {
 	assert.Empty(t, plan, "a disabled webui module plans no actions")
 }
 
-func TestBuildCSPSelfOnly(t *testing.T) {
-	csp := buildCSP()
-	got := csp["default-src"]
-	require.NotEmpty(t, got)
-	assert.Equal(t, []string{"'self'"}, got, "default-src must be 'self' only — no unsafe-inline, no CDN (WEB-06)")
-	assert.NotContains(t, csp.String(), "unsafe-inline", "CSP must never permit unsafe-inline")
+func TestSecurityHeadersCSP(t *testing.T) {
+	// securityHeadersMiddleware must set a CSP that pins default-src 'self',
+	// contains frame-ancestors 'none', and never permits unsafe-inline (WEB-06).
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := buildWebHandler(mux)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/") //nolint:noctx // test-only plain GET
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	csp := resp.Header.Get("Content-Security-Policy")
+	require.NotEmpty(t, csp, "every response must carry a CSP header (WEB-06)")
+	assert.Contains(t, csp, "default-src 'self'", "CSP must pin default-src 'self'")
+	assert.Contains(t, csp, "frame-ancestors 'none'", "CSP must block framing (WEB-06)")
+	assert.NotContains(t, csp, "unsafe-inline", "CSP must never permit unsafe-inline")
 }
 
 // validWhoIs returns a WhoIsResponse with a populated UserProfile, the shape
@@ -488,13 +505,12 @@ func TestCSPHeader(t *testing.T) {
 	h := newTestHandlers(t)
 	mux := http.NewServeMux()
 	h.Register(mux)
-	sw, err := newSafewebServer(mux)
-	require.NoError(t, err)
+	handler := buildWebHandler(mux)
 
-	srv := httptest.NewServer(sw)
+	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/")
+	resp, err := http.Get(srv.URL + "/") //nolint:noctx // test-only plain GET
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 
@@ -605,9 +621,10 @@ func TestRenderErrorView(t *testing.T) {
 	assert.NotContains(t, prec.Body.String(), "<html", "partial error render must omit the base shell")
 }
 
-func TestNotifyFormCSRFToken(t *testing.T) {
-	// With allow_notify enabled, the notify view must emit the safeweb CSRF
-	// token field, and the end-to-end POST must require it (WR-02, WEB-05).
+func TestNotifyFormNoCSRFToken(t *testing.T) {
+	// DEP-03: With CrossOriginProtection replacing gorilla/csrf, the notify form
+	// must NOT contain a hidden gorilla CSRF token field. CrossOriginProtection is
+	// stateless — no token injection required (WR-02 / DEP-03).
 	h, err := NewHandlers(HandlerDeps{
 		Status: stubStatusProvider{}, Doctor: stubDoctorProvider{},
 		Ring: NewNotifyRingBuffer(), AuditLogPath: "", RigHostname: "rig-a",
@@ -616,72 +633,56 @@ func TestNotifyFormCSRFToken(t *testing.T) {
 	require.NoError(t, err)
 	mux := http.NewServeMux()
 	h.Register(mux)
-	sw, err := newSafewebServer(mux)
-	require.NoError(t, err)
-	// safeweb sets a Secure CSRF cookie (SecureContext: true), so the positive
-	// path must run over TLS or the cookie jar would never replay the cookie on
-	// POST. httptest.NewTLSServer + its trusting client provides that.
-	srv := httptest.NewTLSServer(sw)
+	handler := buildWebHandler(mux)
+	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	// A cookie jar is required so the CSRF cookie set on GET is replayed on POST.
-	jar, err := cookiejar.New(nil)
-	require.NoError(t, err)
-	client := srv.Client()
-	client.Jar = jar
-
-	resp, err := client.Get(srv.URL + "/notify")
+	resp, err := http.Get(srv.URL + "/notify") //nolint:noctx // test-only plain GET
 	require.NoError(t, err)
 	bodyBytes, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	body := string(bodyBytes)
 
-	assert.Contains(t, body, `name="gorilla.csrf.Token"`, "notify form must include the safeweb CSRF token field (WR-02)")
+	// The form must render (allow_notify=true).
+	assert.Contains(t, body, `action="/notify"`, "notify form must be present when allow_notify=true")
+	// No gorilla hidden token must appear — CrossOriginProtection is stateless.
+	assert.NotContains(t, body, `name="gorilla.csrf.Token"`, "gorilla CSRF token must NOT be in the form (DEP-03)")
 
-	// Extract the masked token value emitted by safeweb.CSRFTemplateField.
-	token := extractCSRFToken(t, body)
-	require.NotEmpty(t, token, "CSRF token value must be present in the form")
-
-	// postForm issues a POST with the values, a form content-type, and a Referer
-	// matching the origin (gorilla/csrf requires a matching Referer over HTTPS).
-	postForm := func(values url.Values) *http.Response {
-		req, rerr := http.NewRequest(http.MethodPost, srv.URL+"/notify", strings.NewReader(values.Encode()))
-		require.NoError(t, rerr)
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Referer", srv.URL+"/notify")
-		out, derr := client.Do(req)
-		require.NoError(t, derr)
-		return out
-	}
-
-	// POST without the token must be rejected by the CSRF gate.
-	noTok := postForm(url.Values{"title": {"hello"}})
-	_ = noTok.Body.Close()
-	assert.Equal(t, http.StatusForbidden, noTok.StatusCode, "POST without CSRF token must be 403 (WEB-05)")
-
-	// POST WITH the token must pass the CSRF gate and reach the handler (501).
-	withTok := postForm(url.Values{"title": {"hello"}, "gorilla.csrf.Token": {token}})
-	_ = withTok.Body.Close()
-	assert.Equal(t, http.StatusNotImplemented, withTok.StatusCode,
-		"POST with a valid CSRF token must reach handleNotifyPost (501 scaffold)")
+	// A same-origin POST (no Sec-Fetch-Site header, like a direct client) must
+	// pass CrossOriginProtection and reach handleNotifyPost (returns 501 scaffold).
+	req, rerr := http.NewRequest(http.MethodPost, srv.URL+"/notify", strings.NewReader("title=hello"))
+	require.NoError(t, rerr)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postResp, derr := http.DefaultClient.Do(req)
+	require.NoError(t, derr)
+	_ = postResp.Body.Close()
+	assert.Equal(t, http.StatusNotImplemented, postResp.StatusCode,
+		"same-origin POST must reach handleNotifyPost (501 scaffold) — CrossOriginProtection allows non-cross-site requests")
 }
 
-// extractCSRFToken pulls the masked token value out of the hidden input that
-// safeweb.CSRFTemplateField emits (<input ... name="gorilla.csrf.Token" value="...">).
-func extractCSRFToken(t *testing.T, body string) string {
-	t.Helper()
-	const marker = `name="gorilla.csrf.Token" value="`
-	i := strings.Index(body, marker)
-	if i < 0 {
-		return ""
-	}
-	rest := body[i+len(marker):]
-	end := strings.IndexByte(rest, '"')
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
+func TestSecurityHeaders(t *testing.T) {
+	// securityHeadersMiddleware must set all five required security headers on
+	// every response (DEP-03 / T-22-14).
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := buildWebHandler(mux)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/") //nolint:noctx // test-only plain GET
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+
+	assert.NotEmpty(t, resp.Header.Get("Content-Security-Policy"), "CSP header must be set")
+	assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
+	assert.Equal(t, "same-origin", resp.Header.Get("Referer-Policy"))
+	assert.Equal(t, "same-origin", resp.Header.Get("Cross-Origin-Opener-Policy"))
+	assert.NotEmpty(t, resp.Header.Get("Strict-Transport-Security"), "HSTS header must be set")
+	assert.Contains(t, resp.Header.Get("Content-Security-Policy"), "default-src 'self'")
+	assert.Contains(t, resp.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'")
 }
 
 // writeAuditLog writes entries as JSONL to path for handler tests.
@@ -810,6 +811,3 @@ func TestDoctorFuncAdapterRendersFinding(t *testing.T) {
 
 // compile-time assertion that the module satisfies the Module interface.
 var _ modules.Module = (*Module)(nil)
-
-// safeweb.Server must implement http.Handler (used as the inner handler).
-var _ http.Handler = (*safeweb.Server)(nil)

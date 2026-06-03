@@ -28,12 +28,13 @@
 //   - Every request crosses the WhoIs identity gate. Loopback addresses
 //     (127.0.0.1, ::1) and unidentifiable peers receive 403 — there is no
 //     trusted-local bypass (WEB-04).
-//   - safeweb wraps every route with CSRF protection and a restrictive CSP
-//     (default-src 'self'); a non-GET request without a valid CSRF token is
-//     rejected (WEB-05/WEB-06).
+//   - CrossOriginProtection (stdlib net/http, Go 1.26) wraps every route; cross-origin
+//     requests (Sec-Fetch-Site: cross-site) are rejected (WEB-05). securityHeadersMiddleware
+//     applies CSP (default-src 'self'), HSTS, X-Content-Type-Options, Referer-Policy,
+//     and COOP on every response (WEB-06).
 //   - Mutations are blocked at two layers: config.ValidateWebUI (schema) and the
 //     readOnlyMiddleware (HTTP); only the explicitly-unlocked allow_notify path
-//     is reachable, and only behind CSRF (WEB-02).
+//     is reachable, and only behind CrossOriginProtection (WEB-02).
 //
 // Read-only views, templates, and the htmx asset bundle land in Plan 03; the
 // daemon entrypoint wiring and the loud one-time startup security note land in

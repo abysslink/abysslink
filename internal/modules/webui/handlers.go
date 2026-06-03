@@ -27,7 +27,6 @@ import (
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/modules"
-	"tailscale.com/safeweb"
 )
 
 // auditPageSize is the number of audit entries shown per page (UI-SPEC View 3).
@@ -243,11 +242,6 @@ type notifyData struct {
 	Events []notifyRow
 	// AllowNotify gates whether the scaffolded POST form is rendered (WEB-05).
 	AllowNotify bool
-	// CSRFField is the safeweb-generated hidden CSRF input. It is template.HTML
-	// because it is framework-generated (gorilla/csrf), not user data, so it is
-	// safe to emit unescaped. Without it the (locked) allow_notify POST form
-	// could never pass safeweb's CSRF gate (WR-02).
-	CSRFField template.HTML
 }
 
 // pageData carries the shell fields every full-page view needs for base.html.
@@ -516,17 +510,12 @@ func (h *Handlers) handleNotify(w http.ResponseWriter, r *http.Request) {
 		Events:      rows,
 		AllowNotify: h.deps.AllowNotify,
 	}
-	if h.deps.AllowNotify {
-		// safeweb.CSRFTemplateField returns the masked-token hidden input the
-		// safeweb CSRF gate requires for the POST to be accepted (WEB-05).
-		data.CSRFField = safeweb.CSRFTemplateField(r)
-	}
 	h.render(w, r, h.notifyTmpl, data)
 }
 
 // handleNotifyPost is the scaffolded allow_notify mutation path. It is only
-// reachable when cfg.AllowNotify is true (gated by readOnlyMiddleware) AND a
-// valid CSRF token is present (gated by safeweb). Full dispatch is deferred to
+// reachable when cfg.AllowNotify is true (gated by readOnlyMiddleware) and the
+// request is same-origin (gated by CrossOriginProtection). Full dispatch is deferred to
 // Phase 20+; for now it acknowledges the request without sending.
 func (h *Handlers) handleNotifyPost(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

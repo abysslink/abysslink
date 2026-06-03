@@ -42,7 +42,6 @@ badges via CSS classes only; no inline styles, no secret body content (WEB-07).
 {{ end }}
 {{ if .AllowNotify }}
 <form method="POST" action="/notify" hx-post="/notify" hx-target="#main-content" hx-swap="innerHTML">
-  {{ .CSRFField }}
   <label class="t-body" for="notify-title">Title</label>
   <input id="notify-title" name="title" type="text" autocomplete="off" />
   <button type="submit">Send notification</button>
