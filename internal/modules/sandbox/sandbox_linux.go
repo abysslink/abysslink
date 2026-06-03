@@ -31,16 +31,26 @@ import (
 	"log/slog"
 
 	"github.com/landlock-lsm/go-landlock/landlock"
+	"golang.org/x/sys/unix"
 )
 
 // isLandlockSupported probes whether the running kernel supports Landlock V1
-// (Linux kernel >= 5.13). It calls landlock.V1.RestrictPaths() with no rules
-// and WITHOUT BestEffort: on a kernel that lacks Landlock the call returns an
-// error (the syscall is absent / disabled), so err == nil is a reliable
-// support signal. An empty rule set is a safe no-op probe with no lasting
-// restriction on the calling process beyond what an empty ruleset implies.
+// (Linux kernel >= 5.13) WITHOUT enforcing any restriction on the caller.
+//
+// It queries the supported Landlock ABI version via
+// landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION): the kernel
+// returns the ABI version (>= 1 when Landlock is available) and creates no
+// ruleset, so the calling process is left completely unrestricted. On a kernel
+// without Landlock the syscall fails (ENOSYS / EOPNOTSUPP).
+//
+// It must NOT probe by calling landlock.V1.RestrictPaths(): with no rules that
+// applies a deny-all empty ruleset to the live process — irreversibly — which
+// would break every later filesystem write in the same process (e.g. it would
+// lock `abysslink doctor` out of the filesystem mid-run).
 func isLandlockSupported() bool {
-	return landlock.V1.RestrictPaths() == nil
+	const landlockCreateRulesetVersion = 1 // LANDLOCK_CREATE_RULESET_VERSION
+	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, landlockCreateRulesetVersion)
+	return errno == 0 && int(abi) >= 1
 }
 
 // applyLandlockProfile applies a minimal Landlock profile to the current
