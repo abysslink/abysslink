@@ -189,6 +189,15 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 				Message:  "ntfy server.yml binds to 0.0.0.0 — must bind to tailnet IP only (or use Docker mode)",
 			})
 		}
+	} else {
+		// Emit explicit OK so "check ran and passed" is distinguishable from
+		// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "listen_address",
+			Severity: modules.SeverityOK,
+			Message:  "listen_address: ntfy server.yml binds to tailnet IP only",
+		})
 	}
 
 	return findings, nil

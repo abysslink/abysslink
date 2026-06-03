@@ -120,12 +120,18 @@ func (m *mockACLBackend) GetACL(_ context.Context) ([]byte, string, error) {
 	return m.raw, `"test-etag"`, nil
 }
 
+func (m *mockACLBackend) SetACL(_ context.Context, _ []byte, _ string) error { return nil }
+
 func (m *mockACLBackend) NewACLEditor(raw []byte) (backend.ACLEditor, error) {
 	return m.aclMgr.NewACLEditor(raw)
 }
 
 func (m *mockACLBackend) DefaultACL(owner, sshUser string) []byte {
 	return m.aclMgr.DefaultACL(owner, sshUser)
+}
+
+func (m *mockACLBackend) Diff(oldBytes, newBytes []byte) string {
+	return m.aclMgr.Diff(oldBytes, newBytes)
 }
 
 func TestACLDriftOK(t *testing.T) {

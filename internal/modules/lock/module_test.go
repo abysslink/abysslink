@@ -26,14 +26,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDetect_LockEnabled_NoFindings(t *testing.T) {
+func TestDetect_LockEnabled_OKFinding(t *testing.T) {
 	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: `{"Enabled":true}`}})
 	cfg := config.Defaults()
 	cfg.Tailnet.Lock.Enabled = true
 	m := New(modules.Deps{Cfg: cfg, Runner: r})
 	findings, err := m.Detect(context.Background())
 	require.NoError(t, err)
-	assert.Empty(t, findings, "lock is on, config requires it: no findings expected")
+	// Lock is on and config requires it: expect exactly one SeverityOK finding
+	// for lock_enabled (not empty — D-03 presence-based "ran" detection requires it).
+	require.Len(t, findings, 1, "lock is on, config requires it: expect one OK finding")
+	assert.Equal(t, "lock_enabled", findings[0].Check)
+	assert.Equal(t, modules.SeverityOK, findings[0].Severity)
 }
 
 func TestLockEnabledOK(t *testing.T) {
