@@ -163,6 +163,28 @@ func TestMetBindTailnetCheck_EmptyIP_Wildcard(t *testing.T) {
 	require.Equal(t, modules.SeverityFatal, f.Severity, "wildcard bind_addr must still be SeverityFatal when tailnetIP is empty")
 }
 
+// TestMetDisabledListener_UnroutableAddr verifies CR-01 / DOC-10: probing an
+// unroutable address (192.0.2.1:9 — TEST-NET-1, RFC 5737, guaranteed not to
+// route to any real host) must NOT return SeverityOK. The probe cannot
+// distinguish "port closed" from "host unreachable", so the honest result is
+// Check="met-listener-unknown" SeverityWarning.
+func TestMetDisabledListener_UnroutableAddr(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+	// 192.0.2.1:9 — TEST-NET-1 (RFC 5737); port 9 is the discard protocol.
+	// The OS will return EHOSTUNREACH / ENETUNREACH, not ECONNREFUSED, because
+	// no route exists to 192.0.2.0/24 on any standard host.
+	cfg.Observability.Metrics.BindAddr = "192.0.2.1:9"
+
+	f := metDisabledListenerCheck(cfg, "")
+
+	// The false-OK path must not be taken when the probe is inconclusive.
+	assert.NotEqual(t, modules.SeverityOK, f.Severity, "must not return SeverityOK for an unroutable address (CR-01)")
+	assert.Equal(t, "met-listener-unknown", f.Check, "inconclusive probe must use the met-listener-unknown check ID")
+	assert.Equal(t, modules.SeverityWarning, f.Severity, "inconclusive probe must return SeverityWarning, not SeverityOK")
+	assert.NotEqual(t, "met-disabled-listener", f.Check, "must not use the confirmed-closed check ID for an unproven probe")
+}
+
 func TestMetLabelAudit_AllAllowed(t *testing.T) {
 	cfg := config.Defaults()
 	reg := metrics.NewMemRegistry()
