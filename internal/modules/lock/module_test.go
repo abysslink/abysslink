@@ -84,3 +84,31 @@ func TestDetect_NonZeroExit_Warning(t *testing.T) {
 	assert.Equal(t, "lock_status", findings[0].Check)
 	assert.Equal(t, modules.SeverityWarning, findings[0].Severity)
 }
+
+// TestApply_SeverityOK_NoError asserts that Apply returns nil (no error) when
+// Detect yields a SeverityOK lock_enabled finding — i.e. when Tailnet Lock is
+// correctly enabled. This is the CR-01 regression test.
+func TestApply_SeverityOK_NoError(t *testing.T) {
+	// Detect makes one Run call; Apply calls Detect, so the mock must have one call.
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: `{"Enabled":true}`}})
+	cfg := config.Defaults()
+	cfg.Tailnet.Lock.Enabled = true
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+
+	err := m.Apply(context.Background())
+	assert.NoError(t, err, "Apply must not error when Tailnet Lock is correctly enabled (SeverityOK path)")
+}
+
+// TestApply_LockDisabled_ReturnsError asserts that Apply returns the actionable
+// "not yet enabled" error when Detect yields a non-OK lock_enabled finding.
+func TestApply_LockDisabled_ReturnsError(t *testing.T) {
+	// Detect makes one Run call; lock disabled, config requires it → SeverityWarning.
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: `{"Enabled":false}`}})
+	cfg := config.Defaults()
+	cfg.Tailnet.Lock.Enabled = true
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+
+	err := m.Apply(context.Background())
+	require.Error(t, err, "Apply must return an error when Tailnet Lock is required but not enabled")
+	assert.Contains(t, err.Error(), "Tailnet Lock is required but not yet enabled")
+}
