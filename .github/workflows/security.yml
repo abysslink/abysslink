@@ -3,6 +3,8 @@
 name: Security
 
 on:
+  push:
+    branches: ["main"]
   pull_request:
     branches: ["main"]
 
@@ -28,6 +30,7 @@ jobs:
             vuln.go.dev:443
             storage.googleapis.com:443
             objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
             github.com:443
             api.github.com:443
 
@@ -99,6 +102,7 @@ jobs:
             sum.golang.org:443
             storage.googleapis.com:443
             objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
             github.com:443
             api.github.com:443
 
@@ -132,6 +136,9 @@ jobs:
 
   dep-review:
     name: dependency review
+    # The dependency-review action compares a PR's base and head refs, so it
+    # only runs on pull_request events, not on push to main.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
