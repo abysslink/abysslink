@@ -351,25 +351,49 @@ func (m *Module) ensureHostname(ctx context.Context) error {
 	return nil
 }
 
-// Verify re-runs Detect and additionally refuses public exposure: it returns a
-// fatal finding if Tailscale Funnel is active (which exposes a service to the
-// public internet) and a warning if Serve is active. Preventing public exposure
-// is the product's core promise, so a node is never "healthy" while Funnel is on.
+// Verify refuses public exposure: it returns a fatal finding if Tailscale Funnel
+// is active (which exposes a service to the public internet) and a warning if
+// Serve is active. Preventing public exposure is the product's core promise, so
+// a node is never "healthy" while Funnel is on.
+//
+// Pitfall 4: do NOT call Detect here — runner.Doctor calls both Detect and
+// Verify; re-running Detect would double every Detect finding.
+// checkNoPublicExposure is Verify's exclusive contribution; Detect handles
+// running/installed/ssh etc.
 func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	findings, err := m.Detect(ctx)
-	if err != nil {
-		return findings, err
-	}
-	return append(findings, m.checkNoPublicExposure(ctx)...), nil
+	return m.checkNoPublicExposure(ctx), nil
 }
 
 // checkNoPublicExposure inspects `tailscale funnel status` and `tailscale serve
 // status`. Detection is conservative — it only flags clearly-active configs to
 // avoid false positives on healthy machines.
+//
+// Three cases for the funnel probe (D-04, D-05, D-07):
+//  1. Probe failure (exec error or non-zero exit): emit SeverityWarning with
+//     Check="funnel-probe-fail" (distinct from "funnel" so the threat-model row
+//     renders — not ✗). Return immediately; no funnel/serve findings.
+//  2. Confirmed active: emit SeverityFatal with Check="funnel".
+//  3. Confirmed inactive: emit SeverityOK with Check="funnel" so the threat-model
+//     row renders ✓ (D-05 — "check ran and passed" is distinguishable from "check
+//     never ran" in the tri-state).
 func (m *Module) checkNoPublicExposure(ctx context.Context) []modules.Finding {
 	var findings []modules.Finding
 
-	if m.funnelActive(ctx) {
+	active, probeOK := m.funnelActive(ctx)
+	if !probeOK {
+		// Probe failure: command unavailable or returned non-zero exit.
+		// Use a distinct check ID so the threat-model "No public exposure"
+		// row stays at — (did-not-run) rather than flipping to ✗ (D-04).
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "funnel-probe-fail",
+			Severity: modules.SeverityWarning,
+			Message:  "could not determine Funnel state — tailscale funnel command unavailable or returned non-zero exit; re-run after: tailscale status",
+		})
+		return findings
+	}
+
+	if active {
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "funnel",
@@ -398,15 +422,18 @@ func (m *Module) checkNoPublicExposure(ctx context.Context) []modules.Finding {
 }
 
 // funnelActive reports whether `tailscale funnel status` shows an active funnel.
-func (m *Module) funnelActive(ctx context.Context) bool {
+// Returns (active, probeOK): probeOK is false when the command cannot be run
+// (exec error) or exits non-zero (daemon not available), so the caller can
+// distinguish a confirmed-inactive funnel from a probe failure (WR-02).
+func (m *Module) funnelActive(ctx context.Context) (bool, bool) {
 	res, err := m.runner.Run(ctx, "tailscale", "funnel", "status")
 	if err != nil || res.ExitCode != 0 {
-		return false
+		return false, false
 	}
 	out := strings.ToLower(res.Stdout + res.Stderr)
 	// Inactive output is e.g. "Funnel is not configured." / "No serve config".
 	// Active output contains "(funnel on)" beside the exposed URL.
-	return strings.Contains(out, "funnel on")
+	return strings.Contains(out, "funnel on"), true
 }
 
 // serveActive reports whether `tailscale serve status` shows an active proxy.
