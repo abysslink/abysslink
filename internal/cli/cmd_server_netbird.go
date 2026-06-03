@@ -689,9 +689,14 @@ func netbirdUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContext,
 		return nil
 	}
 
+	// AUD-01: build a signed audit writer for chain-recorded backups.
+	// Best-effort: if the keychain is unavailable, sa is nil and the backup site
+	// in netbirdUpgradeLinux documents the unchained fallback with slog.Warn.
+	sa, _ := cmdSignedAudit(ctx, cc)
+
 	switch runtime.GOOS {
 	case "linux":
-		return netbirdUpgradeLinux(ctx, cfg, runner, p, newBinaryPath)
+		return netbirdUpgradeLinux(ctx, cfg, runner, p, newBinaryPath, sa)
 	case "darwin":
 		return netbirdUpgradeMacOS(ctx, runner, p)
 	default:
@@ -699,7 +704,7 @@ func netbirdUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContext,
 	}
 }
 
-func netbirdUpgradeLinux(ctx context.Context, cfg *config.Config, runner shell.Runner, p Printer, newBinaryPath string) error {
+func netbirdUpgradeLinux(ctx context.Context, cfg *config.Config, runner shell.Runner, p Printer, newBinaryPath string, sa *audit.SignedAudit) error {
 	if newBinaryPath == "" {
 		return fmt.Errorf("flag --binary-path required for Linux upgrade")
 	}
@@ -710,10 +715,20 @@ func netbirdUpgradeLinux(ctx context.Context, cfg *config.Config, runner shell.R
 		return err
 	}
 
-	// Backup current config.
+	// AUD-01: backup current config via chain-recorded BackupWithChain.
+	// This site is best-effort (slog.Warn on failure). If sa is unavailable
+	// (keychain unreachable), fall back to unchained Backup with an explicit
+	// warning — optional sidecar, not the principal mutation artifact.
 	cfgPath := netbirdConfigPathFor(cfg)
-	if _, err := audit.Backup(cfgPath); err != nil {
-		slog.WarnContext(ctx, "netbird upgrade: could not backup config", "err", err)
+	if sa != nil {
+		if _, err := audit.BackupWithChain(ctx, cfgPath, sa); err != nil {
+			slog.WarnContext(ctx, "netbird upgrade: could not chain-backup config", "err", err)
+		}
+	} else {
+		// Keychain unavailable — unchained fallback (best-effort sidecar; AUD-01 T-24-07-04).
+		if _, err := audit.Backup(cfgPath); err != nil {
+			slog.WarnContext(ctx, "netbird upgrade: could not backup config (keychain unavailable)", "err", err)
+		}
 	}
 
 	// Stop → copy → start → health-check.
@@ -847,29 +862,41 @@ func netbirdBackupRunE(ctx context.Context, cc *cmdContext, p Printer) error {
 
 	slog.InfoContext(ctx, "netbird backup", "config_path", cfgPath)
 
-	backupPath, err := audit.Backup(cfgPath)
+	// AUD-01: obtain a chain-recording *SignedAudit. Fail-closed for the
+	// principal config artifact (cfgPath). The two optional sidecar files
+	// (container-run.yaml, store.db) stay best-effort with a slog.Warn fallback.
+	sa, saErr := cmdSignedAudit(ctx, cc)
+	if saErr != nil {
+		return fmt.Errorf("netbird backup: %w", saErr)
+	}
+
+	backupPath, err := audit.BackupWithChain(ctx, cfgPath, sa)
 	if err != nil {
 		return fmt.Errorf("netbird backup: config.yaml: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  config.yaml backed up → "+backupPath))
 
 	// Also backup container run config if present (macOS path).
+	// Optional sidecar — best-effort with slog.Warn on failure (AUD-01 T-24-07-04).
 	containerRunCfg := "/etc/netbird/container-run.yaml"
 	if _, statErr := os.Stat(containerRunCfg); statErr == nil {
-		bp, err := audit.Backup(containerRunCfg)
+		bp, err := audit.BackupWithChain(ctx, containerRunCfg, sa)
 		if err != nil {
-			slog.WarnContext(ctx, "netbird backup: container-run.yaml backup failed", "err", err)
+			// Optional sidecar: keep best-effort behaviour.
+			slog.WarnContext(ctx, "netbird backup: container-run.yaml chain-backup failed", "err", err)
 		} else {
 			printerInfo(p, styleSuccess.Render("  ✓  container-run.yaml backed up → "+bp))
 		}
 	}
 
 	// Backup store.db if accessible (Linux path).
+	// Optional sidecar — best-effort with slog.Warn on failure (AUD-01 T-24-07-04).
 	storeDB := "/var/lib/netbird-server/store.db"
 	if _, statErr := os.Stat(storeDB); statErr == nil {
-		bp, err := audit.Backup(storeDB)
+		bp, err := audit.BackupWithChain(ctx, storeDB, sa)
 		if err != nil {
-			slog.WarnContext(ctx, "netbird backup: store.db backup failed", "err", err)
+			// Optional sidecar: keep best-effort behaviour.
+			slog.WarnContext(ctx, "netbird backup: store.db chain-backup failed", "err", err)
 		} else {
 			printerInfo(p, styleSuccess.Render("  ✓  store.db backed up → "+bp))
 		}
