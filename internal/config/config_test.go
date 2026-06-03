@@ -284,3 +284,105 @@ func TestDefaultsObservabilityOff(t *testing.T) {
 	assert.False(t, cfg.Observability.Metrics.Enabled, "metrics must default OFF")
 	assert.False(t, cfg.Observability.Digest.Enabled, "digest must default OFF")
 }
+
+// validBackendBaseConfig returns the minimal Config required to pass all
+// pre-existing Validate checks so that backend-specific assertions are isolated.
+func validBackendBaseConfig() *config.Config {
+	cfg := config.Defaults()
+	cfg.Version = 1
+	cfg.Identity.Email = "a@b.com"
+	cfg.Identity.UnixUser = "user"
+	cfg.Tailnet.Hostname = "my-rig"
+	return cfg
+}
+
+// TestValidateNetBirdHTTP verifies that a NetBird server_url with the http://
+// scheme is rejected with a message citing PAT leakage (NET-02/A7).
+func TestValidateNetBirdHTTP(t *testing.T) {
+	cfg := validBackendBaseConfig()
+	cfg.Backend.Type = "netbird"
+	cfg.Server.NetBird.ServerURL = "http://nb.example.com"
+	err := config.Validate(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must use https://")
+}
+
+// TestValidateNetBirdHTTPS verifies that a NetBird server_url with the https://
+// scheme passes the scheme check (NET-02).
+func TestValidateNetBirdHTTPS(t *testing.T) {
+	cfg := validBackendBaseConfig()
+	cfg.Backend.Type = "netbird"
+	cfg.Server.NetBird.ServerURL = "https://nb.example.com"
+	err := config.Validate(cfg)
+	require.NoError(t, err)
+}
+
+// TestValidateHostname verifies that tailnet.hostname values with a leading dash
+// or non-lowercase charset are rejected, and that valid labels are accepted (NET-03/A8).
+func TestValidateHostname(t *testing.T) {
+	tests := []struct {
+		name      string
+		hostname  string
+		wantErr   bool
+		errSubstr string
+	}{
+		{name: "reject_leading_dash", hostname: "-badhost", wantErr: true, errSubstr: "not a valid hostname"},
+		{name: "reject_uppercase", hostname: "MYRIG", wantErr: true, errSubstr: "not a valid hostname"},
+		{name: "accept_valid_label", hostname: "my-rig", wantErr: false},
+		{name: "accept_multi_label", hostname: "my.rig.example", wantErr: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validBackendBaseConfig()
+			cfg.Tailnet.Hostname = tc.hostname
+			err := config.Validate(cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errSubstr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestValidateServerURLHostname verifies that a server_url whose hostname
+// component begins with dashes is rejected (DNS-safe charset, NET-03/A8), and
+// that a valid URL with a port is accepted.
+func TestValidateServerURLHostname(t *testing.T) {
+	tests := []struct {
+		name      string
+		backendType string
+		serverURL string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:        "reject_leading_dashes_in_hostname",
+			backendType: "headscale",
+			serverURL:   "https://--inject.example.com",
+			wantErr:     true,
+			errSubstr:   "DNS-safe",
+		},
+		{
+			name:        "accept_valid_url_with_port",
+			backendType: "headscale",
+			serverURL:   "https://nb.example.com:8080",
+			wantErr:     false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validBackendBaseConfig()
+			cfg.Backend.Type = tc.backendType
+			cfg.Server.Headscale.ServerURL = tc.serverURL
+			err := config.Validate(cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errSubstr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
