@@ -20,8 +20,8 @@ make lint
 ```
 
 Requirements:
-- Go 1.22+
-- `golangci-lint` (install via `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest`)
+- Go 1.26+ (`go.mod` targets go 1.26.4)
+- `golangci-lint` v2 (install via `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`)
 - `shellcheck` (for `scripts/install.sh` changes)
 
 ## Coding conventions
