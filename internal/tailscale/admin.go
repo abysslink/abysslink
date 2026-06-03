@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -110,7 +111,7 @@ func (a *AdminClient) ensureToken(ctx context.Context) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, maxAdminBody)
 	if err != nil {
 		return fmt.Errorf("admin: read token response: %w", err)
 	}
@@ -182,7 +183,7 @@ func (a *AdminClient) Devices(ctx context.Context) ([]Device, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, maxAdminBody)
 	if err != nil {
 		return nil, fmt.Errorf("admin: read devices response: %w", err)
 	}
@@ -221,7 +222,11 @@ func (a *AdminClient) TagDevice(ctx context.Context, deviceID string, tags []str
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		rb, _ := io.ReadAll(resp.Body)
+		rb, lerr := readLimited(resp.Body, maxAdminBody)
+		if lerr != nil {
+			slog.Warn("admin: response body read failed", "err", lerr)
+			rb = nil
+		}
 		return fmt.Errorf("admin: tag device returned %d: %s", resp.StatusCode, string(rb))
 	}
 	return nil
@@ -240,7 +245,11 @@ func (a *AdminClient) DeleteDevice(ctx context.Context, deviceID string) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
-		rb, _ := io.ReadAll(resp.Body)
+		rb, lerr := readLimited(resp.Body, maxAdminBody)
+		if lerr != nil {
+			slog.Warn("admin: response body read failed", "err", lerr)
+			rb = nil
+		}
 		return fmt.Errorf("admin: delete device returned %d: %s", resp.StatusCode, string(rb))
 	}
 	return nil
@@ -279,7 +288,7 @@ func (a *AdminClient) CreateAuthKey(ctx context.Context, tags []string) (string,
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	rb, err := io.ReadAll(resp.Body)
+	rb, err := readLimited(resp.Body, maxAdminBody)
 	if err != nil {
 		return "", fmt.Errorf("admin: read auth key response: %w", err)
 	}
@@ -311,7 +320,7 @@ func (a *AdminClient) GetACL(ctx context.Context) ([]byte, string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, maxAdminBody)
 	if err != nil {
 		return nil, "", fmt.Errorf("admin: read ACL response: %w", err)
 	}
@@ -348,7 +357,11 @@ func (a *AdminClient) SetACL(ctx context.Context, acl []byte, etag string) error
 		return fmt.Errorf("admin: ACL was modified concurrently (412 Precondition Failed); re-fetch and retry")
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		rb, _ := io.ReadAll(resp.Body)
+		rb, lerr := readLimited(resp.Body, maxAdminBody)
+		if lerr != nil {
+			slog.Warn("admin: response body read failed", "err", lerr)
+			rb = nil
+		}
 		return fmt.Errorf("admin: set ACL returned %d: %s", resp.StatusCode, string(rb))
 	}
 	return nil
