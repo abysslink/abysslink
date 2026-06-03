@@ -253,9 +253,22 @@ func metBindTailnetCheck(cfg *config.Config, tailnetIP string) modules.Finding {
 					addr, tailnetIP),
 			}
 		}
+		// tailnetIP known and bind matches — confirmed tailnet-scoped.
+		return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metrics bind address is tailnet-scoped"}
 	}
 
-	return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metrics bind address is tailnet-scoped"}
+	// WR-03: tailnetIP=="" means the backend (tailscaled/headscale/netbird) was
+	// unavailable during this CLI invocation. We cannot verify that the configured
+	// bind_addr is the tailnet IP, so we must NOT claim SeverityOK (false green).
+	// Emit a distinct check ID ("met-bind-unknown") so the threat-model row renders
+	// — (did-not-run) rather than ✓. The wildcard case above already produced
+	// SeverityFatal, so we only reach here for a non-wildcard non-empty addr.
+	return modules.Finding{
+		Module:   "metrics",
+		Check:    "met-bind-unknown",
+		Severity: modules.SeverityWarning,
+		Message:  "could not verify metrics bind_addr is tailnet-scoped — backend unavailable; restart tailscaled then re-run abysslink doctor",
+	}
 }
 
 // metLabelAuditCheck flags any series whose label names fall outside the
@@ -680,9 +693,11 @@ func findingFix(check string) string {
 		"sshd_running": "sudo systemctl disable --now sshd  (Linux)  |  System Settings → General → Sharing → Remote Login → turn off  (macOS)",
 		"checkperiod":  "Lower ssh_check_period in abysslink.yaml (max 12h)",
 		// Tailscale.
-		"needs_login":   "tailscale login",
-		"ssh_sandboxed": "brew install tailscale  (replaces App Store version)",
-		"installed":     "abysslink up --apply",
+		"needs_login":       "tailscale login",
+		"ssh_sandboxed":     "brew install tailscale  (replaces App Store version)",
+		"installed":         "abysslink up --apply",
+		"funnel-probe-fail": "ensure tailscaled is running: tailscale status — then re-run abysslink doctor",
+		"met-bind-unknown":  "start tailscaled so backend IP can be resolved, then re-run abysslink doctor",
 		// Tailnet Lock.
 		"lock_enabled": "tailscale lock init   (then abysslink up --apply)",
 		"lock_status":  "ensure tailscale is running: brew services restart tailscale",
