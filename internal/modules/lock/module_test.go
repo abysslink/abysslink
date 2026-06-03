@@ -112,3 +112,16 @@ func TestApply_LockDisabled_ReturnsError(t *testing.T) {
 	require.Error(t, err, "Apply must return an error when Tailnet Lock is required but not enabled")
 	assert.Contains(t, err.Error(), "Tailnet Lock is required but not yet enabled")
 }
+
+// TestVerifyReturnsNil asserts that Verify returns nil findings and nil error
+// (Pitfall-4 fix: Verify must not delegate to Detect to avoid double-emission).
+func TestVerifyReturnsNil(t *testing.T) {
+	// No mock calls expected — Verify must return nil without running any commands.
+	r := shell.NewMockRunner()
+	cfg := config.Defaults()
+	cfg.Tailnet.Lock.Enabled = true
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+	findings, err := m.Verify(context.Background())
+	require.NoError(t, err, "Verify must not return an error")
+	require.Empty(t, findings, "Verify must return nil/empty findings (no double-emission)")
+}
