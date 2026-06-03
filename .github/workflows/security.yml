@@ -22,7 +22,7 @@ jobs:
       - name: Harden runner
         uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
         with:
-          egress-policy: audit
+          egress-policy: block
           allowed-endpoints: >
             golang.org:443
             proxy.golang.org:443
@@ -42,7 +42,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version-file: go.mod
+          go-version: "1.26"
           cache: true
 
       - name: Install govulncheck
@@ -98,7 +98,7 @@ jobs:
       - name: Harden runner
         uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
         with:
-          egress-policy: audit
+          egress-policy: block
           allowed-endpoints: >
             golang.org:443
             proxy.golang.org:443
@@ -117,7 +117,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          go-version-file: go.mod
+          go-version: "1.26"
           cache: true
 
       - name: Install gosec
