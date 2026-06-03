@@ -29,7 +29,7 @@ See `docs/IMPLEMENTATION-TASKS.md` — "Cross-cutting decisions Claude Code shou
 1. **Go**, not Python. Single static binary.
 2. **Apache-2.0** license. Not MIT, not GPL.
 3. **No mobile app** in v1.
-4. **Tailscale only** in v1. Headscale / NetBird deferred.
+4. **Tailscale** is the default backend; self-hosted **Headscale** and **NetBird** control planes are also supported (shipped in v3.0.0 — the original v1 plan deferred them).
 5. **ntfy** is the default notification backend.
 6. **OS keychain** for secrets. Vaultwarden module deferred to v2+.
 7. **`--dry-run`** is the default for destructive ops.
@@ -54,7 +54,7 @@ If you find yourself wanting to deviate from these, stop and ask first.
 
 ### Coding conventions
 
-- Go 1.22+. `go.mod` module path: `github.com/abysslink/abysslink`.
+- Go 1.26+ (`go.mod` targets go 1.26.4). Module path: `github.com/abysslink/abysslink`.
 - Lint with `golangci-lint` per `.golangci.yml` (errcheck, gosec, revive, gofmt, goimports, gocyclo, ineffassign, unused, staticcheck).
 - Tests required for every non-trivial function. Use `testify` for assertions, `httptest.Server` for HTTP mocking, fixtures in `testdata/`.
 - Run `make lint test` before declaring a phase complete.
