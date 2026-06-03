@@ -132,6 +132,20 @@ func TestApply_SeverityOK_NoMutation(t *testing.T) {
 	}
 }
 
+// TestVerifyReturnsNil asserts that Verify returns nil findings and nil error
+// (Pitfall-4 fix: Verify must not delegate to Detect to avoid double-emission).
+func TestVerifyReturnsNil(t *testing.T) {
+	// No mock calls expected — Verify must return nil without running any commands.
+	r := shell.NewMockRunner()
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Enabled = true
+	cfg.Modules.SSH.Mode = "tailscale"
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+	findings, err := m.Verify(context.Background())
+	require.NoError(t, err, "Verify must not return an error")
+	require.Empty(t, findings, "Verify must return nil/empty findings (no double-emission)")
+}
+
 // TestApply_NonOK_RunsMutation asserts that Apply still issues the disable
 // mutation when the ssh finding is non-OK (sshd is on when it should be off).
 func TestApply_NonOK_RunsMutation(t *testing.T) {
