@@ -144,7 +144,7 @@ func enrollRigGenerateKey(ctx context.Context, opts enrollRigOpts, rigSvc string
 		return fmt.Errorf("enroll rig: key gen: %w", err)
 	}
 	if !opts.apply {
-		fmt.Fprintf(out, "[dry-run] Would generate and store HMAC signing key for rig %q\n", opts.name)
+		_, _ = fmt.Fprintf(out, "[dry-run] Would generate and store HMAC signing key for rig %q\n", opts.name)
 		return nil
 	}
 	if opts.keychain == nil {
@@ -154,13 +154,13 @@ func enrollRigGenerateKey(ctx context.Context, opts enrollRigOpts, rigSvc string
 		return fmt.Errorf("enroll rig: store signing key: %w", err)
 	}
 	// Print the key ONCE with a one-time-warning box (mirror Tailnet Lock UX).
-	fmt.Fprintf(out, "\n")
-	fmt.Fprintf(out, "┌─────────────────────────────────────────────────────────────────┐\n")
-	fmt.Fprintf(out, "│  ONE-TIME SECRET: HMAC signing key for rig %q\n", opts.name)
-	fmt.Fprintf(out, "│  Store this in your password manager — it will not be shown again.\n")
-	fmt.Fprintf(out, "│  %s\n", hexKey)
-	fmt.Fprintf(out, "└─────────────────────────────────────────────────────────────────┘\n")
-	fmt.Fprintf(out, "\n")
+	_, _ = fmt.Fprintf(out, "\n")
+	_, _ = fmt.Fprintf(out, "┌─────────────────────────────────────────────────────────────────┐\n")
+	_, _ = fmt.Fprintf(out, "│  ONE-TIME SECRET: HMAC signing key for rig %q\n", opts.name)
+	_, _ = fmt.Fprintf(out, "│  Store this in your password manager — it will not be shown again.\n")
+	_, _ = fmt.Fprintf(out, "│  %s\n", hexKey)
+	_, _ = fmt.Fprintf(out, "└─────────────────────────────────────────────────────────────────┘\n")
+	_, _ = fmt.Fprintf(out, "\n")
 	return nil
 }
 
@@ -182,7 +182,7 @@ func enrollRigMigrateV1(ctx context.Context, opts enrollRigOpts, rigSvc string, 
 				return fmt.Errorf("enroll rig: migrate keychain entry %q: %w", acct, setErr)
 			}
 		} else {
-			fmt.Fprintf(out, "[dry-run] Would migrate keychain entry abysslink/%s → %s/%s\n", acct, rigSvc, acct)
+			_, _ = fmt.Fprintf(out, "[dry-run] Would migrate keychain entry abysslink/%s → %s/%s\n", acct, rigSvc, acct)
 		}
 	}
 	return nil
@@ -246,9 +246,9 @@ func enrollRigWriteConfig(opts enrollRigOpts, cfg *config.Config, topic string, 
 		if err := config.Write(opts.cfgPath, cfg); err != nil {
 			return fmt.Errorf("enroll rig: write config: %w", err)
 		}
-		fmt.Fprintf(out, "Enrolled rig %q (topic=%s, backend=%s)\n", opts.name, topic, backendType)
+		_, _ = fmt.Fprintf(out, "Enrolled rig %q (topic=%s, backend=%s)\n", opts.name, topic, backendType)
 	} else {
-		fmt.Fprintf(out, "[dry-run] Would enroll rig %q (topic=%s, backend=%s, hostname=%s)\n",
+		_, _ = fmt.Fprintf(out, "[dry-run] Would enroll rig %q (topic=%s, backend=%s, hostname=%s)\n",
 			opts.name, topic, backendType, hostname)
 	}
 	return nil
@@ -285,9 +285,9 @@ func enforceRigToRigACLDeny(ctx context.Context, mgr aclManagerFace, apply bool,
 		if err := assertNoRigRigGrant(raw2); err != nil {
 			return fmt.Errorf("enroll rig: ACL validate-after-push failed: %w", err)
 		}
-		fmt.Fprintf(out, "ACL isolation verified: no tag:laptop↔tag:laptop grant found (absence-of-grant, SC-3)\n")
+		_, _ = fmt.Fprintf(out, "ACL isolation verified: no tag:laptop↔tag:laptop grant found (absence-of-grant, SC-3)\n")
 	} else {
-		fmt.Fprintf(out, "[dry-run] Would verify ACL: no tag:laptop↔tag:laptop grant (absence-of-grant)\n")
+		_, _ = fmt.Fprintf(out, "[dry-run] Would verify ACL: no tag:laptop↔tag:laptop grant (absence-of-grant)\n")
 	}
 
 	return nil
