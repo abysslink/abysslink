@@ -326,7 +326,12 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
   4. Report-only `SeverityOK` findings appear exactly ONCE per `abysslink doctor` pass for lock/ssh/ntfy/acl/tailscale — either emitted in only one of Detect/Verify (hardening-module precedent) or deduped on `(Module, Check)` in `runner.Doctor`; the "N ok" count is no longer inflated and no duplicate ✓ rows render (DOC-08 / WR-08)
   5. `make lint test` green; new/updated tests cover each probe-failure → non-OK path and the single-emission/dedup guarantee
 
-**Plans:** 4/4 plans complete
+**Plans:** 4 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 23.1 to break down)
+**Wave 1** *(all plans independent — parallel execution)*
+
+- [ ] 23.1-01-PLAN.md — DOC-05 + DOC-08 (tailscale): funnelActive returns (bool, bool); probe-failure → SeverityWarning Check="funnel-probe-fail"; Verify calls only checkNoPublicExposure (no Detect delegation)
+- [ ] 23.1-02-PLAN.md — DOC-07 + DOC-08 (ntfy): hasWildcardListen extended for `[::]:PORT` and bare `::`; content-level `[::]` check added; ntfy Verify returns nil
+- [ ] 23.1-03-PLAN.md — DOC-06: metBindTailnetCheck tailnetIP="" + non-wildcard → SeverityWarning Check="met-bind-unknown"; findingFix entries for "funnel-probe-fail" and "met-bind-unknown"
+- [ ] 23.1-04-PLAN.md — DOC-08 (lock + ssh): lock Verify returns nil; ssh Verify returns nil; TestRunnerDoctor_NoDoubleEmit integration test (D-02)
