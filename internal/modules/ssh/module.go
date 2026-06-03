@@ -182,6 +182,9 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 
 	var actions []modules.Action
 	for _, f := range findings {
+		if f.Severity == modules.SeverityOK {
+			continue // OK findings represent passing checks; no action needed
+		}
 		switch m.cfg.Modules.SSH.Mode {
 		case "tailscale":
 			if f.Check == "remote_login" || f.Check == "sshd_running" {
