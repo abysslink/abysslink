@@ -82,6 +82,15 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 			Severity: modules.SeverityWarning,
 			Message:  "config requires Tailnet Lock but it is not enabled on this tailnet",
 		})
+	} else if status.Enabled {
+		// Emit explicit OK so "check ran and passed" is distinguishable from
+		// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "lock_enabled",
+			Severity: modules.SeverityOK,
+			Message:  "lock_enabled: Tailnet Lock is enabled on this tailnet",
+		})
 	}
 
 	return findings, nil

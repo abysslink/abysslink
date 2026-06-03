@@ -376,6 +376,15 @@ func (m *Module) checkNoPublicExposure(ctx context.Context) []modules.Finding {
 			Severity: modules.SeverityFatal,
 			Message:  "Tailscale Funnel is enabled — this exposes a service to the public internet; disable it with `tailscale funnel reset`",
 		})
+	} else {
+		// Emit explicit OK so "check ran and passed" is distinguishable from
+		// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "funnel",
+			Severity: modules.SeverityOK,
+			Message:  "funnel: no public exposure — Funnel/Serve disabled or not configured",
+		})
 	}
 	if m.serveActive(ctx) {
 		findings = append(findings, modules.Finding{
