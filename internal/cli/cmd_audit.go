@@ -97,9 +97,28 @@ func runAuditVerify(ctx context.Context, p Printer, logPath string, kc audit.Key
 	entries, _ := audit.ReadLog(logPath)
 	printerInfo(p, fmt.Sprintf("Chain OK — %d entries (%d signatures verified, %d legacy/unsigned/unverifiable skipped)",
 		len(entries), result.SigsVerified, result.SigsSkipped))
+
+	// AUD-02 D-04: surface CounterStatus honestly — "unknown" must NEVER be
+	// rendered as a pass. Only "verified" is a clean counter result.
+	switch result.CounterStatus {
+	case "verified":
+		printerInfo(p, "Counter OK — keychain counter matches log entry count (tail-truncation check passed)")
+	case "mismatch":
+		printerError(p, fmt.Sprintf("COUNTER MISMATCH: %s", result.Reason))
+	case "unknown":
+		printerError(p, "? Counter UNKNOWN — keychain counter absent or unreadable; tail-truncation check could not run")
+	case "":
+		// Pre-AUD-02 log with no counter; no output (not a failure for legacy logs).
+	}
+
 	if kc == nil {
 		// Degraded result: chain walked but unauthenticated. Exit non-zero so
 		// scripts do not treat an unverified log as fully trusted (WR-02).
+		return &exitError{code: exitCodeError}
+	}
+	// AUD-02: CounterStatus="unknown" is not a clean result — exit non-zero so
+	// scripts cannot treat an unverified tail-truncation check as fully trusted.
+	if result.CounterStatus == "unknown" {
 		return &exitError{code: exitCodeError}
 	}
 	return nil
