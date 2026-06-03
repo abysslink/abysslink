@@ -398,7 +398,6 @@ behind-proxy: false
 		"--name", dockerContainerName,
 		"--restart", "always",
 		"-p", fmt.Sprintf("%s:%s:80", tailnetIP, port),
-		"-p", fmt.Sprintf("127.0.0.1:%s:80", port),
 		"-v", cfgPath+":/etc/ntfy/server.yml:ro",
 		"-v", dataDir+":/var/lib/ntfy",
 		dockerImage,
