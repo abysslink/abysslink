@@ -134,6 +134,35 @@ func TestCheckFileVault_FatalOnExecError(t *testing.T) {
 	assert.Contains(t, found.Message, "disk-encryption state is UNKNOWN")
 }
 
+// TestFileVaultSingleEmission_DetectAndVerify asserts that calling both Detect
+// and Verify (as Runner.Doctor does) produces exactly one filevault finding.
+// This guards against the Detect+Verify double-emission landmine (Pitfall 4).
+func TestFileVaultSingleEmission_DetectAndVerify(t *testing.T) {
+	// MockRunner returns "FileVault is On" for every call (Detect + Verify both invoke fdesetup).
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "FileVault is On.\n"}}, // Detect call
+		// Verify is now a no-op (returns nil) — no additional MockRunner call needed.
+	)
+	m := &Module{runner: r}
+	ctx := context.Background()
+
+	detectFindings, err := m.Detect(ctx)
+	require.NoError(t, err)
+
+	verifyFindings, err := m.Verify(ctx)
+	require.NoError(t, err)
+
+	all := append(detectFindings, verifyFindings...)
+	var filevaultFindings []modules.Finding
+	for _, f := range all {
+		if f.Check == "filevault" {
+			filevaultFindings = append(filevaultFindings, f)
+		}
+	}
+	assert.Len(t, filevaultFindings, 1,
+		"exactly one filevault finding per Detect+Verify pass (no double-emission)")
+}
+
 func TestCheckFirewall_WarnWhenDisabled(t *testing.T) {
 	json := `{"SPFirewallDataType":[{"spfw_global_state":"disabled"}]}`
 	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: json}})
