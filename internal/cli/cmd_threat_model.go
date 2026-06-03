@@ -77,10 +77,17 @@ var backendRows = map[string][]threatRow{
 	},
 }
 
+// checkState records whether a check ID ran and whether it failed.
+// It drives the tri-state render: absent (never ran) ⇒ —; ran+OK ⇒ ✓; ran+failed ⇒ ✗.
+type checkState struct {
+	ran    bool
+	failed bool
+}
+
 func newThreatModelCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "threat-model",
-		Short: "Print the security threat model with the current ✓/✗ status of each defense",
+		Short: "Print the security threat model with the current ✓/✗/— status of each defense",
 		Example: `  # Show the threat model and current security posture
   abysslink threat-model
 
@@ -95,16 +102,19 @@ func newThreatModelCmd() *cobra.Command {
 			p := newPrinter(cmd)
 			backend, _ := cmd.Flags().GetString("backend")
 
-			// Derive live status from a doctor pass (best-effort).
-			present := map[string]bool{}
+			// DOC-01: derive live status from the shared collectDoctorFindings set —
+			// the same source of truth doctor and the web-UI dashboard consume.
+			// Build a tri-state map so absent checks render — (never ✓).
+			state := map[string]checkState{}
 			if deps, derr := buildDeps(ctx, cc); derr == nil {
-				if r, rerr := modules.NewRunner(allModules(deps), cc.cfg); rerr == nil {
-					findings, _ := r.Doctor(ctx)
-					for _, f := range findings {
-						if f.Severity != modules.SeverityOK {
-							present[f.Check] = true
-						}
+				findings := collectDoctorFindings(ctx, cc, deps)
+				for _, f := range findings {
+					st := state[f.Check]
+					st.ran = true
+					if f.Severity != modules.SeverityOK {
+						st.failed = true
 					}
+					state[f.Check] = st
 				}
 			}
 
@@ -112,17 +122,17 @@ func newThreatModelCmd() *cobra.Command {
 
 			printerInfo(p, "")
 			printerInfo(p, styleBold.Render("  Base threat model"))
-			renderThreatRows(p, threatRows, present)
+			renderThreatRows(p, threatRows, state)
 
 			printerInfo(p, "")
 			printerInfo(p, styleBold.Render("  v3 surfaces"))
-			renderThreatRows(p, v3SurfaceRows, present)
+			renderThreatRows(p, v3SurfaceRows, state)
 
 			if backend != "" {
 				if rows, ok := backendRows[backend]; ok {
 					printerInfo(p, "")
 					printerInfo(p, styleBold.Render(fmt.Sprintf("  Backend: %s", backend)))
-					renderThreatRows(p, rows, present)
+					renderThreatRows(p, rows, state)
 				} else {
 					printerInfo(p, "")
 					printerInfo(p, styleMuted.Render(fmt.Sprintf("  unknown backend %q — rendering base + v3 surfaces only (valid: tailscale, headscale, netbird)", backend)))
@@ -131,6 +141,7 @@ func newThreatModelCmd() *cobra.Command {
 
 			printerInfo(p, "")
 			printerInfo(p, styleMuted.Render("✗ means a doctor check is currently failing — run `abysslink doctor` for detail."))
+			printerInfo(p, styleMuted.Render("— means the backing check did not run this pass (non-active backend or probe unavailable)."))
 			return nil
 		},
 	}
@@ -138,20 +149,40 @@ func newThreatModelCmd() *cobra.Command {
 	return cmd
 }
 
-// renderThreatRows prints each row with a ✓/✗ mark derived from the present
-// (failing-check) set built from a live doctor pass.
-func renderThreatRows(p Printer, rows []threatRow, present map[string]bool) {
+// renderThreatRows prints each row with a tri-state ✓/✗/— mark derived from the
+// checkState map built over the shared collectDoctorFindings set (DOC-01).
+//
+// Per-row logic (D-02, D-04):
+//   - empty failChecks (structural rows) ⇒ always ✓ (Pitfall 3 — always on by construction)
+//   - any failCheck ran && failed ⇒ ✗ (styleFatal)
+//   - else any failCheck ran ⇒ ✓ (styleSuccess)
+//   - else (no failCheck present in the set) ⇒ — (styleMuted; honest unknown, never fabricated ✓)
+func renderThreatRows(p Printer, rows []threatRow, state map[string]checkState) {
 	for _, row := range rows {
-		ok := true
-		for _, c := range row.failChecks {
-			if present[c] {
-				ok = false
-				break
+		var mark string
+		if len(row.failChecks) == 0 {
+			// Structural row: defense is always on by construction.
+			mark = styleSuccess.Render("✓")
+		} else {
+			anyRan := false
+			anyFailed := false
+			for _, c := range row.failChecks {
+				if st, ok := state[c]; ok && st.ran {
+					anyRan = true
+					if st.failed {
+						anyFailed = true
+					}
+				}
 			}
-		}
-		mark := styleSuccess.Render("✓")
-		if !ok {
-			mark = styleFatal.Render("✗")
+			switch {
+			case anyFailed:
+				mark = styleFatal.Render("✗")
+			case anyRan:
+				mark = styleSuccess.Render("✓")
+			default:
+				// No backing check ran this pass — render honestly as unknown.
+				mark = styleMuted.Render("—")
+			}
 		}
 		printerInfo(p, fmt.Sprintf("  %s  %s", mark, row.desc))
 	}
