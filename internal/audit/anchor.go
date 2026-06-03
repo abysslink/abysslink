@@ -91,9 +91,27 @@ func WriteAnchor(ctx context.Context, logPath string, kc KeychainStore) error {
 	}
 
 	path := anchorPath(logPath)
-	tmp := path + ".abysslink.tmp"
-	if werr := os.WriteFile(tmp, data, 0o600); werr != nil {
+	// Use os.CreateTemp for a unique tmp path per concurrent caller — a shared
+	// static ".abysslink.tmp" suffix races when two goroutines both call
+	// WriteAnchor (AUD-02 per-Append anchor makes this routine now). The tmp
+	// file is created in the same directory as the anchor so the rename is
+	// always within the same filesystem (cross-device rename would fail).
+	f, ferr := os.CreateTemp(filepath.Dir(path), "audit.anchor.*.tmp")
+	if ferr != nil {
+		return fmt.Errorf("audit: create temp anchor: %w", ferr)
+	}
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("audit: write temp anchor %s: %w", tmp, werr)
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil { //nolint:gosec // G304: tmp is derived from os.CreateTemp; path is app-controlled
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: chmod temp anchor %s: %w", tmp, err)
 	}
 	if rerr := os.Rename(tmp, path); rerr != nil {
 		_ = os.Remove(tmp)

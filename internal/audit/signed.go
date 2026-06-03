@@ -48,7 +48,6 @@ const (
 	hmacKeyAccount = "audit-hmac" // full keychain id: abysslink-audit-hmac
 	hmacKeyBytes   = 32
 	genesisMarker  = "genesis"
-	anchorCadence  = 100 // write an anchor every N appended entries
 )
 
 // SignInput is the ONLY permitted input to the HMAC signer.
@@ -346,11 +345,18 @@ func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, d
 
 	a.mu.Unlock() // explicit — must precede the post-lock anchor write below.
 
-	// Best-effort, count-based anchor. Never under the mutex; never fatal.
-	if atomic.AddInt64(&a.count, 1)%anchorCadence == 0 {
-		if aerr := WriteAnchor(ctx, a.logPath, a.kc); aerr != nil {
-			slog.Warn("audit: anchor write failed", "err", aerr, "log", a.logPath)
-		}
+	// AUD-02: anchor refreshed on EVERY append (not cadenced).
+	// Failure hard-fails Append; WriteFile callers abort before physical write
+	// because Append returns error first (D-03 write-ordering correctness).
+	atomic.AddInt64(&a.count, 1)
+	if aerr := WriteAnchor(ctx, a.logPath, a.kc); aerr != nil {
+		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
+	}
+	// AUD-02: keychain counter incremented after successful anchor write.
+	// Counter failure does NOT abort — anchor is already written; Verify
+	// will report CounterStatus="unknown" on the next run.
+	if cerr := IncrementCounter(ctx, a.kc); cerr != nil {
+		slog.Warn("audit: keychain counter increment failed", "err", cerr, "log", a.logPath)
 	}
 	return nil
 }
