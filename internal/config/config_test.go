@@ -346,16 +346,76 @@ func TestValidateHostname(t *testing.T) {
 	}
 }
 
+// TestValidateWatchPanes verifies the D-06/NET-03 flag-injection gate for tmux
+// pane names. Each element of cfg.Modules.Watch.Panes is passed verbatim to
+// `tmux capture-pane -t <pane>`, so a value beginning with `-` would be parsed
+// as a tmux flag (A8 — same class as tailscale hostname injection).
+func TestValidateWatchPanes(t *testing.T) {
+	tests := []struct {
+		name      string
+		panes     []string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:    "valid_pane",
+			panes:   []string{"main"},
+			wantErr: false,
+		},
+		{
+			name:    "valid_multi_pane",
+			panes:   []string{"main", "editor"},
+			wantErr: false,
+		},
+		{
+			name:      "reject_leading_dash",
+			panes:     []string{"-kill-server"},
+			wantErr:   true,
+			errSubstr: "A8/NET-03",
+		},
+		{
+			name:      "reject_flag_injection",
+			panes:     []string{"main", "--kill-server"},
+			wantErr:   true,
+			errSubstr: "A8/NET-03",
+		},
+		{
+			name:      "reject_bad_charset",
+			panes:     []string{"MYRIG"},
+			wantErr:   true,
+			errSubstr: "A8/NET-03",
+		},
+		{
+			name:    "empty_panes",
+			panes:   []string{},
+			wantErr: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validBackendBaseConfig()
+			cfg.Modules.Watch.Panes = tc.panes
+			err := config.Validate(cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errSubstr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 // TestValidateServerURLHostname verifies that a server_url whose hostname
 // component begins with dashes is rejected (DNS-safe charset, NET-03/A8), and
 // that a valid URL with a port is accepted.
 func TestValidateServerURLHostname(t *testing.T) {
 	tests := []struct {
-		name      string
+		name        string
 		backendType string
-		serverURL string
-		wantErr   bool
-		errSubstr string
+		serverURL   string
+		wantErr     bool
+		errSubstr   string
 	}{
 		{
 			name:        "reject_leading_dashes_in_hostname",
