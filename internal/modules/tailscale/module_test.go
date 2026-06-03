@@ -57,18 +57,38 @@ func TestFunnelActive(t *testing.T) {
 
 func TestServeActive(t *testing.T) {
 	cases := []struct {
-		name string
-		res  shell.Result
-		want bool
+		name        string
+		call        shell.Call
+		wantActive  bool
+		wantProbeOK bool
 	}{
-		{"active proxy", shell.Result{Stdout: "https://rig.ts.net\n|-- /  proxy http://127.0.0.1:8080", ExitCode: 0}, true},
-		{"no config", shell.Result{Stdout: "No serve config", ExitCode: 0}, false},
-		{"empty", shell.Result{Stdout: "", ExitCode: 0}, false},
+		{
+			"active proxy",
+			shell.Call{Result: shell.Result{Stdout: "https://rig.ts.net\n|-- /  proxy http://127.0.0.1:8080", ExitCode: 0}},
+			true, true,
+		},
+		{
+			"no config",
+			shell.Call{Result: shell.Result{Stdout: "No serve config", ExitCode: 0}},
+			false, true,
+		},
+		{
+			"empty",
+			shell.Call{Result: shell.Result{Stdout: "", ExitCode: 0}},
+			false, true,
+		},
+		{
+			"exec error",
+			shell.Call{Err: errors.New("not found")},
+			false, false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestModule(shell.Call{Result: tc.res})
-			assert.Equal(t, tc.want, m.serveActive(context.Background()))
+			m := newTestModule(tc.call)
+			active, probeOK := m.serveActive(context.Background())
+			assert.Equal(t, tc.wantActive, active)
+			assert.Equal(t, tc.wantProbeOK, probeOK)
 		})
 	}
 }
@@ -204,6 +224,99 @@ func TestFunnelProbeFailDistinctCheckID(t *testing.T) {
 		assert.NotEqual(t, "funnel-probe-fail", checkID,
 			"funnel-probe-fail must not appear in threat-model failChecks (D-04): found %q", checkID)
 	}
+}
+
+// TestServeProbeFailure verifies CR-02: exec error on "tailscale serve status"
+// must produce a SeverityWarning with Check="serve-probe-fail", never Check="serve"
+// (which would silently suppress the serve warning while hiding the probe failure).
+func TestServeProbeFailure(t *testing.T) {
+	m := newTestModule(
+		// funnelActive call: confirmed-inactive (probe succeeds)
+		shell.Call{Result: shell.Result{Stdout: "Funnel is not configured.", ExitCode: 0}},
+		// serveActive call: exec error
+		shell.Call{Err: errors.New("tailscale: command not found")},
+	)
+	findings := m.checkNoPublicExposure(context.Background())
+
+	var probeFail *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "serve-probe-fail" {
+			probeFail = &findings[i]
+		}
+	}
+	require.NotNil(t, probeFail, "expected a finding with Check=serve-probe-fail on exec error, got %+v", findings)
+	assert.Equal(t, modules.SeverityWarning, probeFail.Severity)
+
+	// Must not emit a Check="serve" finding at all (no false silence / no serve Warning suppressed by probe failure).
+	for _, f := range findings {
+		assert.NotEqual(t, "serve", f.Check, "unexpected serve check in serve probe-failure path: %+v", f)
+	}
+	// Must not emit SeverityOK for serve-probe-fail.
+	assert.NotEqual(t, modules.SeverityOK, probeFail.Severity, "serve-probe-fail must not be SeverityOK")
+}
+
+// TestServeProbeFailNonZeroExit verifies CR-02: a non-zero exit code (no exec
+// error) is treated identically to an exec error — probe-failure, not false-silence.
+func TestServeProbeFailNonZeroExit(t *testing.T) {
+	m := newTestModule(
+		// funnelActive call: confirmed-inactive (probe succeeds)
+		shell.Call{Result: shell.Result{Stdout: "Funnel is not configured.", ExitCode: 0}},
+		// serveActive call: non-zero exit
+		shell.Call{Result: shell.Result{ExitCode: 1}},
+	)
+	findings := m.checkNoPublicExposure(context.Background())
+
+	var probeFail *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "serve-probe-fail" {
+			probeFail = &findings[i]
+		}
+	}
+	require.NotNil(t, probeFail, "expected Check=serve-probe-fail on non-zero exit, got %+v", findings)
+	assert.Equal(t, modules.SeverityWarning, probeFail.Severity)
+
+	for _, f := range findings {
+		assert.NotEqual(t, "serve", f.Check, "unexpected serve check in serve probe-failure path: %+v", f)
+	}
+}
+
+// TestServeProbeFailDistinctCheckID documents the D-04 invariant for serve:
+// "serve-probe-fail" must NOT appear in any threat-model row's failChecks, so
+// probe-failure findings keep the row at — (did-not-run), not ✗.
+//
+// This is a compile-time-stable assertion over the known failChecks universe.
+func TestServeProbeFailDistinctCheckID(t *testing.T) {
+	// All failChecks values from cmd_threat_model.go threatRows, v3SurfaceRows,
+	// and backendRows as of Phase 23.2. Update this list if new rows are added.
+	knownFailChecks := []string{
+		// threatRows
+		"funnel", "acl_drift", "remote_login", "sshd_running",
+		"filevault", "luks", "lock_enabled", "listen_address",
+		// v3SurfaceRows
+		"sec-metrics-bind", "metrics-bind-tailnet",
+		"sec-webui-bind", "webui-bind",
+		"sec-audit-anchor-age", "audit-anchor-age",
+		// backendRows — tailscale
+		"sec-funnel-schema",
+		// backendRows — headscale
+		"hs-tls", "hs-api-auth", "hs-lock", "hs-oidc-filter",
+		// backendRows — netbird
+		"nb-tls", "nb-version", "nb-zitadel", "nb-lock",
+	}
+
+	for _, checkID := range knownFailChecks {
+		assert.NotEqual(t, "serve-probe-fail", checkID,
+			"serve-probe-fail must not appear in threat-model failChecks (D-04 / CR-02): found %q", checkID)
+	}
+}
+
+// TestServeActiveOK is a regression guard: confirmed-inactive serve (clean output)
+// must yield active=false, probeOK=true — the probe ran and the check passed.
+func TestServeActiveOK(t *testing.T) {
+	m := newTestModule(shell.Call{Result: shell.Result{Stdout: "No serve config", ExitCode: 0}})
+	active, probeOK := m.serveActive(context.Background())
+	assert.False(t, active, "confirmed-inactive serve must return active=false")
+	assert.True(t, probeOK, "confirmed-inactive serve must return probeOK=true")
 }
 
 // TestVerifyCallsOnlyCheckNoPublicExposure verifies WR-08: Verify must not call

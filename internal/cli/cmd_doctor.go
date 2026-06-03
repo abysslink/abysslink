@@ -697,6 +697,7 @@ func findingFix(check string) string {
 		"ssh_sandboxed":     "brew install tailscale  (replaces App Store version)",
 		"installed":         "abysslink up --apply",
 		"funnel-probe-fail": "ensure tailscaled is running: tailscale status — then re-run abysslink doctor",
+		"serve-probe-fail":  "ensure tailscaled is running: tailscale status — then re-run abysslink doctor",
 		"met-bind-unknown":  "start tailscaled so backend IP can be resolved, then re-run abysslink doctor",
 		// Tailnet Lock.
 		"lock_enabled": "tailscale lock init   (then abysslink up --apply)",

@@ -376,6 +376,15 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 //  3. Confirmed inactive: emit SeverityOK with Check="funnel" so the threat-model
 //     row renders ✓ (D-05 — "check ran and passed" is distinguishable from "check
 //     never ran" in the tri-state).
+//
+// Three cases for the serve probe (IN-01, CR-02):
+//  1. Probe failure (exec error or non-zero exit): emit SeverityWarning with
+//     Check="serve-probe-fail" (distinct from "serve" so the threat-model row
+//     renders — not ✗). Does NOT return early — funnel findings are already
+//     appended above.
+//  2. Confirmed active: emit SeverityWarning with Check="serve".
+//  3. Confirmed inactive: no serve finding (correct — serve-inactive has no
+//     distinct sentinel, unlike funnel).
 func (m *Module) checkNoPublicExposure(ctx context.Context) []modules.Finding {
 	var findings []modules.Finding
 
@@ -410,7 +419,19 @@ func (m *Module) checkNoPublicExposure(ctx context.Context) []modules.Finding {
 			Message:  "funnel: no public exposure — Funnel/Serve disabled or not configured",
 		})
 	}
-	if m.serveActive(ctx) {
+
+	serveOn, serveProbeOK := m.serveActive(ctx)
+	if !serveProbeOK {
+		// Probe failure: command unavailable or returned non-zero exit.
+		// Use a distinct check ID so the threat-model row stays at —
+		// (did-not-run) rather than flipping to ✗ (IN-01 / CR-02).
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "serve-probe-fail",
+			Severity: modules.SeverityWarning,
+			Message:  "could not determine Serve state — tailscale serve command unavailable; re-run after: tailscale status",
+		})
+	} else if serveOn {
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "serve",
@@ -437,17 +458,20 @@ func (m *Module) funnelActive(ctx context.Context) (bool, bool) {
 }
 
 // serveActive reports whether `tailscale serve status` shows an active proxy.
-func (m *Module) serveActive(ctx context.Context) bool {
+// Returns (active, probeOK): probeOK is false when the command cannot be run
+// (exec error) or exits non-zero (daemon not available), so the caller can
+// distinguish a confirmed-inactive serve from a probe failure (CR-02 / IN-01).
+func (m *Module) serveActive(ctx context.Context) (active, probeOK bool) {
 	res, err := m.runner.Run(ctx, "tailscale", "serve", "status")
 	if err != nil || res.ExitCode != 0 {
-		return false
+		return false, false
 	}
 	out := strings.ToLower(res.Stdout + res.Stderr)
 	if strings.Contains(out, "no serve config") || strings.TrimSpace(out) == "" {
-		return false
+		return false, true
 	}
 	// Active serve output lists proxied targets (a tree with "|--" / "proxy").
-	return strings.Contains(out, "proxy") || strings.Contains(out, "|--")
+	return strings.Contains(out, "proxy") || strings.Contains(out, "|--"), true
 }
 
 // Repair attempts to fix findings.
