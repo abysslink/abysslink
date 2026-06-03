@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+#
+# OpenSSF Scorecard — supply-chain security posture analysis. Publishes results
+# to the public Scorecard API (api.securityscorecards.dev), which backs the
+# README scorecard badge, and uploads SARIF to the GitHub Security tab.
+name: Scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    # Weekly, Monday 07:20 UTC.
+    - cron: "20 7 * * 1"
+  push:
+    branches: ["main"]
+
+# Read-all at the top; the analysis job elevates only what it needs.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to upload the SARIF results to the code-scanning dashboard.
+      security-events: write
+      # Needed to publish results and get a badge (OIDC token for the API).
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          # Scorecard probes many endpoints (GitHub API, deps.dev, the OSSF
+          # results API); audit mode logs egress without blocking the analysis.
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@62b2cac7ed8198b15735ed49ab1e5cf35480ba46 # v2.4.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publish to the public Scorecard API so the README badge resolves.
+          publish_results: true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@b6a472f63d85b9c78a3ac5e89422239fc15e9b3c # v3.28.1
+        with:
+          sarif_file: results.sarif
