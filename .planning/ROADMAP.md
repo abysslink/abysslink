@@ -335,3 +335,25 @@ Plans:
 - [x] 23.1-02-PLAN.md — DOC-07 + DOC-08 (ntfy): hasWildcardListen extended for `[::]:PORT` and bare `::`; content-level `[::]` check added; ntfy Verify returns nil
 - [x] 23.1-03-PLAN.md — DOC-06: metBindTailnetCheck tailnetIP="" + non-wildcard → SeverityWarning Check="met-bind-unknown"; findingFix entries for "funnel-probe-fail" and "met-bind-unknown"
 - [x] 23.1-04-PLAN.md — DOC-08 (lock + ssh): lock Verify returns nil; ssh Verify returns nil; TestRunnerDoctor_NoDoubleEmit integration test (D-02)
+
+### Phase 23.2: Doctor probe-failure honesty (round 2) — serve + metrics-listener probes must not report OK on unproven probes (INSERTED)
+
+**Goal:** Close the two CRITICAL false-OK-on-unknown findings from the Phase 23.1 code review (23.1-REVIEW.md). The same anti-pattern fixed for `funnelActive` in 23.1 survives in two sibling probes: `serveActive` collapses a failed serve probe into "not active" (emitting no warning while the funnel ✓ already rendered), and `metDisabledListenerCheck` treats *any* dial error as proof the port is closed (reporting SeverityOK for a fail-closed security control it never actually verified). A doctor/threat-model check must never render ✓ for a control whose backing probe could not run.
+**Requirements**: DOC-09 (CR-02 serveActive probe-failure false-OK), DOC-10 (CR-01 metDisabledListenerCheck false-OK on inconclusive dial error)
+**Depends on:** Phase 23.1
+**Source:** Phase 23.1 code review (`.planning/phases/23.1-doctor-probe-failure-honesty-no-false-ok-on-unknown-or-faile/23.1-REVIEW.md`) — CR-01, CR-02
+**Success Criteria** (what must be TRUE):
+
+  1. `serveActive` (tailscale/module.go) distinguishes serve-probe failure from confirmed-inactive: on exec error / non-zero exit, `checkNoPublicExposure` emits a distinct `serve-probe-fail` SeverityWarning ("could not determine Serve state"), NOT silence; the "No public exposure" promise never renders confirmed-clean when the serve probe could not run (DOC-09 / CR-02)
+  2. `metDisabledListenerCheck` (cmd_doctor.go) returns SeverityOK only for a genuine closed port (`errors.Is(err, syscall.ECONNREFUSED)`); timeout, unreachable, and resolution-failure dial errors return a distinct `met-listener-unknown` SeverityWarning instead of falsely asserting "no stale metrics listener detected" (DOC-10 / CR-01)
+  3. `findingFix` map gains human-readable remediation entries for both new check IDs (`serve-probe-fail`, `met-listener-unknown`), mirroring the 23.1 `funnel-probe-fail` / `met-bind-unknown` entries
+  4. New tests cover each probe-failure → non-OK path: serve-probe exec error / non-zero exit asserts `serve-probe-fail` Warning (distinct from `funnel`); metrics probe against an unroutable address (e.g. `192.0.2.1:9` TEST-NET-1) asserts it does NOT return SeverityOK; existing closed-port-on-loopback ECONNREFUSED test still asserts SeverityOK
+  5. `make lint test` green
+
+**Plans:** 2 plans
+
+Plans:
+**Wave 1** *(both plans independent — parallel execution)*
+
+- [ ] 23.2-01-PLAN.md — DOC-09 (CR-02): serveActive returns (bool, bool); probe-failure emits SeverityWarning Check='serve-probe-fail'; findingFix entry; tests for exec-error + non-zero-exit + distinct-check-ID + serve-OK regression
+- [ ] 23.2-02-PLAN.md — DOC-10 (CR-01): metDisabledListenerCheck ECONNREFUSED gate; non-ECONNREFUSED errors emit SeverityWarning Check='met-listener-unknown'; findingFix entry; TestMetDisabledListener_UnroutableAddr (192.0.2.1:9) + ECONNREFUSED regression
