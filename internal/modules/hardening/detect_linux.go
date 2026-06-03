@@ -65,17 +65,40 @@ func checkLUKS(ctx context.Context, m *Module) ([]modules.Finding, error) {
 	res, err := m.runner.Run(ctx, "lsblk", "--json", "--output", "NAME,TYPE,MOUNTPOINT")
 	if err != nil {
 		slog.Warn("hardening detect: lsblk failed", "error", err)
-		return nil, nil
+		// DOC-02 / D-06: lsblk unavailable → disk-encryption state is UNKNOWN → FATAL.
+		// Stable marker "disk-encryption state is UNKNOWN" used by Plan 04's up gate.
+		// Message must NOT offer a bypass (D-05).
+		return []modules.Finding{{
+			Module:   m.Name(),
+			Check:    "luks",
+			Severity: modules.SeverityFatal,
+			Message: "disk-encryption state is UNKNOWN: lsblk is unavailable or failed to run — " +
+				"verify LUKS encryption manually with: cryptsetup status <device>",
+		}}, nil
 	}
 	if res.ExitCode != 0 {
 		slog.Warn("hardening detect: lsblk exited non-zero", "stderr", res.Stderr)
-		return nil, nil
+		// DOC-02: non-zero exit → state unknown.
+		return []modules.Finding{{
+			Module:   m.Name(),
+			Check:    "luks",
+			Severity: modules.SeverityFatal,
+			Message: "disk-encryption state is UNKNOWN: lsblk exited with a non-zero status — " +
+				"verify LUKS encryption manually with: cryptsetup status <device>",
+		}}, nil
 	}
 
 	var output lsblkOutput
 	if err := json.Unmarshal([]byte(res.Stdout), &output); err != nil {
 		slog.Warn("hardening detect: could not parse lsblk JSON", "error", err)
-		return nil, nil
+		// DOC-02: unparseable JSON → state unknown.
+		return []modules.Finding{{
+			Module:   m.Name(),
+			Check:    "luks",
+			Severity: modules.SeverityFatal,
+			Message: "disk-encryption state is UNKNOWN: lsblk returned unparseable JSON — " +
+				"verify LUKS encryption manually with: cryptsetup status <device>",
+		}}, nil
 	}
 
 	encrypted := isHomeEncrypted(home, output.Blockdevices)
@@ -90,7 +113,16 @@ func checkLUKS(ctx context.Context, m *Module) ([]modules.Finding, error) {
 		}}, nil
 	}
 
-	return nil, nil
+	// DOC-01 backfill: emit SeverityOK on the genuinely-encrypted clean path.
+	// Emitted only in checkLUKS (called once per detectPlatform invocation) to
+	// prevent double-emission — Detect and Verify both call detectPlatform, so
+	// the finding appears at most once per doctor pass per detectPlatform call.
+	return []modules.Finding{{
+		Module:   m.Name(),
+		Check:    "luks",
+		Severity: modules.SeverityOK,
+		Message:  "Home directory is on an encrypted (LUKS) filesystem",
+	}}, nil
 }
 
 // isHomeEncrypted returns true if the block device tree that mounts home
