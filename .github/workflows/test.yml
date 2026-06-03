@@ -30,5 +30,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Point TMPDIR at the runner's scratch space. The default /tmp is not
+      # writable for t.TempDir() on the Linux runner (mkdir: permission denied),
+      # and its path is too long for the macOS 104-char unix-socket limit that
+      # the daemon status tests hit. runner.temp is writable and short on both.
       - name: Run tests
         run: make test
+        env:
+          TMPDIR: ${{ runner.temp }}
