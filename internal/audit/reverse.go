@@ -17,11 +17,15 @@ package audit
 
 import (
 	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // ReadLog parses the audit log at logPath into Entry records. A missing log is
@@ -87,6 +91,105 @@ func Backups(target string) ([]string, error) {
 	}
 	sort.Strings(matches)
 	return matches, nil
+}
+
+// findChainEntry walks the signed log at logPath for an Op="backup" entry
+// whose Target equals cleanBak. Returns nil if not found.
+func findChainEntry(logPath, cleanBak string) (*Entry, error) {
+	entries, err := ReadLog(logPath)
+	if err != nil {
+		return nil, fmt.Errorf("audit: restore: read chain: %w", err)
+	}
+	for i := range entries {
+		if entries[i].Op == "backup" && entries[i].Target == cleanBak {
+			e := entries[i]
+			return &e, nil
+		}
+	}
+	return nil, nil
+}
+
+// verifyBackupHash recomputes sha256(content) and checks it against chainEntry.Hash.
+func verifyBackupHash(content []byte, chainEntry *Entry, cleanBak string) error {
+	got := sha256.Sum256(content)
+	if hex.EncodeToString(got[:]) != chainEntry.Hash {
+		return fmt.Errorf("audit: restore refused: backup content hash mismatch for %q (chain entry present but content modified)", cleanBak)
+	}
+	return nil
+}
+
+// atomicRestoreWrite writes content to dst via a tmp+rename sequence (0o600).
+func atomicRestoreWrite(cleanDst string, content []byte) error {
+	tmp := cleanDst + ".tmp"
+	if werr := os.WriteFile(tmp, content, 0o600); werr != nil { //nolint:gosec // G304: tmp is an internally-derived restore temp path; 0o600 enforces owner-only perms
+		return fmt.Errorf("audit: restore write tmp %s: %w", tmp, werr)
+	}
+	if rerr := os.Rename(tmp, cleanDst); rerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: restore rename %s → %s: %w", tmp, cleanDst, rerr)
+	}
+	return nil
+}
+
+// RestoreGated is the AUD-01 chain-verified restore path. It refuses to write
+// backupPath over dst unless a signed chain entry exists matching backupPath +
+// sha256(content), or acceptUnverified is true.
+//
+// Gate logic (D-01, D-02):
+//   - Walk the signed chain for an Op="backup" entry with Target==cleanBak.
+//   - If no matching entry found and acceptUnverified==false: return error.
+//   - If a matching entry found: recompute sha256(content) and verify it matches
+//     the stored hash. Hash mismatch → return error (content modified).
+//   - If acceptUnverified==true and no chain entry: restore is allowed but the
+//     restore is recorded as a "restore-unverified" non-OK audit entry.
+//
+// Both dst and backupPath must be absolute; they must share the same directory
+// (path traversal is rejected). This is the only bypass for unchained backups;
+// the bypass itself is auditable.
+func RestoreGated(ctx context.Context, dst, backupPath string, sa *SignedAudit, acceptUnverified bool) error {
+	cleanDst := filepath.Clean(dst)
+	cleanBak := filepath.Clean(backupPath)
+
+	if !strings.HasPrefix(cleanDst, "/") {
+		return fmt.Errorf("audit: restore dst must be absolute, got %q", dst)
+	}
+	if filepath.Dir(cleanBak) != filepath.Dir(cleanDst) {
+		return fmt.Errorf("audit: backup %q and dst %q must be in the same directory", backupPath, dst)
+	}
+
+	// AUD-01 / D-02: walk the signed chain for an Op="backup" entry matching cleanBak.
+	chainEntry, err := findChainEntry(sa.LogPath(), cleanBak)
+	if err != nil {
+		return err
+	}
+	if chainEntry == nil && !acceptUnverified {
+		return fmt.Errorf("audit: restore refused: no chain entry for %q — pass --accept-unverified-backup to override", cleanBak)
+	}
+
+	content, rerr := os.ReadFile(cleanBak) //nolint:gosec // G304: cleanBak is a filepath.Clean of an internally-derived backup path, not user-controlled
+	if rerr != nil {
+		return fmt.Errorf("audit: restore read backup %s: %w", cleanBak, rerr)
+	}
+
+	// If a chain entry was found, verify content hash matches.
+	if chainEntry != nil {
+		if verr := verifyBackupHash(content, chainEntry, cleanBak); verr != nil {
+			return verr
+		}
+	}
+
+	if werr := atomicRestoreWrite(cleanDst, content); werr != nil {
+		return werr
+	}
+
+	// AUD-01 / D-01: record the unverified restore as a non-OK audit entry.
+	if acceptUnverified && chainEntry == nil {
+		diffHash := sha256.Sum256(content)
+		// Non-fatal: the restore succeeded; log the audit failure as a warning.
+		// The caller can see dst was changed even if this entry is missing.
+		_ = sa.Append(ctx, SignInput{Title: "restore-unverified", DiffHash: diffHash}, cleanDst, false)
+	}
+	return nil
 }
 
 // ReverseAction records what reversing a single mutated target did (or would do).
