@@ -68,6 +68,29 @@ func TestServeActive(t *testing.T) {
 	}
 }
 
+func TestFunnelOK(t *testing.T) {
+	// Clean path: neither funnel nor serve is active → expect SeverityOK finding
+	// with Check=="funnel".
+	m := newTestModule(
+		// funnelActive call: "Funnel is not configured."
+		shell.Call{Result: shell.Result{Stdout: "Funnel is not configured.", ExitCode: 0}},
+		// serveActive call: no serve config
+		shell.Call{Result: shell.Result{Stdout: "No serve config", ExitCode: 0}},
+	)
+	findings := m.checkNoPublicExposure(context.Background())
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "funnel" {
+			found = &findings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected a finding with Check==\"funnel\" on clean path, got none")
+	}
+	assert.Equal(t, modules.SeverityOK, found.Severity, "clean path must emit SeverityOK for funnel")
+}
+
 func TestSSHFindings(t *testing.T) {
 	m := newTestModule()
 

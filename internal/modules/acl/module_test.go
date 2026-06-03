@@ -106,6 +106,69 @@ func TestSSHUserFallback(t *testing.T) {
 // m.prompt at least twice: once before opening the browser (the pre-open
 // instruction notice) and once after (the post-paste confirmation).
 // This is the regression guard for the fix in plan 260530-8mf.
+// mockACLBackend is a test double that implements backend.Client +
+// backend.ACLManager. GetACL returns the pre-canned bytes given at construction;
+// DefaultACL and NewACLEditor delegate to the real tailscale adapter so the
+// HuJSON round-trip is accurate.
+type mockACLBackend struct {
+	backend.Client
+	aclMgr backend.ACLManager
+	raw    []byte
+}
+
+func (m *mockACLBackend) GetACL(_ context.Context) ([]byte, string, error) {
+	return m.raw, `"test-etag"`, nil
+}
+
+func (m *mockACLBackend) NewACLEditor(raw []byte) (backend.ACLEditor, error) {
+	return m.aclMgr.NewACLEditor(raw)
+}
+
+func (m *mockACLBackend) DefaultACL(owner, sshUser string) []byte {
+	return m.aclMgr.DefaultACL(owner, sshUser)
+}
+
+func TestACLDriftOK(t *testing.T) {
+	// Clean path: Verify is called with admin creds set and the live ACL is
+	// already converged (bytes.Equal == true) → must return a SeverityOK finding
+	// with Check=="acl_drift".
+	t.Setenv("ABYSSLINK_TS_OAUTH_SECRET", "test-secret")
+
+	cfg := config.Defaults()
+	cfg.Identity.Email = "owner@example.com"
+	cfg.Identity.UnixUser = "alice"
+	cfg.Mobile.SSHCheckPeriod = "12h"
+	cfg.Tailnet.Admin.Tailnet = "example.com"
+	cfg.Tailnet.Admin.OAuthClientID = "client-id"
+
+	// Build the real tailscale adapter to use its NewACLEditor / DefaultACL.
+	r := shell.NewMockRunner()
+	realBknd, err := backend.New(cfg, r)
+	require.NoError(t, err)
+	realAclMgr, ok := realBknd.(backend.ACLManager)
+	require.True(t, ok)
+
+	// Build the already-converged ACL (default ACL already contains the required grant).
+	raw := realAclMgr.DefaultACL(cfg.Identity.Email, cfg.Identity.UnixUser)
+
+	mock := &mockACLBackend{Client: realBknd, aclMgr: realAclMgr, raw: raw}
+	m := New(modules.Deps{Cfg: cfg, Runner: r, Backend: mock})
+
+	findings, verifyErr := m.Verify(context.Background())
+	require.NoError(t, verifyErr)
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "acl_drift" {
+			found = &findings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected a finding with Check==\"acl_drift\" on no-drift path, got none")
+	}
+	assert.Equal(t, modules.SeverityOK, found.Severity, "no-drift path must emit SeverityOK for acl_drift")
+}
+
 func TestApplyManual_PausesBeforeAndAfterOpenURL(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
