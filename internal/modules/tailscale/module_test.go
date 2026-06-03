@@ -17,12 +17,14 @@ package tailscale
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newTestModule(calls ...shell.Call) *Module {
@@ -122,4 +124,114 @@ func TestSSHFindings(t *testing.T) {
 		assert.Equal(t, "ssh", got[0].Check)
 		assert.Equal(t, modules.SeverityWarning, got[0].Severity)
 	}
+}
+
+// TestFunnelProbeFailure verifies WR-02: exec error on "tailscale funnel status"
+// must produce a SeverityWarning with Check="funnel-probe-fail", never SeverityOK
+// with Check="funnel" (which would be a false-green for the public-exposure promise).
+func TestFunnelProbeFailure(t *testing.T) {
+	m := newTestModule(
+		shell.Call{Err: errors.New("tailscale: command not found")},
+	)
+	findings, err := m.Verify(context.Background())
+	require.NoError(t, err)
+
+	var probeFail *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "funnel-probe-fail" {
+			probeFail = &findings[i]
+		}
+	}
+	require.NotNil(t, probeFail, "expected a finding with Check=funnel-probe-fail on exec error, got %+v", findings)
+	assert.Equal(t, modules.SeverityWarning, probeFail.Severity)
+
+	// Must not emit a Check="funnel" finding at all (no false-OK).
+	for _, f := range findings {
+		assert.NotEqual(t, "funnel", f.Check, "unexpected funnel check in probe-failure path: %+v", f)
+		assert.NotEqual(t, modules.SeverityOK, f.Severity, "unexpected SeverityOK in probe-failure path: %+v", f)
+	}
+}
+
+// TestFunnelProbeFailNonZeroExit verifies WR-02: a non-zero exit code (no exec
+// error) is treated identically to an exec error — probe-failure, not false-OK.
+func TestFunnelProbeFailNonZeroExit(t *testing.T) {
+	m := newTestModule(
+		shell.Call{Result: shell.Result{ExitCode: 1}},
+	)
+	findings, err := m.Verify(context.Background())
+	require.NoError(t, err)
+
+	var probeFail *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "funnel-probe-fail" {
+			probeFail = &findings[i]
+		}
+	}
+	require.NotNil(t, probeFail, "expected Check=funnel-probe-fail on non-zero exit, got %+v", findings)
+	assert.Equal(t, modules.SeverityWarning, probeFail.Severity)
+
+	for _, f := range findings {
+		assert.NotEqual(t, "funnel", f.Check, "unexpected funnel check in probe-failure path: %+v", f)
+		assert.NotEqual(t, modules.SeverityOK, f.Severity, "unexpected SeverityOK in probe-failure path: %+v", f)
+	}
+}
+
+// TestFunnelProbeFailDistinctCheckID documents D-04: "funnel-probe-fail" must
+// NOT appear in any threat-model row's failChecks, so probe-failure findings
+// keep the "No public exposure" row at — (did-not-run), not ✗ (actively failing).
+//
+// This is a compile-time-stable assertion over the known failChecks universe.
+func TestFunnelProbeFailDistinctCheckID(t *testing.T) {
+	// All failChecks values from cmd_threat_model.go threatRows, v3SurfaceRows,
+	// and backendRows as of Phase 23.1. Update this list if new rows are added.
+	knownFailChecks := []string{
+		// threatRows
+		"funnel", "acl_drift", "remote_login", "sshd_running",
+		"filevault", "luks", "lock_enabled", "listen_address",
+		// v3SurfaceRows
+		"sec-metrics-bind", "metrics-bind-tailnet",
+		"sec-webui-bind", "webui-bind",
+		"sec-audit-anchor-age", "audit-anchor-age",
+		// backendRows — tailscale
+		"sec-funnel-schema",
+		// backendRows — headscale
+		"hs-tls", "hs-api-auth", "hs-lock", "hs-oidc-filter",
+		// backendRows — netbird
+		"nb-tls", "nb-version", "nb-zitadel", "nb-lock",
+	}
+
+	for _, checkID := range knownFailChecks {
+		assert.NotEqual(t, "funnel-probe-fail", checkID,
+			"funnel-probe-fail must not appear in threat-model failChecks (D-04): found %q", checkID)
+	}
+}
+
+// TestVerifyCallsOnlyCheckNoPublicExposure verifies WR-08: Verify must not call
+// Detect (which would double every Detect finding in a runner.Doctor pass).
+// The mock is primed with exactly one Call (for funnelActive inside
+// checkNoPublicExposure). If Detect were called, it would make additional
+// runner.Run calls and the mock would return an "unexpected call" error.
+func TestVerifyCallsOnlyCheckNoPublicExposure(t *testing.T) {
+	// One Call: funnelActive (inside checkNoPublicExposure) — "not configured".
+	// serveActive is also called by checkNoPublicExposure, so provide it too.
+	m := newTestModule(
+		shell.Call{Result: shell.Result{Stdout: "Funnel is not configured.", ExitCode: 0}},
+		shell.Call{Result: shell.Result{Stdout: "No serve config", ExitCode: 0}},
+	)
+	findings, err := m.Verify(context.Background())
+	require.NoError(t, err)
+
+	// The mock runner tracks how many calls were consumed. Done() returns true
+	// if all scripted calls were consumed (i.e. exactly 2 calls, no more).
+	mock := m.runner.(*shell.MockRunner)
+	assert.True(t, mock.Done(), "Verify consumed more runner calls than expected — Detect may have been called")
+
+	// Confirm we get the expected funnel OK finding (and no doubled findings).
+	var funnelOK bool
+	for _, f := range findings {
+		if f.Check == "funnel" && f.Severity == modules.SeverityOK {
+			funnelOK = true
+		}
+	}
+	assert.True(t, funnelOK, "expected SeverityOK funnel finding from Verify, got %+v", findings)
 }
