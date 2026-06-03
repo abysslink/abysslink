@@ -111,6 +111,50 @@ func TestCollectFleetStatus_RemoteRigUnknownOnUnreachable(t *testing.T) {
 	assert.LessOrEqual(t, online, 1)
 }
 
+// TestCollectDoctorFindings_VersionFloorPresent asserts that the ntfy version-floor
+// finding (check ID "ntfy-version") appears in the set returned by
+// CollectDoctorFindings. The MockRunner's unexpected-call behaviour means most
+// shell probes degrade gracefully; the ntfy probe also degrades to SeverityWarning
+// (fail-honest). The key assertion is PRESENCE: the finding must exist so it flows
+// into both doctor and (via Task 2) threat-model. Severity is not asserted here
+// because the exact call-index depends on core-module probe ordering.
+// This test is the DOC-04 wiring gate: it failed RED until collectDoctorFindings
+// called versionFloorFindings and appended its results.
+func TestCollectDoctorFindings_VersionFloorPresent(t *testing.T) {
+	cfg := config.Defaults()
+	runner := shell.NewMockRunner() // all calls → unexpected-call; floor probe degrades to SeverityWarning
+	findings := CollectDoctorFindings(context.Background(), cfg, runner)
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "ntfy-version" {
+			found = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "ntfy-version finding must appear in CollectDoctorFindings (DOC-04 wiring)")
+	// Severity is SeverityWarning (fail-honest probe error) — the important thing
+	// is that the finding is present, not absent.
+	assert.NotEqual(t, modules.SeverityOK, found.Severity,
+		"ntfy-version in CollectDoctorFindings must never be SeverityOK when the probe cannot run")
+}
+
+// TestCollectDoctorFindings_VersionFloorNoDuplicate asserts that a single
+// CollectDoctorFindings pass does NOT produce duplicate ntfy-version findings.
+// This guards against the Pitfall 4 double-emission pattern (Detect+Verify both
+// calling the same producer).
+func TestCollectDoctorFindings_VersionFloorNoDuplicate(t *testing.T) {
+	cfg := config.Defaults()
+	runner := shell.NewMockRunner() // all calls → unexpected-call graceful degrade
+	findings := CollectDoctorFindings(context.Background(), cfg, runner)
+	count := 0
+	for _, f := range findings {
+		if f.Check == "ntfy-version" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "ntfy-version must appear exactly once in a single CollectDoctorFindings pass (no double-emission)")
+}
+
 // compile-time: a finding's severity zero value is SeverityOK (sanity guard the
 // honest-N/A logic relies on).
 var _ modules.Severity = modules.SeverityOK

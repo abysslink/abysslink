@@ -272,7 +272,14 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 			Message:  "tailnet ACL is missing the abysslink mobile→laptop grant or SSH rule; run `abysslink up --apply`",
 		}}, nil
 	}
-	return nil, nil
+	// Emit explicit OK so "check ran and passed" is distinguishable from
+	// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
+	return []modules.Finding{{
+		Module:   m.Name(),
+		Check:    "acl_drift",
+		Severity: modules.SeverityOK,
+		Message:  "acl_drift: tailnet ACL matches the required abysslink grant and SSH rule",
+	}}, nil
 }
 
 // Repair re-applies the ACL.

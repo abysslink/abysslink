@@ -111,3 +111,47 @@ func TestThreatModelBackend(t *testing.T) {
 			"expected an unknown-backend warning in output")
 	})
 }
+
+// TestThreatModelTriState_UnknownGlyph asserts that a row whose failChecks have
+// NO finding in the set renders the unknown/— glyph (never ✓). In a bare test
+// environment the core module probes all fail gracefully (unexpected mock calls),
+// so checks like "lock_enabled" never appear in the finding set. The
+// "Tailnet Lock enabled" row must render — not ✓ (DOC-01 tri-state, D-02/D-04).
+//
+// RED gate: this fails until renderThreatRows is replaced with the tri-state map
+// from collectDoctorFindings — the current binary-present map renders ✓ for any
+// row whose failChecks are all absent.
+func TestThreatModelTriState_UnknownGlyph(t *testing.T) {
+	out := runThreatModel(t)
+	// "Tailnet Lock enabled" has failChecks: ["lock_enabled"].
+	// In the test env, lock_enabled never appears in the finding set
+	// (core module probes fail) → tri-state must render — not ✓.
+	assert.Contains(t, out, "—",
+		"threat-model must render — for rows whose backing check did not run (DOC-01 tri-state)")
+}
+
+// TestThreatModelTriState_StructuralRowAlwaysCheck asserts that a structural row
+// (empty failChecks) always renders ✓, never — (Pitfall 3).
+// "No SSH agent forwarding" has nil failChecks and is always on by construction.
+func TestThreatModelTriState_StructuralRowAlwaysCheck(t *testing.T) {
+	out := runThreatModel(t)
+	assert.Contains(t, out, "No SSH agent forwarding",
+		"structural row description must be present")
+	// The row itself must appear with ✓ — verify by checking the output contains
+	// the ✓ glyph somewhere (structural rows are the only source of ✓ in a bare
+	// test environment where no checks run).
+	assert.Contains(t, out, "✓",
+		"structural empty-failChecks rows must render ✓ even when no checks ran")
+}
+
+// TestThreatModelTriState_LegendExplainsUnknown asserts the footer legend
+// explains the — glyph (D-04 legend requirement).
+func TestThreatModelTriState_LegendExplainsUnknown(t *testing.T) {
+	out := runThreatModel(t)
+	assert.Contains(t, out, "—",
+		"footer legend must document the — glyph so users understand it")
+	// The legend should mention what — means (did not run / backing check absent).
+	assert.True(t,
+		strings.Contains(out, "did not run") || strings.Contains(out, "check did not run") || strings.Contains(out, "not run"),
+		"footer legend must explain that — means the backing check did not run this pass")
+}

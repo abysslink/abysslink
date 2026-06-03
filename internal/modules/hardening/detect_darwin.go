@@ -48,16 +48,34 @@ func detectPlatform(ctx context.Context, m *Module) ([]modules.Finding, error) {
 	return findings, nil
 }
 
-// checkFileVault runs `fdesetup status` and fails closed if FileVault is off.
+// checkFileVault runs `fdesetup status` and fails closed if FileVault is off,
+// in-progress, deferred, or decrypting (DOC-02 / D-06).
+//
+// Stable UNKNOWN marker: "disk-encryption state is UNKNOWN" — used by Plan 04's
+// up gate to refuse --force-unsafe for unknown-state FATALs (D-05).
+//
+// NOTE (Assumption A3): The in-progress/deferred substrings are cross-verified
+// against the fdesetup(8) man page and Apple deployment guide at MEDIUM
+// confidence. Exact wording should be confirmed on a real Mac.
 func checkFileVault(ctx context.Context, m *Module) ([]modules.Finding, error) {
 	res, err := m.runner.Run(ctx, "fdesetup", "status")
 	if err != nil {
-		return nil, fmt.Errorf("run fdesetup: %w", err)
+		// DOC-02 / D-06: exec error → disk-encryption state is UNKNOWN → FATAL.
+		// Convert error return to FATAL finding so the up gate can block (D-05).
+		slog.Warn("hardening detect: fdesetup failed", "error", err)
+		return []modules.Finding{{
+			Module:   m.Name(),
+			Check:    "filevault",
+			Severity: modules.SeverityFatal,
+			Message: "disk-encryption state is UNKNOWN: fdesetup is unavailable or failed to run — " +
+				"verify FileVault status manually in System Settings → Privacy & Security → FileVault",
+		}}, nil
 	}
 
 	output := strings.TrimSpace(res.Stdout)
 	slog.Debug("filevault status", "output", output)
 
+	// Known-off: FileVault explicitly disabled.
 	if strings.HasPrefix(output, "FileVault is Off") {
 		return []modules.Finding{{
 			Module:   m.Name(),
@@ -67,7 +85,46 @@ func checkFileVault(ctx context.Context, m *Module) ([]modules.Finding, error) {
 		}}, nil
 	}
 
-	return nil, nil
+	// DOC-02: Not-fully-enabled states — FATAL (fail-closed).
+	// These strings are per fdesetup(8) man page (MEDIUM confidence, see NOTE above).
+	notFullyEnabled := []struct {
+		substr  string
+		msgSufx string
+	}{
+		{"Encryption in progress", "encryption is in progress (not yet fully enabled) — wait for encryption to complete before enabling remote access"},
+		{"Deferred enablement appears to be active", "deferred enablement is pending (not yet fully enabled) — complete FileVault setup at next login before enabling remote access"},
+		{"Decryption in progress", "decryption is in progress (FileVault is being disabled) — re-enable FileVault before enabling remote access"},
+	}
+	for _, s := range notFullyEnabled {
+		if strings.Contains(output, s.substr) {
+			return []modules.Finding{{
+				Module:   m.Name(),
+				Check:    "filevault",
+				Severity: modules.SeverityFatal,
+				Message:  "FileVault is not fully enabled: " + s.msgSufx,
+			}}, nil
+		}
+	}
+
+	// DOC-01 backfill: only "FileVault is On" is fully enabled → SeverityOK.
+	// Emitted here (not in detectPlatform) to avoid Detect+Verify double-emission.
+	if strings.HasPrefix(output, "FileVault is On") {
+		return []modules.Finding{{
+			Module:   m.Name(),
+			Check:    "filevault",
+			Severity: modules.SeverityOK,
+			Message:  "FileVault full-disk encryption is enabled",
+		}}, nil
+	}
+
+	// Unknown fdesetup output (not any recognised string) → fail closed.
+	return []modules.Finding{{
+		Module:   m.Name(),
+		Check:    "filevault",
+		Severity: modules.SeverityFatal,
+		Message: "disk-encryption state is UNKNOWN: fdesetup returned an unrecognised status (" + output + ") — " +
+			"verify FileVault status manually in System Settings → Privacy & Security → FileVault",
+	}}, nil
 }
 
 // firewallJSON is the relevant subset of system_profiler SPFirewallDataType -json output.

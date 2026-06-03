@@ -17,12 +17,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -253,9 +255,22 @@ func metBindTailnetCheck(cfg *config.Config, tailnetIP string) modules.Finding {
 					addr, tailnetIP),
 			}
 		}
+		// tailnetIP known and bind matches — confirmed tailnet-scoped.
+		return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metrics bind address is tailnet-scoped"}
 	}
 
-	return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "metrics bind address is tailnet-scoped"}
+	// WR-03: tailnetIP=="" means the backend (tailscaled/headscale/netbird) was
+	// unavailable during this CLI invocation. We cannot verify that the configured
+	// bind_addr is the tailnet IP, so we must NOT claim SeverityOK (false green).
+	// Emit a distinct check ID ("met-bind-unknown") so the threat-model row renders
+	// — (did-not-run) rather than ✓. The wildcard case above already produced
+	// SeverityFatal, so we only reach here for a non-wildcard non-empty addr.
+	return modules.Finding{
+		Module:   "metrics",
+		Check:    "met-bind-unknown",
+		Severity: modules.SeverityWarning,
+		Message:  "could not verify metrics bind_addr is tailnet-scoped — backend unavailable; restart tailscaled then re-run abysslink doctor",
+	}
 }
 
 // metLabelAuditCheck flags any series whose label names fall outside the
@@ -323,10 +338,23 @@ func metDisabledListenerCheck(cfg *config.Config, tailnetIP string) modules.Find
 	switch {
 	case addr != "":
 		// Honor an explicit host:port; a bare host gets the configured/default
-		// port. Reuse config.BindAddrHost for host extraction (IN-04) instead of
-		// a hand-rolled bracket trim, matching metBindTailnetCheck's host extraction.
-		if _, _, err := net.SplitHostPort(addr); err != nil {
+		// port.
+		//
+		// WR-03: reject/normalize a zero or absent port rather than dialing it.
+		// A degenerate bind_addr like "host:0" parses cleanly via SplitHostPort
+		// but port 0 means "any free port" — dialing it would probe a port no
+		// listener could deterministically bind, masking a stale listener on the
+		// real runtime port (false-OK, the OBS-05 failure this check guards). When
+		// the parsed port is missing or zero, substitute the configured/default
+		// port so the probe targets the address the runtime listener would bind.
+		if host, portStr, err := net.SplitHostPort(addr); err != nil {
+			// When bind_addr lacks a port (SplitHostPort fails), extract the host
+			// via config.BindAddrHost (IN-04) instead of a hand-rolled bracket
+			// trim — matching metBindTailnetCheck's host extraction — and append
+			// the configured/default port.
 			addr = net.JoinHostPort(config.BindAddrHost(addr), fmt.Sprintf("%d", port))
+		} else if portStr == "" || portStr == "0" {
+			addr = net.JoinHostPort(host, fmt.Sprintf("%d", port))
 		}
 	case tailnetIP != "":
 		addr = net.JoinHostPort(tailnetIP, fmt.Sprintf("%d", port))
@@ -343,7 +371,33 @@ func metDisabledListenerCheck(cfg *config.Config, tailnetIP string) modules.Find
 			Message:  fmt.Sprintf("port %s is listening but metrics.enabled=false — stale listener (OBS-05)", addr),
 		}
 	}
-	return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "no stale metrics listener detected"}
+	// Only ECONNREFUSED proves the port is genuinely closed. Any other error
+	// (timeout, EHOSTUNREACH, ENETUNREACH, DNS failure) is inconclusive — the
+	// probe did NOT verify the port is closed, so returning SeverityOK would be
+	// a false-OK on an unproven security control (OBS-05 / CR-01 / DOC-10).
+	//
+	// WR-01 (Unix-only by design): the SeverityOK "closed port" proof below
+	// keys exclusively on syscall.ECONNREFUSED, a Unix errno. Abysslink v1
+	// targets macOS and Linux only (see CLAUDE.md "decisions you must not
+	// relitigate"), so this gate is correct and complete on every supported
+	// host. On a hypothetical non-Unix host (e.g. Windows, where the connection-
+	// refused errno is WSAECONNREFUSED and net.DialTimeout does not normalize
+	// the two), a genuinely closed port would NOT match this errors.Is and would
+	// instead fall through to the met-listener-unknown SeverityWarning branch
+	// below. That is the intended fail-honest direction: erring toward
+	// "listener state unknown" never yields a false SeverityOK on an unproven
+	// control. We deliberately do NOT add a build-tag-guarded portable match,
+	// because no non-Unix target is in scope for v1 and a portable broaden would
+	// add untested platform code paths.
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return modules.Finding{Module: "metrics", Check: check, Severity: modules.SeverityOK, Message: "no stale metrics listener detected"}
+	}
+	return modules.Finding{
+		Module:   "metrics",
+		Check:    "met-listener-unknown",
+		Severity: modules.SeverityWarning,
+		Message:  fmt.Sprintf("could not probe metrics port %s (%v) — listener state unknown; re-run abysslink doctor", addr, err),
+	}
 }
 
 // countMetricSeries returns the number of unique (metric name, sorted label-set)
@@ -665,6 +719,11 @@ func appendAllRigsFindings(ctx context.Context, cc *cmdContext, findings []modul
 	return findings, fanErr
 }
 
+// tailscaledFixHint is the shared remediation for any check whose probe could
+// not run because tailscaled was unreachable (e.g. funnel-probe-fail,
+// serve-probe-fail). Extracting it keeps the two entries from drifting apart.
+const tailscaledFixHint = "ensure tailscaled is running: tailscale status — then re-run abysslink doctor"
+
 // findingFix maps a finding check name to a short remediation command or
 // instruction. Returns "" when no specific guidance exists (generic repair
 // message is shown instead).
@@ -680,9 +739,13 @@ func findingFix(check string) string {
 		"sshd_running": "sudo systemctl disable --now sshd  (Linux)  |  System Settings → General → Sharing → Remote Login → turn off  (macOS)",
 		"checkperiod":  "Lower ssh_check_period in abysslink.yaml (max 12h)",
 		// Tailscale.
-		"needs_login":   "tailscale login",
-		"ssh_sandboxed": "brew install tailscale  (replaces App Store version)",
-		"installed":     "abysslink up --apply",
+		"needs_login":          "tailscale login",
+		"ssh_sandboxed":        "brew install tailscale  (replaces App Store version)",
+		"installed":            "abysslink up --apply",
+		"funnel-probe-fail":    tailscaledFixHint,
+		"serve-probe-fail":     tailscaledFixHint,
+		"met-bind-unknown":     "start tailscaled so backend IP can be resolved, then re-run abysslink doctor",
+		"met-listener-unknown": "verify network reachability to the metrics address then re-run abysslink doctor",
 		// Tailnet Lock.
 		"lock_enabled": "tailscale lock init   (then abysslink up --apply)",
 		"lock_status":  "ensure tailscale is running: brew services restart tailscale",
@@ -712,8 +775,10 @@ func findingFix(check string) string {
 		"hs-proc-user":       "Ensure Headscale runs as the dedicated service user: check systemd User= or launchd UserName= in the service unit",
 		"hs-derp-failclosed": "Set derp.server.verify_clients: true in Headscale config.yaml (R-02 correct key)",
 		// NetBird backend (nb-* checks).
-		"nb-tls":       "Renew or replace the TLS certificate; ensure server.tls.certFile and server.tls.keyFile are set in NetBird config.yaml",
-		"nb-version":   "Upgrade netbird-server to >= v0.57.0 (CVE-2025-10678 fix): abysslink server netbird upgrade --binary-path /path/to/new-binary --apply",
+		"nb-tls":     "Renew or replace the TLS certificate; ensure server.tls.certFile and server.tls.keyFile are set in NetBird config.yaml",
+		"nb-version": "Upgrade netbird-server to >= v0.57.0 (CVE-2025-10678 fix): abysslink server netbird upgrade --binary-path /path/to/new-binary --apply",
+		// Version-floor checks (DOC-04) — keyed by versionFloor.checkID from cmd_doctor_versions.go.
+		"ntfy-version": "Upgrade ntfy to >= 2.21 (CVE-2026-39087 fix): see https://github.com/binwiederhier/ntfy/releases — stop container, pull new image, restart; or: brew upgrade ntfy",
 		"nb-zitadel":   "Remove the default ZITADEL admin account: run the ZITADEL cleanup script to delete zitadel-admin@ user",
 		"nb-mgmt-bind": "Set metricsListenAddress: 127.0.0.1:9090 in NetBird config.yaml to prevent public metrics exposure",
 		"nb-key-type":  "Revoke reusable or expired setup keys via the NetBird dashboard; re-mint one-off keys with explicit expiry",
