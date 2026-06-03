@@ -436,11 +436,11 @@ func checkHsDbPerms(dbPath string) DoctorFinding {
 		}
 	}
 	perm := fi.Mode().Perm()
-	switch {
-	case perm == 0o600:
+	switch perm {
+	case 0o600:
 		return DoctorFinding{Module: mod, Check: check, Severity: DoctorOK,
 			Message: fmt.Sprintf("SQLite DB perm %04o is correct", perm)}
-	case perm == 0o640:
+	case 0o640:
 		return DoctorFinding{
 			Module:   mod,
 			Check:    check,

@@ -17,63 +17,60 @@ linters:
     - staticcheck
     - depguard
     - nolintlint
-
-linters-settings:
-  nolintlint:
-    require-explanation: true   # SEC-02: every //nolint:X must carry an inline justification
-    require-specific: true      # //nolint without a linter name is forbidden
-    # allow-unused: true — gosec's G304 is globally excluded above and errcheck does
-    # not flag deferred Close(), so several justified //nolint directives suppress
-    # nothing under golangci-lint's own config. They remain load-bearing for the
-    # STANDALONE gosec CI job (which ignores golangci config). Flagging them as
-    # "unused" would force their removal and break the standalone gosec gate, so
-    # allow-unused stays true. require-explanation + require-specific are the actual
-    # SEC-02 security gates: every suppression is named and justified.
-    allow-unused: true
-  forbidigo:
-    analyze-types: true
-    forbid:
-      - p: '^audit\.(Entry|SignInput)\.(Body|Content|Data|Raw|Payload)$'
-        msg: "AUD-04: audit signing input must only contain title+diffHash — no body/content/data/raw/payload field"
-  gocyclo:
-    min-complexity: 15
-  revive:
-    rules:
-      - name: exported
-        disabled: false
-      - name: var-naming
-        disabled: false
-  gosec:
-    excludes:
-      - G304  # file path from variable — audit package legitimately reads paths from vars for backup/restore
-  depguard:
-    rules:
-      no-concrete-backend:
-        list-mode: lax
-        files:
-          - "!**/internal/backend/**"
-          - "!**/internal/tailscale/**"
-        deny:
-          - pkg: "github.com/abysslink/abysslink/internal/tailscale"
-            desc: "import internal/backend (Client interface) instead — concrete adapters are off-limits outside internal/backend (ROADMAP Phase 11 criterion 4)"
-      no-netbird-agpl:
-        list-mode: lax
-        deny:
-          - pkg: "github.com/netbirdio/netbird/management"
-            desc: "NetBird management server packages are AGPLv3 — importing them taints the abysslink binary; use REST + net/http only (NB-04)"
-          - pkg: "github.com/netbirdio/netbird/combined"
-            desc: "NetBird combined server packages are AGPLv3 — same restriction as management (NB-04)"
-          - pkg: "github.com/netbirdio/netbird/relay"
-            desc: "NetBird relay packages are AGPLv3 (NB-04)"
-          - pkg: "github.com/netbirdio/netbird/signal"
-            desc: "NetBird signal packages are AGPLv3 (NB-04)"
-      no-prometheus-client:
-        list-mode: lax
-        deny:
-          - pkg: "github.com/prometheus/client_golang"
-            desc: "OBS-01: metrics are hand-rolled in internal/daemon/metrics_server.go — no prometheus client lib permitted anywhere in this module"
-
-issues:
+  settings:
+    nolintlint:
+      require-explanation: true   # SEC-02: every //nolint:X must carry an inline justification
+      require-specific: true      # //nolint without a linter name is forbidden
+      # allow-unused: true — gosec's G304 is globally excluded above and errcheck does
+      # not flag deferred Close(), so several justified //nolint directives suppress
+      # nothing under golangci-lint's own config. They remain load-bearing for the
+      # STANDALONE gosec CI job (which ignores golangci config). Flagging them as
+      # "unused" would force their removal and break the standalone gosec gate, so
+      # allow-unused stays true. require-explanation + require-specific are the actual
+      # SEC-02 security gates: every suppression is named and justified.
+      allow-unused: true
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^audit\.(Entry|SignInput)\.(Body|Content|Data|Raw|Payload)$'
+          msg: "AUD-04: audit signing input must only contain title+diffHash — no body/content/data/raw/payload field"
+    gocyclo:
+      min-complexity: 15
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+        - name: var-naming
+          disabled: false
+    gosec:
+      excludes:
+        - G304  # file path from variable — audit package legitimately reads paths from vars for backup/restore
+    depguard:
+      rules:
+        no-concrete-backend:
+          list-mode: lax
+          files:
+            - "!**/internal/backend/**"
+            - "!**/internal/tailscale/**"
+          deny:
+            - pkg: "github.com/abysslink/abysslink/internal/tailscale"
+              desc: "import internal/backend (Client interface) instead — concrete adapters are off-limits outside internal/backend (ROADMAP Phase 11 criterion 4)"
+        no-netbird-agpl:
+          list-mode: lax
+          deny:
+            - pkg: "github.com/netbirdio/netbird/management"
+              desc: "NetBird management server packages are AGPLv3 — importing them taints the abysslink binary; use REST + net/http only (NB-04)"
+            - pkg: "github.com/netbirdio/netbird/combined"
+              desc: "NetBird combined server packages are AGPLv3 — same restriction as management (NB-04)"
+            - pkg: "github.com/netbirdio/netbird/relay"
+              desc: "NetBird relay packages are AGPLv3 (NB-04)"
+            - pkg: "github.com/netbirdio/netbird/signal"
+              desc: "NetBird signal packages are AGPLv3 (NB-04)"
+        no-prometheus-client:
+          list-mode: lax
+          deny:
+            - pkg: "github.com/prometheus/client_golang"
+              desc: "OBS-01: metrics are hand-rolled in internal/daemon/metrics_server.go — no prometheus client lib permitted anywhere in this module"
   exclusions:
     rules:
       - path: "_test\\.go"
@@ -82,5 +79,7 @@ issues:
       - path: "doc\\.go"
         linters:
           - revive
+
+issues:
   max-issues-per-linter: 50
   max-same-issues: 10

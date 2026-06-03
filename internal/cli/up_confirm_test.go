@@ -145,6 +145,7 @@ func TestApplyAnimationEnabled_PerSudoKeyword(t *testing.T) {
 func TestRunApply_AbortContract(t *testing.T) {
 	// This test exists solely to assert the function signature. The variable
 	// assignment below is a zero-cost compile check — it does not invoke runApply.
+	//nolint:staticcheck // QF1011: the explicit type IS the signature assertion this test exists for; inferring it would defeat the check
 	var _ func(context.Context, *cobra.Command, Printer, *modules.Runner, []modules.Action, *cmdContext) ([]modules.Finding, time.Duration, bool, error) = runApply
 	t.Log("runApply signature is (ctx, cmd, Printer, *Runner, []Action, *cmdContext) ([]Finding, Duration, bool, error)")
 }

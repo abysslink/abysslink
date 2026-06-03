@@ -43,7 +43,7 @@ func New(runner shell.Runner) (*Platform, error) {
 		// If /etc/os-release is absent (e.g. container base), carry on with unknowns.
 		return &Platform{runner: runner, distro: platform.DistroUnknown}, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fields, _ := ParseOSRelease(f)
 	d := DetectDistro(fields)
