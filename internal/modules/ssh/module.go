@@ -114,6 +114,15 @@ func (m *Module) detectDarwin(ctx context.Context) []modules.Finding {
 				Severity: modules.SeverityWarning,
 				Message:  "Remote Login is On — when mode=tailscale, macOS sshd should be disabled",
 			})
+		} else {
+			// Emit explicit OK so "check ran and passed" is distinguishable from
+			// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
+			findings = append(findings, modules.Finding{
+				Module:   m.Name(),
+				Check:    "remote_login",
+				Severity: modules.SeverityOK,
+				Message:  "remote_login: Remote Login (sshd) is correctly off — Tailscale SSH is the active transport",
+			})
 		}
 	}
 
@@ -137,13 +146,24 @@ func (m *Module) detectLinux(ctx context.Context) []modules.Finding {
 	active := strings.TrimSpace(res.Stdout) == "active"
 	slog.Debug("ssh detect linux", "sshd_active", active)
 
-	if m.cfg.Modules.SSH.Mode == "tailscale" && active {
-		findings = append(findings, modules.Finding{
-			Module:   m.Name(),
-			Check:    "sshd_running",
-			Severity: modules.SeverityWarning,
-			Message:  "sshd is running — when mode=tailscale, consider disabling the openssh daemon",
-		})
+	if m.cfg.Modules.SSH.Mode == "tailscale" {
+		if active {
+			findings = append(findings, modules.Finding{
+				Module:   m.Name(),
+				Check:    "sshd_running",
+				Severity: modules.SeverityWarning,
+				Message:  "sshd is running — when mode=tailscale, consider disabling the openssh daemon",
+			})
+		} else {
+			// Emit explicit OK so "check ran and passed" is distinguishable from
+			// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
+			findings = append(findings, modules.Finding{
+				Module:   m.Name(),
+				Check:    "sshd_running",
+				Severity: modules.SeverityOK,
+				Message:  "sshd_running: OpenSSH daemon is correctly off — Tailscale SSH is the active transport",
+			})
+		}
 	}
 
 	return findings
