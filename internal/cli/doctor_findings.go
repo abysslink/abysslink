@@ -146,5 +146,11 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	// Phase 21 optional-module posture.
 	findings = append(findings, mod3DoctorFindings(ctx, cc.cfg, cc.runner)...)
 
+	// Version-floor findings (DOC-04): ntfy < 2.21 FATAL, etc. Appended once
+	// here so they surface in both `abysslink doctor` and (via Task 2) the
+	// shared-set threat-model render. Appending after mod3 preserves the
+	// canonical order and avoids double-emission (this is the only call site).
+	findings = append(findings, versionFloorFindings(ctx, cc.runner)...)
+
 	return findings
 }
