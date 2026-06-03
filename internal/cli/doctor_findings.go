@@ -131,6 +131,10 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	metFinds := metricsDoctorFindings(cc.cfg, deps.MetricsRegistry(), resolveTailnetIP(ctx, cc))
 	findings = append(findings, metFinds...)
 
+	// ntfy port-binding posture (NET-01 / D-02).
+	ntfyFinds := ntfyBindFindings(ctx, cc.runner, cc.cfg)
+	findings = append(findings, ntfyFinds...)
+
 	// Web UI posture.
 	webuiFinds := webuiDoctorFindings(ctx, cc.cfg)
 	findings = append(findings, webuiFinds...)

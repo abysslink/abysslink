@@ -692,8 +692,10 @@ func findingFix(check string) string {
 		"api_key_present":              "export ANTHROPIC_API_KEY=<key>  then  abysslink up --apply",
 		"api_key_keychain":             "unlock your login keychain in Keychain Access.app",
 		// ntfy.
-		"ntfy_bind":  "abysslink up --apply  (ntfy must bind to tailnet IP, not 0.0.0.0)",
-		"ntfy_admin": "abysslink up --apply",
+		"ntfy_bind":     "abysslink up --apply  (ntfy must bind to tailnet IP, not 0.0.0.0)",
+		"ntfy_admin":    "abysslink up --apply",
+		"ntfy-bind":     "abysslink up --apply  (restarts ntfy container with tailnet-IP-only binding; removes 127.0.0.1 port mapping)",
+		"ntfy-loopback": "abysslink up --apply  (reprovisioning removes the loopback -p flag from docker run; verify with: docker inspect abysslink-ntfy)",
 		// Generic install / config.
 		"not_installed":        "abysslink up --apply",
 		"panes_configured":     "add panes to modules.watch.panes in abysslink.yaml",
