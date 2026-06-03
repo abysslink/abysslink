@@ -99,8 +99,12 @@ func (a *headscaleAdapter) Status(ctx context.Context) (*Status, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("headscale: status: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nil, fmt.Errorf("headscale: status: read response: %w", err)
+	}
 	var result hsNodesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("headscale: status: decode: %w", err)
 	}
 
@@ -128,8 +132,12 @@ func (a *headscaleAdapter) IP(ctx context.Context) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("headscale: ip: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("headscale: ip: read response: %w", err)
+	}
 	var result hsNodesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return "", fmt.Errorf("headscale: ip: decode: %w", err)
 	}
 	// Select the IPv4 address explicitly rather than IPAddresses[0]: Headscale's
@@ -163,8 +171,12 @@ func (a *headscaleAdapter) Hostname(ctx context.Context) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("headscale: hostname: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("headscale: hostname: read response: %w", err)
+	}
 	var result hsNodesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return "", fmt.Errorf("headscale: hostname: decode: %w", err)
 	}
 	if len(result.Nodes) > 0 {
@@ -292,8 +304,12 @@ func (a *headscaleAdapter) Devices(ctx context.Context) ([]Device, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("headscale: list nodes: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nil, fmt.Errorf("headscale: list nodes: read response: %w", err)
+	}
 	var result hsNodesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, fmt.Errorf("headscale: list nodes: decode: %w", err)
 	}
 	devices := make([]Device, len(result.Nodes))
@@ -355,8 +371,12 @@ func (a *headscaleAdapter) CreateAuthKey(ctx context.Context, tags []string) (st
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("headscale: create auth key: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("headscale: create auth key: read response: %w", err)
+	}
 	var result hsCreatePreAuthKeyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return "", fmt.Errorf("headscale: create auth key: decode: %w", err)
 	}
 	if result.PreAuthKey.Key == "" {
@@ -377,8 +397,12 @@ func (a *headscaleAdapter) GetACL(ctx context.Context) ([]byte, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("headscale: get acl: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nil, "", fmt.Errorf("headscale: get acl: read response: %w", err)
+	}
 	var result hsPolicyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, "", fmt.Errorf("headscale: get acl: decode: %w", err)
 	}
 	etag := resp.Header.Get("ETag")
