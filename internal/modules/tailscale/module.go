@@ -470,8 +470,12 @@ func (m *Module) serveActive(ctx context.Context) (active, probeOK bool) {
 	if strings.Contains(out, "no serve config") || strings.TrimSpace(out) == "" {
 		return false, true
 	}
-	// Active serve output lists proxied targets (a tree with "|--" / "proxy").
-	return strings.Contains(out, "proxy") || strings.Contains(out, "|--"), true
+	// Active serve output lists proxied targets as a tree, each leaf prefixed
+	// with the "|--" tree marker (e.g. "|-- /  proxy http://127.0.0.1:8080").
+	// Key on that structural marker rather than the bare word "proxy" (IN-03):
+	// help/hint text that merely mentions "proxy" must not be misread as an
+	// active serve (false-positive Warning).
+	return strings.Contains(out, "|--"), true
 }
 
 // Repair attempts to fix findings.
