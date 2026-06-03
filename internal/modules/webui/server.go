@@ -109,6 +109,8 @@ func resolveWebUIAddr(ctx context.Context, cfg *config.Config, resolver tailnetI
 // that safeweb's serveBrowser() provided (tailscale.com@v1.98.5/safeweb/http.go:377-384).
 // CSP string: derived from DefaultCSP() + Set("default-src","'self'") — no change to content.
 // HSTS is always set because the listener is TLS-only (SecureContext was always true).
+// Note: the correct W3C/RFC header name is "Referrer-Policy" (two r's); "Referer-Policy"
+// (one r) is silently ignored by all browsers (WR-01).
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	const csp = "default-src 'self'; frame-ancestors 'none'; form-action 'self'; " +
 		"base-uri 'self'; block-all-mixed-content"
@@ -117,7 +119,7 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referer-Policy", "same-origin")
+		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		h.Set("Strict-Transport-Security", hsts)
 		next.ServeHTTP(w, r)
