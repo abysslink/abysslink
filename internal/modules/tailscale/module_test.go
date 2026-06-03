@@ -33,19 +33,22 @@ func newTestModule(calls ...shell.Call) *Module {
 
 func TestFunnelActive(t *testing.T) {
 	cases := []struct {
-		name string
-		res  shell.Result
-		err  bool
-		want bool
+		name        string
+		res         shell.Result
+		err         bool
+		wantActive  bool
+		wantProbeOK bool
 	}{
-		{"active", shell.Result{Stdout: "https://rig.tail-scale.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:3000", ExitCode: 0}, false, true},
-		{"not configured", shell.Result{Stdout: "Funnel is not configured.", ExitCode: 0}, false, false},
-		{"command unavailable", shell.Result{ExitCode: 1}, false, false},
+		{"active", shell.Result{Stdout: "https://rig.tail-scale.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:3000", ExitCode: 0}, false, true, true},
+		{"not configured", shell.Result{Stdout: "Funnel is not configured.", ExitCode: 0}, false, false, true},
+		{"command unavailable", shell.Result{ExitCode: 1}, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newTestModule(shell.Call{Result: tc.res})
-			assert.Equal(t, tc.want, m.funnelActive(context.Background()))
+			active, probeOK := m.funnelActive(context.Background())
+			assert.Equal(t, tc.wantActive, active)
+			assert.Equal(t, tc.wantProbeOK, probeOK)
 		})
 	}
 }
