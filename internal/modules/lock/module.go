@@ -136,6 +136,9 @@ func (m *Module) Apply(ctx context.Context) error {
 		return err
 	}
 	for _, f := range findings {
+		if f.Severity == modules.SeverityOK {
+			continue // OK findings represent passing checks; no action needed
+		}
 		if f.Check == "lock_enabled" {
 			return fmt.Errorf(
 				"lock: Tailnet Lock is required but not yet enabled.\n\n" +
