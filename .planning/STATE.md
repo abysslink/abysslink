@@ -2,15 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
-status: executing
-last_updated: "2026-06-03T11:43:03.563Z"
-last_activity: 2026-06-03 -- Phase 23.1 planning complete
+status: milestone_complete
+last_updated: 2026-06-03T12:38:39.246Z
+last_activity: 2026-06-03
 progress:
   total_phases: 13
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 12
-  completed_plans: 8
-  percent: 15
+  completed_plans: 12
+  percent: 23
+stopped_at: Milestone complete (Phase 23.1 was final phase)
 ---
 
 # Project State
@@ -20,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Phase 23.1 — doctor probe failure honesty no false ok on unknown or faile
+**Current focus:** Milestone complete
 
 ## Current Position
 
 Phase: 23.1
 Plan: Not started
-Status: Ready to execute
-Last activity: 2026-06-03 -- Phase 23.1 planning complete
+Status: Milestone complete
+Last activity: 2026-06-03
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 78 (v1.0.0)
+- Total plans completed: 82 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 
@@ -101,6 +102,9 @@ Last activity: 2026-06-03 -- Phase 23.1 planning complete
 | Phase 23-doctor-honesty-coverage P02 | 5m | 3 tasks | 5 files |
 | Phase 23 P03 | 5m | 3 tasks | 5 files |
 | Phase 23-doctor-honesty-coverage P04 | 8 | 4 tasks | 7 files |
+| Phase 23.1 P02 | 6m | 2 tasks | 2 files |
+| Phase 23.1 P03 | 6m | 2 tasks | 2 files |
+| Phase 23.1 P04 | 5m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -180,6 +184,7 @@ Last activity: 2026-06-03 -- Phase 23.1 planning complete
 - [Phase ?]: 23-02: hardening Verify is no-op (returns nil) to prevent Detect+Verify double-emission; hardening is report-only so Verify adds no information
 - [Phase ?]: 23-03: checkID 'ntfy-version' for ntfy floor; versionFloorFindings exported detector wired by Plan 04 into collectDoctorFindings
 - [Phase ?]: diskEncryptionGate extracted as testable helper; UNKNOWN-state non-overridable via stable marker substring (Plan 04)
+- [Phase ?]: WR-03: met-bind-unknown is a distinct check ID from metrics-bind-tailnet; SeverityWarning not OK when tailnetIP unavailable; threat-model row stays at — not ✓
 
 ### Pending Todos
 
@@ -228,6 +233,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-03T11:07:27.006Z
-Stopped at: Phase 23.1 context gathered
-Resume file: .planning/phases/23.1-doctor-probe-failure-honesty-no-false-ok-on-unknown-or-faile/23.1-CONTEXT.md
+Last session: 2026-06-03T12:22:31.712Z
+Stopped at: Completed 23.1-03-PLAN.md
+Resume file: None
