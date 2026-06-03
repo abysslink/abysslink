@@ -22,7 +22,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -407,7 +406,7 @@ func nbZitadelProbe(ctx context.Context, issuerBase string) DoctorFinding {
 		}
 	case http.StatusOK:
 		// Check if results were returned.
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := readLimited(resp.Body, maxBackendBody)
 		var result struct {
 			Result []any `json:"result"`
 		}
@@ -519,7 +518,7 @@ func checkNbKeyType(ctx context.Context, doReq doRequestFunc) DoctorFinding {
 		}
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, maxBackendBody)
 	if err != nil {
 		return DoctorFinding{Module: mod, Check: check, Severity: DoctorWarning,
 			Message: "nb-key-type: could not read response body: " + err.Error(),

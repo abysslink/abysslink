@@ -64,8 +64,12 @@ func (a *netbirdAdapter) ListEvents(ctx context.Context) ([]nbAuditEvent, error)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: list events: HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nil, fmt.Errorf("netbird: list events: read response: %w", err)
+	}
 	var events []nbAuditEvent
-	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+	if err := json.Unmarshal(data, &events); err != nil {
 		return nil, fmt.Errorf("netbird: list events: decode: %w", err)
 	}
 	return events, nil
