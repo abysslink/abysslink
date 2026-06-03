@@ -222,14 +222,14 @@ func metricsHandler(reg metrics.Registry) http.HandlerFunc {
 func writeMetrics(w io.Writer, families []metrics.MetricFamily) {
 	for i := range families {
 		fam := families[i]
-		fmt.Fprintf(w, "# HELP %s %s\n", fam.Name, escapeHelp(fam.Help))
-		fmt.Fprintf(w, "# TYPE %s %s\n", fam.Name, fam.Type)
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n", fam.Name, escapeHelp(fam.Help))
+		_, _ = fmt.Fprintf(w, "# TYPE %s %s\n", fam.Name, fam.Type)
 		for _, s := range fam.Samples {
 			if len(s.Labels) == 0 {
-				fmt.Fprintf(w, "%s %g\n", fam.Name, s.Value)
+				_, _ = fmt.Fprintf(w, "%s %g\n", fam.Name, s.Value)
 				continue
 			}
-			fmt.Fprintf(w, "%s{%s} %g\n", fam.Name, formatLabels(s.Labels), s.Value)
+			_, _ = fmt.Fprintf(w, "%s{%s} %g\n", fam.Name, formatLabels(s.Labels), s.Value)
 		}
 	}
 }
