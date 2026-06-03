@@ -310,7 +310,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 20. Security Audit Pass & Doctor Checks | 4/4 | Complete    | 2026-06-02 |
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
 | 22. Network & Dependency Lockdown | 4/4 | Complete    | 2026-06-03 |
-| 23. Doctor Honesty & Coverage | 4/4 | Complete    | 2026-06-03 |
+| 23. Doctor Honesty & Coverage | 4/4 | Complete   | 2026-06-03 |
 
 ### Phase 23.1: Doctor probe-failure honesty — no false-OK on unknown or failed probes and no double-emit (INSERTED)
 
@@ -350,10 +350,10 @@ Plans:
   4. New tests cover each probe-failure → non-OK path: serve-probe exec error / non-zero exit asserts `serve-probe-fail` Warning (distinct from `funnel`); metrics probe against an unroutable address (e.g. `192.0.2.1:9` TEST-NET-1) asserts it does NOT return SeverityOK; existing closed-port-on-loopback ECONNREFUSED test still asserts SeverityOK
   5. `make lint test` green
 
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 
 Plans:
 **Wave 1** *(both plans independent — parallel execution)*
 
-- [ ] 23.2-01-PLAN.md — DOC-09 (CR-02): serveActive returns (bool, bool); probe-failure emits SeverityWarning Check='serve-probe-fail'; findingFix entry; tests for exec-error + non-zero-exit + distinct-check-ID + serve-OK regression
-- [ ] 23.2-02-PLAN.md — DOC-10 (CR-01): metDisabledListenerCheck ECONNREFUSED gate; non-ECONNREFUSED errors emit SeverityWarning Check='met-listener-unknown'; findingFix entry; TestMetDisabledListener_UnroutableAddr (192.0.2.1:9) + ECONNREFUSED regression
+- [x] 23.2-01-PLAN.md — DOC-09 (CR-02): serveActive returns (bool, bool); probe-failure emits SeverityWarning Check='serve-probe-fail'; findingFix entry; tests for exec-error + non-zero-exit + distinct-check-ID + serve-OK regression
+- [x] 23.2-02-PLAN.md — DOC-10 (CR-01): metDisabledListenerCheck ECONNREFUSED gate; non-ECONNREFUSED errors emit SeverityWarning Check='met-listener-unknown'; findingFix entry; TestMetDisabledListener_UnroutableAddr (192.0.2.1:9) + ECONNREFUSED regression
