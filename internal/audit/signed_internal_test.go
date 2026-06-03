@@ -106,8 +106,8 @@ func TestSignBytes_CoversAllMetadataFields(t *testing.T) {
 // "audit-counter"). All other operations are delegated to the embedded mock.
 // It records whether Delete was called for (counterKeyService, counterKeyAccount).
 type counterFailStore struct {
-	mu          sync.Mutex
-	inner       *secrets.MockStore
+	mu              sync.Mutex
+	inner           *secrets.MockStore
 	deleteCalledFor map[string]bool // "service\x00account" → true
 }
 
