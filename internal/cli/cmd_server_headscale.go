@@ -666,8 +666,14 @@ func headscaleUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContex
 		return fmt.Errorf("headscale upgrade: %w", err)
 	}
 
+	// AUD-01: build a chain-recording *SignedAudit for the DB backup.
+	// headscaleSwapBinary is fail-closed on backup failure, so use sa when
+	// available; if keychain is unavailable, sa is nil and headscaleSwapBinary
+	// will fall back to the unchained Backup (documented at that call site).
+	sa, _ := cmdSignedAudit(ctx, cc)
+
 	// Swap binary: backup DB → stop → write → start → health-check.
-	return headscaleSwapBinary(ctx, cfg, runner, binPath, tmpBinPath)
+	return headscaleSwapBinary(ctx, cfg, runner, binPath, tmpBinPath, sa)
 }
 
 // downloadAndVerifyHeadscale downloads the headscale binary for targetVer, verifies
@@ -710,11 +716,23 @@ func downloadAndVerifyHeadscale(ctx context.Context, runner shell.Runner, target
 // headscaleSwapBinary performs the atomic binary swap: backup DB → stop service →
 // write new binary → start service → health-check. Extracted to keep upgrade
 // cyclomatic complexity below gocyclo limit of 15.
-func headscaleSwapBinary(ctx context.Context, cfg *config.Config, runner shell.Runner, binPath, tmpBinPath string) error {
-	// Backup DB before any mutation (D-04).
+// sa is the chain-recording *SignedAudit from the caller; if nil (keychain
+// unavailable), falls back to unchained audit.Backup with a slog.Warn
+// (AUD-01 T-24-07-04 documented fallback; not silent).
+func headscaleSwapBinary(ctx context.Context, cfg *config.Config, runner shell.Runner, binPath, tmpBinPath string, sa *audit.SignedAudit) error {
+	// AUD-01: backup DB before any mutation (D-04) using chain-recorded BackupWithChain.
+	// Fail-closed: an error aborts the upgrade to preserve the append-before-write ordering.
 	if dbPath := cfg.Server.Headscale.DBPath; dbPath != "" {
-		if _, err := audit.Backup(dbPath); err != nil {
-			return fmt.Errorf("headscale upgrade: backup DB: %w", err)
+		if sa != nil {
+			if _, err := audit.BackupWithChain(ctx, dbPath, sa); err != nil {
+				return fmt.Errorf("headscale upgrade: backup DB: %w", err)
+			}
+		} else {
+			// Keychain unavailable — unchained fallback (AUD-01 T-24-07-04; not silent).
+			slog.WarnContext(ctx, "headscale upgrade: chain backup unavailable (keychain missing); using unchained backup", "db_path", dbPath)
+			if _, err := audit.Backup(dbPath); err != nil {
+				return fmt.Errorf("headscale upgrade: backup DB: %w", err)
+			}
 		}
 	}
 
@@ -862,7 +880,14 @@ func headscaleBackupRunE(ctx context.Context, cc *cmdContext, p Printer) error {
 	}
 
 	slog.InfoContext(ctx, "headscale backup", "db_path", dbPath)
-	backupPath, err := audit.Backup(dbPath)
+
+	// AUD-01: DB backup is the principal artifact — fail-closed if the keychain
+	// is unavailable (cannot build a chain-recording *SignedAudit).
+	sa, saErr := cmdSignedAudit(ctx, cc)
+	if saErr != nil {
+		return fmt.Errorf("headscale backup: %w", saErr)
+	}
+	backupPath, err := audit.BackupWithChain(ctx, dbPath, sa)
 	if err != nil {
 		return fmt.Errorf("headscale backup: %w", err)
 	}
