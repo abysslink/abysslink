@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
-status: verifying
-last_updated: "2026-06-03T10:57:18.231Z"
+status: ready_to_plan
+last_updated: 2026-06-03T10:58:23.484Z
 last_activity: 2026-06-03
 progress:
   total_phases: 13
@@ -11,6 +11,7 @@ progress:
   total_plans: 8
   completed_plans: 8
   percent: 15
+stopped_at: Phase 23 complete (4/4) — ready to discuss Phase 23.1
 ---
 
 # Project State
@@ -20,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Phase 23 — doctor-honesty-coverage
+**Current focus:** Phase 23.1 — doctor probe failure honesty no false ok on unknown or faile
 
 ## Current Position
 
-Phase: 23 (doctor-honesty-coverage) — EXECUTING
-Plan: 4 of 4
-Status: Phase complete — ready for verification
+Phase: 23.1
+Plan: Not started
+Status: Ready to plan
 Last activity: 2026-06-03
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 74 (v1.0.0)
+- Total plans completed: 78 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 

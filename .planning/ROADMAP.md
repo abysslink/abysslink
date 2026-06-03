@@ -310,7 +310,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 20. Security Audit Pass & Doctor Checks | 4/4 | Complete    | 2026-06-02 |
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
 | 22. Network & Dependency Lockdown | 4/4 | Complete    | 2026-06-03 |
-| 23. Doctor Honesty & Coverage | 4/4 | Complete   | 2026-06-03 |
+| 23. Doctor Honesty & Coverage | 4/4 | Complete    | 2026-06-03 |
 
 ### Phase 23.1: Doctor probe-failure honesty — no false-OK on unknown or failed probes and no double-emit (INSERTED)
 
@@ -326,7 +326,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
   4. Report-only `SeverityOK` findings appear exactly ONCE per `abysslink doctor` pass for lock/ssh/ntfy/acl/tailscale — either emitted in only one of Detect/Verify (hardening-module precedent) or deduped on `(Module, Check)` in `runner.Doctor`; the "N ok" count is no longer inflated and no duplicate ✓ rows render (DOC-08 / WR-08)
   5. `make lint test` green; new/updated tests cover each probe-failure → non-OK path and the single-emission/dedup guarantee
 
-**Plans:** 0 plans
+**Plans:** 4/4 plans complete
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 23.1 to break down)
