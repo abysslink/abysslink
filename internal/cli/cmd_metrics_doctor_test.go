@@ -185,6 +185,56 @@ func TestMetDisabledListener_UnroutableAddr(t *testing.T) {
 	assert.NotEqual(t, "met-disabled-listener", f.Check, "must not use the confirmed-closed check ID for an unproven probe")
 }
 
+// TestMetDisabledListener_UnroutableTailnetIP verifies WR-02: the
+// `case tailnetIP != ""` JoinHostPort branch (bind_addr empty, tailnetIP set)
+// must honestly report met-listener-unknown when the probe is inconclusive.
+// 192.0.2.2 is TEST-NET-1 (RFC 5737) — guaranteed unroutable on any standard
+// host, so the dial returns EHOSTUNREACH/ENETUNREACH (not ECONNREFUSED). The
+// honest result is Check="met-listener-unknown" SeverityWarning, never a false
+// SeverityOK, on the address built from tailnetIP rather than an explicit
+// bind_addr.
+func TestMetDisabledListener_UnroutableTailnetIP(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+	cfg.Observability.Metrics.BindAddr = "" // force the tailnetIP JoinHostPort branch
+
+	f := metDisabledListenerCheck(cfg, "192.0.2.2")
+
+	assert.NotEqual(t, modules.SeverityOK, f.Severity, "must not return SeverityOK for an unroutable tailnet IP (WR-02)")
+	assert.Equal(t, "met-listener-unknown", f.Check, "inconclusive probe on the tailnetIP branch must use the met-listener-unknown check ID")
+	assert.Equal(t, modules.SeverityWarning, f.Severity, "inconclusive probe must return SeverityWarning, not SeverityOK")
+}
+
+// TestMetDisabledListener_DefaultFallbackPort verifies WR-02: when both
+// bind_addr and tailnetIP are empty, metDisabledListenerCheck falls back to
+// dialing ":port" (the default branch at cmd_doctor.go). This pins that the
+// default-fallback address is constructed from the configured port and probed:
+// against a port we have proven closed (bound then released on loopback), the
+// honest result is the ECONNREFUSED-gated SeverityOK on the met-disabled-listener
+// check — confirming the ":port" fallback reaches a real socket address rather
+// than dialing something malformed. (The inconclusive arm of the ":port" path is
+// not loopback-deterministic; the tailnetIP unroutable case above pins the
+// met-listener-unknown emission for inconclusive dials.)
+func TestMetDisabledListener_DefaultFallbackPort(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Observability.Metrics.Enabled = false
+	cfg.Observability.Metrics.BindAddr = "" // empty bind_addr ...
+	// ... and empty tailnetIP forces the ":port" default fallback branch.
+
+	// Pick a free port, then release it so nothing listens there. Dialing
+	// ":port" reaches loopback and returns ECONNREFUSED for a closed port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	freePort := ln.Addr().(*net.TCPAddr).Port
+	require.NoError(t, ln.Close())
+	cfg.Observability.Metrics.Port = freePort
+
+	f := metDisabledListenerCheck(cfg, "")
+
+	assert.Equal(t, "met-disabled-listener", f.Check, "default ':port' fallback must probe the configured port and report the closed-port check ID")
+	assert.Equal(t, modules.SeverityOK, f.Severity, "a provably-closed ':port' default fallback must return the ECONNREFUSED-gated SeverityOK")
+}
+
 func TestMetLabelAudit_AllAllowed(t *testing.T) {
 	cfg := config.Defaults()
 	reg := metrics.NewMemRegistry()
