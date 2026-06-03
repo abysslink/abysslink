@@ -224,6 +224,9 @@ func (m *Module) Apply(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Join(home, ".config", "code-server"), 0o700); err != nil {
 		return fmt.Errorf("code-server apply: mkdir config: %w", err)
 	}
+	// #nosec G117 -- code-server's own config file legitimately stores its auth
+	// password (generated/keychain-sourced, written 0o600); this is the config
+	// format code-server requires, not a hardcoded credential.
 	data, err := yaml.Marshal(codeServerConfig{
 		BindAddr: ip + ":" + codeServerPort,
 		Auth:     "password",

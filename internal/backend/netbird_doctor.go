@@ -287,6 +287,8 @@ func semverLessThan(a, b string) bool {
 			// strip pre-release suffixes (e.g. "1-rc1")
 			tok = strings.SplitN(tok, "-", 2)[0]
 			n, _ := strconv.Atoi(tok)
+			// #nosec G602 -- parts is a [3]int and i is bounded to 0..2 by both
+			// SplitN(s, ".", 3) and the i >= 3 break above; index is always in range
 			parts[i] = n
 		}
 		return parts

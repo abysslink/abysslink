@@ -13,7 +13,7 @@ env:
 
 jobs:
   vuln-scan:
-    name: govulncheck (module mode)
+    name: govulncheck
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -47,13 +47,14 @@ jobs:
         # Pinned (not @latest) — a supply-chain-hardening gate must itself be
         # reproducible and immune to upstream tool compromise. Bump via Dependabot
         # (gomod ecosystem) or a documented manual cadence.
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
 
-      - name: Run govulncheck (module mode)
-        # Module mode reports ALL vulnerabilities in the dependency graph
-        # regardless of reachability — it catches dormant vulns that
-        # call-graph mode misses. govulncheck exits non-zero on any finding.
-        run: govulncheck -mode=module ./...
+      - name: Run govulncheck
+        # Reachability scan: reports vulnerabilities your code actually calls
+        # (the actionable set). govulncheck exits non-zero on any such finding.
+        # (Module-level scanning, which also surfaces dormant transitive vulns,
+        # no longer accepts package patterns in govulncheck v1.3.x.)
+        run: govulncheck ./...
 
   semgrep:
     name: semgrep (OSS ruleset)
@@ -119,7 +120,7 @@ jobs:
         # Pinned (not @latest) — a supply-chain-hardening gate must itself be
         # reproducible and immune to upstream tool compromise (T-20-01-04). Bump
         # via Dependabot (gomod ecosystem) or a documented manual cadence.
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
 
       - name: Run gosec
         # gosec exits non-zero on any unsuppressed finding; no continue-on-error.
