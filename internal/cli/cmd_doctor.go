@@ -719,6 +719,11 @@ func appendAllRigsFindings(ctx context.Context, cc *cmdContext, findings []modul
 	return findings, fanErr
 }
 
+// tailscaledFixHint is the shared remediation for any check whose probe could
+// not run because tailscaled was unreachable (e.g. funnel-probe-fail,
+// serve-probe-fail). Extracting it keeps the two entries from drifting apart.
+const tailscaledFixHint = "ensure tailscaled is running: tailscale status — then re-run abysslink doctor"
+
 // findingFix maps a finding check name to a short remediation command or
 // instruction. Returns "" when no specific guidance exists (generic repair
 // message is shown instead).
@@ -737,8 +742,8 @@ func findingFix(check string) string {
 		"needs_login":          "tailscale login",
 		"ssh_sandboxed":        "brew install tailscale  (replaces App Store version)",
 		"installed":            "abysslink up --apply",
-		"funnel-probe-fail":    "ensure tailscaled is running: tailscale status — then re-run abysslink doctor",
-		"serve-probe-fail":     "ensure tailscaled is running: tailscale status — then re-run abysslink doctor",
+		"funnel-probe-fail":    tailscaledFixHint,
+		"serve-probe-fail":     tailscaledFixHint,
 		"met-bind-unknown":     "start tailscaled so backend IP can be resolved, then re-run abysslink doctor",
 		"met-listener-unknown": "verify network reachability to the metrics address then re-run abysslink doctor",
 		// Tailnet Lock.
