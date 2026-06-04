@@ -55,7 +55,8 @@ func main() {
 
 	cfg, err := config.Load(configPath())
 	if err != nil {
-		cfg = config.Defaults()
+		slog.Error("abysslinkd: invalid config — refusing to start", "err", err)
+		os.Exit(1)
 	}
 
 	kc, kerr := secrets.NewStore(ctx, runner)

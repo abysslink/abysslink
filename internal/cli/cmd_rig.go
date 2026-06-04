@@ -126,7 +126,7 @@ func newRigImportCmd() *cobra.Command {
 func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		cfg = config.Defaults()
+		return fmt.Errorf("rig ls: load config: %w", err)
 	}
 
 	records := make([]rigLsRecord, 0, len(cfg.Rigs))
@@ -243,7 +243,7 @@ func runRigImport(cfgPath, importPath string, apply bool, out io.Writer) error {
 	// Load current config.
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		cfg = config.Defaults()
+		return fmt.Errorf("rig import: load config: %w", err)
 	}
 
 	// Validate each incoming rig before mutating state.

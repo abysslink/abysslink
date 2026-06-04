@@ -96,8 +96,7 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		// For commands that don't need config (like status), return defaults.
-		cfg = config.Defaults()
+		return nil, fmt.Errorf("config: %w", err)
 	}
 
 	// Default: if neither --apply nor --dry-run is set, dry-run mode.
