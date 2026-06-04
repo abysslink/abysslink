@@ -39,9 +39,9 @@ created: 2026-06-04
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
 | shell.LookPath added | 26-01 | 1 | PHASE-26-B1 | T-26-01 | PATH probe only — no subprocess | unit | `go build ./internal/shell/...` | ✅ | ⬜ pending |
-| openURL fixed | 26-01 | 1 | PHASE-26-B1 | T-26-01, T-26-02 | returns error when opener absent or non-zero exit | unit | `go test ./internal/cli/... -run TestOpenURL` | created in plan | ⬜ pending |
+| openURL fixed | 26-01 | 1 | PHASE-26-B1 | T-26-01, T-26-02 | returns error when opener absent or non-zero exit; accepts shell.Runner param for mock injection | unit | `go test ./internal/cli/... -run TestOpenURL_NoOpenerError` | created in plan | ⬜ pending |
 | checkACSleepDisabled fixed | 26-01 | 1 | PHASE-26-B3 | T-26-03 | >= 2 fields — annotated pmset output parses | unit | `go test ./internal/cli/... -run TestCheckACSleepDisabled -v` | created in plan | ⬜ pending |
-| Stage 2 B2 fix | 26-02 | 2 | PHASE-26-B2 | T-26-04 | no sudo calls without real autoYes | unit | `go test ./internal/cli/... -run TestJourneyStage2_NoDuplicateCalls -v` | created in plan | ⬜ pending |
+| Stage 2 B2 fix | 26-02 | 2 | PHASE-26-B2 | T-26-04 | no sudo calls without real autoYes; output contains "Prerequisites verified." | unit | `go test ./internal/cli/... -run TestJourneyStage2_NoDuplicateCalls -v` | created in plan | ⬜ pending |
 | Per-stage gates | 26-02 | 2 | PHASE-26-GATED-JOURNEY | T-26-05 | autoYes=true: no huh prompts; non-TTY: no hang | unit | `go test ./internal/cli/... -run TestRunJourney_AutoYes\|TestRunJourney_NonTTY -v` | updated+created | ⬜ pending |
 | ACL stage | 26-02 | 2 | PHASE-26-ACL-STAGE | T-26-05, T-26-06 | headless: prints guidance, no RunInteractive | unit | `go test ./internal/cli/... -run TestJourneyStageCount\|TestJourneyStageLabels -v` | updated in plan | ⬜ pending |
 | Stage count 8 | 26-02 | 2 | PHASE-26-ACL-STAGE | — | journeyLabels() == 8; journeyStages() == 8 | unit | `go test ./internal/cli/... -run TestJourneyStageCount\|TestJourneyStageLabels -v` | updated in plan | ⬜ pending |
@@ -61,7 +61,7 @@ Existing infrastructure covers all phase requirements — `internal/cli` already
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
 | Interactive stage gating (huh confirm prompts) | PHASE-26-GATED-JOURNEY | TTY interaction can't run in CI | Run `abysslink init` in a terminal; confirm each stage pauses and offers to run its command |
-| Browser actually opens on macOS | PHASE-26-B1 | Requires GUI session | Run `abysslink init` on macOS; verify browser opens for Tailscale auth when user selects "No, open the link for me" |
+| Browser actually opens on macOS | PHASE-26-B1 | Requires GUI session (unit test covers error paths via mock runner; real open call requires display) | Run `abysslink init` on macOS; verify browser opens for Tailscale auth when user selects "No, open the link for me" |
 
 ---
 

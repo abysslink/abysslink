@@ -285,6 +285,7 @@ Plans:
 **Wave 1** *(parallel)*
 
 Plans:
+
 - [x] 24-01-PLAN.md — AUD-01: BackupWithChain + RestoreGated (HMAC-bound backup + chain-walk restore gate)
 - [x] 24-02-PLAN.md — CI-01: harden-runner on lint.yml + test.yml + REQUIREMENTS.md:93 Phase 24 fix
 - [x] 24-04-PLAN.md — DOS-01 Part A: limitedWriter (exec.go) + MaxBytesReader (/notify) + readLimited on 15 NetBird seam sites
@@ -307,6 +308,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 25-00-PLAN.md — Wave 0: Test scaffolding (limitio_test, config_load_test, flock.go stub, signed_test additions)
 - [x] 25-01-PLAN.md — limitio leaf package + backend/limit.go wrapper + DOC-03 nb-lock findingFix + DOC-04 ntfy-version threatRows
 - [x] 25-02-PLAN.md — config.Load fail-closed (D-01) + 4 swallowing callers fixed + NET-03 argv defense-in-depth (D-03)
@@ -319,10 +321,18 @@ Plans:
 **Requirements**: TBD
 **Depends on:** Phase 25
 **Plans:** 2 plans
-
 Plans:
+**Wave 1**
+
 - [ ] 26-01-PLAN.md — shell.LookPath + openURL B1 fix + checkACSleepDisabled B3 fix + regression tests
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 26-02-PLAN.md — B2 fix (Stage 2 no-dup) + 8-stage gated journey + per-stage gates + ACL stage + updated tests
+
+**Cross-cutting constraints:**
+
+- make lint test green
 
 ---
 
