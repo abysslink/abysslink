@@ -291,8 +291,8 @@ func (m *Module) enableSSH(ctx context.Context, sandboxed bool) error {
 func (m *Module) ensureConnected(ctx context.Context, needsLogin, notRunning bool) error {
 	switch {
 	case needsLogin:
-		slog.Info("tailscale apply: launching browser login (tailscale login --reauth)")
-		if err := m.runner.RunInteractive(ctx, "tailscale", "login", "--reauth"); err != nil {
+		slog.Info("tailscale apply: launching browser login (tailscale login)")
+		if err := m.runner.RunInteractive(ctx, "tailscale", "login"); err != nil {
 			return fmt.Errorf("tailscale apply: interactive login: %w", err)
 		}
 	case notRunning:
