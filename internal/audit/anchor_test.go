@@ -258,8 +258,12 @@ func TestVerify_CounterAbsent_Unknown(t *testing.T) {
 		"absent counter must not falsely set TruncationDetected")
 }
 
-// TestVerify_CounterMismatch_TruncationDetected: keychain counter=3 but log
-// has 5 entries → TruncationDetected=true and CounterStatus="mismatch".
+// TestVerify_CounterMismatch_TruncationDetected: keychain counter=7 but log has
+// 5 entries → TruncationDetected=true and CounterStatus="mismatch". Genuine tail
+// truncation is modeled as counter > entries: the tamper-resistant keychain
+// counter retains the original (higher) count while the on-disk log loses tail
+// entries. counter < entries is the OPPOSITE direction (the benign append-before-
+// write window) and must NOT be flagged — see TestVerify_CounterLagging_NotMismatch.
 func TestVerify_CounterMismatch_TruncationDetected(t *testing.T) {
 	dir := t.TempDir()
 	kc := seededStore(t)
@@ -268,14 +272,47 @@ func TestVerify_CounterMismatch_TruncationDetected(t *testing.T) {
 	require.NoError(t, err)
 	writeSomeEntries(t, sa, 5) // writes 5 entries + sets counter=5
 
-	// Simulate tail-deletion: reset counter to 3 (as if 2 tail entries deleted).
-	require.NoError(t, audit.WriteCounter(context.Background(), kc, 3))
+	// Simulate tail-deletion: counter records 7 appends but only 5 entries remain
+	// on disk (2 tail entries were stripped by an attacker who cannot touch the
+	// keychain counter). counter(7) > entries(5) → genuine truncation.
+	require.NoError(t, audit.WriteCounter(context.Background(), kc, 7))
 
 	res, verr := audit.Verify(context.Background(), logPath, kc)
 	require.NoError(t, verr)
 	assert.True(t, res.TruncationDetected,
-		"counter mismatch must set TruncationDetected=true")
+		"counter > entries must set TruncationDetected=true")
 	assert.Equal(t, "mismatch", res.CounterStatus)
+}
+
+// TestVerify_CounterLagging_NotMismatch is the automated coverage for the
+// append-before-write crash window (25-VERIFICATION human item #1). When the
+// keychain counter LAGS the on-disk entry count — counter < entries — it means
+// a process died between appending chain-valid JSONL entries under the flock and
+// bumping the keychain counter. Every entry is HMAC-chain-verified by the walk,
+// so a log-only attacker cannot have forged the extra entries; this is therefore
+// never truncation. Verify MUST report CounterStatus="unknown" (honest tri-state)
+// and MUST NOT set TruncationDetected — a false "mismatch" tamper alarm here would
+// fire on every interrupted WriteFile.
+func TestVerify_CounterLagging_NotMismatch(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	writeSomeEntries(t, sa, 5) // 5 chain-valid entries + counter=5
+
+	// Roll the counter back below the entry count to model a crash that landed
+	// the entries but not the counter bump (counter=3 < entries=5).
+	require.NoError(t, audit.WriteCounter(context.Background(), kc, 3))
+
+	res, verr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verr)
+	assert.Equal(t, "unknown", res.CounterStatus,
+		"counter lagging entries (append-before-write window) must be unknown, never mismatch")
+	assert.False(t, res.TruncationDetected,
+		"a lagging counter must never set TruncationDetected (no genuine truncation)")
+	assert.True(t, res.OK,
+		"chain is intact; only the counter is behind — overall result stays OK")
 }
 
 // TestVerify_CounterVerified: 5 entries appended normally → counter=5;
