@@ -233,18 +233,52 @@ func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modu
 	return res.actions, res.findings, res.err
 }
 
+// interactiveActionsFromActions returns the display strings for actions that
+// require raw terminal access via shell.Runner.RunInteractive. The single
+// keyword is "tailscale login" (substring match, case-insensitive).
+//
+// Rationale: when a planned action description contains "tailscale login", the
+// subprocess calls RunInteractive which wires directly to os.Stdin/os.Stdout/
+// os.Stderr. Running the Bubble Tea LiveTable in raw mode concurrently causes
+// stdin contention and staircase output (LF without CR). Disabling animation
+// returns terminal ownership to the subprocess.
+//
+// This is the same rationale as the sudo path (sudoActionsFromActions), but
+// kept separate so that tailscale login does NOT trigger the sudo notice text —
+// it is an interactive authentication step, not a privilege-escalation step.
+func interactiveActionsFromActions(actions []modules.Action) []string {
+	var result []string
+	for _, a := range actions {
+		if strings.Contains(strings.ToLower(a.Description), "tailscale login") {
+			result = append(result, fmt.Sprintf("%-18s %s", a.Module, styleMuted.Render(a.Description)))
+		}
+	}
+	return result
+}
+
 // applyAnimationEnabled decides whether the apply phase may use the live
 // Bubble Tea table. Animation is disabled — independent of TTY/color/jsonOut
-// — when ANY planned action requires sudo. Rationale: tea.NewProgram in
-// internal/tui.RunLiveTable owns os.Stdin while running. If apply spawns an
-// interactive child (sudo password prompt via shell.ExecRunner.RunInteractive,
-// which also wires cmd.Stdin = os.Stdin), the two race for stdin bytes, the
-// password reads garbage, sudo fails, and Ctrl-C is swallowed by the tea
-// event loop. Falling back to the plain Printer-callback path returns stdin
-// ownership to the child process so sudo can read the password normally.
-// Scan-phase animation is unaffected — there is no sudo on the scan path.
-func applyAnimationEnabled(jsonOut bool, sudoLines []string) bool {
+// — when ANY planned action requires sudo OR when any planned action requires
+// raw terminal access (e.g., tailscale login via RunInteractive).
+//
+// Rationale: tea.NewProgram in internal/tui.RunLiveTable owns os.Stdin while
+// running. If apply spawns an interactive child (sudo password prompt or
+// tailscale login browser auth via shell.ExecRunner.RunInteractive, which also
+// wires cmd.Stdin = os.Stdin), the two race for stdin bytes, the interaction
+// reads garbage, and Ctrl-C is swallowed by the tea event loop. Falling back
+// to the plain Printer-callback path returns stdin ownership to the child
+// process so the interaction works normally.
+//
+// Interactive subprocess actions (e.g., tailscale login) are detected
+// separately from sudo (via interactiveActionsFromActions) to avoid showing the
+// sudo notice for login-only plans — login is an auth step, not escalation.
+// Scan-phase animation is unaffected — there is no sudo or RunInteractive on
+// the scan path.
+func applyAnimationEnabled(jsonOut bool, sudoLines []string, interactiveLines []string) bool {
 	if len(sudoLines) > 0 {
+		return false
+	}
+	if len(interactiveLines) > 0 {
 		return false
 	}
 	return animationEnabled(jsonOut)
@@ -256,6 +290,7 @@ func applyAnimationEnabled(jsonOut bool, sudoLines []string) bool {
 func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Runner, actions []modules.Action, cc *cmdContext) (findings []modules.Finding, elapsed time.Duration, aborted bool, err error) {
 	unique := uniqueActions(actions)
 	sudoLines := sudoActionsFromActions(unique)
+	interactiveLines := interactiveActionsFromActions(unique)
 
 	// Build a summary string for ConfirmBlast.
 	var sb strings.Builder
@@ -280,15 +315,18 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	}
 
 	// Proceed with apply.
+	// Note: printSudoNotice is driven by sudoLines only — interactiveLines (tailscale login)
+	// must NOT trigger the sudo notice, as login is an auth step, not privilege escalation.
 	printSudoNotice(p, unique)
 	printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
 	printerInfo(p, "  "+styleBold.Render(fmt.Sprintf("Applying %d changes...", len(unique))))
 	printerInfo(p, "")
 
-	// Animation is force-disabled when any module requires sudo so the tea
-	// program does not race with the password prompt for stdin. See
+	// Animation is force-disabled when any module requires sudo or any module
+	// requires raw terminal access (e.g. tailscale login) so the tea program
+	// does not race with the interactive subprocess for stdin. See
 	// applyAnimationEnabled for the full rationale.
-	animate := applyAnimationEnabled(cc.jsonOut, sudoLines)
+	animate := applyAnimationEnabled(cc.jsonOut, sudoLines, interactiveLines)
 	if animate {
 		applyFindings, applyErr := runApplyAnimated(ctx, r)
 		return applyFindings, 0, false, applyErr

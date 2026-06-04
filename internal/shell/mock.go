@@ -24,12 +24,13 @@ import (
 
 // Call represents a scripted invocation in a MockRunner.
 type Call struct {
-	Name   string
-	Args   []string
-	Stdin  string            // captured stdin content from RunWithStdin (empty for Run calls)
-	Env    map[string]string // extra env vars passed via RunWithEnv
-	Result Result
-	Err    error
+	Name          string
+	Args          []string
+	Stdin         string            // captured stdin content from RunWithStdin (empty for Run calls)
+	Env           map[string]string // extra env vars passed via RunWithEnv
+	IsInteractive bool              // true when the call was made via RunInteractive
+	Result        Result
+	Err           error
 }
 
 // MockRunner replays pre-scripted Calls in order. Tests use this to avoid
@@ -89,9 +90,17 @@ func (m *MockRunner) RunWithStdin(_ context.Context, stdin io.Reader, name strin
 	return c.Result, c.Err
 }
 
-// RunInteractive returns the next scripted Call's error, recording the actual
-// name and args. Scripted Result output is ignored since interactive calls do
-// not capture output.
+// RunInteractive returns an error for the next scripted Call, recording the
+// actual name and args. The recorded call is stamped with IsInteractive=true so
+// tests can distinguish RunInteractive calls from Run calls via
+// RunInteractiveCalls().
+//
+// Interactive calls do not capture output, so c.Result.Stdout/Stderr are ignored.
+// A scripted non-zero c.Result.ExitCode is, however, mapped to an error to mirror
+// the real ExecRunner.RunInteractive, which returns exec.Cmd.Run's *exec.ExitError
+// for a non-zero exit. An explicit c.Err always takes precedence so tests can
+// script an arbitrary failure. Scripting Result.ExitCode: 0 yields nil (success),
+// keeping existing success-path tests green.
 func (m *MockRunner) RunInteractive(_ context.Context, name string, args ...string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -101,8 +110,51 @@ func (m *MockRunner) RunInteractive(_ context.Context, name string, args ...stri
 	c := m.calls[m.idx]
 	m.calls[m.idx].Name = name
 	m.calls[m.idx].Args = args
+	m.calls[m.idx].IsInteractive = true
 	m.idx++
-	return c.Err
+	if c.Err != nil {
+		return c.Err
+	}
+	if c.Result.ExitCode != 0 {
+		return fmt.Errorf("shell: interactive command %q exited with code %d", name, c.Result.ExitCode)
+	}
+	return nil
+}
+
+// RunInteractiveCalls returns the full argv (name prepended to args) for every
+// call that was made via RunInteractive. Returns a non-nil empty slice when no
+// interactive calls have been recorded. Safe to call concurrently.
+func (m *MockRunner) RunInteractiveCalls() [][]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][]string, 0)
+	for _, c := range m.calls[:m.idx] {
+		if c.IsInteractive {
+			argv := make([]string, 0, 1+len(c.Args))
+			argv = append(argv, c.Name)
+			argv = append(argv, c.Args...)
+			out = append(out, argv)
+		}
+	}
+	return out
+}
+
+// RunCalls returns the full argv (name prepended to args) for every call that
+// was made via Run (not RunInteractive, RunWithStdin, or RunWithEnv). Returns a
+// non-nil empty slice when no such calls have been recorded. Safe to call concurrently.
+func (m *MockRunner) RunCalls() [][]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][]string, 0)
+	for _, c := range m.calls[:m.idx] {
+		if !c.IsInteractive {
+			argv := make([]string, 0, 1+len(c.Args))
+			argv = append(argv, c.Name)
+			argv = append(argv, c.Args...)
+			out = append(out, argv)
+		}
+	}
+	return out
 }
 
 // RunWithEnv returns the next scripted Call result. The env map is recorded for

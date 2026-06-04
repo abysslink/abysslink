@@ -13,21 +13,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package cli — 7-stage Setup Journey orchestrator.
+// Package cli — 8-stage Setup Journey orchestrator.
 //
 // `abysslink init` runs this journey: Account → Prerequisites → Converge →
-// Lock → Enroll → Verify → Done. Each stage calls the existing command
+// Lock → Enroll → Verify → ACL → Done. Each stage calls the existing command
 // function for that step (never duplicating them), so every stage remains
 // independently runnable and idempotent.
 //
 // Under --yes/--json/non-TTY the journey runs headless (no JourneyHeader) so
-// automated invocations never hang. With a TTY, JourneyHeader is printed at
-// each stage boundary. The journey itself is NON-BLOCKING: each stage prints
-// guidance and returns — the §6-sanctioned external-action waits live inside
-// the underlying commands the guidance points to (e.g. `enroll phone`'s
-// enrollPhoneInstallPause), not in this driver loop. Security notes are
-// suppressed under --json. The last completed stage is persisted to
-// abysslinkStateDir()/journey-state.json so --resume can continue an
+// automated invocations never hang (T-10-16). With a TTY, each stage pauses for
+// user confirmation; stages 3–7 offer to invoke the underlying command directly.
+// The headless path (autoYes=true or non-TTY) remains non-blocking in all cases.
+// Security notes are suppressed under --json. The last completed stage is
+// persisted to abysslinkStateDir()/journey-state.json so --resume can continue an
 // interrupted run.
 
 package cli
@@ -36,12 +34,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 
+	"github.com/charmbracelet/huh"
+	cterm "github.com/charmbracelet/x/term"
+
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
-	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/abysslink/abysslink/internal/tui"
 )
@@ -72,11 +73,239 @@ func journeyLabels() []string {
 		"Lock",
 		"Enroll",
 		"Verify",
+		"ACL",
 		"Done",
 	}
 }
 
-// journeyStages returns the ordered slice of the 7 journey stages. Each stage's
+// journeyOfferRun presents a huh.NewConfirm prompt and, if confirmed, calls
+// runner.RunInteractive with the given command. Non-fatal on run failure: warnMsg
+// is printed (or the default "Command failed — run it manually later." when warnMsg
+// is empty) and nil is returned so the stage doesn't abort the journey.
+//
+// warnMsg is the caller-supplied failure warning; pass "" for the default.
+//
+// The function is a no-op (returns nil without prompting) when stdin is not a TTY,
+// so it is safe to call unconditionally — callers do not need to gate on stdinIsTTY().
+//
+// Terminal-state contract: huh leaves the terminal in raw mode after its form
+// exits. journeyOfferRun captures the controlling-tty (/dev/tty) state with
+// cterm.GetState before the form, and restores it with cterm.Restore after the
+// form returns (success or error), before calling RunInteractive. /dev/tty (not
+// os.Stdin) is used because huh drives that descriptor directly. This ensures the
+// child process starts from a clean cooked-mode terminal rather than inheriting
+// huh's raw-mode state.
+func journeyOfferRun(ctx context.Context, p Printer, runner shell.Runner, title, desc, affirm, neg, warnMsg string, args ...string) error {
+	// Argv guard: args[0] is indexed unconditionally below; reject an empty
+	// argv up front rather than panicking (no panics in normal control flow).
+	if len(args) == 0 {
+		return errors.New("journeyOfferRun: no command supplied")
+	}
+
+	// Non-TTY guard: skip the prompt entirely when stdin is not a terminal.
+	// This keeps journeyOfferRun safe in CI, pipes, and go test contexts.
+	if !stdinIsTTY() {
+		return nil
+	}
+
+	// huh puts the terminal in raw mode; restore to cooked mode before spawning
+	// the child so the child's own raw-mode setup starts from a clean state.
+	//
+	// huh opens and drives /dev/tty directly (not os.Stdin), so the save/restore
+	// must operate on the controlling-tty descriptor — not os.Stdin, which may be
+	// a redirected file even when a controlling terminal is attached (WR-04).
+	// If /dev/tty cannot be opened or its state cannot be read, log and skip the
+	// restore rather than silently discarding the error.
+	var (
+		ttyFD      uintptr
+		savedState *cterm.State
+	)
+	if tty, ttyErr := os.OpenFile("/dev/tty", os.O_RDWR, 0); ttyErr == nil {
+		defer func() { _ = tty.Close() }()
+		ttyFD = tty.Fd()
+		if st, stErr := cterm.GetState(ttyFD); stErr == nil {
+			savedState = st
+		} else {
+			slog.Debug("journeyOfferRun: GetState failed; terminal restore skipped", "error", stErr)
+		}
+	} else {
+		slog.Debug("journeyOfferRun: open /dev/tty failed; terminal restore skipped", "error", ttyErr)
+	}
+
+	var runNow bool
+	formErr := huh.NewConfirm().
+		Title(title).
+		Description(desc).
+		Affirmative(affirm).
+		Negative(neg).
+		Value(&runNow).Run()
+
+	// Restore terminal to cooked mode regardless of whether the form succeeded.
+	if savedState != nil {
+		_ = cterm.Restore(ttyFD, savedState)
+	}
+
+	if formErr != nil {
+		return formErr
+	}
+
+	if runNow {
+		if err := runner.RunInteractive(ctx, args[0], args[1:]...); err != nil {
+			msg := warnMsg
+			if msg == "" {
+				msg = "Command failed — run it manually later."
+			}
+			printerInfo(p, "  "+iconWarnStr()+"  "+msg)
+		}
+	}
+	return nil
+}
+
+// journeyStageAccount is the run closure for Stage 1 (Account).
+func journeyStageAccount(jsonOut bool, runner shell.Runner, autoYes bool) func(ctx context.Context, p Printer) error {
+	return func(ctx context.Context, p Printer) error {
+		emitSecurityNote(p, jsonOut, "sso-hardening")   // §7 note 1
+		emitSecurityNote(p, jsonOut, "dry-run-default") // §7 note 2
+		if err := ensureTailscaleAccount(p, runner, autoYes); err != nil {
+			return err
+		}
+		return tui.Pause(ctx, "Stage 1 complete — account ready", autoYes)
+	}
+}
+
+// journeyStagePrereqs is the run closure for Stage 2 (Prerequisites).
+// Prerequisites were already verified in cmd_init RunE before the journey started;
+// this stage emits a summary note and gate-pause only — it must NOT re-run
+// ensureTailscale or runSecurityFixes (B2 fix).
+func journeyStagePrereqs(jsonOut bool, autoYes bool) func(ctx context.Context, p Printer) error {
+	return func(ctx context.Context, p Printer) error {
+		emitSecurityNote(p, jsonOut, "sudo-notice") // §7 note 4
+		printerInfo(p, styleSuccess.Render("Prerequisites verified."))
+		return tui.Pause(ctx, "Stage 2 complete — prerequisites ready", autoYes)
+	}
+}
+
+// journeyStageConverge is the run closure for Stage 3 (Converge).
+func journeyStageConverge(jsonOut bool, runner shell.Runner, autoYes bool) func(ctx context.Context, p Printer) error {
+	return func(ctx context.Context, p Printer) error {
+		emitSecurityNote(p, jsonOut, "disk-encryption")   // §7 note 5
+		emitSecurityNote(p, jsonOut, "ntfy-tailnet-only") // §7 note 9
+		printerInfo(p, styleMuted.Render("Config written. Run `abysslink up --apply` to converge."))
+		if autoYes || !interactive(autoYes, jsonOut) {
+			return nil
+		}
+		return journeyOfferRun(ctx, p, runner,
+			"Run `abysslink up --apply` now?",
+			"Converges your system to match abysslink.yaml.",
+			"Yes, run it", "No, I'll run it later",
+			"", // default failure message
+			"abysslink", "up", "--apply")
+	}
+}
+
+// journeyStageConverge is the run closure for Stage 4 (Lock).
+func journeyStageLock(jsonOut bool, cfg *config.Config, runner shell.Runner, autoYes bool) func(ctx context.Context, p Printer) error {
+	return func(ctx context.Context, p Printer) error {
+		emitSecurityNote(p, jsonOut, "tailnet-lock-secrets") // §7 note 6
+		b, bErr := backend.New(cfg, runner)
+		if bErr == nil {
+			if locker, ok := b.(backend.Locker); ok {
+				if st, err := locker.LockStatus(ctx); err == nil && st.Enabled {
+					printerInfo(p, styleSuccess.Render("Tailnet Lock is already enabled."))
+					return nil
+				}
+			}
+		}
+		printerInfo(p, styleBold.Render("Enable Tailnet Lock:"))
+		printerInfo(p, "  "+styleCode.Render("abysslink lock init --apply"))
+		printerInfo(p, "  "+styleMuted.Render("This will print disablement secrets ONCE — have a password manager ready."))
+		if autoYes || !interactive(autoYes, jsonOut) {
+			return nil
+		}
+		return journeyOfferRun(ctx, p, runner,
+			"Run `abysslink lock init --apply` now?",
+			"Enables Tailnet Lock — disablement secrets printed ONCE.",
+			"Yes, run it", "No, I'll run it later",
+			"", // default failure message
+			"abysslink", "lock", "init", "--apply")
+	}
+}
+
+// journeyStageEnroll is the run closure for Stage 5 (Enroll).
+func journeyStageEnroll(jsonOut bool, runner shell.Runner, autoYes bool) func(ctx context.Context, p Printer) error {
+	return func(ctx context.Context, p Printer) error {
+		emitSecurityNote(p, jsonOut, "lock-screen-hygiene") // §7 note 10
+		printerInfo(p, styleBold.Render("Enroll your phone:"))
+		printerInfo(p, "  "+styleCode.Render("abysslink enroll phone"))
+		printerInfo(p, "  "+styleMuted.Render("This will show a QR code for the Tailscale app."))
+		if autoYes || !interactive(autoYes, jsonOut) {
+			return nil
+		}
+		return journeyOfferRun(ctx, p, runner,
+			"Run `abysslink enroll phone` now?",
+			"Shows a QR code for the Tailscale app.",
+			"Yes, run it", "No, I'll run it later",
+			"", // default failure message
+			"abysslink", "enroll", "phone")
+	}
+}
+
+// journeyStageVerify is the run closure for Stage 6 (Verify).
+func journeyStageVerify(jsonOut bool, runner shell.Runner, autoYes bool) func(ctx context.Context, p Printer) error {
+	return func(ctx context.Context, p Printer) error {
+		emitSecurityNote(p, jsonOut, "doctor-not-full-audit") // §7 note 11
+		printerInfo(p, styleBold.Render("Verify your setup:"))
+		printerInfo(p, "  "+styleCode.Render("abysslink doctor"))
+		if autoYes || !interactive(autoYes, jsonOut) {
+			return nil
+		}
+		return journeyOfferRun(ctx, p, runner,
+			"Run `abysslink doctor` now?",
+			"Checks all modules for misconfigurations.",
+			"Yes, run it", "No, I'll run it later",
+			"", // default failure message
+			"abysslink", "doctor")
+	}
+}
+
+// journeyStageACL is the run closure for Stage 7 (ACL).
+// It delegates to journeyOfferRun so the terminal-restore logic and custom failure
+// message live in a single place — no inline huh block.
+func journeyStageACL(jsonOut bool, runner shell.Runner, autoYes bool) func(ctx context.Context, p Printer) error {
+	return func(ctx context.Context, p Printer) error {
+		printerInfo(p, styleBold.Render("Configure the tailnet ACL:"))
+		printerInfo(p, "  "+styleCode.Render("abysslink acl push --apply"))
+		printerInfo(p, "  "+styleMuted.Render("Requires tailnet.admin OAuth config — if absent, manage at:"))
+		printerInfo(p, "  "+styleCode.Render("https://login.tailscale.com/admin/acls/file"))
+		if autoYes || !interactive(autoYes, jsonOut) {
+			return nil
+		}
+		return journeyOfferRun(ctx, p, runner,
+			"Run `abysslink acl push --apply` now?",
+			"Pushes the abysslink ACL to your tailnet. Requires OAuth config.",
+			"Yes, push ACL", "No, I'll manage it manually",
+			"ACL push failed — manage manually at the URL above.",
+			"abysslink", "acl", "push", "--apply")
+	}
+}
+
+// journeyStageDone is the run closure for Stage 8 (Done).
+func journeyStageDone(jsonOut bool) func(ctx context.Context, p Printer) error {
+	return func(_ context.Context, p Printer) error {
+		emitSecurityNote(p, jsonOut, "backups-reversible") // §7 note 3
+		emitSecurityNote(p, jsonOut, "no-funnel")          // §7 note 8
+		emitSecurityNote(p, jsonOut, "panic-reversible")   // §7 note 12
+		printerInfo(p, "")
+		printerInfo(p, styleSuccess.Render("Setup complete — your rig is ready."))
+		printerInfo(p, "")
+		printerInfo(p, styleMuted.Render("Connect from your phone:"))
+		printerInfo(p, "  "+styleCode.Render("mosh <your-rig> -- tmux new -A -s main"))
+		printerInfo(p, "")
+		return nil
+	}
+}
+
+// journeyStages returns the ordered slice of the 8 journey stages. Each stage's
 // run function CALLS the existing command function for that step — it never
 // reimplements the step logic, keeping every stage independently runnable.
 //
@@ -86,125 +315,18 @@ func journeyLabels() []string {
 // resolve to the tailscale adapter once a second backend exists — WR-05).
 func journeyStages(jsonOut bool, cfg *config.Config, runner shell.Runner, autoYes bool) []journeyStage {
 	return []journeyStage{
-		{
-			index: 1,
-			label: "Account",
-			// Stage 1: confirm or guide the user to create a Tailscale account.
-			// §7 note 1 (SSO hardening) fires here.
-			run: func(ctx context.Context, p Printer) error {
-				emitSecurityNote(p, jsonOut, "sso-hardening")   // §7 note 1
-				emitSecurityNote(p, jsonOut, "dry-run-default") // §7 note 2
-				return ensureTailscaleAccount(p, autoYes)
-			},
-		},
-		{
-			index: 2,
-			label: "Prerequisites",
-			// Stage 2: tool check + Tailscale binary/daemon ensure + security hardening.
-			// §7 note 4 (sudo notice) fires here before any elevated actions.
-			run: func(ctx context.Context, p Printer) error {
-				emitSecurityNote(p, jsonOut, "sudo-notice") // §7 note 4
-				runner := &shell.ExecRunner{}
-				plat, err := platformauto.New(runner)
-				if err != nil {
-					return err
-				}
-				toolStatus := runToolCheck(ctx, p, runner)
-				if err := ensureTailscale(ctx, p, runner, plat, toolStatus, true); err != nil {
-					return err
-				}
-				return runSecurityFixes(ctx, p, runner, plat, true)
-			},
-		},
-		{
-			index: 3,
-			label: "Converge",
-			// Stage 3: placeholder — the config write already happened in init RunE
-			// before the journey stages run. The up converge runs after the journey
-			// when the user runs `abysslink up --apply`.
-			// §7 notes 5 (disk encryption) and 9 (ntfy tailnet-only) fire here.
-			run: func(_ context.Context, p Printer) error {
-				emitSecurityNote(p, jsonOut, "disk-encryption")   // §7 note 5
-				emitSecurityNote(p, jsonOut, "ntfy-tailnet-only") // §7 note 9
-				printerInfo(p, styleMuted.Render("Config written. Run `abysslink up --apply` to converge."))
-				return nil
-			},
-		},
-		{
-			index: 4,
-			label: "Lock",
-			// Stage 4: Tailnet Lock init guidance.
-			// The real init (with SecretBox + attestation) runs when the user
-			// runs `abysslink lock init --apply`. Here we provide guidance and
-			// check whether Lock is already enabled.
-			// §7 note 6 (Tailnet Lock secrets) fires here.
-			run: func(ctx context.Context, p Printer) error {
-				emitSecurityNote(p, jsonOut, "tailnet-lock-secrets") // §7 note 6
-				b, bErr := backend.New(cfg, runner)
-				if bErr == nil {
-					if locker, ok := b.(backend.Locker); ok {
-						if st, err := locker.LockStatus(ctx); err == nil && st.Enabled {
-							printerInfo(p, styleSuccess.Render("Tailnet Lock is already enabled."))
-							return nil
-						}
-					}
-				}
-				printerInfo(p, styleBold.Render("Enable Tailnet Lock:"))
-				printerInfo(p, "  "+styleCode.Render("abysslink lock init --apply"))
-				printerInfo(p, "  "+styleMuted.Render("This will print disablement secrets ONCE — have a password manager ready."))
-				return nil
-			},
-		},
-		{
-			index: 5,
-			label: "Enroll",
-			// Stage 5: phone enrollment guidance.
-			// The real enrollment (QR + poll) runs when the user runs
-			// `abysslink enroll phone`. Here we provide guidance.
-			// §7 note 10 (lock screen + SSH client hygiene) fires here — enroll is
-			// where the user is setting up the phone connection.
-			run: func(_ context.Context, p Printer) error {
-				emitSecurityNote(p, jsonOut, "lock-screen-hygiene") // §7 note 10
-				printerInfo(p, styleBold.Render("Enroll your phone:"))
-				printerInfo(p, "  "+styleCode.Render("abysslink enroll phone"))
-				printerInfo(p, "  "+styleMuted.Render("This will show a QR code for the Tailscale app."))
-				return nil
-			},
-		},
-		{
-			index: 6,
-			label: "Verify",
-			// Stage 6: doctor guidance.
-			// §7 note 11 (doctor is not a full audit) fires here.
-			run: func(_ context.Context, p Printer) error {
-				emitSecurityNote(p, jsonOut, "doctor-not-full-audit") // §7 note 11
-				printerInfo(p, styleBold.Render("Verify your setup:"))
-				printerInfo(p, "  "+styleCode.Render("abysslink doctor"))
-				return nil
-			},
-		},
-		{
-			index: 7,
-			label: "Done",
-			// Stage 7: success/next-steps box.
-			// §7 notes 3 (backups reversible), 8 (no Funnel), 12 (panic reversible) fire here.
-			run: func(_ context.Context, p Printer) error {
-				emitSecurityNote(p, jsonOut, "backups-reversible") // §7 note 3
-				emitSecurityNote(p, jsonOut, "no-funnel")          // §7 note 8
-				emitSecurityNote(p, jsonOut, "panic-reversible")   // §7 note 12
-				printerInfo(p, "")
-				printerInfo(p, styleSuccess.Render("Setup complete — your rig is ready."))
-				printerInfo(p, "")
-				printerInfo(p, styleMuted.Render("Connect from your phone:"))
-				printerInfo(p, "  "+styleCode.Render("mosh <your-rig> -- tmux new -A -s main"))
-				printerInfo(p, "")
-				return nil
-			},
-		},
+		{index: 1, label: "Account", run: journeyStageAccount(jsonOut, runner, autoYes)},
+		{index: 2, label: "Prerequisites", run: journeyStagePrereqs(jsonOut, autoYes)},
+		{index: 3, label: "Converge", run: journeyStageConverge(jsonOut, runner, autoYes)},
+		{index: 4, label: "Lock", run: journeyStageLock(jsonOut, cfg, runner, autoYes)},
+		{index: 5, label: "Enroll", run: journeyStageEnroll(jsonOut, runner, autoYes)},
+		{index: 6, label: "Verify", run: journeyStageVerify(jsonOut, runner, autoYes)},
+		{index: 7, label: "ACL", run: journeyStageACL(jsonOut, runner, autoYes)},
+		{index: 8, label: "Done", run: journeyStageDone(jsonOut)},
 	}
 }
 
-// runJourney is the driver loop for the 7-stage journey. It:
+// runJourney is the driver loop for the 8-stage journey. It:
 //   - Prints a JourneyHeader at each stage boundary (unless non-interactive)
 //   - Skips stages up to (but not including) resumeFrom+1
 //   - Runs each stage function
