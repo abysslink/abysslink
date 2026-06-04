@@ -220,16 +220,31 @@ func verifyCounter(ctx context.Context, kc KeychainStore, entries []Entry, resul
 		return result
 	}
 	n, found, cerr := ReadCounter(ctx, kc)
+	entryCount := int64(len(entries))
 	switch {
 	case cerr != nil || !found:
 		// Counter absent (first-use pre-AUD-02 log) or keychain error.
 		// D-04: absent counter → UNKNOWN, never PASS.
 		result.CounterStatus = "unknown"
-	case n != int64(len(entries)):
+	case n > entryCount:
+		// Counter records MORE entries than the log holds: the keychain counter
+		// (which a log-only attacker cannot touch) outran the on-disk entries.
+		// This is the genuine tail-truncation signal.
 		result.TruncationDetected = true
 		result.CounterStatus = "mismatch"
 		result.Reason = fmt.Sprintf(
-			"keychain counter %d != log entries %d (tail-truncation)", n, len(entries))
+			"keychain counter %d > log entries %d (tail-truncation)", n, entryCount)
+	case n < entryCount:
+		// Counter LAGS the log: more signed entries exist on disk than the counter
+		// recorded. Every entry was HMAC-chain-verified by the walk above, so these
+		// are legitimately-signed appends the counter never caught up to — the
+		// documented append-before-write crash window (a process death between the
+		// JSONL append and the keychain counter bump). A log-only attacker cannot
+		// forge additional chain-valid entries, so this is NEVER truncation. Degrade
+		// to UNKNOWN (honest tri-state), never a false "mismatch" tamper alarm.
+		result.CounterStatus = "unknown"
+		result.Reason = fmt.Sprintf(
+			"keychain counter %d < log entries %d (append-before-write window; counter lagging)", n, entryCount)
 	default:
 		result.CounterStatus = "verified"
 	}
