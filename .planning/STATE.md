@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
-milestone: v3.0.0
-milestone_name: Harden, Observe & Control
+milestone: v3.0.1
+milestone_name: Network & Dependency Security Hotfix
 status: milestone_complete
 last_updated: 2026-06-04T16:24:36.023Z
 last_activity: 2026-06-04
 progress:
-  total_phases: 16
-  completed_phases: 5
-  total_plans: 24
+  total_phases: 6
+  completed_phases: 6
+  total_plans: 26
   completed_plans: 26
-  percent: 31
-stopped_at: Milestone complete (Phase 25 was final phase)
+  percent: 100
+stopped_at: Milestone v3.0.1 complete (Phase 25 was final phase)
 ---
 
 # Project State

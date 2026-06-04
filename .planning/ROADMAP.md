@@ -40,15 +40,18 @@ Phases 16–21 (6 phases, 24 plans) — supply-chain hardening (cosign v3 / SLSA
 
 ---
 
-## v3.0.1 — Network & Dependency Security Hotfix 🔧 IN PROGRESS
+## v3.0.1 — Network & Dependency Security Hotfix ✅ COMPLETE 2026-06-04
 
-Phase 22 — closes 6 CRITICAL/HIGH network & dependency findings from the 2026-06-03 full security audit (11 agents).
-Requirements: NET-01 (CRITICAL A1), NET-02 (A7), NET-03 (A8), DEP-01 (A2), DEP-02 (A3), DEP-03 (A12).
+Phases 22, 23, 23.1, 23.2, 24, 25 (6 phases, 26 plans) — closes the 2026-06-03 full security audit (11 agents) network/dependency/doctor/audit/DoS findings. All 18 requirements `[x]` verified.
 
-Phase 23 — restores doctor/threat-model honesty: one shared finding set, fail-closed disk encryption, NetBird Tailnet-Lock warning, and a doctor minimum-versions table.
-Requirements: DOC-01 (A4), DOC-02 (A5), DOC-03 (A6), DOC-04 (C).
+- **Phase 22** — 6 CRITICAL/HIGH network & dependency findings. NET-01 (A1 CRITICAL), NET-02 (A7), NET-03 (A8), DEP-01 (A2), DEP-02 (A3), DEP-03 (A12).
+- **Phase 23** — doctor/threat-model honesty: one shared finding set, fail-closed disk encryption, NetBird Tailnet-Lock warning, minimum-versions table. DOC-01 (A4), DOC-02 (A5), DOC-03 (A6), DOC-04 (C).
+- **Phase 23.1** (INSERTED) — doctor probe-failure honesty: no false-OK on unknown/failed probes, ntfy IPv6 wildcard, Verify double-emit dedup. DOC-05 (WR-02), DOC-06 (WR-03), DOC-07 (WR-04), DOC-08 (WR-08).
+- **Phase 23.2** (INSERTED) — probe-failure honesty round 2: serve/metrics listener probe-fail Warnings. DOC-09 (CR-02).
+- **Phase 24** — v3.0.1 security closeout: audit chain integrity + bounded reads. AUD-01 (A9), AUD-02 (A10), DOS-01 (A11), CI-01 (D-subset, govulncheck blocking gate).
+- **Phase 25** — close residual v3.0.1 debt: config.Validate-on-load (fail-closed), CLI bounded reads, AUD-02 concurrency hardening. Reinforces NET-02/03, DOS-01, AUD-02, DOC-03/04.
 
-(AUD-01/02, DOS-01, CI-01 land in later v3.0.1 phases 24–25 — not yet added to roadmap.)
+Deferred (tracked tech debt): Phase 23 FileVault mid-encryption string literals need real-hardware confirmation (B2, MED — code logic verified correct; only Apple's exact `fdesetup` wording is unconfirmed).
 
 ---
 
