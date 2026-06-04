@@ -17,8 +17,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
@@ -96,7 +98,16 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("config: %w", err)
+		// D-01 (fail-closed): propagate validation and parse errors so a
+		// hand-edited malformed config is never silently ignored.
+		// Exception: if the config file simply does not exist yet (user has
+		// not run `abysslink init`), fall back to defaults so commands that
+		// don't require a config (e.g. `claudecode disable`, `status`) still
+		// work on a fresh install.
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("config: %w", err)
+		}
+		cfg = config.Defaults()
 	}
 
 	// Default: if neither --apply nor --dry-run is set, dry-run mode.

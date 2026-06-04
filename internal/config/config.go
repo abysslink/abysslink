@@ -502,6 +502,29 @@ func Validate(cfg *Config) error {
 	return nil
 }
 
+// ValidateHostname is an exported defense-in-depth helper for D-03 argv-site
+// guards. It checks a single hostname string against the DNS-safe pattern used
+// by validateIdentity and fleet.safeHostname. It is separate from Validate so
+// that code that constructs Config structs programmatically (tests, fleet fan-
+// out, future paths) can re-check just the hostname before passing it as a
+// --hostname= argv token.
+//
+// Rules:
+//   - Empty string → nil (empty means "not set"; caller decides default).
+//   - Non-empty string that matches safeHostnamePat → nil.
+//   - Non-empty string that does NOT match → descriptive error.
+func ValidateHostname(hostname string) error {
+	if hostname == "" {
+		return nil
+	}
+	if !safeHostnamePat.MatchString(hostname) {
+		return fmt.Errorf("hostname %q contains unsafe characters: "+
+			"must match DNS-safe pattern (no leading dashes, ASCII letters/digits/hyphens only)",
+			hostname)
+	}
+	return nil
+}
+
 // ValidateWebUI enforces the WEB-02 hard floor for the opt-in web dashboard.
 // It is the config-layer half of the two-layer read-only gate. Two checks fire:
 //

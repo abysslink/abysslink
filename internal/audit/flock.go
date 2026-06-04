@@ -28,7 +28,8 @@ import (
 // releaseAuditLock(fd) when done — even on error paths — to release the fd.
 // The log file itself is NOT locked; a sibling avoids fd-ordering ambiguity
 // with the O_APPEND write fd (RESEARCH.md RQ-1).
-func acquireAuditLock(logPath string) (int, error) {
+// Note: callers are wired in plan 25-04 (AUD-02); nolint until that plan runs.
+func acquireAuditLock(logPath string) (int, error) { //nolint:unused // wired by plan 25-04 (AUD-02)
 	lockPath := logPath + ".lock"
 	fd, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR, 0o600)
 	if err != nil {
@@ -45,7 +46,7 @@ func acquireAuditLock(logPath string) (int, error) {
 // acquired by acquireAuditLock. Return values from both unix calls are
 // intentionally discarded — failure to unlock is non-actionable at this layer
 // (the OS releases all flocks on process exit regardless).
-func releaseAuditLock(fd int) {
+func releaseAuditLock(fd int) { //nolint:unused // wired by plan 25-04 (AUD-02)
 	_ = unix.Flock(fd, unix.LOCK_UN)
 	_ = unix.Close(fd)
 }

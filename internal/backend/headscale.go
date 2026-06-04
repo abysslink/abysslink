@@ -232,6 +232,13 @@ func (a *headscaleAdapter) Up(ctx context.Context, opts UpOpts) error {
 		hostname = a.cfg.Tailnet.Hostname
 	}
 
+	// D-03: defense-in-depth re-check before passing hostname to argv.
+	if hostname != "" {
+		if err := config.ValidateHostname(hostname); err != nil {
+			return fmt.Errorf("headscale: up: %w", err)
+		}
+	}
+
 	args := []string{"up",
 		"--login-server", a.baseURL,
 	}

@@ -89,25 +89,25 @@ func TestLoad_RejectsFunnelKey(t *testing.T) {
 }
 
 func TestValidate_InvalidEmail(t *testing.T) {
-	cfg, err := config.Load("testdata/invalid-email.yaml")
-	require.NoError(t, err)
-	err = config.Validate(cfg)
+	// Load now calls Validate internally (D-01 fail-closed). The invalid-email
+	// fixture has a syntactically invalid email address so Load returns an error.
+	_, err := config.Load("testdata/invalid-email.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "email")
 }
 
 func TestValidate_EmptyHostname(t *testing.T) {
-	cfg, err := config.Load("testdata/invalid-hostname.yaml")
-	require.NoError(t, err)
-	err = config.Validate(cfg)
+	// Load now calls Validate internally (D-01 fail-closed). The invalid-hostname
+	// fixture has an empty hostname so Load returns an error.
+	_, err := config.Load("testdata/invalid-hostname.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hostname")
 }
 
 func TestValidate_InvalidPeriod(t *testing.T) {
-	cfg, err := config.Load("testdata/invalid-period.yaml")
-	require.NoError(t, err)
-	err = config.Validate(cfg)
+	// Load now calls Validate internally (D-01 fail-closed). The invalid-period
+	// fixture has an invalid ssh_check_period value so Load returns an error.
+	_, err := config.Load("testdata/invalid-period.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ssh_check_period")
 }
