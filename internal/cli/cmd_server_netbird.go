@@ -376,9 +376,23 @@ func netbirdInitMacOS(ctx context.Context, cfg *config.Config, runner shell.Runn
 	if containerUser == "root" || containerUser == "0" {
 		return fmt.Errorf("container is running as root — provisioning refused; NetBird server image must declare a non-root USER")
 	}
-	// Empty string is acceptable (image defaults to non-root USER in its Dockerfile).
+	// WR-05: an empty {{.Config.User}} is AMBIGUOUS — it is returned both when the
+	// image declares a non-root USER *and* when it declares none (defaulting to
+	// root at runtime). Do NOT assume non-root. Query the running container's
+	// effective UID and refuse if it is 0 (fail-closed on the nb-proc-user control).
 	if containerUser == "" {
-		printerInfo(p, styleSuccess.Render("  ✓  container user: (image default, assumed non-root)"))
+		idRes, idErr := runner.Run(ctx, runtime, "exec", netbirdServiceName, "id", "-u")
+		if idErr != nil {
+			return fmt.Errorf("netbird init (macOS): cannot determine container effective UID (image declares no USER) — provisioning refused: %w", idErr)
+		}
+		effUID := strings.TrimSpace(idRes.Stdout)
+		if effUID == "0" {
+			return fmt.Errorf("container effective UID is 0 (root) — image declares no non-root USER; provisioning refused")
+		}
+		if effUID == "" {
+			return fmt.Errorf("container effective UID could not be read — provisioning refused (fail-closed on non-root assertion)")
+		}
+		printerInfo(p, styleSuccess.Render("  ✓  container user: effective UID "+effUID+" (non-root)"))
 	} else {
 		printerInfo(p, styleSuccess.Render("  ✓  container user: "+containerUser+" (non-root)"))
 	}
