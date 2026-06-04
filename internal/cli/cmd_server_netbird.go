@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -46,6 +47,17 @@ const (
 	netbirdConfigPath     = "/etc/netbird/config.yaml"
 	netbirdBinaryDest     = "/usr/local/bin/netbird-server"
 	netbirdServiceUser    = "netbird-server"
+
+	// netbirdBinaryCeiling bounds the supplied binary read (WR-04). It mirrors
+	// audit.writeFilePathCeiling (256 MiB): a NetBird server binary is tens of MB,
+	// so a file beyond this is operator error or hostile and must not be slurped
+	// into memory before the checksum runs.
+	netbirdBinaryCeiling = 256 << 20 // 256 MiB
+
+	// netbirdConfigCeiling bounds the merged config.yaml read (WR-04). The config
+	// is a few KB; this cap is generous while preventing an unbounded read of a
+	// path that an operator could point at a large file.
+	netbirdConfigCeiling = 4 << 20 // 4 MiB
 
 	// netbirdSystemdUnit is the systemd unit template from RESEARCH.md RF-3.
 	netbirdSystemdUnit = `[Unit]
@@ -244,13 +256,12 @@ func netbirdLinuxBinarySetup(ctx context.Context, runner shell.Runner, p Printer
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  version "+version+" meets floor "+netbirdMinVersion))
 
-	// ── SHA-256 checksum: compute and print for operator records ──────────────
-	binData, err := os.ReadFile(binaryPath) //nolint:gosec // G304: binaryPath is an internally-staged download temp path, not user-controlled
+	// ── SHA-256 checksum: stream through the hasher with a 256 MiB ceiling so a
+	// multi-GB --binary-path cannot exhaust memory before the checksum runs (WR-04).
+	checksumHex, err := streamSHA256(binaryPath, netbirdBinaryCeiling)
 	if err != nil {
-		return fmt.Errorf("netbird init: read binary for checksum: %w", err)
+		return fmt.Errorf("netbird init: checksum binary: %w", err)
 	}
-	sum := sha256.Sum256(binData)
-	checksumHex := hex.EncodeToString(sum[:])
 	printerInfo(p, "  SHA-256 checksum of supplied binary (record for audit purposes):")
 	printerInfo(p, "  "+checksumHex)
 
@@ -439,12 +450,19 @@ func detectContainerRuntime(ctx context.Context, runner shell.Runner) (string, e
 //   - HTTP 200 with results → FAIL + return error (provisioning refused).
 //   - Network error or unexpected status → FAIL + return error.
 func netbirdZitadelInitProbe(ctx context.Context, cfgPath string, p Printer) error {
-	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the resolved netbird config path derived internally, not user input
+	// WR-04: bound the config read so a config path pointing at a large file
+	// cannot be slurped wholesale. The merged config.yaml is a few KB.
+	f, err := os.Open(cfgPath) //nolint:gosec // G304: cfgPath is the resolved netbird config path derived internally, not user input
 	if err != nil {
 		// config.yaml not found — ZITADEL not in use (Dex default has no issuer in
 		// a newly-written config).
 		slog.InfoContext(ctx, "netbird init: ZITADEL not in use — CVE gate SKIP (no config.yaml)")
 		return nil
+	}
+	data, rerr := limitio.ReadLimited(f, netbirdConfigCeiling)
+	_ = f.Close()
+	if rerr != nil {
+		return fmt.Errorf("netbird init: read config %s: %w", cfgPath, rerr)
 	}
 
 	// Parse issuer from config.yaml (look for server.auth.issuer).
@@ -523,6 +541,28 @@ func runNetBirdZitadelProbe(ctx context.Context, issuerBase string, p Printer) e
 	default:
 		return fmt.Errorf("ZITADEL CVE probe failed: unexpected HTTP %d — provisioning refused; verify ZITADEL state manually", resp.StatusCode)
 	}
+}
+
+// streamSHA256 computes the hex SHA-256 of the file at path by streaming it
+// through the hasher with an N+1 overflow sentinel at ceiling bytes (WR-04). It
+// never loads the whole file into memory and refuses a file exceeding ceiling,
+// mirroring audit.WriteFilePath's bounded-read discipline.
+func streamSHA256(path string, ceiling int64) (string, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: path is an internally-staged binary/config path, not user-controlled
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, ceiling+1)) // N+1 sentinel detects overflow
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	if n > ceiling {
+		return "", fmt.Errorf("%s exceeds %d byte ceiling", path, ceiling)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // extractIssuerFromYAML scans YAML bytes for the server.auth.issuer value.
