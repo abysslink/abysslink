@@ -110,7 +110,7 @@ func enrollRig(ctx context.Context, opts enrollRigOpts) error {
 
 	cfg, err := config.Load(opts.cfgPath)
 	if err != nil {
-		cfg = config.Defaults()
+		return fmt.Errorf("config load: %w", err)
 	}
 
 	rigSvc := fleet.RigService(opts.name)
