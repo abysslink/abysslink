@@ -89,3 +89,57 @@ func TestUpDiskEncryption_NoBlockers(t *testing.T) {
 	assert.NoError(t, diskEncryptionGate(nil, false))
 	assert.NoError(t, diskEncryptionGate(nil, true))
 }
+
+// TestInteractiveActionsFromActions_TailscaleLogin asserts that an action whose
+// Description contains "tailscale login" is detected as an interactive action.
+func TestInteractiveActionsFromActions_TailscaleLogin(t *testing.T) {
+	actions := []modules.Action{{
+		Module:      "tailscale",
+		Description: "ACTION REQUIRED: run `tailscale login` to authenticate (opens browser), then re-run `abysslink up --apply`",
+	}}
+	result := interactiveActionsFromActions(actions)
+	assert.NotEmpty(t, result, "action containing 'tailscale login' must be detected as interactive")
+}
+
+// TestInteractiveActionsFromActions_NoMatch asserts that actions NOT containing
+// "tailscale login" are not detected as interactive.
+func TestInteractiveActionsFromActions_NoMatch(t *testing.T) {
+	actions := []modules.Action{{
+		Module:      "tailscale",
+		Description: "run tailscale set --ssh",
+	}}
+	result := interactiveActionsFromActions(actions)
+	assert.Empty(t, result, "action without 'tailscale login' must not be detected as interactive")
+}
+
+// TestApplyAnimationEnabled_TailscaleLogin asserts that applyAnimationEnabled
+// returns false when interactive actions (tailscale login) are present, preventing
+// BubbleTea raw-mode stdin contention with RunInteractive.
+func TestApplyAnimationEnabled_TailscaleLogin(t *testing.T) {
+	interactiveLines := interactiveActionsFromActions([]modules.Action{{
+		Description: "run `tailscale login` to authenticate",
+	}})
+	assert.False(t, applyAnimationEnabled(false, nil, interactiveLines),
+		"applyAnimationEnabled must return false when interactive actions are present")
+}
+
+// TestApplyAnimationEnabled_NoInteractiveOrSudo asserts that animation is enabled
+// when there are no sudo or interactive actions (and jsonOut=false).
+func TestApplyAnimationEnabled_NoInteractiveOrSudo(t *testing.T) {
+	assert.True(t, applyAnimationEnabled(false, nil, nil),
+		"applyAnimationEnabled must return true when no sudo or interactive actions are present")
+}
+
+// TestApplyAnimationEnabled_SudoStillDisables asserts that the existing sudo path
+// still disables animation even with no interactive actions.
+func TestApplyAnimationEnabled_SudoStillDisables(t *testing.T) {
+	assert.False(t, applyAnimationEnabled(false, []string{"pmset notice"}, nil),
+		"applyAnimationEnabled must return false when sudo actions are present")
+}
+
+// TestApplyAnimationEnabled_JsonOutDisables asserts that jsonOut=true disables
+// animation regardless of interactive or sudo lines.
+func TestApplyAnimationEnabled_JsonOutDisables(t *testing.T) {
+	assert.False(t, applyAnimationEnabled(true, nil, nil),
+		"applyAnimationEnabled must return false when jsonOut=true")
+}
