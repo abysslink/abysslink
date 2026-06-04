@@ -94,7 +94,7 @@ func journeyStages(jsonOut bool, cfg *config.Config, runner shell.Runner, autoYe
 			run: func(ctx context.Context, p Printer) error {
 				emitSecurityNote(p, jsonOut, "sso-hardening")   // §7 note 1
 				emitSecurityNote(p, jsonOut, "dry-run-default") // §7 note 2
-				return ensureTailscaleAccount(p, autoYes)
+				return ensureTailscaleAccount(p, runner, autoYes)
 			},
 		},
 		{

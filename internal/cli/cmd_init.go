@@ -166,7 +166,8 @@ func newInitCmd() *cobra.Command {
 // If the user doesn't have an account yet, we show the signup URL and wait.
 // When headless is true (--yes flag or non-TTY stdin), the function prints the
 // informational signup-URL note and returns nil immediately — no huh, no /dev/tty.
-func ensureTailscaleAccount(p Printer, headless bool) error {
+// runner is used to open the browser URL if the user requests it.
+func ensureTailscaleAccount(p Printer, runner shell.Runner, headless bool) error {
 	const signupURL = "https://login.tailscale.com/start"
 
 	printerInfo(p, "  "+styleBold.Render("Tailscale account"))
@@ -198,7 +199,7 @@ func ensureTailscaleAccount(p Printer, headless bool) error {
 	}
 
 	if !hasAccount {
-		if err := openURL(signupURL); err != nil {
+		if err := openURL(runner, signupURL); err != nil {
 			printerInfo(p, "  "+iconWarnStr()+"  Could not open browser — visit manually:")
 			printerInfo(p, "  "+styleCode.Render(signupURL))
 		} else {
@@ -224,25 +225,33 @@ func ensureTailscaleAccount(p Printer, headless bool) error {
 	return nil
 }
 
-// openURL tries to open a URL in the system browser (best-effort, non-fatal).
-func openURL(url string) error {
-	runner := &shell.ExecRunner{}
+// openURL opens url in the system browser. Returns an error if no browser opener
+// is found on PATH or if the opener exits non-zero.
+// runner is used for the actual exec so tests can inject a mock (shell.LookPath is
+// a PATH probe that does not go through the runner).
+func openURL(runner shell.Runner, url string) error {
 	ctx := context.Background()
 	switch {
-	case isCommandAvailable(ctx, runner, "open"):
-		_, err := runner.Run(ctx, "open", url) // macOS
-		return err
-	case isCommandAvailable(ctx, runner, "xdg-open"):
-		_, err := runner.Run(ctx, "xdg-open", url) // Linux
-		return err
+	case shell.LookPath("open"):
+		res, err := runner.Run(ctx, "open", url) // macOS
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("open %s: exit %d", url, res.ExitCode)
+		}
+		return nil
+	case shell.LookPath("xdg-open"):
+		res, err := runner.Run(ctx, "xdg-open", url) // Linux
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("xdg-open %s: exit %d", url, res.ExitCode)
+		}
+		return nil
 	}
-	return nil
-}
-
-// isCommandAvailable returns true if the binary is on PATH.
-func isCommandAvailable(ctx context.Context, runner shell.Runner, binary string) bool {
-	_, err := runner.Run(ctx, binary, "--version")
-	return err == nil
+	return fmt.Errorf("no browser opener found (tried: open, xdg-open)")
 }
 
 // runToolCheck prints the prerequisites table and returns results keyed by tool name.
@@ -598,7 +607,7 @@ func checkACSleepDisabled(ctx context.Context, runner shell.Runner) bool {
 	}
 	for _, line := range strings.Split(res.Stdout, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 && fields[0] == "sleep" && fields[1] == "0" {
+		if len(fields) >= 2 && fields[0] == "sleep" && fields[1] == "0" {
 			return true
 		}
 	}
