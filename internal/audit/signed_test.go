@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -151,6 +152,47 @@ func TestSignedAudit_ConcurrentAppend(t *testing.T) {
 			"chain fork detected: prev_hash %s appears more than once", e.PrevHash)
 	}
 	assert.Equal(t, 1, genesisCount, "genesis must appear exactly once")
+}
+
+// TestAuditWriteFilePath verifies the streaming WriteFilePath helper (D-06 / WR-02).
+// A source file with known content must be copied to dst with matching content.
+// A source exceeding 256 MiB must return an error containing "256 MiB".
+func TestAuditWriteFilePath(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	kc := seededStore(t)
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+
+	// Happy path: small source file.
+	src := filepath.Join(dir, "src.bin")
+	dst := filepath.Join(dir, "dst.bin")
+	content := []byte("hello writefilepath")
+	require.NoError(t, os.WriteFile(src, content, 0o600))
+
+	ctx := context.Background()
+	err = sa.WriteFilePath(ctx, src, dst, 0o644, false)
+	require.NoError(t, err, "WriteFilePath must succeed for a small source file")
+
+	got, err := os.ReadFile(dst) //nolint:gosec
+	require.NoError(t, err)
+	assert.Equal(t, content, got, "dst content must match src content")
+
+	// Oversized source: exceed 256 MiB ceiling.
+	bigSrc := filepath.Join(dir, "big.bin")
+	const ceiling = 256 << 20 // 256 MiB
+	bigF, ferr := os.Create(bigSrc)
+	require.NoError(t, ferr)
+	// Write ceiling+1 bytes by seeking and writing a single byte at offset 256MiB.
+	_, serr := bigF.WriteAt([]byte{0x00}, int64(ceiling))
+	require.NoError(t, serr)
+	require.NoError(t, bigF.Close())
+
+	bigDst := filepath.Join(dir, "big.dst")
+	bigErr := sa.WriteFilePath(ctx, bigSrc, bigDst, 0o644, false)
+	require.Error(t, bigErr, "WriteFilePath must return an error when src exceeds 256 MiB")
+	assert.True(t, strings.Contains(bigErr.Error(), "256 MiB"),
+		"error message must mention '256 MiB', got: %s", bigErr.Error())
 }
 
 // TestAuditCounterMatchesEntries verifies that the keychain counter equals the
