@@ -158,9 +158,9 @@ func applyUpgrade(ctx context.Context, p Printer, runner shell.Runner, tag strin
 		return fmt.Errorf("upgrade: extract binary: %w", err)
 	}
 
-	// Atomic self-replace.
+	// Atomic self-replace. nil sa → production keychain-backed audit (built inside).
 	printerInfo(p, "  ↺  replacing "+selfPath)
-	if err := atomicReplace(ctx, selfPath, newBin); err != nil {
+	if err := atomicReplace(ctx, selfPath, newBin, nil); err != nil {
 		return fmt.Errorf("upgrade: self-replace: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  upgraded to "+tag))
@@ -281,18 +281,25 @@ func extractBinary(tarPath, outDir string) (string, error) {
 // Per CLAUDE.md hard rule: every file mutation goes through internal/audit.
 // The keychain store uses shell.ExecRunner — keychain operations are always
 // real system calls and must never be routed through the CLI mock runner.
-func atomicReplace(ctx context.Context, dst, src string) error {
-	logPath, err := audit.DefaultLogPath()
-	if err != nil {
-		return fmt.Errorf("atomicReplace: audit log path: %w", err)
-	}
-	kc, err := secrets.NewStore(ctx, &shell.ExecRunner{})
-	if err != nil {
-		return fmt.Errorf("atomicReplace: keychain: %w", err)
-	}
-	sa, err := audit.NewSigned(logPath, kc)
-	if err != nil {
-		return fmt.Errorf("atomicReplace: audit init: %w", err)
+// atomicReplace streams src over dst through the tamper-evident audit log.
+// A nil sa builds the production keychain-backed audit (real keychain via
+// ExecRunner — keychain ops are real system calls, never the CLI mock runner).
+// Tests inject a SignedAudit backed by a mock keychain + temp log so the path is
+// exercisable on platforms without a libsecret/Keychain backend (e.g. Linux CI).
+func atomicReplace(ctx context.Context, dst, src string, sa *audit.SignedAudit) error {
+	if sa == nil {
+		logPath, err := audit.DefaultLogPath()
+		if err != nil {
+			return fmt.Errorf("atomicReplace: audit log path: %w", err)
+		}
+		kc, err := secrets.NewStore(ctx, &shell.ExecRunner{})
+		if err != nil {
+			return fmt.Errorf("atomicReplace: keychain: %w", err)
+		}
+		sa, err = audit.NewSigned(logPath, kc)
+		if err != nil {
+			return fmt.Errorf("atomicReplace: audit init: %w", err)
+		}
 	}
 	if err := sa.WriteFilePath(ctx, src, dst, 0o755, false); err != nil {
 		return fmt.Errorf("atomicReplace: write: %w", err)
