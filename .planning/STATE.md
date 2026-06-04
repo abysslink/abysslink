@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
-status: verifying
-last_updated: "2026-06-04T15:25:51.865Z"
+status: milestone_complete
+last_updated: 2026-06-04T16:24:36.023Z
 last_activity: 2026-06-04
 progress:
   total_phases: 16
@@ -11,6 +11,7 @@ progress:
   total_plans: 24
   completed_plans: 26
   percent: 31
+stopped_at: Milestone complete (Phase 25 was final phase)
 ---
 
 # Project State
@@ -20,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Phase 25 — close-v3-0-1-debt-config-validate-on-load-cli-bounded-reads-
+**Current focus:** Milestone complete
 
 ## Current Position
 
-Phase: 25 (close-v3-0-1-debt-config-validate-on-load-cli-bounded-reads-) — EXECUTING
-Plan: 5 of 5
-Status: Phase complete — ready for verification
+Phase: 25
+Plan: Not started
+Status: Milestone complete
 Last activity: 2026-06-04
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 91 (v1.0.0)
+- Total plans completed: 96 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 
