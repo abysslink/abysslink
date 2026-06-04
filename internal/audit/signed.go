@@ -519,20 +519,40 @@ func computePrevHash(logPath string) (string, error) {
 // never written — only its DiffHash digest and the HMAC sig. dryRun tags the
 // entry without changing the chain.
 //
-// CRITICAL MUTEX SCOPE: mu is held across the entire read→compute→write
-// sequence. mu.Unlock() is called EXPLICITLY (not via defer) before the
-// best-effort anchor write, so the anchor write never happens under the mutex.
+// CRITICAL LOCK SCOPE: the in-process mutex AND the cross-process OS flock are
+// both held across the entire read→compute→write→anchor sequence (WR-01 / WR-06).
+// WriteFilePath→Append and the daemon's hourly anchor path run in DIFFERENT
+// processes; the in-process mutex alone does nothing across that boundary, so
+// without the flock two processes could computePrevHash off the same tail and
+// fork the chain. Holding the flock through WriteAnchor also keeps the anchor's
+// EntryCount/LastHash consistent with the log a concurrent appender cannot mutate
+// mid-read. Both locks are released exactly once, on every exit, via the deferred
+// unlock — so the keychain counter step below also runs under the lock.
 func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, dryRun bool) error {
+	// WR-01: mutex-then-flock ordering, identical to WriteFile.
 	a.mu.Lock()
+	lockFD, lerr := acquireAuditLock(a.logPath)
+	if lerr != nil {
+		a.mu.Unlock()
+		return fmt.Errorf("audit: acquire process lock: %w", lerr)
+	}
+	unlocked := false
+	unlock := func() {
+		if unlocked {
+			return
+		}
+		unlocked = true
+		releaseAuditLock(lockFD)
+		a.mu.Unlock()
+	}
+	defer unlock()
 
 	key, err := a.hmacKey(ctx)
 	if err != nil {
-		a.mu.Unlock()
 		return err
 	}
 	prevHash, err := computePrevHash(a.logPath)
 	if err != nil {
-		a.mu.Unlock()
 		return err
 	}
 	now := time.Now().UTC()
@@ -556,29 +576,25 @@ func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, d
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
-		a.mu.Unlock()
 		return fmt.Errorf("audit: marshal entry: %w", err)
 	}
 	line = append(line, '\n')
 
 	f, err := os.OpenFile(a.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: a.logPath is the internal audit-log path set at construction, not user-controlled
 	if err != nil {
-		a.mu.Unlock()
 		return fmt.Errorf("audit: open log %s: %w", a.logPath, err)
 	}
 	if _, werr := f.Write(line); werr != nil {
 		_ = f.Close()
-		a.mu.Unlock()
 		return fmt.Errorf("audit: write log: %w", werr)
 	}
 	if cerr := f.Close(); cerr != nil {
-		a.mu.Unlock()
 		return fmt.Errorf("audit: close log: %w", cerr)
 	}
 
-	a.mu.Unlock() // explicit — must precede the post-lock anchor write below.
-
-	// AUD-02: anchor refreshed on EVERY append (not cadenced).
+	// AUD-02: anchor refreshed on EVERY append (not cadenced), under the SAME
+	// flock as the append (WR-06) so EntryCount/LastHash describe a log state no
+	// concurrent appender can change between the two reads inside WriteAnchor.
 	// Failure hard-fails Append; WriteFile callers abort before physical write
 	// because Append returns error first (D-03 write-ordering correctness).
 	atomic.AddInt64(&a.count, 1)
