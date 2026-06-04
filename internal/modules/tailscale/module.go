@@ -324,6 +324,11 @@ func (m *Module) ensureHostname(ctx context.Context) error {
 	if m.cfg.Tailnet.Hostname == "" {
 		return nil
 	}
+	// D-03: defense-in-depth re-check before passing hostname to argv. This fires
+	// even when Config is constructed programmatically without going through Load.
+	if err := config.ValidateHostname(m.cfg.Tailnet.Hostname); err != nil {
+		return fmt.Errorf("tailscale apply: %w", err)
+	}
 	statusRes, err := m.runner.Run(ctx, "tailscale", "status", "--json")
 	if err != nil || statusRes.ExitCode != 0 {
 		return nil

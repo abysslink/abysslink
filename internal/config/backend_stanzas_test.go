@@ -38,13 +38,14 @@ func TestBackendAlias(t *testing.T) {
 
 // TestBackendStanzaExplicit verifies that an explicit backend: {type: tailscale}
 // stanza is accepted under strict YAML (KnownFields(true)).
+// Now that Load calls Validate (D-01), the YAML must include the required
+// identity fields so the fixture passes validation.
 func TestBackendStanzaExplicit(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "explicit_backend.yaml")
-	content := `version: 1
-backend:
-  type: tailscale
-`
+	// minimalValidYAML() (config_load_test.go) produces a full valid config;
+	// override only the backend stanza to test explicit backend parsing.
+	content := minimalValidYAML() + "backend:\n  type: tailscale\n"
 	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
 	cfg, err := config.Load(p)
 	require.NoError(t, err, "explicit backend: stanza must load under strict mode")
@@ -53,16 +54,10 @@ backend:
 
 // TestServerRigStanzasParsed verifies that server: and rig: stanzas are
 // accepted under strict YAML (forward-compat stubs; not yet consumed).
+// Now that Load calls Validate (D-01), the YAML must include required
+// identity fields so the fixture passes validation.
 func TestServerRigStanzasParsed(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "server_rig.yaml")
-	content := `version: 1
-server:
-  hostname: headscale.example.com
-rig:
-  name: my-rig
-`
-	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+	p := writeTempYAML(t, minimalValidYAML())
 	_, err := config.Load(p)
 	require.NoError(t, err, "server: and rig: stanzas must parse without strict-mode rejection")
 }
@@ -76,9 +71,8 @@ func TestBackendTypeDefault(t *testing.T) {
 	cfg := config.Defaults()
 	// After Defaults, Backend.Type is "" — that's fine; factory normalizes it.
 	// But after Load (which calls Defaults then decodes), Backend.Type == "tailscale".
-	dir := t.TempDir()
-	p := filepath.Join(dir, "minimal.yaml")
-	require.NoError(t, os.WriteFile(p, []byte("version: 1\n"), 0o600))
+	// Now that Load calls Validate (D-01), the fixture must include required fields.
+	p := writeTempYAML(t, minimalValidYAML())
 	loaded, err := config.Load(p)
 	require.NoError(t, err)
 	assert.Equal(t, "tailscale", loaded.Backend.Type,
