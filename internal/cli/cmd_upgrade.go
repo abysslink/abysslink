@@ -312,8 +312,7 @@ func downloadFile(ctx context.Context, url, dest string) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(limitio.ReadSnippet(resp.Body)))
 	}
 	f, err := os.Create(dest) //nolint:gosec // G304: dest is an internally-derived download temp path, not user input
 	if err != nil {
@@ -338,8 +337,7 @@ func latestReleaseTag(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, strings.TrimSpace(limitio.ReadSnippet(resp.Body)))
 	}
 	var rel struct {
 		TagName string `json:"tag_name"`
