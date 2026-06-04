@@ -43,6 +43,7 @@ var threatRows = []threatRow{
 	{"No telemetry", nil},
 	{"Tailnet Lock enabled", []string{"lock_enabled"}},
 	{"ntfy binds tailnet IP only (never 0.0.0.0)", []string{"listen_address"}},
+	{"ntfy version >= 2.21 (CVE-2026-39087 fix)", []string{"ntfy-version"}},
 }
 
 // v3SurfaceRows are the in-process surfaces added in v3 (metrics endpoint, Web
