@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/limitio"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
@@ -338,8 +339,12 @@ func latestReleaseTag(ctx context.Context) (string, error) {
 	var rel struct {
 		TagName string `json:"tag_name"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return "", err
+	relData, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("GitHub releases: read response: %w", err)
+	}
+	if err := json.Unmarshal(relData, &rel); err != nil {
+		return "", fmt.Errorf("GitHub releases: decode response: %w", err)
 	}
 	if rel.TagName == "" {
 		return "", fmt.Errorf("no tag_name in latest release")
