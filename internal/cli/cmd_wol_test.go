@@ -36,7 +36,7 @@ func writeWolCfg(t *testing.T, rigName, mac string) string {
 	t.Helper()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	cfg.Modules.Upsnap.Enabled = true
 	cfg.Rigs = []config.RigConfig{

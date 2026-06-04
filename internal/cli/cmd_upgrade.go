@@ -32,6 +32,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/limitio"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
@@ -155,9 +158,9 @@ func applyUpgrade(ctx context.Context, p Printer, runner shell.Runner, tag strin
 		return fmt.Errorf("upgrade: extract binary: %w", err)
 	}
 
-	// Atomic self-replace.
+	// Atomic self-replace. nil sa → production keychain-backed audit (built inside).
 	printerInfo(p, "  ↺  replacing "+selfPath)
-	if err := atomicReplace(selfPath, newBin); err != nil {
+	if err := atomicReplace(ctx, selfPath, newBin, nil); err != nil {
 		return fmt.Errorf("upgrade: self-replace: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  upgraded to "+tag))
@@ -272,26 +275,36 @@ func extractBinary(tarPath, outDir string) (string, error) {
 	return "", fmt.Errorf("abysslink binary not found in archive")
 }
 
-// atomicReplace replaces dst with src using a write-to-temp + rename pattern
-// to ensure the process is never in a half-replaced state.
-func atomicReplace(dst, src string) error {
-	dstDir := filepath.Dir(dst)
-	tmp, err := os.CreateTemp(dstDir, ".abysslink-upgrade-*")
-	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
+// atomicReplace replaces dst with src via audit.WriteFilePath — streaming
+// io.Copy with a 256 MiB ceiling (D-06 / WR-02). WriteFilePath handles temp
+// creation, chmod, and atomic rename; the binary is never fully in memory.
+// Per CLAUDE.md hard rule: every file mutation goes through internal/audit.
+// The keychain store uses shell.ExecRunner — keychain operations are always
+// real system calls and must never be routed through the CLI mock runner.
+// atomicReplace streams src over dst through the tamper-evident audit log.
+// A nil sa builds the production keychain-backed audit (real keychain via
+// ExecRunner — keychain ops are real system calls, never the CLI mock runner).
+// Tests inject a SignedAudit backed by a mock keychain + temp log so the path is
+// exercisable on platforms without a libsecret/Keychain backend (e.g. Linux CI).
+func atomicReplace(ctx context.Context, dst, src string, sa *audit.SignedAudit) error {
+	if sa == nil {
+		logPath, err := audit.DefaultLogPath()
+		if err != nil {
+			return fmt.Errorf("atomicReplace: audit log path: %w", err)
+		}
+		kc, err := secrets.NewStore(ctx, &shell.ExecRunner{})
+		if err != nil {
+			return fmt.Errorf("atomicReplace: keychain: %w", err)
+		}
+		sa, err = audit.NewSigned(logPath, kc)
+		if err != nil {
+			return fmt.Errorf("atomicReplace: audit init: %w", err)
+		}
 	}
-	tmpPath := tmp.Name()
-	_ = tmp.Close()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	srcData, err := os.ReadFile(src) //nolint:gosec // G304: src is the freshly-extracted upgrade binary path derived internally, not user input
-	if err != nil {
-		return err
+	if err := sa.WriteFilePath(ctx, src, dst, 0o755, false); err != nil {
+		return fmt.Errorf("atomicReplace: write: %w", err)
 	}
-	if err := os.WriteFile(tmpPath, srcData, 0o755); err != nil { //nolint:gosec // G306: 0o755 required — written file is an executable binary
-		return err
-	}
-	return os.Rename(tmpPath, dst)
+	return nil
 }
 
 // downloadFile downloads url to dest, following redirects.
@@ -306,8 +319,7 @@ func downloadFile(ctx context.Context, url, dest string) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(limitio.ReadSnippet(resp.Body)))
 	}
 	f, err := os.Create(dest) //nolint:gosec // G304: dest is an internally-derived download temp path, not user input
 	if err != nil {
@@ -332,14 +344,17 @@ func latestReleaseTag(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, strings.TrimSpace(limitio.ReadSnippet(resp.Body)))
 	}
 	var rel struct {
 		TagName string `json:"tag_name"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return "", err
+	relData, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("GitHub releases: read response: %w", err)
+	}
+	if err := json.Unmarshal(relData, &rel); err != nil {
+		return "", fmt.Errorf("GitHub releases: decode response: %w", err)
 	}
 	if rel.TagName == "" {
 		return "", fmt.Errorf("no tag_name in latest release")

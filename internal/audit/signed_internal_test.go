@@ -17,11 +17,18 @@ package audit
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"path/filepath"
+	"sync"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestComputeSig_HexLength(t *testing.T) {
@@ -92,4 +99,71 @@ func TestSignBytes_CoversAllMetadataFields(t *testing.T) {
 	for i, m := range mutators {
 		assert.False(t, bytes.Equal(b0, signBytes(m(base))), "mutator %d must change signed bytes", i)
 	}
+}
+
+// counterFailStore is a KeychainStore that wraps a *secrets.MockStore but
+// overrides Set to fail ONLY for the counter account (counterKeyAccount =
+// "audit-counter"). All other operations are delegated to the embedded mock.
+// It records whether Delete was called for (counterKeyService, counterKeyAccount).
+type counterFailStore struct {
+	mu              sync.Mutex
+	inner           *secrets.MockStore
+	deleteCalledFor map[string]bool // "service\x00account" → true
+}
+
+func newCounterFailStore(t *testing.T) *counterFailStore {
+	t.Helper()
+	inner := secrets.NewMockStore()
+	// Pre-seed the HMAC key so NewSigned finds it without calling Set for it.
+	require.NoError(t, inner.Set(context.Background(), hmacKeyService, hmacKeyAccount,
+		hex.EncodeToString(bytes.Repeat([]byte{1}, 32))))
+	return &counterFailStore{inner: inner, deleteCalledFor: make(map[string]bool)}
+}
+
+func (s *counterFailStore) Set(ctx context.Context, service, account, secret string) error {
+	if service == counterKeyService && account == counterKeyAccount {
+		return fmt.Errorf("simulated keychain write failure for counter")
+	}
+	return s.inner.Set(ctx, service, account, secret)
+}
+
+func (s *counterFailStore) Get(ctx context.Context, service, account string) (string, error) {
+	return s.inner.Get(ctx, service, account)
+}
+
+func (s *counterFailStore) Delete(ctx context.Context, service, account string) error {
+	s.mu.Lock()
+	s.deleteCalledFor[service+"\x00"+account] = true
+	s.mu.Unlock()
+	return s.inner.Delete(ctx, service, account)
+}
+
+func (s *counterFailStore) wasDeleteCalledFor(service, account string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteCalledFor[service+"\x00"+account]
+}
+
+// TestAppend_IncrementCounterFailure_DeletesCounterKey is the AUD-02 RED test:
+// when IncrementCounter fails (Set on the counter key returns an error), Append
+// must DELETE the counter key so the next ReadCounter returns found=false and
+// verifyCounter reports CounterStatus="unknown" instead of "mismatch".
+func TestAppend_IncrementCounterFailure_DeletesCounterKey(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	kc := newCounterFailStore(t)
+
+	sa, err := NewSigned(logPath, kc)
+	require.NoError(t, err)
+
+	// Append should succeed despite the counter-increment failure (fail-soft
+	// contract: only WriteAnchor is fatal).
+	ctx := context.Background()
+	appendErr := sa.Append(ctx, SignInput{Title: "write", DiffHash: sha256.Sum256([]byte("x"))}, "/etc/a", false)
+	require.NoError(t, appendErr, "Append must succeed even when IncrementCounter fails")
+
+	// AUD-02 fix: the counter key must have been deleted so the next Verify
+	// reports CounterStatus="unknown" (found=false), not "mismatch".
+	assert.True(t, kc.wasDeleteCalledFor(counterKeyService, counterKeyAccount),
+		"Append must delete the counter key when IncrementCounter fails to prevent a false mismatch")
 }

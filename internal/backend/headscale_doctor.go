@@ -21,7 +21,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -660,7 +659,7 @@ func checkHsAPIAuth(ctx context.Context, doReq doRequestFunc) DoctorFinding {
 // message if any key expires within 14 days. Returns empty string on no issue.
 func checkAPIKeyExpiry(resp *http.Response) string {
 	const warnDays = 14
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, maxBackendBody)
 	if err != nil {
 		return ""
 	}
@@ -744,7 +743,7 @@ func parsePreAuthKeyExpiry(resp *http.Response) DoctorFinding {
 	const check = "hs-key-expiry"
 	const mod = "headscale"
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, maxBackendBody)
 	if err != nil {
 		return DoctorFinding{Module: mod, Check: check, Severity: DoctorWarning,
 			Message: "hs-key-expiry: could not read response body: " + err.Error()}

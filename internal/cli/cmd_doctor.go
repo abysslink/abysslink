@@ -786,6 +786,7 @@ func findingFix(check string) string {
 		"nb-proc-user": "Ensure netbird-server runs as a non-root service user: check systemd User= in the unit file",
 		"nb-runtime":   "Install a container runtime: brew install --cask docker  (or colima: brew install colima && colima start)",
 		"nb-sshcheck":  "", // permanent WARN — SSHCheck not available on NetBird; no fix possible
+		"nb-lock":      "", // permanent WARN — Tailnet Lock (TKA) is not available on NetBird; no fix possible
 		// Fleet isolation checks (mr-* checks).
 		"mr-rig-isolation":   "abysslink enroll rig <name> --apply  (re-pushes the rig-to-rig ACL deny)",
 		"mr-topic-isolation": "Give each rig a unique ntfy_topic in abysslink.yaml",

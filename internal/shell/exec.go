@@ -19,11 +19,33 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 )
+
+// maxSubprocessOutput caps stdout+stderr capture per subprocess invocation.
+// Tailscale status JSON for a ~1000-node fleet is ~500 KB; 16 MiB is ~32x
+// that maximum. Over-limit is a hard error returned from Run (A11 / DOS-01).
+const maxSubprocessOutput = 16 * 1024 * 1024 // 16 MiB
+
+// limitedWriter caps writes to cap bytes, then errors. Used to bound
+// subprocess stdout/stderr capture without restructuring cmd.Stdout assignment.
+// Write errors propagate through cmd.Run() as non-ExitError → returned as
+// Result{}, err (A11 / DOS-01).
+type limitedWriter struct {
+	buf *bytes.Buffer
+	cap int
+}
+
+func (lw *limitedWriter) Write(p []byte) (int, error) {
+	if lw.buf.Len()+len(p) > lw.cap {
+		return 0, fmt.Errorf("subprocess output exceeded %d bytes", lw.cap)
+	}
+	return lw.buf.Write(p)
+}
 
 // ExecRunner is the production Runner that invokes real binaries via os/exec.
 // This is the only file in the codebase allowed to import os/exec.
@@ -36,8 +58,8 @@ type ExecRunner struct{}
 func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: shell.Runner is the project-sanctioned exec abstraction (CLAUDE.md); argv is exec'd directly with no shell, never sh -c
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = &limitedWriter{buf: &stdout, cap: maxSubprocessOutput}
+	cmd.Stderr = &limitedWriter{buf: &stderr, cap: maxSubprocessOutput}
 
 	err := cmd.Run()
 	if err != nil {
@@ -93,8 +115,8 @@ func (r *ExecRunner) RunWithEnv(ctx context.Context, env map[string]string, name
 	}
 	cmd.Env = merged
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = &limitedWriter{buf: &stdout, cap: maxSubprocessOutput}
+	cmd.Stderr = &limitedWriter{buf: &stderr, cap: maxSubprocessOutput}
 
 	err := cmd.Run()
 	if err != nil {
@@ -121,8 +143,8 @@ func (r *ExecRunner) RunWithStdin(ctx context.Context, stdin io.Reader, name str
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: shell.Runner is the project-sanctioned exec abstraction (CLAUDE.md); argv is exec'd directly with no shell, never sh -c
 	var stdout, stderr bytes.Buffer
 	cmd.Stdin = stdin
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = &limitedWriter{buf: &stdout, cap: maxSubprocessOutput}
+	cmd.Stderr = &limitedWriter{buf: &stderr, cap: maxSubprocessOutput}
 
 	err := cmd.Run()
 	if err != nil {
