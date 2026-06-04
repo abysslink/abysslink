@@ -34,7 +34,7 @@ import (
 func writeCfgWithRigs(t *testing.T, dir string) string {
 	t.Helper()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	cfg.Rigs = []config.RigConfig{
 		{Name: "alpha", Hostname: "alpha.ts.net", NtfyTopic: "abysslink-alpha-aabbccdd", Backend: "tailscale"},
@@ -203,7 +203,7 @@ func TestRigImport_NoOSWriteFile(t *testing.T) {
 	// Here we just confirm the function is callable.
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	data, err := yaml.Marshal(cfg)
 	require.NoError(t, err)
@@ -246,7 +246,7 @@ func TestRigFlags_Registered(t *testing.T) {
 func TestRigLs_Empty(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	data, err := yaml.Marshal(cfg)
 	require.NoError(t, err)

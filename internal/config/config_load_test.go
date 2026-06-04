@@ -226,7 +226,7 @@ hardening:
 
 	_, err := config.Load(path)
 	if err == nil {
-		t.Errorf("expected Load to return error for NetBird http:// server_url, got nil — "+
+		t.Errorf("expected Load to return error for NetBird http:// server_url, got nil — " +
 			"RED: config.Load does not yet call Validate (fix in plan 25-02, NET-02)")
 	}
 }
