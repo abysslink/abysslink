@@ -1,7 +1,7 @@
 ---
 phase: 26
 slug: init-journey-gating-first-run-fixes
-status: planned
+status: validated
 nyquist_compliant: true
 wave_0_complete: true
 created: 2026-06-04
@@ -38,13 +38,13 @@ created: 2026-06-04
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| shell.LookPath added | 26-01 | 1 | PHASE-26-B1 | T-26-01 | PATH probe only — no subprocess | unit | `go build ./internal/shell/...` | ✅ | ⬜ pending |
-| openURL fixed | 26-01 | 1 | PHASE-26-B1 | T-26-01, T-26-02 | returns error when opener absent or non-zero exit; accepts shell.Runner param for mock injection | unit | `go test ./internal/cli/... -run TestOpenURL_NoOpenerError` | created in plan | ⬜ pending |
-| checkACSleepDisabled fixed | 26-01 | 1 | PHASE-26-B3 | T-26-03 | >= 2 fields — annotated pmset output parses | unit | `go test ./internal/cli/... -run TestCheckACSleepDisabled -v` | created in plan | ⬜ pending |
-| Stage 2 B2 fix | 26-02 | 2 | PHASE-26-B2 | T-26-04 | no sudo calls without real autoYes; output contains "Prerequisites verified." | unit | `go test ./internal/cli/... -run TestJourneyStage2_NoDuplicateCalls -v` | created in plan | ⬜ pending |
-| Per-stage gates | 26-02 | 2 | PHASE-26-GATED-JOURNEY | T-26-05 | autoYes=true: no huh prompts; non-TTY: no hang | unit | `go test ./internal/cli/... -run TestRunJourney_AutoYes\|TestRunJourney_NonTTY -v` | updated+created | ⬜ pending |
-| ACL stage | 26-02 | 2 | PHASE-26-ACL-STAGE | T-26-05, T-26-06 | headless: prints guidance, no RunInteractive | unit | `go test ./internal/cli/... -run TestJourneyStageCount\|TestJourneyStageLabels -v` | updated in plan | ⬜ pending |
-| Stage count 8 | 26-02 | 2 | PHASE-26-ACL-STAGE | — | journeyLabels() == 8; journeyStages() == 8 | unit | `go test ./internal/cli/... -run TestJourneyStageCount\|TestJourneyStageLabels -v` | updated in plan | ⬜ pending |
+| shell.LookPath added | 26-01 | 1 | PHASE-26-B1 | T-26-01 | PATH probe only — no subprocess | unit | `go build ./internal/shell/...` | ✅ | ✅ green |
+| openURL fixed | 26-01 | 1 | PHASE-26-B1 | T-26-01, T-26-02 | returns error when opener absent or non-zero exit; accepts shell.Runner param for mock injection | unit | `go test ./internal/cli/... -run TestOpenURL_NoOpenerError` | created in plan | ✅ green |
+| checkACSleepDisabled fixed | 26-01 | 1 | PHASE-26-B3 | T-26-03 | >= 2 fields — annotated pmset output parses | unit | `go test ./internal/cli/... -run TestCheckACSleepDisabled -v` | created in plan | ✅ green |
+| Stage 2 B2 fix | 26-02 | 2 | PHASE-26-B2 | T-26-04 | no sudo calls without real autoYes; output contains "Prerequisites verified." | unit | `go test ./internal/cli/... -run TestJourneyStage2_NoDuplicateCalls -v` | created in plan | ✅ green |
+| Per-stage gates | 26-02 | 2 | PHASE-26-GATED-JOURNEY | T-26-05 | autoYes=true: no huh prompts; non-TTY: no hang | unit | `go test ./internal/cli/... -run TestRunJourney_AutoYes\|TestRunJourney_NonTTY -v` | updated+created | ✅ green |
+| ACL stage | 26-02 | 2 | PHASE-26-ACL-STAGE | T-26-05, T-26-06 | headless: prints guidance, no RunInteractive | unit | `go test ./internal/cli/... -run TestJourneyStageCount\|TestJourneyStageLabels -v` | updated in plan | ✅ green |
+| Stage count 8 | 26-02 | 2 | PHASE-26-ACL-STAGE | — | journeyLabels() == 8; journeyStages() == 8 | unit | `go test ./internal/cli/... -run TestJourneyStageCount\|TestJourneyStageLabels -v` | updated in plan | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -96,4 +96,16 @@ Existing infrastructure covers all phase requirements — `internal/cli` already
 - [x] Feedback latency < 90s
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** planned
+**Approval:** validated 2026-06-04
+
+---
+
+## Validation Audit 2026-06-04
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
+
+All 7 mapped tests exist and pass (`TestOpenURL_NoOpenerError`, `TestCheckACSleepDisabled`, `TestJourneyStage2_NoDuplicateCalls`, `TestRunJourney_AutoYes`, `TestRunJourney_NonTTY`, `TestJourneyStageCount`, `TestJourneyStageLabels`). `go build ./internal/shell/...` OK. Quick suite `go test ./internal/cli/... ./internal/shell/...` green. No new tests generated — no auditor spawn required.
