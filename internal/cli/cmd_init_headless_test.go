@@ -85,6 +85,69 @@ func TestCheckACSleepDisabled(t *testing.T) {
 	}
 }
 
+// TestMaybeFixFirewall_SudoUsesRunInteractive asserts that maybeFixFirewall routes
+// its sudo socketfilterfw --setglobalstate on call through RunInteractive, not Run.
+// RunInteractive exposes stdin to the real tty so macOS sudo's tty-keyed credential
+// cache can reuse the timestamp across calls.
+func TestMaybeFixFirewall_SudoUsesRunInteractive(t *testing.T) {
+	const fwBin = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	// Call 1: --getglobalstate → firewall disabled (no "enabled" in output)
+	// Call 2: sudo --setglobalstate on → success (IsInteractive should be true)
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "Firewall is disabled.", ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+
+	// autoYes=true so we skip the huh.NewConfirm prompt and go straight to the fix.
+	err := maybeFixFirewall(context.Background(), p, runner, true)
+	require.NoError(t, err)
+
+	// The sudo call must have gone through RunInteractive, not Run.
+	interactive := runner.RunInteractiveCalls()
+	require.Len(t, interactive, 1, "expected exactly one RunInteractive call for sudo socketfilterfw")
+	assert.Equal(t, []string{"sudo", fwBin, "--setglobalstate", "on"}, interactive[0])
+
+	// The sudo call must NOT have gone through Run.
+	for _, call := range runner.RunCalls() {
+		assert.False(t,
+			len(call) >= 2 && call[0] == "sudo" && call[1] == fwBin,
+			"sudo socketfilterfw must not appear in Run calls; got: %v", call)
+	}
+}
+
+// TestMaybeFixSleep_SudoUsesRunInteractive asserts that maybeFixSleep routes
+// its sudo pmset -c sleep 0 disksleep 0 call through RunInteractive, not Run.
+func TestMaybeFixSleep_SudoUsesRunInteractive(t *testing.T) {
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	// Call 1: pmset -g → sleep is enabled (not 0)
+	// Call 2: sudo pmset → success (must go through RunInteractive)
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: " sleep         10\n", ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+
+	// autoYes=true so we skip the huh.NewConfirm prompt.
+	err := maybeFixSleep(context.Background(), p, runner, true)
+	require.NoError(t, err)
+
+	// The sudo pmset call must have gone through RunInteractive.
+	interactive := runner.RunInteractiveCalls()
+	require.Len(t, interactive, 1, "expected exactly one RunInteractive call for sudo pmset")
+	assert.Equal(t, []string{"sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"}, interactive[0])
+
+	// The sudo pmset call must NOT have gone through Run.
+	for _, call := range runner.RunCalls() {
+		assert.False(t,
+			len(call) >= 2 && call[0] == "sudo" && call[1] == "pmset",
+			"sudo pmset must not appear in Run calls; got: %v", call)
+	}
+}
+
 // TestOpenURL_NoOpenerError asserts that openURL returns a non-nil error in the
 // error path. Coverage strategy differs by platform:
 //
