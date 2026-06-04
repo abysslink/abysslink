@@ -421,6 +421,43 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// LoadForRead is the READ-ONLY counterpart to Load (WR-07). It parses path and
+// applies defaults exactly like Load, but on a validation failure it returns the
+// parsed config together with the validation error instead of discarding the
+// config. Callers that never feed config values to argv or a mutation — e.g.
+// `rig ls` and `rig export`, which only render cfg.Rigs — can inspect the parsed
+// config while still being able to log the validation problem.
+//
+// SECURITY: LoadForRead must NEVER be used by a path that writes config or feeds
+// a config value to an external command. The fail-closed Load remains the only
+// entry point for mutating/argv paths (D-01). The returned error is non-nil
+// precisely when validation failed, so callers can choose to warn-and-continue
+// (read-only) or abort.
+func LoadForRead(path string) (*Config, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: path is the resolved abysslink config file path, not user-controlled at this layer
+	if err != nil {
+		return nil, fmt.Errorf("config: open %s: %w", path, err)
+	}
+	defer f.Close() //nolint:errcheck // errcheck: close error on read-only file handle is non-actionable
+
+	cfg := Defaults()
+	dec := yaml.NewDecoder(f)
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("config: decode %s: %w", path, err)
+	}
+	if cfg.Backend.Type == "" {
+		cfg.Backend.Type = "tailscale"
+	}
+	// Return the parsed config ALONGSIDE any validation error: a parse/decode
+	// failure is still fatal (nil config above), but a pure validation failure
+	// leaves a usable config for read-only rendering.
+	if verr := Validate(cfg); verr != nil {
+		return cfg, verr
+	}
+	return cfg, nil
+}
+
 // Marshal encodes cfg to canonical YAML bytes. It is the single source of
 // truth for the YAML representation used by both Write and the config preview
 // in cmd_init.go — keeping them byte-faithful to each other.
