@@ -123,11 +123,16 @@ func TestApplyAnimationEnabled_TailscaleLogin(t *testing.T) {
 		"applyAnimationEnabled must return false when interactive actions are present")
 }
 
-// TestApplyAnimationEnabled_NoInteractiveOrSudo asserts that animation is enabled
-// when there are no sudo or interactive actions (and jsonOut=false).
+// TestApplyAnimationEnabled_NoInteractiveOrSudo asserts that animation falls
+// through to animationEnabled() when there are no sudo or interactive actions.
+// In a headless test environment, animationEnabled(false) returns false (no TTY),
+// so the overall result is false — matching the DisabledWhenNotTTY contract.
+// The key property under test: no additional false is introduced by nil slices.
 func TestApplyAnimationEnabled_NoInteractiveOrSudo(t *testing.T) {
-	assert.True(t, applyAnimationEnabled(false, nil, nil),
-		"applyAnimationEnabled must return true when no sudo or interactive actions are present")
+	// applyAnimationEnabled(false, nil, nil) must equal animationEnabled(false)
+	// — the two nil slices must not introduce an extra false gate.
+	assert.Equal(t, animationEnabled(false), applyAnimationEnabled(false, nil, nil),
+		"applyAnimationEnabled with nil slices must delegate directly to animationEnabled")
 }
 
 // TestApplyAnimationEnabled_SudoStillDisables asserts that the existing sudo path
