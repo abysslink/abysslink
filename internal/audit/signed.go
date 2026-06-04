@@ -402,11 +402,14 @@ func (a *SignedAudit) WriteFilePath(ctx context.Context, src, dst string, perm o
 	}
 	defer func() { _ = srcFile2.Close() }()
 
-	tmp := dst + ".abysslink.tmp"
-	tmpFile, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm) //nolint:gosec // G304: tmp is dst-derived, perm is caller-supplied
+	// CR-02 (parity with WriteFile): use os.CreateTemp for a unique temp name per
+	// call so two concurrent same-target callers cannot clobber each other's temp
+	// file. The temp lives in dst's directory so the rename stays on one device.
+	tmpFile, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.abysslink.tmp")
 	if err != nil {
-		return fmt.Errorf("audit: WriteFilePath create temp %s: %w", tmp, err)
+		return fmt.Errorf("audit: WriteFilePath create temp for %s: %w", dst, err)
 	}
+	tmp := tmpFile.Name()
 
 	if _, cerr := io.Copy(tmpFile, io.LimitReader(srcFile2, writeFilePathCeiling)); cerr != nil {
 		_ = tmpFile.Close()
@@ -416,6 +419,10 @@ func (a *SignedAudit) WriteFilePath(ctx context.Context, src, dst string, perm o
 	if cerr := tmpFile.Close(); cerr != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("audit: WriteFilePath close temp: %w", cerr)
+	}
+	if cerr := os.Chmod(tmp, perm); cerr != nil { //nolint:gosec // perm supplied by caller; tmp is os.CreateTemp-derived, app-controlled
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: WriteFilePath chmod temp %s: %w", tmp, cerr)
 	}
 
 	if rerr := os.Rename(tmp, dst); rerr != nil {
