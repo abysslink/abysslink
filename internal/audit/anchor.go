@@ -16,6 +16,7 @@
 package audit
 
 import (
+	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -46,27 +47,92 @@ func anchorPath(logPath string) string {
 	return filepath.Join(filepath.Dir(logPath), "audit.anchor.json")
 }
 
+// scanLogCountAndLast reads logPath in a SINGLE pass, returning the count of
+// non-empty JSONL entries and the last non-empty line (without trailing
+// newline). This replaces the prior two separate reads in WriteAnchor (ReadLog +
+// readLastNonEmptyLine) so EntryCount and LastHash always describe the same log
+// state, even if a concurrent appender writes between what used to be two reads
+// (WR-06). A missing file yields (0, nil, nil). Counting semantics match ReadLog:
+// non-empty lines that fail to JSON-decode are a hard error, so the anchor's
+// EntryCount stays identical to len(ReadLog(...)).
+func scanLogCountAndLast(logPath string) (count int64, last []byte, err error) {
+	f, oerr := os.Open(logPath) //nolint:gosec // logPath is an internal, app-controlled path
+	if oerr != nil {
+		if os.IsNotExist(oerr) {
+			return 0, nil, nil
+		}
+		return 0, nil, fmt.Errorf("audit: open log %s: %w", logPath, oerr)
+	}
+	defer f.Close() //nolint:errcheck // errcheck: close error on read-only file handle is non-actionable
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var e Entry
+		if uerr := json.Unmarshal(line, &e); uerr != nil {
+			return 0, nil, fmt.Errorf("audit: parse log line: %w", uerr)
+		}
+		count++
+		// scanner.Bytes() is only valid until the next Scan; copy it.
+		last = append(last[:0], line...)
+	}
+	if serr := scanner.Err(); serr != nil {
+		return 0, nil, fmt.Errorf("audit: read log %s: %w", logPath, serr)
+	}
+	return count, last, nil
+}
+
 // anchorSignBytes is the canonical, deterministic serialisation the anchor HMAC
 // covers: entry_count + 0x00 + last_hash + 0x00 + time.
 func anchorSignBytes(a Anchor) []byte {
 	return []byte(fmt.Sprintf("%d\x00%s\x00%s", a.EntryCount, a.LastHash, a.Time))
 }
 
+// WriteAnchorLocked acquires the cross-process append flock around WriteAnchor
+// (WR-06). It is the ONLY safe way to refresh the anchor from a path that does
+// NOT already hold the flock — specifically the daemon's standalone hourly
+// goroutine, which races concurrent CLI appends in a different process. It MUST
+// NOT be called from WriteFile/Append (which already hold the flock): flock is
+// per-open-file-description, so re-acquiring from the same process would
+// deadlock. Those paths call WriteAnchor directly, under their own flock.
+func WriteAnchorLocked(ctx context.Context, logPath string, kc KeychainStore) error {
+	lockFD, err := acquireAuditLock(logPath)
+	if err != nil {
+		return fmt.Errorf("audit: acquire process lock: %w", err)
+	}
+	defer releaseAuditLock(lockFD)
+	return WriteAnchor(ctx, logPath, kc)
+}
+
 // WriteAnchor writes an HMAC-signed anchor beside logPath, atomically (temp +
 // rename, mode 0600). It fetches the HMAC key via the package-private
 // fetchHMACKey helper — it MUST NOT construct a *SignedAudit, which would
 // auto-generate/rotate the key and break the chain.
+//
+// CALLER LOCKING: WriteAnchor itself does NOT take the flock. Callers that
+// append (WriteFile/Append) invoke it while already holding the append flock;
+// callers that do NOT hold the flock (the daemon's standalone hourly refresh)
+// MUST use WriteAnchorLocked instead so the single-pass log read is consistent
+// with concurrent cross-process appends.
 func WriteAnchor(ctx context.Context, logPath string, kc KeychainStore) error {
 	key, err := fetchHMACKey(ctx, kc)
 	if err != nil {
 		return err
 	}
 
-	entries, err := ReadLog(logPath)
-	if err != nil {
-		return err
-	}
-	last, err := readLastNonEmptyLine(logPath)
+	// WR-06: read the log in a SINGLE pass so EntryCount and LastHash describe the
+	// SAME log state. The previous two-read form (ReadLog + readLastNonEmptyLine)
+	// could observe a concurrent append between the reads and emit an anchor whose
+	// EntryCount and LastHash were internally inconsistent — which
+	// audit-count-vs-anchor then reads as a false truncation. WriteAnchor is
+	// always invoked while the caller (WriteFile/Append) holds the append flock,
+	// or under it via the daemon's standalone path, so this single read is
+	// consistent with the appends it anchors.
+	count, last, err := scanLogCountAndLast(logPath)
 	if err != nil {
 		return err
 	}
@@ -77,7 +143,7 @@ func WriteAnchor(ctx context.Context, logPath string, kc KeychainStore) error {
 	}
 
 	a := Anchor{
-		EntryCount: int64(len(entries)),
+		EntryCount: count,
 		LastHash:   lastHash,
 		Time:       time.Now().UTC().Format(time.RFC3339),
 	}
