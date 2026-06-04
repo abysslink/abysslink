@@ -127,6 +127,7 @@ Last activity: 2026-06-04 — Milestone v3.0.1 completed and archived
 - v3.0.1 milestone continues with phases 24 (AUD-01/02, DOS-01) and 25 (CI-01) per REQUIREMENTS.md traceability — not yet added to roadmap.
 - Phase 23.1 inserted after Phase 23: Doctor probe-failure honesty — close WR-02/03/04/08 false-OK + double-emit gaps from Phase 23 code review (URGENT)
 - Phase 25 added: Close v3.0.1 debt: config.Validate-on-load, CLI bounded reads, AUD-02 concurrency
+- Phase 26 added: Init journey gating & first-run fixes — gated interactive wizard (stages pause + offer to run up/lock/enroll/doctor, new ACL stage) + 3 first-run bugs (openURL macOS probe, journey stage-2 hardcoded autoYes, pmset sleep parser). From user's real `abysslink init` transcript report.
 
 ### Decisions
 
