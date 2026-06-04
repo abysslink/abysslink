@@ -200,16 +200,22 @@ func headscaleInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, 
 		return fmt.Errorf("headscale init: %w", err)
 	}
 
-	// ── Step 5: Write binary via audit.WriteFile ───────────────────────────────
-	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec // G304: tmpBinPath is an internally-staged download temp path, not user-controlled
-	if err != nil {
-		return fmt.Errorf("headscale init: read temp binary: %w", err)
-	}
-	logPath, err := audit.DefaultLogPath()
+	// ── Step 5: Write binary via audit.WriteFilePath (streaming — D-06 / WR-02) ──
+	// Stream src→dst via io.Copy with 256 MiB ceiling; binary never fully in memory.
+	initLogPath, err := audit.DefaultLogPath()
 	if err != nil {
 		return fmt.Errorf("headscale init: audit log path: %w", err)
 	}
-	if err := audit.New(logPath).WriteFile(binPath, binData, 0o755, false); err != nil {
+	// Keychain uses ExecRunner — secrets CLI calls are always real system calls.
+	initKC, kcErr := secrets.NewStore(ctx, &shell.ExecRunner{})
+	if kcErr != nil {
+		return fmt.Errorf("headscale init: keychain: %w", kcErr)
+	}
+	initSA, err := audit.NewSigned(initLogPath, initKC)
+	if err != nil {
+		return fmt.Errorf("headscale init: audit init: %w", err)
+	}
+	if err := initSA.WriteFilePath(ctx, tmpBinPath, binPath, 0o755, false); err != nil {
 		return fmt.Errorf("headscale init: write binary: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  binary installed → "+binPath))
@@ -742,16 +748,28 @@ func headscaleSwapBinary(ctx context.Context, cfg *config.Config, runner shell.R
 		return fmt.Errorf("headscale upgrade: stop service: %w", err)
 	}
 
-	// Write new binary via audit.WriteFile.
-	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec // G304: tmpBinPath is an internally-staged download temp path, not user-controlled
-	if err != nil {
-		return fmt.Errorf("headscale upgrade: read new binary: %w", err)
+	// Write new binary via audit.WriteFilePath (streaming — D-06 / WR-02).
+	// Stream src→dst via io.Copy with 256 MiB ceiling; binary never fully in memory.
+	// sa is the chain-recording *SignedAudit from the caller; if nil, fall back to
+	// a fresh SignedAudit (mirrors the DB backup fallback above).
+	swapSA := sa
+	if swapSA == nil {
+		swapLogPath, lerr := audit.DefaultLogPath()
+		if lerr != nil {
+			return fmt.Errorf("headscale upgrade: audit log path: %w", lerr)
+		}
+		// Keychain uses ExecRunner — secrets CLI calls are always real system calls.
+		swapKC, kcErr := secrets.NewStore(ctx, &shell.ExecRunner{})
+		if kcErr != nil {
+			return fmt.Errorf("headscale upgrade: keychain: %w", kcErr)
+		}
+		var saErr error
+		swapSA, saErr = audit.NewSigned(swapLogPath, swapKC)
+		if saErr != nil {
+			return fmt.Errorf("headscale upgrade: audit init: %w", saErr)
+		}
 	}
-	logPath, err := audit.DefaultLogPath()
-	if err != nil {
-		return fmt.Errorf("headscale upgrade: audit log path: %w", err)
-	}
-	if err := audit.New(logPath).WriteFile(binPath, binData, 0o755, false); err != nil {
+	if err := swapSA.WriteFilePath(ctx, tmpBinPath, binPath, 0o755, false); err != nil {
 		return fmt.Errorf("headscale upgrade: write binary: %w", err)
 	}
 

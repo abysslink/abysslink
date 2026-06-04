@@ -32,7 +32,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/limitio"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
@@ -158,7 +160,7 @@ func applyUpgrade(ctx context.Context, p Printer, runner shell.Runner, tag strin
 
 	// Atomic self-replace.
 	printerInfo(p, "  ↺  replacing "+selfPath)
-	if err := atomicReplace(selfPath, newBin); err != nil {
+	if err := atomicReplace(ctx, selfPath, newBin); err != nil {
 		return fmt.Errorf("upgrade: self-replace: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  upgraded to "+tag))
@@ -273,26 +275,29 @@ func extractBinary(tarPath, outDir string) (string, error) {
 	return "", fmt.Errorf("abysslink binary not found in archive")
 }
 
-// atomicReplace replaces dst with src using a write-to-temp + rename pattern
-// to ensure the process is never in a half-replaced state.
-func atomicReplace(dst, src string) error {
-	dstDir := filepath.Dir(dst)
-	tmp, err := os.CreateTemp(dstDir, ".abysslink-upgrade-*")
+// atomicReplace replaces dst with src via audit.WriteFilePath — streaming
+// io.Copy with a 256 MiB ceiling (D-06 / WR-02). WriteFilePath handles temp
+// creation, chmod, and atomic rename; the binary is never fully in memory.
+// Per CLAUDE.md hard rule: every file mutation goes through internal/audit.
+// The keychain store uses shell.ExecRunner — keychain operations are always
+// real system calls and must never be routed through the CLI mock runner.
+func atomicReplace(ctx context.Context, dst, src string) error {
+	logPath, err := audit.DefaultLogPath()
 	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
+		return fmt.Errorf("atomicReplace: audit log path: %w", err)
 	}
-	tmpPath := tmp.Name()
-	_ = tmp.Close()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	srcData, err := os.ReadFile(src) //nolint:gosec // G304: src is the freshly-extracted upgrade binary path derived internally, not user input
+	kc, err := secrets.NewStore(ctx, &shell.ExecRunner{})
 	if err != nil {
-		return err
+		return fmt.Errorf("atomicReplace: keychain: %w", err)
 	}
-	if err := os.WriteFile(tmpPath, srcData, 0o755); err != nil { //nolint:gosec // G306: 0o755 required — written file is an executable binary
-		return err
+	sa, err := audit.NewSigned(logPath, kc)
+	if err != nil {
+		return fmt.Errorf("atomicReplace: audit init: %w", err)
 	}
-	return os.Rename(tmpPath, dst)
+	if err := sa.WriteFilePath(ctx, src, dst, 0o755, false); err != nil {
+		return fmt.Errorf("atomicReplace: write: %w", err)
+	}
+	return nil
 }
 
 // downloadFile downloads url to dest, following redirects.
