@@ -68,21 +68,38 @@ func TestApplyDarwin_SleepEnabledRunsSudo(t *testing.T) {
 	assert.Equal(t, []string{"sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"}, interactive[0])
 }
 
-func TestHasSleepEnabled(t *testing.T) {
+func TestACSleepState(t *testing.T) {
 	cases := []struct {
-		name   string
-		output string
-		want   bool
+		name      string
+		output    string
+		wantValue int
+		wantFound bool
 	}{
-		{"sleep_zero", " sleep         0\n", false},
-		{"sleep_ten", " sleep         10\n", true},
-		{"disksleep_only", " disksleep     10\n", false},
-		{"empty", "", false},
-		{"no_sleep_line", "autopoweroffdelay 28800\n", false},
+		{"sleep_zero", " sleep         0\n", 0, true},
+		{"sleep_ten", " sleep         10\n", 10, true},
+		{"annotated_zero", " sleep  0 (sleep prevented by powerd)\n", 0, true},
+		{"disksleep_only", " disksleep     10\n", 0, false},
+		{"empty", "", 0, false},
+		{"no_sleep_line", "autopoweroffdelay 28800\n", 0, false},
+		// pmset -g custom emits both blocks; only the AC value must be read.
+		{
+			"ac_zero_battery_ten",
+			"AC Power:\n sleep 0\nBattery Power:\n sleep 10\n",
+			0, true,
+		},
+		{
+			"ac_ten_battery_zero",
+			"AC Power:\n sleep 10\nBattery Power:\n sleep 0\n",
+			10, true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, hasSleepEnabled(tc.output))
+			value, found := acSleepState(tc.output)
+			assert.Equal(t, tc.wantFound, found)
+			if found {
+				assert.Equal(t, tc.wantValue, value)
+			}
 		})
 	}
 }
