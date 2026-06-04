@@ -151,7 +151,10 @@ func startAnchorWriter(ctx context.Context, kc secrets.KeychainStore) {
 			select {
 			case <-ticker.C:
 				writeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				if werr := audit.WriteAnchor(writeCtx, logPath, kc); werr != nil {
+				// WR-06: the daemon does not hold the append flock, so use the
+				// locked variant to serialise with concurrent cross-process CLI
+				// appends and keep the anchor's EntryCount/LastHash consistent.
+				if werr := audit.WriteAnchorLocked(writeCtx, logPath, kc); werr != nil {
 					slog.Warn("abysslinkd: anchor write failed", "err", werr)
 				}
 				cancel()
