@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +31,92 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ── WR-05: macOS container non-root verification (fail-closed on root) ────────
+//
+// Automated coverage for 25-VERIFICATION human item #3. netbirdInitMacOS must
+// refuse provisioning when the container would run as root. An empty
+// {{.Config.User}} is AMBIGUOUS (returned both for a declared non-root USER and
+// for no USER at all → runtime root), so the code probes the running container's
+// effective UID via `id -u` and fails closed unless it can prove non-root.
+//
+// netbirdInitMacOS makes these runner calls in order; the MockRunner replays
+// scripted Results positionally:
+//  1. <runtime> info        (detectContainerRuntime → docker)
+//  2. <runtime> pull <img>
+//  3. <runtime> inspect --format {{.RepoDigests}} <img>
+//  4. <runtime> run -d ...
+//  5. <runtime> inspect --format {{.Config.User}} <svc>
+//  6. <runtime> exec <svc> id -u    (only when step 5 returns empty)
+
+// nbMacOSPrefixCalls returns the four scripted Results that take netbirdInitMacOS
+// from runtime detection up to (but not including) the container-user inspect.
+func nbMacOSPrefixCalls() []shell.Call {
+	return []shell.Call{
+		{Result: shell.Result{ExitCode: 0}},                                                // docker info (detect)
+		{Result: shell.Result{ExitCode: 0}},                                                // pull
+		{Result: shell.Result{Stdout: "[netbirdio/netbird@sha256:abc123]\n", ExitCode: 0}}, // inspect digest
+		{Result: shell.Result{ExitCode: 0}},                                                // run -d
+	}
+}
+
+func nbMacOSConfig() *config.Config {
+	cfg := config.Defaults()
+	cfg.Backend.Type = "netbird"
+	cfg.Server.NetBird.ServerURL = "https://nb.example.com"
+	return cfg
+}
+
+func TestNetbirdInitMacOS_RejectsExplicitRootUser(t *testing.T) {
+	calls := append(nbMacOSPrefixCalls(),
+		shell.Call{Result: shell.Result{Stdout: "root\n", ExitCode: 0}}, // inspect user → "root"
+	)
+	runner := shell.NewMockRunner(calls...)
+	p := NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{})
+
+	err := netbirdInitMacOS(context.Background(), nbMacOSConfig(), runner, p)
+	require.Error(t, err, "explicit root container user must be refused")
+	assert.Contains(t, err.Error(), "running as root")
+}
+
+func TestNetbirdInitMacOS_RejectsEmptyUserWithRootUID(t *testing.T) {
+	calls := append(nbMacOSPrefixCalls(),
+		shell.Call{Result: shell.Result{Stdout: "\n", ExitCode: 0}},  // inspect user → "" (ambiguous)
+		shell.Call{Result: shell.Result{Stdout: "0\n", ExitCode: 0}}, // id -u → 0 (root)
+	)
+	runner := shell.NewMockRunner(calls...)
+	p := NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{})
+
+	err := netbirdInitMacOS(context.Background(), nbMacOSConfig(), runner, p)
+	require.Error(t, err, "empty USER resolving to effective UID 0 must be refused")
+	assert.Contains(t, err.Error(), "effective UID is 0 (root)")
+}
+
+func TestNetbirdInitMacOS_RejectsEmptyUserWhenUIDProbeFails(t *testing.T) {
+	calls := append(nbMacOSPrefixCalls(),
+		shell.Call{Result: shell.Result{Stdout: "\n", ExitCode: 0}},       // inspect user → ""
+		shell.Call{Err: errors.New("exec failed: container not running")}, // id -u → error
+	)
+	runner := shell.NewMockRunner(calls...)
+	p := NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{})
+
+	err := netbirdInitMacOS(context.Background(), nbMacOSConfig(), runner, p)
+	require.Error(t, err, "inability to determine effective UID must fail closed")
+	assert.Contains(t, err.Error(), "cannot determine container effective UID")
+}
+
+func TestNetbirdInitMacOS_RejectsEmptyUserWhenUIDUnreadable(t *testing.T) {
+	calls := append(nbMacOSPrefixCalls(),
+		shell.Call{Result: shell.Result{Stdout: "\n", ExitCode: 0}}, // inspect user → ""
+		shell.Call{Result: shell.Result{Stdout: "\n", ExitCode: 0}}, // id -u → "" (unreadable)
+	)
+	runner := shell.NewMockRunner(calls...)
+	p := NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{})
+
+	err := netbirdInitMacOS(context.Background(), nbMacOSConfig(), runner, p)
+	require.Error(t, err, "blank effective UID must fail closed (non-root not proven)")
+	assert.Contains(t, err.Error(), "effective UID could not be read")
+}
 
 // ── Dry-run: no write calls, returns nil ─────────────────────────────────────
 
