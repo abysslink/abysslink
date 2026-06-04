@@ -13,7 +13,7 @@
   ✓  asciinema         up to date
   ✓  ssh               up to date
   →  mosh              1 change: install mosh
-  ✓  acl               up to date
+  →  acl               1 change: ensure tailnet ACL restricts tag:mobile → tag:laptop to tcp/22 + tcp/2586 + udp/60000-61000
   ✓  lock              up to date
   →  ntfy              1 change: ACTION REQUIRED: install Docker Desktop or configure ntfy.sh in abysslink.yaml
   ✓  code-server       up to date
@@ -25,17 +25,18 @@
   →  watch             1 change: configure pane watchers
   ✓  claudecode        up to date
   ────────────────────────────────────────────────
-  7 changes planned
+  8 changes planned
 
   →  tailscale     install tailscale
   →  tmux          install tmux
   →  tmux          write ~/.tmux.conf if changed
   →  mosh          install mosh
+  →  acl           ensure tailnet ACL restricts tag:mobile → tag:laptop to tcp/22 + tcp/2586 + udp/60000-61000
   →  ntfy          ACTION REQUIRED: install Docker Desktop or configure ntfy.sh in abysslink.yaml
   →  notify        start ntfy service
   →  watch         configure pane watchers
 
-  Run   abysslink up --apply   to apply 7 changes.
+  Run   abysslink up --apply   to apply 8 changes.
 ╭──────────────────────────────────────────────────────╮
 │                                                      │
 │  Next steps                                          │

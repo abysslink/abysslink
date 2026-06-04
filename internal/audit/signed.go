@@ -29,10 +29,12 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 )
+
+const writeFilePathCeiling = 256 << 20 // 256 MiB — D-06 WR-02 streaming ceiling
 
 // KeychainStore is satisfied by internal/secrets.KeychainStore; redeclared here
 // to avoid an import cycle (audit→secrets→…→audit). The real injection happens
@@ -48,7 +50,6 @@ const (
 	hmacKeyAccount = "audit-hmac" // full keychain id: abysslink-audit-hmac
 	hmacKeyBytes   = 32
 	genesisMarker  = "genesis"
-	anchorCadence  = 100 // write an anchor every N appended entries
 )
 
 // SignInput is the ONLY permitted input to the HMAC signer.
@@ -131,7 +132,6 @@ type SignedAudit struct {
 	logPath string
 	kc      KeychainStore
 	mu      sync.Mutex
-	count   int64 // atomic — entries appended by this instance
 }
 
 // NewSigned returns a SignedAudit. If the HMAC key is absent from the keychain
@@ -162,36 +162,272 @@ func (a *SignedAudit) LogPath() string { return a.logPath }
 // (T-17-14): if the process crashes between the log append and the write, an
 // operator sees the recorded intent without the effect.
 //
+// Pre-overwrite backups are recorded as signed chain entries via backupNoRefresh
+// (AUD-01 / D-08) so RestoreGated can later locate and verify them. The backup
+// entry, the write-intent entry, the WriteAnchor+addCounter refresh, AND the
+// physical target write+rename ALL run under a SINGLE mutex+OS-flock critical
+// section (D-07 / D-08 / CR-01 / CR-02): the keychain counter always equals the
+// JSONL entry count at any process-kill point, the chain-attested .bak is the
+// byte-identical file on disk, and concurrent same-target writers serialise on
+// the physical write (each using a unique os.CreateTemp temp path) instead of
+// racing on a shared temp suffix.
+//
 // It uses context.Background() internally — justified by the AuditWriter
 // interface omitting ctx for drop-in *Audit compatibility (WriteFile is a
 // convenience wrapper over Append, not a hot path; see interface.go).
 func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error {
 	ctx := context.Background()
 
-	// Record intent in the signed chain FIRST (audit-then-write ordering).
+	// Check whether a pre-existing file must be backed up (before acquiring mu).
+	// os.Stat is idempotent and lock-free; the result is rechecked inside the
+	// critical section only if needed. A race here is safe: if the file disappears
+	// between Stat and the flock acquisition, backupNoRefresh will return an error
+	// and WriteFile aborts — the correct outcome.
+	_, existErr := os.Stat(path)
+	fileExists := existErr == nil
+
+	// D-08: Acquire in-process mutex, then OS flock — mutex-then-flock ordering
+	// is strictly enforced (RESEARCH.md RQ-1 / PATTERNS.md pitfall 7).
+	a.mu.Lock()
+	lockFD, err := acquireAuditLock(a.logPath)
+	if err != nil {
+		a.mu.Unlock()
+		return fmt.Errorf("audit: acquire process lock: %w", err)
+	}
+
+	// CR-01 / CR-02: EVERYTHING below — the backup .bak, the JSONL chain entries,
+	// the anchor+counter refresh, AND the physical target write+rename — happens
+	// under the SAME mutex+flock. The lock is released exactly once, on every exit
+	// path, via the deferred unlock. This is what guarantees:
+	//   * the .bak attested in the chain is the byte-identical file on disk
+	//     (no unlocked re-read that a concurrent writer could change — CR-01), and
+	//   * two WriteFile calls to the same target serialise their physical writes
+	//     instead of racing on a shared temp path (CR-02).
+	unlocked := false
+	unlock := func() {
+		if unlocked {
+			return
+		}
+		unlocked = true
+		releaseAuditLock(lockFD)
+		a.mu.Unlock()
+	}
+	defer unlock()
+
+	// D-08: entryCount tracks the number of JSONL entries appended under this flock
+	// so the keychain counter can be advanced by the exact batch size.
+	var entryCount int64
+
+	if fileExists {
+		// AUD-01: record the backup as a signed chain entry without triggering a
+		// per-entry anchor/counter refresh (backupNoRefresh). backupNoRefresh ALSO
+		// creates the physical .bak under this flock with the exact stamp recorded
+		// in the chain entry — there is no separate unlocked backup write (CR-01).
+		if bErr := a.backupNoRefresh(ctx, path, dryRun); bErr != nil {
+			return fmt.Errorf("audit: backup before write %s: %w", path, bErr)
+		}
+		entryCount++
+	}
+
+	// Record write-intent entry without per-entry anchor/counter refresh.
 	diffHash := sha256.Sum256(content)
-	if err := a.Append(ctx, SignInput{Title: "write", DiffHash: diffHash}, path, dryRun); err != nil {
-		return err
+	if wErr := a.appendNoRefresh(ctx, SignInput{Title: "write", DiffHash: diffHash}, path, dryRun); wErr != nil {
+		return wErr
+	}
+	entryCount++
+
+	// Refresh anchor and counter while STILL holding the flock (CR-02). Doing this
+	// under the lock keeps the keychain counter and the JSONL entry count in step
+	// at every process-kill point: a crash can leave recorded intent without the
+	// physical effect (the documented append-before-write window), but never a
+	// "counter behind entries" state that audit-count-vs-anchor reads as a false
+	// truncation alarm.
+	if aerr := WriteAnchor(ctx, a.logPath, a.kc); aerr != nil {
+		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
+	}
+	if cerr := addCounter(ctx, a.kc, entryCount); cerr != nil {
+		_ = a.kc.Delete(ctx, counterKeyService, counterKeyAccount)
+		slog.Warn("audit: keychain counter increment failed; counter key cleared to prevent false mismatch alarm",
+			"err", cerr, "log", a.logPath)
 	}
 
 	if dryRun {
 		return nil
 	}
 
-	// Back up an existing file before overwriting it so the change is reversible.
-	if _, statErr := os.Stat(path); statErr == nil {
-		if _, bErr := Backup(path); bErr != nil {
-			return fmt.Errorf("audit: backup before write %s: %w", path, bErr)
-		}
+	// Physical write of the target, still under the flock. Use os.CreateTemp for a
+	// unique temp name per call so concurrent same-target writers cannot clobber
+	// each other's temp file (CR-02) — mirrors the WriteAnchor fix in anchor.go.
+	// The temp lives in the target's directory so the rename stays on one device.
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	tmpFile, err := os.CreateTemp(dir, base+".*.abysslink.tmp")
+	if err != nil {
+		return fmt.Errorf("audit: create temp for %s: %w", path, err)
 	}
-
-	tmp := path + ".abysslink.tmp"
-	if err := os.WriteFile(tmp, content, perm); err != nil { //nolint:gosec // perm supplied by caller; tmp is path-derived
-		return fmt.Errorf("audit: write temp %s: %w", tmp, err)
+	tmp := tmpFile.Name()
+	_, werr := tmpFile.Write(content)
+	if cerr := tmpFile.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: write temp %s: %w", tmp, werr)
+	}
+	if cerr := os.Chmod(tmp, perm); cerr != nil { //nolint:gosec // perm supplied by caller; tmp is os.CreateTemp-derived, app-controlled
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: chmod temp %s: %w", tmp, cerr)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("audit: rename %s → %s: %w", tmp, path, err)
+	}
+	return nil
+}
+
+// appendNoRefresh appends one HMAC-signed, hash-chained entry to the log WITHOUT
+// triggering WriteAnchor or IncrementCounter. It is the internal batch-write
+// primitive used by WriteFile so both the backup and write-intent JSONL entries
+// share a single flock and a single subsequent anchor/counter refresh (D-08).
+//
+// MUST be called with a.mu already held and flock already acquired by the caller.
+// Does not refresh anchor or counter.
+func (a *SignedAudit) appendNoRefresh(ctx context.Context, in SignInput, target string, dryRun bool) error {
+	key, err := a.hmacKey(ctx)
+	if err != nil {
+		return err
+	}
+	prevHash, err := computePrevHash(a.logPath)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	in.Target = target
+	in.Time = now.Format(time.RFC3339)
+	in.DryRun = dryRun
+	in.PrevHash = prevHash
+	entry := Entry{
+		Time:     now,
+		Op:       in.Title,
+		Target:   target,
+		Hash:     hex.EncodeToString(in.DiffHash[:]),
+		DryRun:   dryRun,
+		PrevHash: prevHash,
+		Sig:      computeSig(key, in),
+	}
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("audit: marshal entry: %w", err)
+	}
+	line = append(line, '\n')
+
+	f, err := os.OpenFile(a.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: a.logPath is the internal audit-log path set at construction, not user-controlled
+	if err != nil {
+		return fmt.Errorf("audit: open log %s: %w", a.logPath, err)
+	}
+	if _, werr := f.Write(line); werr != nil {
+		_ = f.Close()
+		return fmt.Errorf("audit: write log: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return fmt.Errorf("audit: close log: %w", cerr)
+	}
+	return nil
+}
+
+// backupNoRefresh records a backup chain entry for targetPath WITHOUT triggering
+// WriteAnchor or IncrementCounter. It reads targetPath to compute the SHA-256
+// hash, writes the .bak file, then appends the signed chain entry via
+// appendNoRefresh. Used by WriteFile's batched path (D-08).
+//
+// MUST be called with a.mu already held and flock already acquired by the caller.
+// Does not refresh anchor or counter.
+func (a *SignedAudit) backupNoRefresh(ctx context.Context, targetPath string, dryRun bool) error {
+	content, err := os.ReadFile(targetPath) //nolint:gosec // G304: targetPath is an audit-controlled path, not user input
+	if err != nil {
+		return fmt.Errorf("audit: backup read %s: %w", targetPath, err)
+	}
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	bakPath := fmt.Sprintf("%s.bak.%s", targetPath, stamp)
+	if err := os.WriteFile(bakPath, content, 0o600); err != nil { //nolint:gosec // G304: bakPath is derived from targetPath, not user input; 0o600 enforces owner-only perms
+		return fmt.Errorf("audit: backup write %s: %w", bakPath, err)
+	}
+	diffHash := sha256.Sum256(content)
+	if aerr := a.appendNoRefresh(ctx, SignInput{Title: "backup", DiffHash: diffHash}, bakPath, dryRun); aerr != nil {
+		_ = os.Remove(bakPath) // rollback: remove orphaned .bak on chain-append failure
+		return fmt.Errorf("audit: backup chain-entry failed (backup rolled back): %w", aerr)
+	}
+	return nil
+}
+
+// WriteFilePath is the streaming equivalent of WriteFile for large binary
+// installs (D-06 / WR-02). It reads src via io.Copy with a 256 MiB ceiling,
+// never loading the file into memory. If src exceeds 256 MiB the function
+// returns an error and cleans up any temp file before returning.
+//
+// This is the SOLE definition of WriteFilePath on *SignedAudit.
+func (a *SignedAudit) WriteFilePath(ctx context.Context, src, dst string, perm os.FileMode, dryRun bool) error {
+	// Step 1: compute SHA-256 of src via a streaming hasher — N+1 sentinel detects
+	// overflow at exactly writeFilePathCeiling bytes without silent truncation.
+	srcFile, err := os.Open(src) //nolint:gosec // G304: src is a caller-supplied binary path; callers in internal/cli supply installer-derived paths, not user-controlled paths
+	if err != nil {
+		return fmt.Errorf("audit: WriteFilePath open src %s: %w", src, err)
+	}
+
+	hasher := sha256.New()
+	n, err := io.Copy(hasher, io.LimitReader(srcFile, writeFilePathCeiling+1))
+	_ = srcFile.Close()
+	if err != nil {
+		return fmt.Errorf("audit: WriteFilePath hash src %s: %w", src, err)
+	}
+	if n > writeFilePathCeiling {
+		return fmt.Errorf("audit: WriteFilePath: src %s exceeds 256 MiB ceiling", src)
+	}
+
+	// Step 2: record audit intent entry with the hash.
+	var diffHash [32]byte
+	copy(diffHash[:], hasher.Sum(nil))
+	if aerr := a.Append(ctx, SignInput{Title: "write", DiffHash: diffHash}, dst, dryRun); aerr != nil {
+		return aerr
+	}
+
+	if dryRun {
+		return nil
+	}
+
+	// Step 3: stream src to a temp file via io.Copy+LimitReader, then rename.
+	srcFile2, err := os.Open(src) //nolint:gosec // G304: same path as above; see note on step 1
+	if err != nil {
+		return fmt.Errorf("audit: WriteFilePath reopen src %s: %w", src, err)
+	}
+	defer func() { _ = srcFile2.Close() }()
+
+	// CR-02 (parity with WriteFile): use os.CreateTemp for a unique temp name per
+	// call so two concurrent same-target callers cannot clobber each other's temp
+	// file. The temp lives in dst's directory so the rename stays on one device.
+	tmpFile, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.abysslink.tmp")
+	if err != nil {
+		return fmt.Errorf("audit: WriteFilePath create temp for %s: %w", dst, err)
+	}
+	tmp := tmpFile.Name()
+
+	if _, cerr := io.Copy(tmpFile, io.LimitReader(srcFile2, writeFilePathCeiling)); cerr != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: WriteFilePath copy to temp: %w", cerr)
+	}
+	if cerr := tmpFile.Close(); cerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: WriteFilePath close temp: %w", cerr)
+	}
+	if cerr := os.Chmod(tmp, perm); cerr != nil { //nolint:gosec // perm supplied by caller; tmp is os.CreateTemp-derived, app-controlled
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: WriteFilePath chmod temp %s: %w", tmp, cerr)
+	}
+
+	if rerr := os.Rename(tmp, dst); rerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: WriteFilePath rename %s → %s: %w", tmp, dst, rerr)
 	}
 	return nil
 }
@@ -287,20 +523,40 @@ func computePrevHash(logPath string) (string, error) {
 // never written — only its DiffHash digest and the HMAC sig. dryRun tags the
 // entry without changing the chain.
 //
-// CRITICAL MUTEX SCOPE: mu is held across the entire read→compute→write
-// sequence. mu.Unlock() is called EXPLICITLY (not via defer) before the
-// best-effort anchor write, so the anchor write never happens under the mutex.
+// CRITICAL LOCK SCOPE: the in-process mutex AND the cross-process OS flock are
+// both held across the entire read→compute→write→anchor sequence (WR-01 / WR-06).
+// WriteFilePath→Append and the daemon's hourly anchor path run in DIFFERENT
+// processes; the in-process mutex alone does nothing across that boundary, so
+// without the flock two processes could computePrevHash off the same tail and
+// fork the chain. Holding the flock through WriteAnchor also keeps the anchor's
+// EntryCount/LastHash consistent with the log a concurrent appender cannot mutate
+// mid-read. Both locks are released exactly once, on every exit, via the deferred
+// unlock — so the keychain counter step below also runs under the lock.
 func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, dryRun bool) error {
+	// WR-01: mutex-then-flock ordering, identical to WriteFile.
 	a.mu.Lock()
+	lockFD, lerr := acquireAuditLock(a.logPath)
+	if lerr != nil {
+		a.mu.Unlock()
+		return fmt.Errorf("audit: acquire process lock: %w", lerr)
+	}
+	unlocked := false
+	unlock := func() {
+		if unlocked {
+			return
+		}
+		unlocked = true
+		releaseAuditLock(lockFD)
+		a.mu.Unlock()
+	}
+	defer unlock()
 
 	key, err := a.hmacKey(ctx)
 	if err != nil {
-		a.mu.Unlock()
 		return err
 	}
 	prevHash, err := computePrevHash(a.logPath)
 	if err != nil {
-		a.mu.Unlock()
 		return err
 	}
 	now := time.Now().UTC()
@@ -324,33 +580,41 @@ func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, d
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
-		a.mu.Unlock()
 		return fmt.Errorf("audit: marshal entry: %w", err)
 	}
 	line = append(line, '\n')
 
 	f, err := os.OpenFile(a.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: a.logPath is the internal audit-log path set at construction, not user-controlled
 	if err != nil {
-		a.mu.Unlock()
 		return fmt.Errorf("audit: open log %s: %w", a.logPath, err)
 	}
 	if _, werr := f.Write(line); werr != nil {
 		_ = f.Close()
-		a.mu.Unlock()
 		return fmt.Errorf("audit: write log: %w", werr)
 	}
 	if cerr := f.Close(); cerr != nil {
-		a.mu.Unlock()
 		return fmt.Errorf("audit: close log: %w", cerr)
 	}
 
-	a.mu.Unlock() // explicit — must precede the post-lock anchor write below.
-
-	// Best-effort, count-based anchor. Never under the mutex; never fatal.
-	if atomic.AddInt64(&a.count, 1)%anchorCadence == 0 {
-		if aerr := WriteAnchor(ctx, a.logPath, a.kc); aerr != nil {
-			slog.Warn("audit: anchor write failed", "err", aerr, "log", a.logPath)
-		}
+	// AUD-02: anchor refreshed on EVERY append (not cadenced), under the SAME
+	// flock as the append (WR-06) so EntryCount/LastHash describe a log state no
+	// concurrent appender can change between the two reads inside WriteAnchor.
+	// Failure hard-fails Append; WriteFile callers abort before physical write
+	// because Append returns error first (D-03 write-ordering correctness).
+	if aerr := WriteAnchor(ctx, a.logPath, a.kc); aerr != nil {
+		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
+	}
+	// AUD-02: keychain counter incremented after successful anchor write.
+	// Counter failure does NOT abort — anchor is already written (fail-soft
+	// contract). On failure the counter key is DELETED so the next ReadCounter
+	// returns found=false and verifyCounter reports CounterStatus="unknown"
+	// (honest tri-state: "cannot check") rather than leaving the stale value in
+	// place and causing a permanent false "mismatch"/TruncationDetected alarm on
+	// every subsequent Verify.
+	if cerr := IncrementCounter(ctx, a.kc); cerr != nil {
+		_ = a.kc.Delete(ctx, counterKeyService, counterKeyAccount) // best-effort: clear stale counter to avoid false mismatch
+		slog.Warn("audit: keychain counter increment failed; counter key cleared to prevent false mismatch alarm",
+			"err", cerr, "log", a.logPath)
 	}
 	return nil
 }

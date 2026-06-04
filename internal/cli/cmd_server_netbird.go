@@ -33,6 +33,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/limitio"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
@@ -46,6 +47,17 @@ const (
 	netbirdConfigPath     = "/etc/netbird/config.yaml"
 	netbirdBinaryDest     = "/usr/local/bin/netbird-server"
 	netbirdServiceUser    = "netbird-server"
+
+	// netbirdBinaryCeiling bounds the supplied binary read (WR-04). It mirrors
+	// audit.writeFilePathCeiling (256 MiB): a NetBird server binary is tens of MB,
+	// so a file beyond this is operator error or hostile and must not be slurped
+	// into memory before the checksum runs.
+	netbirdBinaryCeiling = 256 << 20 // 256 MiB
+
+	// netbirdConfigCeiling bounds the merged config.yaml read (WR-04). The config
+	// is a few KB; this cap is generous while preventing an unbounded read of a
+	// path that an operator could point at a large file.
+	netbirdConfigCeiling = 4 << 20 // 4 MiB
 
 	// netbirdSystemdUnit is the systemd unit template from RESEARCH.md RF-3.
 	netbirdSystemdUnit = `[Unit]
@@ -244,13 +256,12 @@ func netbirdLinuxBinarySetup(ctx context.Context, runner shell.Runner, p Printer
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  version "+version+" meets floor "+netbirdMinVersion))
 
-	// ── SHA-256 checksum: compute and print for operator records ──────────────
-	binData, err := os.ReadFile(binaryPath) //nolint:gosec // G304: binaryPath is an internally-staged download temp path, not user-controlled
+	// ── SHA-256 checksum: stream through the hasher with a 256 MiB ceiling so a
+	// multi-GB --binary-path cannot exhaust memory before the checksum runs (WR-04).
+	checksumHex, err := streamSHA256(binaryPath, netbirdBinaryCeiling)
 	if err != nil {
-		return fmt.Errorf("netbird init: read binary for checksum: %w", err)
+		return fmt.Errorf("netbird init: checksum binary: %w", err)
 	}
-	sum := sha256.Sum256(binData)
-	checksumHex := hex.EncodeToString(sum[:])
 	printerInfo(p, "  SHA-256 checksum of supplied binary (record for audit purposes):")
 	printerInfo(p, "  "+checksumHex)
 
@@ -365,9 +376,23 @@ func netbirdInitMacOS(ctx context.Context, cfg *config.Config, runner shell.Runn
 	if containerUser == "root" || containerUser == "0" {
 		return fmt.Errorf("container is running as root — provisioning refused; NetBird server image must declare a non-root USER")
 	}
-	// Empty string is acceptable (image defaults to non-root USER in its Dockerfile).
+	// WR-05: an empty {{.Config.User}} is AMBIGUOUS — it is returned both when the
+	// image declares a non-root USER *and* when it declares none (defaulting to
+	// root at runtime). Do NOT assume non-root. Query the running container's
+	// effective UID and refuse if it is 0 (fail-closed on the nb-proc-user control).
 	if containerUser == "" {
-		printerInfo(p, styleSuccess.Render("  ✓  container user: (image default, assumed non-root)"))
+		idRes, idErr := runner.Run(ctx, runtime, "exec", netbirdServiceName, "id", "-u")
+		if idErr != nil {
+			return fmt.Errorf("netbird init (macOS): cannot determine container effective UID (image declares no USER) — provisioning refused: %w", idErr)
+		}
+		effUID := strings.TrimSpace(idRes.Stdout)
+		if effUID == "0" {
+			return fmt.Errorf("container effective UID is 0 (root) — image declares no non-root USER; provisioning refused")
+		}
+		if effUID == "" {
+			return fmt.Errorf("container effective UID could not be read — provisioning refused (fail-closed on non-root assertion)")
+		}
+		printerInfo(p, styleSuccess.Render("  ✓  container user: effective UID "+effUID+" (non-root)"))
 	} else {
 		printerInfo(p, styleSuccess.Render("  ✓  container user: "+containerUser+" (non-root)"))
 	}
@@ -439,12 +464,19 @@ func detectContainerRuntime(ctx context.Context, runner shell.Runner) (string, e
 //   - HTTP 200 with results → FAIL + return error (provisioning refused).
 //   - Network error or unexpected status → FAIL + return error.
 func netbirdZitadelInitProbe(ctx context.Context, cfgPath string, p Printer) error {
-	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the resolved netbird config path derived internally, not user input
+	// WR-04: bound the config read so a config path pointing at a large file
+	// cannot be slurped wholesale. The merged config.yaml is a few KB.
+	f, err := os.Open(cfgPath) //nolint:gosec // G304: cfgPath is the resolved netbird config path derived internally, not user input
 	if err != nil {
 		// config.yaml not found — ZITADEL not in use (Dex default has no issuer in
 		// a newly-written config).
 		slog.InfoContext(ctx, "netbird init: ZITADEL not in use — CVE gate SKIP (no config.yaml)")
 		return nil
+	}
+	data, rerr := limitio.ReadLimited(f, netbirdConfigCeiling)
+	_ = f.Close()
+	if rerr != nil {
+		return fmt.Errorf("netbird init: read config %s: %w", cfgPath, rerr)
 	}
 
 	// Parse issuer from config.yaml (look for server.auth.issuer).
@@ -507,7 +539,10 @@ func runNetBirdZitadelProbe(ctx context.Context, issuerBase string, p Printer) e
 		printerInfo(p, styleSuccess.Render("  [SC-2] ZITADEL CVE-2025-10678 gate: default admin credentials rejected (PASS)"))
 		return nil
 	case http.StatusOK:
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+		if err != nil {
+			return fmt.Errorf("ZITADEL CVE probe: read response: %w", err)
+		}
 		var result struct {
 			Result []any `json:"result"`
 		}
@@ -520,6 +555,28 @@ func runNetBirdZitadelProbe(ctx context.Context, issuerBase string, p Printer) e
 	default:
 		return fmt.Errorf("ZITADEL CVE probe failed: unexpected HTTP %d — provisioning refused; verify ZITADEL state manually", resp.StatusCode)
 	}
+}
+
+// streamSHA256 computes the hex SHA-256 of the file at path by streaming it
+// through the hasher with an N+1 overflow sentinel at ceiling bytes (WR-04). It
+// never loads the whole file into memory and refuses a file exceeding ceiling,
+// mirroring audit.WriteFilePath's bounded-read discipline.
+func streamSHA256(path string, ceiling int64) (string, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: path is an internally-staged binary/config path, not user-controlled
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, ceiling+1)) // N+1 sentinel detects overflow
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	if n > ceiling {
+		return "", fmt.Errorf("%s exceeds %d byte ceiling", path, ceiling)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // extractIssuerFromYAML scans YAML bytes for the server.auth.issuer value.
@@ -689,9 +746,14 @@ func netbirdUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContext,
 		return nil
 	}
 
+	// AUD-01: build a signed audit writer for chain-recorded backups.
+	// Best-effort: if the keychain is unavailable, sa is nil and the backup site
+	// in netbirdUpgradeLinux documents the unchained fallback with slog.Warn.
+	sa, _ := cmdSignedAudit(ctx, cc)
+
 	switch runtime.GOOS {
 	case "linux":
-		return netbirdUpgradeLinux(ctx, cfg, runner, p, newBinaryPath)
+		return netbirdUpgradeLinux(ctx, cfg, runner, p, newBinaryPath, sa)
 	case "darwin":
 		return netbirdUpgradeMacOS(ctx, runner, p)
 	default:
@@ -699,7 +761,7 @@ func netbirdUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContext,
 	}
 }
 
-func netbirdUpgradeLinux(ctx context.Context, cfg *config.Config, runner shell.Runner, p Printer, newBinaryPath string) error {
+func netbirdUpgradeLinux(ctx context.Context, cfg *config.Config, runner shell.Runner, p Printer, newBinaryPath string, sa *audit.SignedAudit) error {
 	if newBinaryPath == "" {
 		return fmt.Errorf("flag --binary-path required for Linux upgrade")
 	}
@@ -710,10 +772,20 @@ func netbirdUpgradeLinux(ctx context.Context, cfg *config.Config, runner shell.R
 		return err
 	}
 
-	// Backup current config.
+	// AUD-01: backup current config via chain-recorded BackupWithChain.
+	// This site is best-effort (slog.Warn on failure). If sa is unavailable
+	// (keychain unreachable), fall back to unchained Backup with an explicit
+	// warning — optional sidecar, not the principal mutation artifact.
 	cfgPath := netbirdConfigPathFor(cfg)
-	if _, err := audit.Backup(cfgPath); err != nil {
-		slog.WarnContext(ctx, "netbird upgrade: could not backup config", "err", err)
+	if sa != nil {
+		if _, err := audit.BackupWithChain(ctx, cfgPath, sa); err != nil {
+			slog.WarnContext(ctx, "netbird upgrade: could not chain-backup config", "err", err)
+		}
+	} else {
+		// Keychain unavailable — unchained fallback (best-effort sidecar; AUD-01 T-24-07-04).
+		if _, err := audit.Backup(cfgPath); err != nil {
+			slog.WarnContext(ctx, "netbird upgrade: could not backup config (keychain unavailable)", "err", err)
+		}
 	}
 
 	// Stop → copy → start → health-check.
@@ -847,29 +919,41 @@ func netbirdBackupRunE(ctx context.Context, cc *cmdContext, p Printer) error {
 
 	slog.InfoContext(ctx, "netbird backup", "config_path", cfgPath)
 
-	backupPath, err := audit.Backup(cfgPath)
+	// AUD-01: obtain a chain-recording *SignedAudit. Fail-closed for the
+	// principal config artifact (cfgPath). The two optional sidecar files
+	// (container-run.yaml, store.db) stay best-effort with a slog.Warn fallback.
+	sa, saErr := cmdSignedAudit(ctx, cc)
+	if saErr != nil {
+		return fmt.Errorf("netbird backup: %w", saErr)
+	}
+
+	backupPath, err := audit.BackupWithChain(ctx, cfgPath, sa)
 	if err != nil {
 		return fmt.Errorf("netbird backup: config.yaml: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  config.yaml backed up → "+backupPath))
 
 	// Also backup container run config if present (macOS path).
+	// Optional sidecar — best-effort with slog.Warn on failure (AUD-01 T-24-07-04).
 	containerRunCfg := "/etc/netbird/container-run.yaml"
 	if _, statErr := os.Stat(containerRunCfg); statErr == nil {
-		bp, err := audit.Backup(containerRunCfg)
+		bp, err := audit.BackupWithChain(ctx, containerRunCfg, sa)
 		if err != nil {
-			slog.WarnContext(ctx, "netbird backup: container-run.yaml backup failed", "err", err)
+			// Optional sidecar: keep best-effort behaviour.
+			slog.WarnContext(ctx, "netbird backup: container-run.yaml chain-backup failed", "err", err)
 		} else {
 			printerInfo(p, styleSuccess.Render("  ✓  container-run.yaml backed up → "+bp))
 		}
 	}
 
 	// Backup store.db if accessible (Linux path).
+	// Optional sidecar — best-effort with slog.Warn on failure (AUD-01 T-24-07-04).
 	storeDB := "/var/lib/netbird-server/store.db"
 	if _, statErr := os.Stat(storeDB); statErr == nil {
-		bp, err := audit.Backup(storeDB)
+		bp, err := audit.BackupWithChain(ctx, storeDB, sa)
 		if err != nil {
-			slog.WarnContext(ctx, "netbird backup: store.db backup failed", "err", err)
+			// Optional sidecar: keep best-effort behaviour.
+			slog.WarnContext(ctx, "netbird backup: store.db chain-backup failed", "err", err)
 		} else {
 			printerInfo(p, styleSuccess.Render("  ✓  store.db backed up → "+bp))
 		}

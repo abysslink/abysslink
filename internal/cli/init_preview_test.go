@@ -196,7 +196,7 @@ func TestConfigMarshal_ContainsExpectedFields(t *testing.T) {
 // TestConfigMarshal_RoundTrip asserts that Marshal output can be loaded back
 // and produces an equal Config (Marshal ↔ Load round-trip).
 func TestConfigMarshal_RoundTrip(t *testing.T) {
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Identity.Email = "roundtrip@example.com"
 	cfg.Tailnet.Hostname = "trip-host"
 	cfg.Modules.Mosh.Enabled = false

@@ -103,8 +103,12 @@ func (a *netbirdAdapter) ListPostureChecks(ctx context.Context) ([]nbPostureChec
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: list posture checks: HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nil, fmt.Errorf("netbird: list posture checks: read response: %w", err)
+	}
 	var checks []nbPostureCheck
-	if err := json.NewDecoder(resp.Body).Decode(&checks); err != nil {
+	if err := json.Unmarshal(data, &checks); err != nil {
 		return nil, fmt.Errorf("netbird: list posture checks: decode: %w", err)
 	}
 	return checks, nil
@@ -121,8 +125,12 @@ func (a *netbirdAdapter) CreatePostureCheck(ctx context.Context, req nbCreatePos
 	if resp.StatusCode != http.StatusCreated {
 		return nbPostureCheck{}, fmt.Errorf("netbird: create posture check: HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nbPostureCheck{}, fmt.Errorf("netbird: create posture check: read response: %w", err)
+	}
 	var created nbPostureCheck
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+	if err := json.Unmarshal(data, &created); err != nil {
 		return nbPostureCheck{}, fmt.Errorf("netbird: create posture check: decode: %w", err)
 	}
 	return created, nil

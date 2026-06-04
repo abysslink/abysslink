@@ -334,3 +334,92 @@ func TestVerify_AnchorLastHashConsistent(t *testing.T) {
 	assert.True(t, res.OK, "intact anchor LastHash must verify")
 	assert.False(t, res.TruncationDetected)
 }
+
+// TestVerify_DegradedCounter_Unknown tests AUD-02 scenario A10: when a transient
+// IncrementCounter failure during Append causes the counter key to be deleted
+// (the fix in signed.go), the next Verify must report CounterStatus="unknown"
+// and TruncationDetected=false — NOT the permanent false alarm "mismatch".
+//
+// This test drives the degrade behaviour via the public surface: perform a
+// normal Append with a working keychain (counter=1), then Delete the counter
+// key to model exactly what Append now does on IncrementCounter failure.
+// This is valid because the Delete IS the fix — it is what production code now
+// executes on counter-increment failure.
+func TestVerify_DegradedCounter_Unknown(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	// Append one entry — counter is now 1 in the keychain.
+	writeSomeEntries(t, sa, 1)
+
+	// Simulate the degrade-to-unknown path: delete the counter key, exactly
+	// as Append now does when IncrementCounter fails (AUD-02 fix).
+	require.NoError(t, kc.Delete(ctx, "abysslink", "audit-counter"))
+
+	res, verr := audit.Verify(ctx, logPath, kc)
+	require.NoError(t, verr)
+	// A cleared counter must yield "unknown", never "mismatch".
+	assert.Equal(t, "unknown", res.CounterStatus,
+		"cleared counter (degrade-to-unknown) must report CounterStatus=unknown")
+	assert.False(t, res.TruncationDetected,
+		"cleared counter must not set TruncationDetected (no genuine truncation)")
+	// Chain itself is still intact.
+	assert.True(t, res.OK, "chain must be intact; only the counter check is unknown")
+}
+
+// TestVerify_GenuineTruncation_Mismatch tests AUD-02 scenario T-24-06-02: a
+// genuine tail truncation (counter present and disagrees with entry count) must
+// still produce CounterStatus="mismatch" and TruncationDetected=true.
+//
+// We set up a clean log with N entries (counter=N), then overwrite the counter
+// to N+1 to simulate the attacker/truncation scenario where the log is shorter
+// than the counter records.
+func TestVerify_GenuineTruncation_Mismatch(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	const entryCount = 4
+	writeSomeEntries(t, sa, entryCount)
+
+	// Write a counter that is larger than the actual entry count, simulating
+	// tail truncation (log has 4 entries but counter says 5 were appended).
+	require.NoError(t, audit.WriteCounter(ctx, kc, entryCount+1))
+
+	res, verr := audit.Verify(ctx, logPath, kc)
+	require.NoError(t, verr)
+	assert.Equal(t, "mismatch", res.CounterStatus,
+		"genuine truncation (counter > entries) must report CounterStatus=mismatch")
+	assert.True(t, res.TruncationDetected,
+		"genuine truncation must set TruncationDetected=true")
+}
+
+// TestVerify_NoCounter_Unknown is a regression guard for pre-AUD-02 logs: a log
+// written without any counter (counter key was never set in the keychain) must
+// produce CounterStatus="unknown" — the honest tri-state result for "counter
+// was never recorded", not a spurious "mismatch" alarm.
+func TestVerify_NoCounter_Unknown(t *testing.T) {
+	dir := t.TempDir()
+	kc := seededStore(t)
+	logPath := filepath.Join(dir, "audit.log")
+
+	ctx := context.Background()
+	// Write a log using the plain (unsigned) Audit — no counter is ever written.
+	legacy := audit.New(logPath)
+	require.NoError(t, legacy.Append("write", "/etc/a", []byte("a"), false))
+	require.NoError(t, legacy.Append("write", "/etc/b", []byte("b"), false))
+
+	res, verr := audit.Verify(ctx, logPath, kc)
+	require.NoError(t, verr)
+	assert.Equal(t, "unknown", res.CounterStatus,
+		"pre-AUD-02 log with no counter must report CounterStatus=unknown (regression guard)")
+	assert.False(t, res.TruncationDetected,
+		"missing counter must not set TruncationDetected")
+}

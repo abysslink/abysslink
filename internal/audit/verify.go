@@ -29,15 +29,25 @@ import (
 // VerifyResult reports the outcome of a chain walk. OK is true only when every
 // signed entry chains and verifies; At is the index of the first bad entry (-1
 // when OK). TruncationDetected is set when the (HMAC-validated) anchor records
-// more entries than the log currently holds. SigsVerified counts entries whose
-// HMAC signature was checked and matched; SigsSkipped counts entries whose
-// signature could not be authenticated (legacy/unsigned entries, or any signed
-// entry when the keychain is unavailable so HMAC checks are skipped).
+// more entries than the log currently holds, OR when the keychain counter
+// disagrees with the log entry count (AUD-02 / A10). SigsVerified counts
+// entries whose HMAC signature was checked and matched; SigsSkipped counts
+// entries whose signature could not be authenticated (legacy/unsigned entries,
+// or any signed entry when the keychain is unavailable so HMAC checks are
+// skipped).
+//
+// CounterStatus reports the AUD-02 keychain counter check (D-04 tri-state
+// honesty rule — mirrors the probeOK pattern):
+//   - "verified"  — keychain counter matches log entry count
+//   - "mismatch"  — counter disagrees with entry count (tail-truncation)
+//   - "unknown"   — counter absent or keychain unavailable (NEVER coerced to PASS)
+//   - ""          — pre-AUD-02 log (no counter was ever written)
 type VerifyResult struct {
 	OK                 bool
 	At                 int
 	Reason             string
 	TruncationDetected bool
+	CounterStatus      string // "verified" | "unknown" | "mismatch" | "" (pre-AUD-02 log)
 	SigsVerified       int
 	SigsSkipped        int
 }
@@ -72,7 +82,7 @@ func Verify(ctx context.Context, logPath string, kc KeychainStore) (VerifyResult
 	if !result.OK {
 		return result, nil
 	}
-	return verifyAnchor(logPath, rawLines, entries, key, kc, result)
+	return verifyAnchor(ctx, logPath, rawLines, entries, key, kc, result)
 }
 
 // walkChain validates each entry's prev_hash link and (when key != nil) HMAC
@@ -152,14 +162,17 @@ func verifyEntrySig(key []byte, e Entry) bool {
 	return verifyHMAC(key, in, e.Sig)
 }
 
-// verifyAnchor validates the external anchor (CR-01, WR-01) and folds the result
-// into the running VerifyResult.
-func verifyAnchor(logPath string, rawLines [][]byte, entries []Entry, key []byte, kc KeychainStore, result VerifyResult) (VerifyResult, error) {
+// verifyAnchor validates the external anchor (CR-01, WR-01) and the AUD-02
+// keychain counter, folding both results into the running VerifyResult.
+// ctx is threaded through from Verify for the ReadCounter keychain call.
+func verifyAnchor(ctx context.Context, logPath string, rawLines [][]byte, entries []Entry, key []byte, kc KeychainStore, result VerifyResult) (VerifyResult, error) {
 	anchor, err := ReadAnchor(logPath)
 	if err != nil {
 		return VerifyResult{}, err
 	}
 	if anchor == nil {
+		// No anchor yet — still run the AUD-02 counter check below.
+		result = verifyCounter(ctx, kc, entries, result)
 		return result, nil
 	}
 	// CR-01: a forged/unsigned anchor must be treated as tampering, not silently
@@ -168,6 +181,7 @@ func verifyAnchor(logPath string, rawLines [][]byte, entries []Entry, key []byte
 	// unverifiable anchor.
 	if key == nil {
 		result.SigsSkipped++
+		result.CounterStatus = "unknown" // keychain unavailable; cannot run counter check
 		return result, nil
 	}
 	ok, verr := VerifyAnchor(logPath, kc)
@@ -189,7 +203,52 @@ func verifyAnchor(logPath string, rawLines [][]byte, entries []Entry, key []byte
 			return VerifyResult{OK: false, At: len(entries) - 1, Reason: "anchor last_hash mismatch (history rewrite)"}, nil
 		}
 	}
+
+	// AUD-02 D-04: keychain counter check for tail-truncation detection.
+	// absent counter → CounterStatus="unknown" (NEVER coerced to PASS).
+	// Mirrors the probeOK tri-state honesty pattern (D-04).
+	result = verifyCounter(ctx, kc, entries, result)
 	return result, nil
+}
+
+// verifyCounter checks the AUD-02 keychain counter against the log entry count
+// and sets result.CounterStatus and result.TruncationDetected accordingly.
+// It is called from verifyAnchor after all structural checks pass.
+func verifyCounter(ctx context.Context, kc KeychainStore, entries []Entry, result VerifyResult) VerifyResult {
+	if kc == nil {
+		result.CounterStatus = "unknown" // keychain unavailable; cannot run counter check
+		return result
+	}
+	n, found, cerr := ReadCounter(ctx, kc)
+	entryCount := int64(len(entries))
+	switch {
+	case cerr != nil || !found:
+		// Counter absent (first-use pre-AUD-02 log) or keychain error.
+		// D-04: absent counter → UNKNOWN, never PASS.
+		result.CounterStatus = "unknown"
+	case n > entryCount:
+		// Counter records MORE entries than the log holds: the keychain counter
+		// (which a log-only attacker cannot touch) outran the on-disk entries.
+		// This is the genuine tail-truncation signal.
+		result.TruncationDetected = true
+		result.CounterStatus = "mismatch"
+		result.Reason = fmt.Sprintf(
+			"keychain counter %d > log entries %d (tail-truncation)", n, entryCount)
+	case n < entryCount:
+		// Counter LAGS the log: more signed entries exist on disk than the counter
+		// recorded. Every entry was HMAC-chain-verified by the walk above, so these
+		// are legitimately-signed appends the counter never caught up to — the
+		// documented append-before-write crash window (a process death between the
+		// JSONL append and the keychain counter bump). A log-only attacker cannot
+		// forge additional chain-valid entries, so this is NEVER truncation. Degrade
+		// to UNKNOWN (honest tri-state), never a false "mismatch" tamper alarm.
+		result.CounterStatus = "unknown"
+		result.Reason = fmt.Sprintf(
+			"keychain counter %d < log entries %d (append-before-write window; counter lagging)", n, entryCount)
+	default:
+		result.CounterStatus = "verified"
+	}
+	return result
 }
 
 // scanRawAndEntries reads the log, returning the raw JSONL lines (without

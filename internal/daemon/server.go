@@ -39,6 +39,10 @@ import (
 // defaults to "dev"; Plan 04 wires the real value from the build ldflag.
 var daemonVersion = "dev"
 
+// maxNotifyBody caps the /notify request body. ntfy title ≤ 250 chars,
+// message ≤ 4096 chars; 256 KiB is ~60x the largest legit ntfy payload (A11 / DOS-01).
+const maxNotifyBody = 256 * 1024 // 256 KiB
+
 // Watcher polling defaults. The pane watcher fires when a pane has shown a
 // prompt-shaped last line with no output change for at least idleInterval.
 const (
@@ -134,8 +138,18 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// A11 / DOS-01: cap the request body before decoding to prevent memory-exhaustion
+	// from a hostile or compromised tailnet peer flooding POST /notify.
+	r.Body = http.MaxBytesReader(w, r.Body, maxNotifyBody)
 	var req NotifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// MaxBytesReader sets an internal flag that causes ResponseWriter to emit 413
+		// if we call http.Error after the read limit is exceeded; we disambiguate
+		// here to return 413 explicitly for clarity.
+		if strings.Contains(err.Error(), "request body too large") {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}

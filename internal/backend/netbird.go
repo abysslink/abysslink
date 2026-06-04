@@ -112,8 +112,12 @@ func (a *netbirdAdapter) Status(ctx context.Context) (*Status, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: status: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nil, fmt.Errorf("netbird: status: read response: %w", err)
+	}
 	var peers []nbPeer
-	if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
+	if err := json.Unmarshal(data, &peers); err != nil {
 		return nil, fmt.Errorf("netbird: status: decode: %w", err)
 	}
 
@@ -141,8 +145,12 @@ func (a *netbirdAdapter) IP(ctx context.Context) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("netbird: ip: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("netbird: ip: read response: %w", err)
+	}
 	var peers []nbPeer
-	if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
+	if err := json.Unmarshal(data, &peers); err != nil {
 		return "", fmt.Errorf("netbird: ip: decode: %w", err)
 	}
 	var firstIP string
@@ -172,8 +180,12 @@ func (a *netbirdAdapter) Hostname(ctx context.Context) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("netbird: hostname: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("netbird: hostname: read response: %w", err)
+	}
 	var peers []nbPeer
-	if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
+	if err := json.Unmarshal(data, &peers); err != nil {
 		return "", fmt.Errorf("netbird: hostname: decode: %w", err)
 	}
 	if len(peers) > 0 {
@@ -239,6 +251,13 @@ func (a *netbirdAdapter) Up(ctx context.Context, opts UpOpts) error {
 	hostname := opts.Hostname
 	if hostname == "" {
 		hostname = a.cfg.Tailnet.Hostname
+	}
+
+	// D-03: defense-in-depth re-check before passing hostname to argv.
+	if hostname != "" {
+		if err := config.ValidateHostname(hostname); err != nil {
+			return fmt.Errorf("netbird: up: %w", err)
+		}
 	}
 
 	args := []string{"up",
@@ -309,8 +328,12 @@ func (a *netbirdAdapter) Devices(ctx context.Context) ([]Device, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: list peers: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nil, fmt.Errorf("netbird: list peers: read response: %w", err)
+	}
 	var peers []nbPeer
-	if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
+	if err := json.Unmarshal(data, &peers); err != nil {
 		return nil, fmt.Errorf("netbird: list peers: decode: %w", err)
 	}
 	devices := make([]Device, len(peers))
@@ -393,8 +416,12 @@ func (a *netbirdAdapter) CreateAuthKey(ctx context.Context, tags []string) (stri
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("netbird: create auth key: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("netbird: create auth key: read response: %w", err)
+	}
 	var result nbSetupKeyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return "", fmt.Errorf("netbird: create auth key: decode: %w", err)
 	}
 	if result.Key == "" {
@@ -417,7 +444,7 @@ func (a *netbirdAdapter) GetACL(ctx context.Context) ([]byte, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("netbird: get acl: unexpected HTTP %d", resp.StatusCode)
 	}
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readLimited(resp.Body, maxBackendBody)
 	if err != nil {
 		return nil, "", fmt.Errorf("netbird: get acl: read: %w", err)
 	}

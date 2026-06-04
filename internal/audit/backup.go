@@ -16,6 +16,8 @@
 package audit
 
 import (
+	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +43,57 @@ func Backup(src string) (string, error) {
 		return "", fmt.Errorf("audit: backup write %s: %w", dst, err)
 	}
 	return dst, nil
+}
+
+// BackupWithChain atomically copies src to a <src>.bak.<timestamp> file (same
+// as Backup) and additionally appends a signed chain entry recording the backup
+// path and SHA-256 of the backed-up content (AUD-01 / A9).
+//
+// If the chain-entry Append fails, the just-created .bak file is removed
+// (rollback) and the Append error is returned. The caller's mutation must also
+// abort on this error to preserve the append-before-write audit ordering.
+func BackupWithChain(ctx context.Context, src string, sa *SignedAudit) (string, error) {
+	content, err := os.ReadFile(src) //nolint:gosec // G304: src is an audit backup path derived from the target path, not user-controlled
+	if err != nil {
+		return "", fmt.Errorf("audit: backup read %s: %w", src, err)
+	}
+
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	dst := fmt.Sprintf("%s.bak.%s", src, stamp)
+
+	if err := os.WriteFile(dst, content, 0o600); err != nil { //nolint:gosec // G304: dst is an audit backup path derived internally; 0o600 enforces owner-only perms
+		return "", fmt.Errorf("audit: backup write %s: %w", dst, err)
+	}
+
+	// AUD-01: record the backup path and content hash in the signed chain.
+	diffHash := sha256.Sum256(content)
+	if aerr := sa.Append(ctx, SignInput{Title: "backup", DiffHash: diffHash}, dst, false); aerr != nil {
+		// Rollback: remove the orphaned .bak file before returning the error.
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("audit: backup chain-entry failed (backup rolled back): %w", aerr)
+	}
+	return dst, nil
+}
+
+// BackupsFromChain returns chain entries for target by walking the signed audit
+// log and filtering entries where Op="backup" and the Target path has target as
+// a prefix. This is the authoritative backup-selection path (AUD-01 / D-02):
+// chain-recorded entries are the source of truth, not filesystem glob order.
+//
+// logPath is the path of the signed audit log. target is the original source
+// file path (not the .bak path). A missing or empty log returns (nil, nil).
+func BackupsFromChain(logPath, target string) ([]Entry, error) {
+	entries, err := ReadLog(logPath)
+	if err != nil {
+		return nil, err
+	}
+	var result []Entry
+	for _, e := range entries {
+		if e.Op == "backup" && strings.HasPrefix(e.Target, target) {
+			result = append(result, e)
+		}
+	}
+	return result, nil
 }
 
 // Restore copies backupPath over dst. Both paths must share the same directory
