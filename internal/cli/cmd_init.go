@@ -605,13 +605,35 @@ func maybeFixSleep(ctx context.Context, p Printer, runner shell.Runner, autoYes 
 	return nil
 }
 
-// checkACSleepDisabled returns true when pmset reports sleep=0 for current power source.
+// checkACSleepDisabled returns true when pmset reports sleep=0 for the AC power
+// source. It reads `pmset -g custom` (the AC/custom profile) rather than bare
+// `pmset -g` (the *active* power source) so the probe agrees with the AC profile
+// that maybeFixSleep mutates via `pmset -c …`; on battery the two never agree
+// otherwise (CR-01). A non-zero pmset exit is treated as "not disabled" to mirror
+// the power module's exit-code check and avoid a false positive (WR-03).
 func checkACSleepDisabled(ctx context.Context, runner shell.Runner) bool {
-	res, err := runner.Run(ctx, "pmset", "-g")
-	if err != nil {
+	res, err := runner.Run(ctx, "pmset", "-g", "custom")
+	if err != nil || res.ExitCode != 0 {
 		return false
 	}
-	for _, line := range strings.Split(res.Stdout, "\n") {
+	// pmset -g custom emits "AC Power:" and "Battery Power:" blocks; only the AC
+	// block is consulted so a non-zero battery sleep is never read as AC. When no
+	// power-source header is present (legacy output / test fixture), all lines are
+	// considered so the parser degrades gracefully.
+	inAC, sawHeader := true, false
+	for _, raw := range strings.Split(res.Stdout, "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, "AC Power"):
+			inAC, sawHeader = true, true
+			continue
+		case strings.HasPrefix(line, "Battery Power"):
+			inAC, sawHeader = false, true
+			continue
+		}
+		if sawHeader && !inAC {
+			continue
+		}
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && fields[0] == "sleep" && fields[1] == "0" {
 			return true
