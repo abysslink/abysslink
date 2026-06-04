@@ -16,27 +16,17 @@
 package backend
 
 import (
-	"fmt"
 	"io"
+
+	"github.com/abysslink/abysslink/internal/limitio"
 )
 
-// maxBackendBody is the maximum REST response body size accepted from any
-// self-hosted backend (Headscale, NetBird). Chosen well above the largest
-// legit response (~2 MB for a 1000-node fleet list) while preventing
-// memory-exhaustion DoS from hostile/compromised controllers (A11 / DOS-01).
-const maxBackendBody int64 = 8 * 1024 * 1024 // 8 MiB
+// maxBackendBody re-exports limitio.MaxBackendBody so existing backend call
+// sites need no change (D-04 import-change is a one-liner here, not at 25 sites).
+const maxBackendBody = limitio.MaxBackendBody
 
-// readLimited reads at most n bytes from r. If the body exceeds n bytes it
-// returns an explicit error — io.LimitReader alone silently truncates; the
-// N+1 sentinel detects overflow before JSON decode (D-06).
+// readLimited re-exports limitio.ReadLimited so existing backend call sites
+// need no change (D-04 thin wrapper).
 func readLimited(r io.ReadCloser, n int64) ([]byte, error) {
-	limited := io.LimitReader(r, n+1) // N+1 sentinel: reads one extra byte to detect overflow
-	data, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > n {
-		return nil, fmt.Errorf("response body exceeded %d bytes", n)
-	}
-	return data, nil
+	return limitio.ReadLimited(r, n)
 }
