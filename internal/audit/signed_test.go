@@ -152,3 +152,23 @@ func TestSignedAudit_ConcurrentAppend(t *testing.T) {
 	}
 	assert.Equal(t, 1, genesisCount, "genesis must appear exactly once")
 }
+
+// TestAuditCounterMatchesEntries verifies that the keychain counter equals the
+// number of JSONL entries in the audit log after a series of WriteFile calls.
+//
+// Wave 2: implementation in 25-04.
+func TestAuditCounterMatchesEntries(t *testing.T) {
+	t.Skip("Wave 2: implementation pending (plan 25-04)")
+}
+
+// TestAuditCrossProcessFlock verifies that concurrent subprocess writers do not
+// interleave JSONL entries and that the audit log remains verifiable after N
+// concurrent subprocess appends (AUD-02 / CR-01).
+//
+// Wave 2: subprocess-gated. Set GO_TEST_AUDIT_SUBPROCESS=1 to run.
+func TestAuditCrossProcessFlock(t *testing.T) {
+	if os.Getenv("GO_TEST_AUDIT_SUBPROCESS") != "1" {
+		t.Skip("set GO_TEST_AUDIT_SUBPROCESS=1 to run")
+	}
+	t.Error("TestAuditCrossProcessFlock: Wave 2 implementation pending (plan 25-04)")
+}
