@@ -320,7 +320,7 @@ Plans:
 **Goal:** `abysslink init` becomes a genuinely gated interactive wizard: each journey stage pauses for user confirmation, stages 3–6 offer to actually run `up --apply` / `lock init --apply` / `enroll phone` / `doctor` (instead of printing the command and scrolling past), a new ACL stage guides `abysslink acl push --apply`, and three first-run bugs are fixed — (1) openURL macOS probe uses `open --version` which exits 1 so the browser never opens yet "Browser opened" is printed (cmd_init.go:228-246, 200-206); (2) journey Stage 2 hardcodes autoYes=true (journey.go:113,116) so sudo mutations run unprompted and duplicate init RunE work; (3) checkACSleepDisabled pmset parser requires exactly-2-field "sleep 0" lines, but `pmset -g` emits trailing annotations, so `sudo pmset` re-runs every init (cmd_init.go:594-606). Headless paths (--yes/--json/non-TTY) stay non-blocking; --resume keeps working via journey-state.json. The documented "journey is NON-BLOCKING" design comment in journey.go and the DESIGN.md §6/§7 references must be reconciled.
 **Requirements**: TBD
 **Depends on:** Phase 25
-**Plans:** 2/2 plans complete
+**Plans:** 3 plans (2 complete, 1 gap-closure)
 Plans:
 **Wave 1**
 
@@ -329,6 +329,10 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 26-02-PLAN.md — B2 fix (Stage 2 no-dup) + 8-stage gated journey + per-stage gates + ACL stage + updated tests
+
+**Wave 3 (gap-closure)** *(blocked on Wave 2 completion)*
+
+- [ ] 26-03-PLAN.md — sudo tty-wiring (RunInteractive for privileged calls) + power module already-disabled short-circuit + terminal state teardown before child spawn
 
 **Cross-cutting constraints:**
 
