@@ -194,3 +194,32 @@ func TestServerNetBirdStatusSSHCheckWarn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "SSHCheck not available on NetBird")
 }
+
+// ── DOS-01: ZITADEL probe oversized body is rejected ─────────────────────────
+
+// TestServerNetbird_BoundedRead verifies that an HTTP response body larger than
+// MaxBackendBody returns an error containing "exceeded" and does NOT return nil.
+// This is the D-05 bounded-read regression test (DOS-01 / T-25-03-01).
+func TestServerNetbird_BoundedRead(t *testing.T) {
+	// Serve a body exactly (MaxBackendBody+1) bytes — one byte past the ceiling.
+	// limitio.MaxBackendBody = 8 MiB. We use a streaming handler to avoid
+	// allocating 8 MiB in the test process; bytes.Repeat is fine at 1 byte.
+	const oneMiB = 1 << 20
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// Write MaxBackendBody+1 bytes: 8*1024*1024+1.
+		chunk := make([]byte, oneMiB)
+		for i := 0; i < 8; i++ {
+			_, _ = w.Write(chunk)
+		}
+		_, _ = w.Write([]byte{0x00}) // the one extra byte that triggers overflow
+	}))
+	defer srv.Close()
+
+	out := &bytes.Buffer{}
+	p := NewHumanPrinterTo(out, &bytes.Buffer{})
+
+	err := runNetBirdZitadelProbe(context.Background(), srv.URL, p)
+	require.Error(t, err, "oversized response body must return an error")
+	assert.Contains(t, err.Error(), "exceeded", "error must mention 'exceeded' for bounded-read violation")
+}
