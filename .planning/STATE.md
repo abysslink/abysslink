@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
 status: Phase 25 not planned yet
-last_updated: "2026-06-04T12:52:12.682Z"
+last_updated: "2026-06-04T13:09:26.794Z"
 last_activity: 2026-06-03
 progress:
   total_phases: 16
@@ -245,6 +245,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-03T18:08:54.840Z
-Stopped at: Completed 24-03-PLAN.md
-Resume file: None
+Last session: 2026-06-04T13:09:26.788Z
+Stopped at: Phase 25 context gathered
+Resume file: .planning/phases/25-close-v3-0-1-debt-config-validate-on-load-cli-bounded-reads-/25-CONTEXT.md
