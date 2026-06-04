@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v3.0.0
-milestone_name: Harden, Observe & Control
-status: milestone_complete
-last_updated: 2026-06-03T13:17:23.989Z
-last_activity: 2026-06-03
+milestone: v3.0.1
+milestone_name: Network & Dependency Security Hotfix
+status: Awaiting next milestone
+last_updated: "2026-06-04T16:39:54.195Z"
+last_activity: 2026-06-04 — Milestone v3.0.1 completed and archived
 progress:
-  total_phases: 14
-  completed_phases: 4
-  total_plans: 14
-  completed_plans: 14
-  percent: 29
-stopped_at: Milestone complete (Phase 23.2 was final phase)
+  total_phases: 16
+  completed_phases: 5
+  total_plans: 24
+  completed_plans: 26
+  percent: 31
 ---
 
 # Project State
@@ -25,16 +24,16 @@ See: .planning/PROJECT.md (updated 2026-05-30)
 
 ## Current Position
 
-Phase: 23.2
-Plan: Not started
-Status: Milestone complete
-Last activity: 2026-06-03
+Phase: Milestone v3.0.1 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-06-04 — Milestone v3.0.1 completed and archived
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 84 (v1.0.0)
+- Total plans completed: 96 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 
@@ -106,6 +105,18 @@ Last activity: 2026-06-03
 | Phase 23.1 P03 | 6m | 2 tasks | 2 files |
 | Phase 23.1 P04 | 5m | 2 tasks | 5 files |
 | Phase 23.2 P02 | 5m | 2 tasks | 2 files |
+| Phase 24 P01 | 3m | 2 tasks | 3 files |
+| Phase 24 P04 | 439 | 2 tasks | 11 files |
+| Phase 24 P02 | 5m | 2 tasks | 2 files |
+| Phase 24 P03 | 7m | 2 tasks | 5 files |
+| Phase 24 P05 | 224 | 2 tasks | 5 files |
+| Phase 24 P06 | 6m | 2 tasks | 3 files |
+| Phase 24 P07 | 12m | 3 tasks | 5 files |
+| Phase 25 P00 | 3min | 3 tasks | 5 files |
+| Phase 25 P01 | 4min | 2 tasks | 5 files |
+| Phase 25 P02 | 35m | 2 tasks | 18 files |
+| Phase 25 P04 | 25m | 2 tasks | 3 files |
+| Phase 25 P03 | 12m | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -115,9 +126,16 @@ Last activity: 2026-06-03
 - Phase 23 (Doctor Honesty & Coverage) added to ROADMAP.md — DOC-01/02/03/04 (v3.0.1). Plans TBD.
 - v3.0.1 milestone continues with phases 24 (AUD-01/02, DOS-01) and 25 (CI-01) per REQUIREMENTS.md traceability — not yet added to roadmap.
 - Phase 23.1 inserted after Phase 23: Doctor probe-failure honesty — close WR-02/03/04/08 false-OK + double-emit gaps from Phase 23 code review (URGENT)
+- Phase 25 added: Close v3.0.1 debt: config.Validate-on-load, CLI bounded reads, AUD-02 concurrency
 
 ### Decisions
 
+- [Phase 25-03]: atomicReplace uses &shell.ExecRunner{} for keychain — keychain ops are real system calls, never routed through the CLI mock runner
+- [Phase 25-03]: headscaleSwapBinary sa nil-fallback uses ExecRunner for NewStore — mirrors existing DB-backup nil-sa unchained fallback pattern
+- [Phase 25-04]: addCounter(delta) batch helper in anchor.go used by WriteFile; entryCount=2 for overwrite keeps counter==JSONL entries at any process-kill point (D-08 CR-02)
+- [Phase 25-04]: WriteFilePath streaming helper sole definition on *SignedAudit; 256 MiB N+1 sentinel; callers wired by plan 25-03 (D-06 WR-02)
+- [Phase 25-02]: D-01: config.Load calls Validate before return — fail-closed; os.ErrNotExist carve-out in loadCmdContext preserves pre-init UX
+- [Phase 25-02]: D-03: ValidateHostname exported helper guards all three --hostname= argv sites (tailscale/module.go, backend/headscale.go, backend/netbird.go)
 - Roadmap: Phases follow IMPLEMENTATION-TASKS.md Phase 0–8 structure exactly (user explicit choice)
 - Roadmap: Granularity is coarse — 9 phases, broad delivery boundaries, no horizontal layer splits
 - Architecture: claudecode is one opt-in consumer of generic notify module; no Claude logic in core modules
@@ -186,6 +204,10 @@ Last activity: 2026-06-03
 - [Phase ?]: 23-03: checkID 'ntfy-version' for ntfy floor; versionFloorFindings exported detector wired by Plan 04 into collectDoctorFindings
 - [Phase ?]: diskEncryptionGate extracted as testable helper; UNKNOWN-state non-overridable via stable marker substring (Plan 04)
 - [Phase ?]: WR-03: met-bind-unknown is a distinct check ID from metrics-bind-tailnet; SeverityWarning not OK when tailnetIP unavailable; threat-model row stays at — not ✓
+- [Phase ?]: AUD-01: BackupWithChain + RestoreGated with fail-closed chain gate; acceptUnverified records non-OK entry
+- [Phase ?]: DOS-01 Part A (A11): limitedWriter(16MiB)+MaxBytesReader(256KiB)+readLimited(8MiB) close all three subprocess/daemon/REST attack surfaces with hard errors, no silent truncation
+- [Phase ?]: Phase 24-02 CI hardening
+- [Phase ?]: AUD-02 IncrementCounter exported; WriteAnchor unique tmp; verifyCounter helper extracted
 
 ### Pending Todos
 
@@ -232,8 +254,20 @@ None.
 | tech-debt | TestUpDryRunParity environment-dependent golden (not a regression) | RESOLVED 2026-06-02 (3cbeb36 — notify.HealthProbe seam; golden now deterministic) | v2.0.0 close 2026-06-02 |
 | issue | `init --yes </dev/null` (non-TTY) errors on TTY open instead of degrading gracefully (found in phase-10 UAT self-test; config writes OK, exit 1) | RESOLVED 2026-06-02 (e2cefa9 — headless guard in ensureTailscaleAccount; both init --yes and plain init now exit 0 on non-TTY) | v2.0.0 close 2026-06-02 |
 
+### Acknowledged at v3.0.1 close (2026-06-04)
+
+| Category | Item | Status |
+|----------|------|--------|
+| verification | phase-23 VERIFICATION human_needed — FileVault mid-encryption fdesetup string literals need real-hardware confirmation (fail-closed regardless; message-text only) | Deferred (MED/B2) |
+| uat | phase-23 HUMAN-UAT 1 open scenario (same FileVault item) | Deferred |
+| quick-task | 5 stale quick-task slugs from v1/v2 era (260526-l51, 260530-8mf/8uz/nl4, 260602-1nz) — SUMMARYs exist on disk; only frontmatter status missing | Deferred (historical) |
+
 ## Session Continuity
 
-Last session: 2026-06-03T13:07:27.184Z
-Stopped at: Completed 23.1-03-PLAN.md
+Last session: 2026-06-04T15:25:51.860Z
+Stopped at: Phase 25 context gathered
 Resume file: None
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone

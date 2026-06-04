@@ -413,6 +413,48 @@ func Load(path string) (*Config, error) {
 	if cfg.Backend.Type == "" {
 		cfg.Backend.Type = "tailscale"
 	}
+	// D-01 (fail-closed): validate before returning. A hand-edited YAML with an
+	// unsafe hostname or non-https NetBird URL must never reach argv call sites.
+	if err := Validate(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadForRead is the READ-ONLY counterpart to Load (WR-07). It parses path and
+// applies defaults exactly like Load, but on a validation failure it returns the
+// parsed config together with the validation error instead of discarding the
+// config. Callers that never feed config values to argv or a mutation — e.g.
+// `rig ls` and `rig export`, which only render cfg.Rigs — can inspect the parsed
+// config while still being able to log the validation problem.
+//
+// SECURITY: LoadForRead must NEVER be used by a path that writes config or feeds
+// a config value to an external command. The fail-closed Load remains the only
+// entry point for mutating/argv paths (D-01). The returned error is non-nil
+// precisely when validation failed, so callers can choose to warn-and-continue
+// (read-only) or abort.
+func LoadForRead(path string) (*Config, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: path is the resolved abysslink config file path, not user-controlled at this layer
+	if err != nil {
+		return nil, fmt.Errorf("config: open %s: %w", path, err)
+	}
+	defer f.Close() //nolint:errcheck // errcheck: close error on read-only file handle is non-actionable
+
+	cfg := Defaults()
+	dec := yaml.NewDecoder(f)
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("config: decode %s: %w", path, err)
+	}
+	if cfg.Backend.Type == "" {
+		cfg.Backend.Type = "tailscale"
+	}
+	// Return the parsed config ALONGSIDE any validation error: a parse/decode
+	// failure is still fatal (nil config above), but a pure validation failure
+	// leaves a usable config for read-only rendering.
+	if verr := Validate(cfg); verr != nil {
+		return cfg, verr
+	}
 	return cfg, nil
 }
 
@@ -493,6 +535,29 @@ func Validate(cfg *Config) error {
 	}
 	if err := validateWatchPanes(cfg); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateHostname is an exported defense-in-depth helper for D-03 argv-site
+// guards. It checks a single hostname string against the DNS-safe pattern used
+// by validateIdentity and fleet.safeHostname. It is separate from Validate so
+// that code that constructs Config structs programmatically (tests, fleet fan-
+// out, future paths) can re-check just the hostname before passing it as a
+// --hostname= argv token.
+//
+// Rules:
+//   - Empty string → nil (empty means "not set"; caller decides default).
+//   - Non-empty string that matches safeHostnamePat → nil.
+//   - Non-empty string that does NOT match → descriptive error.
+func ValidateHostname(hostname string) error {
+	if hostname == "" {
+		return nil
+	}
+	if !safeHostnamePat.MatchString(hostname) {
+		return fmt.Errorf("hostname %q contains unsafe characters: "+
+			"must match DNS-safe pattern (no leading dashes, ASCII letters/digits/hyphens only)",
+			hostname)
 	}
 	return nil
 }

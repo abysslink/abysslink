@@ -82,8 +82,12 @@ func (e *netbirdEditor) listGroups(ctx context.Context) ([]nbGroup, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: list groups: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nil, fmt.Errorf("netbird: list groups: read response: %w", err)
+	}
 	var groups []nbGroup
-	if err := json.NewDecoder(resp.Body).Decode(&groups); err != nil {
+	if err := json.Unmarshal(data, &groups); err != nil {
 		return nil, fmt.Errorf("netbird: list groups: decode: %w", err)
 	}
 	return groups, nil
@@ -119,8 +123,12 @@ func (e *netbirdEditor) EnsureGroup(ctx context.Context, name string) (string, e
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("netbird: create group %q: unexpected HTTP %d", name, resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("netbird: create group %q: read response: %w", name, err)
+	}
 	var created nbGroup
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+	if err := json.Unmarshal(data, &created); err != nil {
 		return "", fmt.Errorf("netbird: create group %q: decode: %w", name, err)
 	}
 	if created.ID == "" {
@@ -157,8 +165,12 @@ func (e *netbirdEditor) listPolicies(ctx context.Context) ([]nbPolicy, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("netbird: list policies: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return nil, fmt.Errorf("netbird: list policies: read response: %w", err)
+	}
 	var policies []nbPolicy
-	if err := json.NewDecoder(resp.Body).Decode(&policies); err != nil {
+	if err := json.Unmarshal(data, &policies); err != nil {
 		return nil, fmt.Errorf("netbird: list policies: decode: %w", err)
 	}
 	return policies, nil
@@ -266,8 +278,12 @@ func (e *netbirdEditor) PushDenyAllBaseline(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("netbird: deny-all baseline: push: unexpected HTTP %d", resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return fmt.Errorf("netbird: deny-all baseline: read response: %w", err)
+	}
 	var created nbPolicy
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+	if err := json.Unmarshal(data, &created); err != nil {
 		return fmt.Errorf("netbird: deny-all baseline: parse response: %w", err)
 	}
 	if created.ID == "" {
@@ -303,8 +319,12 @@ func (e *netbirdEditor) PushPolicy(ctx context.Context, raw json.RawMessage, int
 	// D-08 / SC-3: parse the response to extract the created policy ID, then
 	// re-read and validate content equality. A mismatch (dropped/altered rule)
 	// is a FAIL, not a warning.
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return fmt.Errorf("netbird: push policy: read response: %w", err)
+	}
 	var created nbPolicy
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+	if err := json.Unmarshal(data, &created); err != nil {
 		return fmt.Errorf("netbird: push policy: parse response: %w", err)
 	}
 	if created.ID == "" {
@@ -333,8 +353,12 @@ func (e *netbirdEditor) Validate(ctx context.Context, policyID string, intent []
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("netbird: validate: re-read policy %s: unexpected HTTP %d", policyID, resp.StatusCode)
 	}
+	data, err := readLimited(resp.Body, maxBackendBody)
+	if err != nil {
+		return fmt.Errorf("netbird: validate: read policy %s: %w", policyID, err)
+	}
 	var actual nbPolicy
-	if err := json.NewDecoder(resp.Body).Decode(&actual); err != nil {
+	if err := json.Unmarshal(data, &actual); err != nil {
 		return fmt.Errorf("netbird: validate: decode policy %s: %w", policyID, err)
 	}
 

@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -33,6 +32,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/limitio"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
@@ -199,16 +199,22 @@ func headscaleInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, 
 		return fmt.Errorf("headscale init: %w", err)
 	}
 
-	// ── Step 5: Write binary via audit.WriteFile ───────────────────────────────
-	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec // G304: tmpBinPath is an internally-staged download temp path, not user-controlled
-	if err != nil {
-		return fmt.Errorf("headscale init: read temp binary: %w", err)
-	}
-	logPath, err := audit.DefaultLogPath()
+	// ── Step 5: Write binary via audit.WriteFilePath (streaming — D-06 / WR-02) ──
+	// Stream src→dst via io.Copy with 256 MiB ceiling; binary never fully in memory.
+	initLogPath, err := audit.DefaultLogPath()
 	if err != nil {
 		return fmt.Errorf("headscale init: audit log path: %w", err)
 	}
-	if err := audit.New(logPath).WriteFile(binPath, binData, 0o755, false); err != nil {
+	// Keychain uses ExecRunner — secrets CLI calls are always real system calls.
+	initKC, kcErr := secrets.NewStore(ctx, &shell.ExecRunner{})
+	if kcErr != nil {
+		return fmt.Errorf("headscale init: keychain: %w", kcErr)
+	}
+	initSA, err := audit.NewSigned(initLogPath, initKC)
+	if err != nil {
+		return fmt.Errorf("headscale init: audit init: %w", err)
+	}
+	if err := initSA.WriteFilePath(ctx, tmpBinPath, binPath, 0o755, false); err != nil {
 		return fmt.Errorf("headscale init: write binary: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  binary installed → "+binPath))
@@ -666,8 +672,14 @@ func headscaleUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContex
 		return fmt.Errorf("headscale upgrade: %w", err)
 	}
 
+	// AUD-01: build a chain-recording *SignedAudit for the DB backup.
+	// headscaleSwapBinary is fail-closed on backup failure, so use sa when
+	// available; if keychain is unavailable, sa is nil and headscaleSwapBinary
+	// will fall back to the unchained Backup (documented at that call site).
+	sa, _ := cmdSignedAudit(ctx, cc)
+
 	// Swap binary: backup DB → stop → write → start → health-check.
-	return headscaleSwapBinary(ctx, cfg, runner, binPath, tmpBinPath)
+	return headscaleSwapBinary(ctx, cfg, runner, binPath, tmpBinPath, sa)
 }
 
 // downloadAndVerifyHeadscale downloads the headscale binary for targetVer, verifies
@@ -710,11 +722,23 @@ func downloadAndVerifyHeadscale(ctx context.Context, runner shell.Runner, target
 // headscaleSwapBinary performs the atomic binary swap: backup DB → stop service →
 // write new binary → start service → health-check. Extracted to keep upgrade
 // cyclomatic complexity below gocyclo limit of 15.
-func headscaleSwapBinary(ctx context.Context, cfg *config.Config, runner shell.Runner, binPath, tmpBinPath string) error {
-	// Backup DB before any mutation (D-04).
+// sa is the chain-recording *SignedAudit from the caller; if nil (keychain
+// unavailable), falls back to unchained audit.Backup with a slog.Warn
+// (AUD-01 T-24-07-04 documented fallback; not silent).
+func headscaleSwapBinary(ctx context.Context, cfg *config.Config, runner shell.Runner, binPath, tmpBinPath string, sa *audit.SignedAudit) error {
+	// AUD-01: backup DB before any mutation (D-04) using chain-recorded BackupWithChain.
+	// Fail-closed: an error aborts the upgrade to preserve the append-before-write ordering.
 	if dbPath := cfg.Server.Headscale.DBPath; dbPath != "" {
-		if _, err := audit.Backup(dbPath); err != nil {
-			return fmt.Errorf("headscale upgrade: backup DB: %w", err)
+		if sa != nil {
+			if _, err := audit.BackupWithChain(ctx, dbPath, sa); err != nil {
+				return fmt.Errorf("headscale upgrade: backup DB: %w", err)
+			}
+		} else {
+			// Keychain unavailable — unchained fallback (AUD-01 T-24-07-04; not silent).
+			slog.WarnContext(ctx, "headscale upgrade: chain backup unavailable (keychain missing); using unchained backup", "db_path", dbPath)
+			if _, err := audit.Backup(dbPath); err != nil {
+				return fmt.Errorf("headscale upgrade: backup DB: %w", err)
+			}
 		}
 	}
 
@@ -723,16 +747,28 @@ func headscaleSwapBinary(ctx context.Context, cfg *config.Config, runner shell.R
 		return fmt.Errorf("headscale upgrade: stop service: %w", err)
 	}
 
-	// Write new binary via audit.WriteFile.
-	binData, err := os.ReadFile(tmpBinPath) //nolint:gosec // G304: tmpBinPath is an internally-staged download temp path, not user-controlled
-	if err != nil {
-		return fmt.Errorf("headscale upgrade: read new binary: %w", err)
+	// Write new binary via audit.WriteFilePath (streaming — D-06 / WR-02).
+	// Stream src→dst via io.Copy with 256 MiB ceiling; binary never fully in memory.
+	// sa is the chain-recording *SignedAudit from the caller; if nil, fall back to
+	// a fresh SignedAudit (mirrors the DB backup fallback above).
+	swapSA := sa
+	if swapSA == nil {
+		swapLogPath, lerr := audit.DefaultLogPath()
+		if lerr != nil {
+			return fmt.Errorf("headscale upgrade: audit log path: %w", lerr)
+		}
+		// Keychain uses ExecRunner — secrets CLI calls are always real system calls.
+		swapKC, kcErr := secrets.NewStore(ctx, &shell.ExecRunner{})
+		if kcErr != nil {
+			return fmt.Errorf("headscale upgrade: keychain: %w", kcErr)
+		}
+		var saErr error
+		swapSA, saErr = audit.NewSigned(swapLogPath, swapKC)
+		if saErr != nil {
+			return fmt.Errorf("headscale upgrade: audit init: %w", saErr)
+		}
 	}
-	logPath, err := audit.DefaultLogPath()
-	if err != nil {
-		return fmt.Errorf("headscale upgrade: audit log path: %w", err)
-	}
-	if err := audit.New(logPath).WriteFile(binPath, binData, 0o755, false); err != nil {
+	if err := swapSA.WriteFilePath(ctx, tmpBinPath, binPath, 0o755, false); err != nil {
 		return fmt.Errorf("headscale upgrade: write binary: %w", err)
 	}
 
@@ -862,7 +898,14 @@ func headscaleBackupRunE(ctx context.Context, cc *cmdContext, p Printer) error {
 	}
 
 	slog.InfoContext(ctx, "headscale backup", "db_path", dbPath)
-	backupPath, err := audit.Backup(dbPath)
+
+	// AUD-01: DB backup is the principal artifact — fail-closed if the keychain
+	// is unavailable (cannot build a chain-recording *SignedAudit).
+	sa, saErr := cmdSignedAudit(ctx, cc)
+	if saErr != nil {
+		return fmt.Errorf("headscale backup: %w", saErr)
+	}
+	backupPath, err := audit.BackupWithChain(ctx, dbPath, sa)
 	if err != nil {
 		return fmt.Errorf("headscale backup: %w", err)
 	}
@@ -1005,7 +1048,11 @@ func rotateAPIKeyREST(ctx context.Context, baseURL, oldKey string, kc secrets.Ke
 	var result struct {
 		APIKey string `json:"apiKey"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	data, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("rotate API key: read response: %w", err)
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
 		return "", fmt.Errorf("rotate API key: decode response: %w", err)
 	}
 	if result.APIKey == "" {
@@ -1049,7 +1096,11 @@ func ensureHeadscaleUser(ctx context.Context, baseURL, apiKey, userName string) 
 	}
 	// A 200 body that fails to decode means we cannot reliably tell whether the
 	// user exists; returning an error here avoids a spurious recreate attempt.
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	userData, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+	if err != nil {
+		return fmt.Errorf("user-ensure GET: read response: %w", err)
+	}
+	if err := json.Unmarshal(userData, &result); err != nil {
 		return fmt.Errorf("user-ensure GET: decode user list: %w", err)
 	}
 	for _, u := range result.Users {
@@ -1110,8 +1161,7 @@ func mintPreAuthKey(ctx context.Context, baseURL, apiKey, userName string, expir
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return "", fmt.Errorf("mint pre-auth key: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("mint pre-auth key: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(limitio.ReadSnippet(resp.Body)))
 	}
 
 	var result struct {
@@ -1119,7 +1169,11 @@ func mintPreAuthKey(ctx context.Context, baseURL, apiKey, userName string, expir
 			Key string `json:"key"`
 		} `json:"preAuthKey"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	pakData, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("mint pre-auth key: read response: %w", err)
+	}
+	if err := json.Unmarshal(pakData, &result); err != nil {
 		return "", fmt.Errorf("mint pre-auth key: decode response: %w", err)
 	}
 	if result.PreAuthKey.Key == "" {

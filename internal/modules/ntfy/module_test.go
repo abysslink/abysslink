@@ -17,11 +17,13 @@ package ntfy
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
@@ -29,6 +31,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// stubKeychain is a minimal in-memory secrets.KeychainStore for unit tests.
+// applyDocker → ensureAdminUserDocker requires a non-nil keychain; this stub
+// lets the apply path run to completion without touching a real keychain.
+type stubKeychain struct{ pw string }
+
+func (s *stubKeychain) Set(_ context.Context, _, _, secret string) error {
+	s.pw = secret
+	return nil
+}
+func (s *stubKeychain) Get(_ context.Context, _, _ string) (string, error) {
+	return s.pw, nil
+}
+func (s *stubKeychain) Delete(_ context.Context, _, _ string) error { return nil }
 
 // testPlatform is a minimal platform.Platform for unit tests.
 type testPlatform struct{}
@@ -164,6 +180,78 @@ func TestListenAddressIPv6Wildcard(t *testing.T) {
 			assert.NotEqual(t, modules.SeverityOK, f.Severity,
 				"no listen_address finding should be SeverityOK when config has IPv6 wildcard")
 		}
+	}
+}
+
+// TestApplyDockerBindsTailnetIPOnly is the NET-01a tailnet-only bind floor for
+// the Docker container port publish. The `docker run` argv's `-p` mapping must be
+// exactly <tailnetIP>:<port>:80 — never a loopback (127.0.0.1), all-interfaces
+// (0.0.0.0 / [::] / ::), or bare-wildcard publish. No prior test inspected the
+// `docker run` runner argv; ntfy tests only covered the server-config listen-http
+// bind. This closes that gap by asserting on the actual recorded argv.
+func TestApplyDockerBindsTailnetIPOnly(t *testing.T) {
+	tmpHome := t.TempDir()
+	auditLog := filepath.Join(t.TempDir(), "audit.log")
+
+	// Script every runner call applyDocker makes, in order, all exit-0:
+	//   1. getTailnetHostname → tailscale status --json
+	//   2. docker pull
+	//   3. docker rm -f
+	//   4. docker run -d ... (the call under test)
+	//   5. ensureAdminUserDocker → docker exec -i ... (RunWithStdin)
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: `"DNSName": "rig.example.ts.net.",`, ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+
+	cfg := config.Defaults()
+	m := New(modules.Deps{
+		Cfg:      cfg,
+		Runner:   r,
+		Audit:    audit.New(auditLog),
+		Platform: &testPlatform{},
+		Keychain: &stubKeychain{},
+	})
+
+	const tailnetIP = "100.64.1.2"
+	err := m.applyDocker(context.Background(), tailnetIP, tmpHome)
+	require.NoError(t, err, "applyDocker should run cleanly through the scripted runner")
+
+	// Locate the `docker run` call among the recorded argv.
+	var runArgs []string
+	for _, c := range r.RecordedCalls() {
+		if c.Name == "docker" && len(c.Args) > 0 && c.Args[0] == "run" {
+			runArgs = c.Args
+			break
+		}
+	}
+	require.NotNil(t, runArgs, "expected a `docker run` call to be recorded")
+
+	// Extract the value following the (single) -p flag.
+	var portMapping string
+	pFound := false
+	for i := 0; i < len(runArgs); i++ {
+		if runArgs[i] == "-p" {
+			require.Less(t, i+1, len(runArgs), "-p flag must be followed by a value")
+			require.False(t, pFound, "docker run must publish exactly one -p mapping")
+			portMapping = runArgs[i+1]
+			pFound = true
+		}
+	}
+	require.True(t, pFound, "docker run must contain a -p port-publish mapping")
+
+	expectedPort := cfg.Modules.Ntfy.ListenPort()
+	expected := fmt.Sprintf("%s:%d:80", tailnetIP, expectedPort)
+	assert.Equal(t, expected, portMapping,
+		"NET-01a: -p must publish only the tailnet IP, container port 80")
+
+	// Load-bearing negative assertions: no loopback or wildcard host bind.
+	for _, forbidden := range []string{"127.0.0.1", "0.0.0.0", "[::]", "::", "localhost"} {
+		assert.NotContains(t, portMapping, forbidden,
+			"NET-01a: -p mapping must never expose %q", forbidden)
 	}
 }
 

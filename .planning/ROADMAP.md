@@ -40,15 +40,10 @@ Phases 16–21 (6 phases, 24 plans) — supply-chain hardening (cosign v3 / SLSA
 
 ---
 
-## v3.0.1 — Network & Dependency Security Hotfix 🔧 IN PROGRESS
+## v3.0.1 — Network & Dependency Security Hotfix ✅ SHIPPED 2026-06-04
 
-Phase 22 — closes 6 CRITICAL/HIGH network & dependency findings from the 2026-06-03 full security audit (11 agents).
-Requirements: NET-01 (CRITICAL A1), NET-02 (A7), NET-03 (A8), DEP-01 (A2), DEP-02 (A3), DEP-03 (A12).
-
-Phase 23 — restores doctor/threat-model honesty: one shared finding set, fail-closed disk encryption, NetBird Tailnet-Lock warning, and a doctor minimum-versions table.
-Requirements: DOC-01 (A4), DOC-02 (A5), DOC-03 (A6), DOC-04 (C).
-
-(AUD-01/02, DOS-01, CI-01 land in later v3.0.1 phases 24–25 — not yet added to roadmap.)
+Phases 22, 23, 23.1, 23.2, 24, 25 (6 phases, 26 plans) — closes the 2026-06-03 full security audit (11 agents): network/dependency lockdown (ntfy tailnet-only bind, NetBird https-only server_url, argv-injection guards, go1.26.4 / x/crypto v0.52.0 / CSRF→net/http.CrossOriginProtection), doctor/threat-model honesty (shared finding set, fail-closed disk encryption, nb-lock warning, minimum-versions table, probe-failure tri-state), tamper-evident audit hardening (HMAC-chained backups, anchor-every-append + keychain counter, cross-process flock, direction-aware verifyCounter), DoS bounding (limitio + WriteFilePath streaming), and a blocking govulncheck CI gate. All 20 requirements verified. Audit PASSED. Local tag `v3.0.1`. Deferred: Phase 23 FileVault mid-encryption `fdesetup` string literals (MED, real-hardware confirmation; fail-closed regardless).
+→ Archived: [`milestones/v3.0.1-ROADMAP.md`](milestones/v3.0.1-ROADMAP.md) · [`milestones/v3.0.1-REQUIREMENTS.md`](milestones/v3.0.1-REQUIREMENTS.md) · audit [`milestones/v3.0.1-MILESTONE-AUDIT.md`](milestones/v3.0.1-MILESTONE-AUDIT.md)
 
 ---
 
@@ -279,6 +274,44 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 23-04-PLAN.md — DOC-01 tri-state threat-model over collectDoctorFindings + DOC-04 floor wiring + DOC-02 up gate non-overridable for unknown + lint/test gate
+
+### Phase 24: v3.0.1 security closeout — audit-chain integrity, bounded reads, and govulncheck CI gate (AUD-01, AUD-02, DOS-01, CI-01)
+
+**Goal:** Close the final 4 v3.0.1 security requirements so the milestone reaches 20/20: bind backups to the tamper-evident HMAC chain and resist tail-truncation (AUD-01, AUD-02), bound every attacker-influenceable read (DOS-01), and add `govulncheck ./...` as a blocking CI gate (CI-01).
+**Requirements**: AUD-01 (A9 HMAC-bound backups), AUD-02 (A10 anchor-refresh truncation resistance), DOS-01 (A11 bounded reads), CI-01 (govulncheck blocking CI gate)
+**Depends on:** Phase 23.2
+**Plans:** 7/7 plans complete
+
+**Wave 1** *(parallel)*
+
+Plans:
+- [x] 24-01-PLAN.md — AUD-01: BackupWithChain + RestoreGated (HMAC-bound backup + chain-walk restore gate)
+- [x] 24-02-PLAN.md — CI-01: harden-runner on lint.yml + test.yml + REQUIREMENTS.md:93 Phase 24 fix
+- [x] 24-04-PLAN.md — DOS-01 Part A: limitedWriter (exec.go) + MaxBytesReader (/notify) + readLimited on 15 NetBird seam sites
+
+**Wave 2** *(depends on Wave 1)*
+
+- [x] 24-03-PLAN.md — AUD-02: per-Append anchor (fatal) + ReadCounter/WriteCounter + Verify CounterStatus UNKNOWN tri-state *(blocked on 24-01)*
+- [x] 24-05-PLAN.md — DOS-01 Part B: tailscale/limit.go + readLimited on 7 admin.go + 8 Headscale seam sites *(blocked on 24-04)*
+
+**Wave 3 — gap closure** *(VERIFICATION.md found AUD-01 + AUD-02 BLOCKERs; AUD-01/AUD-02 chain functions were dead code / counter-failure faked a permanent truncation alarm)*
+
+- [x] 24-06-PLAN.md — AUD-02 gap: Append deletes the keychain counter key on IncrementCounter failure so Verify degrades to CounterStatus="unknown" instead of a permanent false "mismatch"/TRUNCATION_DETECTED
+- [x] 24-07-PLAN.md — AUD-01 gap: wire BackupWithChain (WriteFile + netbird + headscale) and RestoreGated (live `backup restore` + --accept-unverified-backup, fail-closed) into production so the A9 chain gate is live *(blocked on 24-06: shared signed.go)*
+
+### Phase 25: Close v3.0.1 debt: config.Validate-on-load, CLI bounded reads, AUD-02 concurrency
+
+**Goal:** Wire config.Validate into config.Load (fail-closed), bound all CLI remote-response and binary-install reads, and fix the AUD-02 cross-process concurrency defects so the v3.0.1 milestone audit reaches zero outstanding code items.
+**Requirements**: NET-02, NET-03, DOS-01, AUD-02, DOC-03, DOC-04
+**Depends on:** Phase 24
+**Plans:** 5/5 plans complete
+
+Plans:
+- [x] 25-00-PLAN.md — Wave 0: Test scaffolding (limitio_test, config_load_test, flock.go stub, signed_test additions)
+- [x] 25-01-PLAN.md — limitio leaf package + backend/limit.go wrapper + DOC-03 nb-lock findingFix + DOC-04 ntfy-version threatRows
+- [x] 25-02-PLAN.md — config.Load fail-closed (D-01) + 4 swallowing callers fixed + NET-03 argv defense-in-depth (D-03)
+- [x] 25-03-PLAN.md — DOS-01 CLI bounded reads: 4 sites (D-05) + WR-02 audit.WriteFilePath streaming (D-06)
+- [x] 25-04-PLAN.md — AUD-02 flock (D-07) + appendNoRefresh single anchor/counter refresh per WriteFile (D-08)
 
 ---
 

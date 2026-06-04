@@ -70,7 +70,7 @@ var _ secrets.KeychainStore = (*enrollTestKeychain)(nil)
 func TestEnrollRig_NameValidation(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	data, err := yaml.Marshal(cfg)
 	require.NoError(t, err)
@@ -108,7 +108,7 @@ func TestEnrollRig_NameValidation(t *testing.T) {
 func TestEnrollRig_TopicCollision(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	existingTopic := "abysslink-laptop-a1b2c3d4"
 	cfg.Rigs = []config.RigConfig{
@@ -141,7 +141,7 @@ func TestEnrollRig_TopicCollision(t *testing.T) {
 func TestEnrollRig_Migration(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	data, err := yaml.Marshal(cfg)
 	require.NoError(t, err)
@@ -195,7 +195,7 @@ func TestEnrollRig_Migration(t *testing.T) {
 func TestEnrollRig_HMACKey(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	data, err := yaml.Marshal(cfg)
 	require.NoError(t, err)
@@ -228,7 +228,7 @@ func TestEnrollRig_HMACKey(t *testing.T) {
 func TestEnrollRig_AuditWrite(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	data, err := yaml.Marshal(cfg)
 	require.NoError(t, err)
@@ -267,7 +267,7 @@ func TestEnrollRig_AuditWrite(t *testing.T) {
 func TestEnrollRig_ACLDeny(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	cfg.Backend.Type = "tailscale"
 	data, err := yaml.Marshal(cfg)
@@ -300,7 +300,7 @@ func TestEnrollRig_ACLDeny(t *testing.T) {
 func TestEnrollRig_RigRigGrantFails(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "abysslink.yaml")
-	cfg := config.Defaults()
+	cfg := testCfgDefaults()
 	cfg.Version = 1
 	data, err := yaml.Marshal(cfg)
 	require.NoError(t, err)

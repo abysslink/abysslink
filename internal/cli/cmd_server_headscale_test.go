@@ -16,15 +16,19 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -568,9 +572,97 @@ func TestAssertHeadscaleRunsAsUser_ProcessNotFound(t *testing.T) {
 	require.Error(t, err, "assertion must fail when process not found")
 }
 
-// ── Mock helpers ──────────────────────────────────────────────────────────────
+// ── WR-02: headscaleSwapBinary uses sa.WriteFilePath (streamed, not os.ReadFile) ──
 
-// mockKeychainStore is a simple in-memory keychain for tests.
+// TestHeadscaleInstall_StreamedWrite verifies that headscaleSwapBinary writes the
+// binary through the provided *audit.SignedAudit (sa.WriteFilePath) rather than
+// calling os.ReadFile + audit.New(logPath).WriteFile.
+//
+// RED indicator: with the old code, the audit entry for the binary write is
+// appended to audit.DefaultLogPath() NOT to sa's log. The test checks that
+// sa's log has an entry — this fails today because the old code bypasses sa.
+//
+// This tests D-06 / T-25-03-04 (WR-02 heap spike elimination).
+func TestHeadscaleInstall_StreamedWrite(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("headscaleServiceControl only supports linux and darwin")
+	}
+
+	tmpDir := t.TempDir()
+
+	// Create a mock binary to install.
+	const binaryContent = "mock-headscale-binary-content-v0.26.0\n"
+	tmpBinPath := tmpDir + "/headscale_0.26.0_linux_amd64"
+	require.NoError(t, os.WriteFile(tmpBinPath, []byte(binaryContent), 0o755))
+
+	// Destination binary path.
+	binPath := tmpDir + "/bin/headscale"
+	require.NoError(t, os.MkdirAll(tmpDir+"/bin", 0o755))
+
+	// Set up a SignedAudit with its own log in the temp dir.
+	saLogPath := tmpDir + "/audit.log"
+	mockKC := &mockKeychainStore{entries: map[string]string{}}
+	sa, err := audit.NewSigned(saLogPath, mockKC)
+	require.NoError(t, err, "NewSigned must succeed")
+
+	cfg := config.Defaults()
+	cfg.Backend.Type = "headscale"
+	cfg.Server.Headscale.BinaryPath = binPath
+	// No DBPath → skip DB backup (simplifies the test).
+	cfg.Server.Headscale.DBPath = ""
+
+	// Mock a health-check HTTP server that always returns 200.
+	healthSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer healthSrv.Close()
+	cfg.Server.Headscale.ServerURL = healthSrv.URL
+
+	// Mock runner for service stop + start.
+	var stopArg, startArg string
+	switch runtime.GOOS {
+	case "linux":
+		stopArg = "systemctl"
+		startArg = "systemctl"
+	case "darwin":
+		stopArg = "launchctl"
+		startArg = "launchctl"
+	}
+	mr := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // stop
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // start
+	)
+	_ = stopArg
+	_ = startArg
+
+	err = headscaleSwapBinary(context.Background(), cfg, mr, binPath, tmpBinPath, sa)
+	require.NoError(t, err, "headscaleSwapBinary must succeed")
+
+	// Verify the destination binary has the expected content.
+	got, readErr := os.ReadFile(binPath) //nolint:gosec // G304: binPath is a test-temp path, not user input
+	require.NoError(t, readErr, "destination binary must exist after swap")
+	assert.Equal(t, binaryContent, string(got), "destination binary must have expected content")
+
+	// WR-02 invariant: the audit entry for the binary write must be in sa's log,
+	// NOT only in audit.DefaultLogPath(). With old code (os.ReadFile + audit.New),
+	// sa's log has no entry for the binary write — this assertion FAILS (RED).
+	// With new code (sa.WriteFilePath), sa's log has the entry — assertion PASSES (GREEN).
+	logF, openErr := os.Open(saLogPath) //nolint:gosec // G304: saLogPath is a test-temp path, not user input
+	require.NoError(t, openErr, "sa's audit log must exist after WriteFilePath call")
+	defer func() { _ = logF.Close() }()
+
+	var lineCount int
+	scanner := bufio.NewScanner(logF)
+	for scanner.Scan() {
+		if line := strings.TrimSpace(scanner.Text()); line != "" {
+			lineCount++
+		}
+	}
+	require.NoError(t, scanner.Err())
+	assert.Greater(t, lineCount, 0,
+		"sa's audit log must have at least one entry — WriteFilePath must write via sa, not audit.New(DefaultLogPath)")
+}
+
 type mockKeychainStore struct {
 	entries map[string]string
 }
