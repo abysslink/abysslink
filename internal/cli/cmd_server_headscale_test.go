@@ -662,6 +662,7 @@ func TestHeadscaleInstall_StreamedWrite(t *testing.T) {
 	assert.Greater(t, lineCount, 0,
 		"sa's audit log must have at least one entry — WriteFilePath must write via sa, not audit.New(DefaultLogPath)")
 }
+
 type mockKeychainStore struct {
 	entries map[string]string
 }
