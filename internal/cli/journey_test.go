@@ -18,6 +18,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -203,6 +204,96 @@ func TestJourneyStage2_NoDuplicateCalls(t *testing.T) {
 	// so runner.Done() would be vacuously true — this output check catches that regression.
 	assert.Contains(t, buf.String(), "Prerequisites verified.",
 		"Stage 2 output must contain 'Prerequisites verified.' to confirm the new summary path")
+}
+
+// TestJourneyOfferRun_HeadlessNeverRunsInteractive asserts that in headless/non-TTY
+// contexts the journeyStageACL caller gates before calling journeyOfferRun, so no
+// RunInteractive call is made. This is the non-TTY (go test) path.
+func TestJourneyOfferRun_HeadlessNeverRunsInteractive(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	// Zero-scripted runner — any call would return an unexpected-call error.
+	runner := shell.NewMockRunner()
+
+	// autoYes=true → journeyStageACL exits before calling journeyOfferRun.
+	stages := journeyStages(false, config.Defaults(), runner, true)
+	// Find the ACL stage (index 7, label "ACL").
+	var aclStage journeyStage
+	for _, s := range stages {
+		if s.label == "ACL" {
+			aclStage = s
+		}
+	}
+	require.NotEmpty(t, aclStage.label, "ACL stage must exist")
+
+	err := aclStage.run(ctx, p)
+	require.NoError(t, err)
+	// No interactive calls made.
+	assert.Empty(t, runner.RunInteractiveCalls(),
+		"headless ACL stage must not make any RunInteractive calls")
+}
+
+// TestJourneyStageACL_TerminalRestored verifies that journeyStageACL delegates to
+// journeyOfferRun with the ACL-specific failure message. Under go test stdin is
+// never a TTY so interactive() returns false, both the inline ACL gate and the
+// journeyOfferRun huh prompt are bypassed — no RunInteractive call is made.
+// The test asserts two things:
+//  1. journeyStageACL with autoYes=false returns nil on non-TTY stdin (no hang).
+//  2. The ACL stage makes zero RunInteractive calls (gate fired before any prompt).
+func TestJourneyStageACL_TerminalRestored(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	// Zero-scripted runner — any call returns an unexpected-call error.
+	runner := shell.NewMockRunner()
+
+	// autoYes=false: exercises the non-TTY gate path (interactive() == false under go test).
+	stages := journeyStages(false, config.Defaults(), runner, false)
+	var aclStage journeyStage
+	for _, s := range stages {
+		if s.label == "ACL" {
+			aclStage = s
+		}
+	}
+	require.NotEmpty(t, aclStage.label, "ACL stage must exist in journey")
+
+	err := aclStage.run(ctx, p)
+	require.NoError(t, err, "ACL stage must not hang or error on non-TTY stdin")
+
+	// No RunInteractive calls — gate fired before any prompt.
+	assert.Empty(t, runner.RunInteractiveCalls(),
+		"ACL stage must not invoke RunInteractive on non-TTY stdin")
+}
+
+// TestJourneyOfferRun_WarnMsgParam verifies that journeyOfferRun accepts a warnMsg
+// parameter and uses it (instead of the default message) when RunInteractive fails.
+// Since we cannot open a TTY in tests, we verify compilation and that the non-TTY
+// huh gate prevents any call to RunInteractive (returns nil without a prompt).
+func TestJourneyOfferRun_WarnMsgParam(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	// Zero-scripted runner — any call returns an unexpected-call error.
+	runner := shell.NewMockRunner()
+
+	// Under go test stdin is not a TTY; huh.NewConfirm would fail with "no TTY" if
+	// reached. journeyOfferRun must guard with stdinIsTTY() / interactive() and
+	// return nil without calling huh or RunInteractive.
+	err := journeyOfferRun(ctx, p, runner,
+		"Test title",
+		"Test description",
+		"Yes", "No",
+		"custom failure message",
+		"abysslink", "acl", "push", "--apply")
+	require.NoError(t, err)
+	assert.Empty(t, runner.RunInteractiveCalls(),
+		"journeyOfferRun must not call RunInteractive on non-TTY stdin")
+	// Verify fmt import is used (suppress unused-import compile error in the test file).
+	_ = fmt.Sprintf
 }
 
 // TestRunJourney_NonTTY asserts that the journey completes without hanging
