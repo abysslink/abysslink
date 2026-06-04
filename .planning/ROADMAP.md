@@ -306,13 +306,17 @@ Plans:
 
 ### Phase 25: Close v3.0.1 debt: config.Validate-on-load, CLI bounded reads, AUD-02 concurrency
 
-**Goal:** [To be planned]
-**Requirements**: TBD
+**Goal:** Wire config.Validate into config.Load (fail-closed), bound all CLI remote-response and binary-install reads, and fix the AUD-02 cross-process concurrency defects so the v3.0.1 milestone audit reaches zero outstanding code items.
+**Requirements**: NET-02, NET-03, DOS-01, AUD-02, DOC-03, DOC-04
 **Depends on:** Phase 24
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 25 to break down)
+- [ ] 25-00-PLAN.md — Wave 0: Test scaffolding (limitio_test, config_load_test, flock.go stub, signed_test additions)
+- [ ] 25-01-PLAN.md — limitio leaf package + backend/limit.go wrapper + DOC-03 nb-lock findingFix + DOC-04 ntfy-version threatRows
+- [ ] 25-02-PLAN.md — config.Load fail-closed (D-01) + 4 swallowing callers fixed + NET-03 argv defense-in-depth (D-03)
+- [ ] 25-03-PLAN.md — DOS-01 CLI bounded reads: 4 sites (D-05) + WR-02 audit.WriteFilePath streaming (D-06)
+- [ ] 25-04-PLAN.md — AUD-02 flock (D-07) + appendNoRefresh single anchor/counter refresh per WriteFile (D-08)
 
 ---
 
