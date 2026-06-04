@@ -2,16 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
-status: milestone_complete
-last_updated: 2026-06-03T18:22:40.044Z
+status: Phase 25 not planned yet
+last_updated: "2026-06-04T12:52:12.682Z"
 last_activity: 2026-06-03
 progress:
-  total_phases: 15
+  total_phases: 16
   completed_phases: 4
   total_plans: 19
   completed_plans: 21
-  percent: 27
-stopped_at: Milestone complete (Phase 24 was final phase)
+  percent: 25
 ---
 
 # Project State
@@ -25,9 +24,9 @@ See: .planning/PROJECT.md (updated 2026-05-30)
 
 ## Current Position
 
-Phase: 24
+Phase: 25
 Plan: Not started
-Status: Milestone complete
+Status: Phase 25 not planned yet
 Last activity: 2026-06-03
 
 ## Performance Metrics
@@ -122,6 +121,7 @@ Last activity: 2026-06-03
 - Phase 23 (Doctor Honesty & Coverage) added to ROADMAP.md — DOC-01/02/03/04 (v3.0.1). Plans TBD.
 - v3.0.1 milestone continues with phases 24 (AUD-01/02, DOS-01) and 25 (CI-01) per REQUIREMENTS.md traceability — not yet added to roadmap.
 - Phase 23.1 inserted after Phase 23: Doctor probe-failure honesty — close WR-02/03/04/08 false-OK + double-emit gaps from Phase 23 code review (URGENT)
+- Phase 25 added: Close v3.0.1 debt: config.Validate-on-load, CLI bounded reads, AUD-02 concurrency
 
 ### Decisions
 

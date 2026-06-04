@@ -304,6 +304,16 @@ Plans:
 - [x] 24-06-PLAN.md — AUD-02 gap: Append deletes the keychain counter key on IncrementCounter failure so Verify degrades to CounterStatus="unknown" instead of a permanent false "mismatch"/TRUNCATION_DETECTED
 - [x] 24-07-PLAN.md — AUD-01 gap: wire BackupWithChain (WriteFile + netbird + headscale) and RestoreGated (live `backup restore` + --accept-unverified-backup, fail-closed) into production so the A9 chain gate is live *(blocked on 24-06: shared signed.go)*
 
+### Phase 25: Close v3.0.1 debt: config.Validate-on-load, CLI bounded reads, AUD-02 concurrency
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 24
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 25 to break down)
+
 ---
 
 ## Progress
