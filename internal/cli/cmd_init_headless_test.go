@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,7 +31,8 @@ func TestEnsureTailscaleAccount_HeadlessReturnsNil(t *testing.T) {
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
 
-	err := ensureTailscaleAccount(p, true)
+	runner := shell.NewMockRunner()
+	err := ensureTailscaleAccount(p, runner, true)
 	require.NoError(t, err)
 
 	// Verify the informational signup-URL note is still printed in headless mode
@@ -47,8 +49,9 @@ func TestEnsureTailscaleAccount_HeadlessReturnsNil(t *testing.T) {
 func TestEnsureTailscaleAccount_NonTTYStdinReturnsNil(t *testing.T) {
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
+	runner := shell.NewMockRunner()
 
 	// stdinIsTTY() returns false under go test (no TTY attached)
-	err := ensureTailscaleAccount(p, false)
+	err := ensureTailscaleAccount(p, runner, false)
 	require.NoError(t, err)
 }
