@@ -31,7 +31,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -133,7 +132,6 @@ type SignedAudit struct {
 	logPath string
 	kc      KeychainStore
 	mu      sync.Mutex
-	count   int64 // atomic — entries appended by this instance
 }
 
 // NewSigned returns a SignedAudit. If the HMAC key is absent from the keychain
@@ -244,7 +242,6 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 	// physical effect (the documented append-before-write window), but never a
 	// "counter behind entries" state that audit-count-vs-anchor reads as a false
 	// truncation alarm.
-	atomic.AddInt64(&a.count, entryCount)
 	if aerr := WriteAnchor(ctx, a.logPath, a.kc); aerr != nil {
 		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
 	}
@@ -597,7 +594,6 @@ func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, d
 	// concurrent appender can change between the two reads inside WriteAnchor.
 	// Failure hard-fails Append; WriteFile callers abort before physical write
 	// because Append returns error first (D-03 write-ordering correctness).
-	atomic.AddInt64(&a.count, 1)
 	if aerr := WriteAnchor(ctx, a.logPath, a.kc); aerr != nil {
 		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
 	}
