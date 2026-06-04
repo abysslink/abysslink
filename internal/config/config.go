@@ -413,6 +413,11 @@ func Load(path string) (*Config, error) {
 	if cfg.Backend.Type == "" {
 		cfg.Backend.Type = "tailscale"
 	}
+	// D-01 (fail-closed): validate before returning. A hand-edited YAML with an
+	// unsafe hostname or non-https NetBird URL must never reach argv call sites.
+	if err := Validate(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
