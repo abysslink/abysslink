@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-30)
 Phase: 26
 Plan: Not started
 Status: Milestone complete
-Last activity: 2026-06-04
+Last activity: 2026-06-04 - Completed quick task 260604-wpf: fix tailscale login --reauth flag error and raw-mode staircase output during apply
 
 ## Performance Metrics
 
@@ -240,6 +240,7 @@ None.
 | 260530-8uz | fix(hardening) + fix(power): rewrite scan warnings to be honest about which findings abysslink auto-fixes — hardening firewall is report-only (manual fix paths provided); pmset auto-fix only runs when `power.closed_lid_ac: keep-awake` is set in abysslink.yaml | 2026-05-30 | 53c3199 | [260530-8uz-make-hardening-power-scan-warnings-hones](.planning/quick/260530-8uz-make-hardening-power-scan-warnings-hones/) |
 | 260530-nl4 | feat(claudecode): add `abysslink claudecode disable` command that strips the abysslink notify hooks from ~/.claude/settings.json on demand (Stop + Notification), preserving all other hooks; dry-run default + --apply, writes via internal/audit | 2026-05-30 | 76aa21b | [260530-nl4-add-abysslink-claudecode-disable-command](.planning/quick/260530-nl4-add-abysslink-claudecode-disable-command/) |
 | 260602-1nz | fix(init): gate ensureTailscaleAccount huh prompts behind headless flag — thread autoYes → journeyStages() → stage-1 closure → ensureTailscaleAccount(p, headless bool); both init --yes and init with non-TTY stdin now exit 0 | 2026-06-02 | 1af28a4 | [260602-1nz-fix-g1-non-tty-init-errors-on-huh-tty-op](.planning/quick/260602-1nz-fix-g1-non-tty-init-errors-on-huh-tty-op/) |
+| 260604-wpf | fix(tailscale)+fix(up): drop unsupported --reauth from `tailscale login` argv (caused "flag provided but not defined: -reauth" + usage dump); add interactiveActionsFromActions detection so apply animation is disabled when a `tailscale login` action is planned — prevents raw-mode staircase output from RunInteractive racing the Bubble Tea LiveTable | 2026-06-04 | eff135b | [260604-wpf-fix-tailscale-login-reauth-flag-error-an](.planning/quick/260604-wpf-fix-tailscale-login-reauth-flag-error-an/) |
 
 ## Deferred Items
 
