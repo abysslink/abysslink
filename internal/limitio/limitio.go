@@ -26,6 +26,13 @@ import (
 // list) while preventing memory-exhaustion DoS (DOS-01).
 const MaxBackendBody int64 = 8 * 1024 * 1024 // 8 MiB
 
+// ErrSnippetMax is the byte cap for an HTTP error-response snippet included in
+// an error message (e.g. a non-200 body). It is small on purpose: the snippet
+// is only for operator-facing diagnostics, never decoded. Hoisted here (WR-03 /
+// IN-01) so every error-path read shares one named constant instead of the
+// magic literal 256 duplicated across cmd_upgrade.go and cmd_server_headscale.go.
+const ErrSnippetMax int64 = 256
+
 // ReadLimited reads at most n bytes from r. If the body exceeds n bytes it
 // returns an explicit error — io.LimitReader alone silently truncates; the
 // N+1 sentinel detects overflow before JSON decode (DOS-01).
@@ -39,4 +46,14 @@ func ReadLimited(r io.ReadCloser, n int64) ([]byte, error) {
 		return nil, fmt.Errorf("response body exceeded %d bytes", n)
 	}
 	return data, nil
+}
+
+// ReadSnippet reads at most ErrSnippetMax bytes from r for use in an error
+// message. Unlike ReadLimited it never returns an error: a snippet read is
+// best-effort diagnostics on an already-failed request, so a truncated or empty
+// snippet is acceptable. Routing error-path reads through this keeps every
+// resp.Body read bounded by a named cap (WR-03 / IN-01).
+func ReadSnippet(r io.Reader) string {
+	data, _ := io.ReadAll(io.LimitReader(r, ErrSnippetMax))
+	return string(data)
 }
