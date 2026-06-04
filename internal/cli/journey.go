@@ -34,6 +34,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -88,11 +89,19 @@ func journeyLabels() []string {
 // so it is safe to call unconditionally — callers do not need to gate on stdinIsTTY().
 //
 // Terminal-state contract: huh leaves the terminal in raw mode after its form
-// exits. journeyOfferRun captures the terminal state with cterm.GetState before
-// the form, and restores it with cterm.Restore after the form returns (success or
-// error), before calling RunInteractive. This ensures the child process starts from
-// a clean cooked-mode terminal rather than inheriting huh's raw-mode state.
+// exits. journeyOfferRun captures the controlling-tty (/dev/tty) state with
+// cterm.GetState before the form, and restores it with cterm.Restore after the
+// form returns (success or error), before calling RunInteractive. /dev/tty (not
+// os.Stdin) is used because huh drives that descriptor directly. This ensures the
+// child process starts from a clean cooked-mode terminal rather than inheriting
+// huh's raw-mode state.
 func journeyOfferRun(ctx context.Context, p Printer, runner shell.Runner, title, desc, affirm, neg, warnMsg string, args ...string) error {
+	// Argv guard: args[0] is indexed unconditionally below; reject an empty
+	// argv up front rather than panicking (no panics in normal control flow).
+	if len(args) == 0 {
+		return errors.New("journeyOfferRun: no command supplied")
+	}
+
 	// Non-TTY guard: skip the prompt entirely when stdin is not a terminal.
 	// This keeps journeyOfferRun safe in CI, pipes, and go test contexts.
 	if !stdinIsTTY() {
@@ -101,7 +110,27 @@ func journeyOfferRun(ctx context.Context, p Printer, runner shell.Runner, title,
 
 	// huh puts the terminal in raw mode; restore to cooked mode before spawning
 	// the child so the child's own raw-mode setup starts from a clean state.
-	savedState, _ := cterm.GetState(os.Stdin.Fd())
+	//
+	// huh opens and drives /dev/tty directly (not os.Stdin), so the save/restore
+	// must operate on the controlling-tty descriptor — not os.Stdin, which may be
+	// a redirected file even when a controlling terminal is attached (WR-04).
+	// If /dev/tty cannot be opened or its state cannot be read, log and skip the
+	// restore rather than silently discarding the error.
+	var (
+		ttyFD      uintptr
+		savedState *cterm.State
+	)
+	if tty, ttyErr := os.OpenFile("/dev/tty", os.O_RDWR, 0); ttyErr == nil {
+		defer func() { _ = tty.Close() }()
+		ttyFD = tty.Fd()
+		if st, stErr := cterm.GetState(ttyFD); stErr == nil {
+			savedState = st
+		} else {
+			slog.Debug("journeyOfferRun: GetState failed; terminal restore skipped", "error", stErr)
+		}
+	} else {
+		slog.Debug("journeyOfferRun: open /dev/tty failed; terminal restore skipped", "error", ttyErr)
+	}
 
 	var runNow bool
 	formErr := huh.NewConfirm().
@@ -113,7 +142,7 @@ func journeyOfferRun(ctx context.Context, p Printer, runner shell.Runner, title,
 
 	// Restore terminal to cooked mode regardless of whether the form succeeded.
 	if savedState != nil {
-		_ = cterm.Restore(os.Stdin.Fd(), savedState)
+		_ = cterm.Restore(ttyFD, savedState)
 	}
 
 	if formErr != nil {
