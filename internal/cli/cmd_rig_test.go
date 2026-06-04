@@ -118,6 +118,63 @@ func TestRigExport_NoSecrets(t *testing.T) {
 	require.Len(t, wrapper.Rigs, 2)
 }
 
+// writeCfgInvalidHostnameWithRigs writes a config whose tailnet.hostname is
+// invalid (fails config.Validate) but whose rigs: section is well-formed. Used to
+// prove the WR-07 read-only degradation path.
+func writeCfgInvalidHostnameWithRigs(t *testing.T, dir string) string {
+	t.Helper()
+	cfgPath := filepath.Join(dir, "abysslink.yaml")
+	cfg := testCfgDefaults()
+	cfg.Version = 1
+	// Unrelated-to-rigs validation failure: an unsafe hostname stanza. Parses
+	// fine (string field) but Validate → validateIdentity rejects it.
+	cfg.Tailnet.Hostname = "Bad_Host!"
+	cfg.Rigs = []config.RigConfig{
+		{Name: "alpha", Hostname: "alpha.ts.net", NtfyTopic: "abysslink-alpha-aabbccdd", Backend: "tailscale"},
+	}
+	data, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, data, 0o600))
+	return cfgPath
+}
+
+// TestRigLs_DegradesOnUnrelatedValidationError is the automated coverage for
+// 25-VERIFICATION human item #2 (WR-07). `rig ls` is read-only — it only renders
+// cfg.Rigs and never feeds a value to argv or a mutation — so once config.Load
+// fails closed (D-01), `rig ls` must NOT hard-fail on a validation error in an
+// unrelated stanza (here, an unsafe tailnet.hostname). It must warn and still
+// list the parsed rigs. The fail-closed Load remains the only entry point for
+// mutating/argv paths; this guards the LoadForRead read-only carve-out.
+func TestRigLs_DegradesOnUnrelatedValidationError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfgInvalidHostnameWithRigs(t, dir)
+
+	// Sanity: the config genuinely fails fail-closed Load (so the test proves a
+	// real degradation, not a config that happens to validate).
+	_, loadErr := config.Load(cfgPath)
+	require.Error(t, loadErr, "precondition: config must fail fail-closed Load")
+
+	// Human (table) rendering: must not error, must still list the rig.
+	var out bytes.Buffer
+	require.NoError(t, runRigLs(cfgPath, false, &out),
+		"rig ls must degrade (warn + continue), not hard-fail, on an unrelated validation error")
+	assert.Contains(t, out.String(), "alpha", "rig ls must still list parsed rigs despite the validation error")
+
+	// JSON rendering: same degradation, valid array with the rig.
+	var jsonOut bytes.Buffer
+	require.NoError(t, runRigLs(cfgPath, true, &jsonOut))
+	var records []rigLsRecord
+	require.NoError(t, json.Unmarshal(jsonOut.Bytes(), &records))
+	require.Len(t, records, 1)
+	assert.Equal(t, "alpha", records[0].Name)
+
+	// rig export shares the same read-only carve-out — it too must degrade.
+	var exportOut bytes.Buffer
+	require.NoError(t, runRigExport(cfgPath, &exportOut),
+		"rig export must degrade like rig ls on an unrelated validation error")
+	assert.Contains(t, exportOut.String(), "alpha")
+}
+
 // TestRigImport_Merge asserts that `rig import` merges a rigs: doc into cfg.Rigs
 // and persists via config.Write (audit).
 func TestRigImport_Merge(t *testing.T) {
