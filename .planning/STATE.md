@@ -2,15 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0.1
 milestone_name: Network & Dependency Security Hotfix
-status: Awaiting next milestone
-last_updated: "2026-06-04T16:39:54.195Z"
-last_activity: 2026-06-04 — Milestone v3.0.1 completed and archived
+status: milestone_complete
+last_updated: 2026-06-04T23:30:00.000Z
+last_activity: 2026-06-04
 progress:
-  total_phases: 16
-  completed_phases: 5
-  total_plans: 24
-  completed_plans: 26
-  percent: 31
+  total_phases: 17
+  completed_phases: 1
+  total_plans: 7
+  completed_plans: 3
+  percent: 6
+stopped_at: Milestone complete (Phase 26 was final phase)
 ---
 
 # Project State
@@ -24,16 +25,16 @@ See: .planning/PROJECT.md (updated 2026-05-30)
 
 ## Current Position
 
-Phase: Milestone v3.0.1 complete
-Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-06-04 — Milestone v3.0.1 completed and archived
+Phase: 26
+Plan: Not started
+Status: Milestone complete
+Last activity: 2026-06-04 - Completed quick task 260604-wpf: fix tailscale login --reauth flag error and raw-mode staircase output during apply
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 96 (v1.0.0)
+- Total plans completed: 101 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 
@@ -117,6 +118,8 @@ Last activity: 2026-06-04 — Milestone v3.0.1 completed and archived
 | Phase 25 P02 | 35m | 2 tasks | 18 files |
 | Phase 25 P04 | 25m | 2 tasks | 3 files |
 | Phase 25 P03 | 12m | 2 tasks | 6 files |
+| Phase 26 P02 | ~12m | 2 tasks | 2 files |
+| Phase 26 P03 | 7 | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -127,6 +130,7 @@ Last activity: 2026-06-04 — Milestone v3.0.1 completed and archived
 - v3.0.1 milestone continues with phases 24 (AUD-01/02, DOS-01) and 25 (CI-01) per REQUIREMENTS.md traceability — not yet added to roadmap.
 - Phase 23.1 inserted after Phase 23: Doctor probe-failure honesty — close WR-02/03/04/08 false-OK + double-emit gaps from Phase 23 code review (URGENT)
 - Phase 25 added: Close v3.0.1 debt: config.Validate-on-load, CLI bounded reads, AUD-02 concurrency
+- Phase 26 added: Init journey gating & first-run fixes — gated interactive wizard (stages pause + offer to run up/lock/enroll/doctor, new ACL stage) + 3 first-run bugs (openURL macOS probe, journey stage-2 hardcoded autoYes, pmset sleep parser). From user's real `abysslink init` transcript report.
 
 ### Decisions
 
@@ -208,6 +212,9 @@ Last activity: 2026-06-04 — Milestone v3.0.1 completed and archived
 - [Phase ?]: DOS-01 Part A (A11): limitedWriter(16MiB)+MaxBytesReader(256KiB)+readLimited(8MiB) close all three subprocess/daemon/REST attack surfaces with hard errors, no silent truncation
 - [Phase ?]: Phase 24-02 CI hardening
 - [Phase ?]: AUD-02 IncrementCounter exported; WriteAnchor unique tmp; verifyCounter helper extracted
+- [Phase ?]: applyDarwin uses RunInteractive for sudo pmset — consistent with behavior spec
+- [Phase ?]: journeyOfferRun non-TTY guard added inline — callers no longer need to gate on stdinIsTTY()
+- [Phase ?]: journeyStageACL delegates to journeyOfferRun — terminal-restore in one place
 
 ### Pending Todos
 
@@ -233,6 +240,7 @@ None.
 | 260530-8uz | fix(hardening) + fix(power): rewrite scan warnings to be honest about which findings abysslink auto-fixes — hardening firewall is report-only (manual fix paths provided); pmset auto-fix only runs when `power.closed_lid_ac: keep-awake` is set in abysslink.yaml | 2026-05-30 | 53c3199 | [260530-8uz-make-hardening-power-scan-warnings-hones](.planning/quick/260530-8uz-make-hardening-power-scan-warnings-hones/) |
 | 260530-nl4 | feat(claudecode): add `abysslink claudecode disable` command that strips the abysslink notify hooks from ~/.claude/settings.json on demand (Stop + Notification), preserving all other hooks; dry-run default + --apply, writes via internal/audit | 2026-05-30 | 76aa21b | [260530-nl4-add-abysslink-claudecode-disable-command](.planning/quick/260530-nl4-add-abysslink-claudecode-disable-command/) |
 | 260602-1nz | fix(init): gate ensureTailscaleAccount huh prompts behind headless flag — thread autoYes → journeyStages() → stage-1 closure → ensureTailscaleAccount(p, headless bool); both init --yes and init with non-TTY stdin now exit 0 | 2026-06-02 | 1af28a4 | [260602-1nz-fix-g1-non-tty-init-errors-on-huh-tty-op](.planning/quick/260602-1nz-fix-g1-non-tty-init-errors-on-huh-tty-op/) |
+| 260604-wpf | fix(tailscale)+fix(up): drop unsupported --reauth from `tailscale login` argv (caused "flag provided but not defined: -reauth" + usage dump); add interactiveActionsFromActions detection so apply animation is disabled when a `tailscale login` action is planned — prevents raw-mode staircase output from RunInteractive racing the Bubble Tea LiveTable | 2026-06-04 | eff135b | [260604-wpf-fix-tailscale-login-reauth-flag-error-an](.planning/quick/260604-wpf-fix-tailscale-login-reauth-flag-error-an/) |
 
 ## Deferred Items
 
@@ -262,10 +270,17 @@ None.
 | uat | phase-23 HUMAN-UAT 1 open scenario (same FileVault item) | Deferred |
 | quick-task | 5 stale quick-task slugs from v1/v2 era (260526-l51, 260530-8mf/8uz/nl4, 260602-1nz) — SUMMARYs exist on disk; only frontmatter status missing | Deferred (historical) |
 
+### Acknowledged at v3.0.1 re-close — Phase 26 fold-in (2026-06-04)
+
+| Category | Item | Status |
+|----------|------|--------|
+| uat | phase-26 26-UAT.md scenarios 2–6 never individually exercised (scenario 1 blocker → fixed by plan 26-03; re-verification 25/25 + 26-HUMAN-UAT.md passed cover the behaviours) | Acknowledged — covered by HUMAN-UAT pass |
+| verification | phase-26 26-VERIFICATION.md status human_needed (sudo credential-cache reuse, terminal restore, stage gates) | Acknowledged — 26-HUMAN-UAT.md complete, user approved 2026-06-04 |
+
 ## Session Continuity
 
-Last session: 2026-06-04T15:25:51.860Z
-Stopped at: Phase 25 context gathered
+Last session: 2026-06-04T23:30:00.000Z
+Stopped at: v3.0.1 re-closed with Phase 26 folded in (archives updated, phase dirs archived)
 Resume file: None
 
 ## Operator Next Steps

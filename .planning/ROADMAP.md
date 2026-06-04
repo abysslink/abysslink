@@ -42,8 +42,8 @@ Phases 16–21 (6 phases, 24 plans) — supply-chain hardening (cosign v3 / SLSA
 
 ## v3.0.1 — Network & Dependency Security Hotfix ✅ SHIPPED 2026-06-04
 
-Phases 22, 23, 23.1, 23.2, 24, 25 (6 phases, 26 plans) — closes the 2026-06-03 full security audit (11 agents): network/dependency lockdown (ntfy tailnet-only bind, NetBird https-only server_url, argv-injection guards, go1.26.4 / x/crypto v0.52.0 / CSRF→net/http.CrossOriginProtection), doctor/threat-model honesty (shared finding set, fail-closed disk encryption, nb-lock warning, minimum-versions table, probe-failure tri-state), tamper-evident audit hardening (HMAC-chained backups, anchor-every-append + keychain counter, cross-process flock, direction-aware verifyCounter), DoS bounding (limitio + WriteFilePath streaming), and a blocking govulncheck CI gate. All 20 requirements verified. Audit PASSED. Local tag `v3.0.1`. Deferred: Phase 23 FileVault mid-encryption `fdesetup` string literals (MED, real-hardware confirmation; fail-closed regardless).
-→ Archived: [`milestones/v3.0.1-ROADMAP.md`](milestones/v3.0.1-ROADMAP.md) · [`milestones/v3.0.1-REQUIREMENTS.md`](milestones/v3.0.1-REQUIREMENTS.md) · audit [`milestones/v3.0.1-MILESTONE-AUDIT.md`](milestones/v3.0.1-MILESTONE-AUDIT.md)
+Phases 22, 23, 23.1, 23.2, 24, 25, 26 (7 phases, 29 plans) — closes the 2026-06-03 full security audit (11 agents): network/dependency lockdown (ntfy tailnet-only bind, NetBird https-only server_url, argv-injection guards, go1.26.4 / x/crypto v0.52.0 / CSRF→net/http.CrossOriginProtection), doctor/threat-model honesty (shared finding set, fail-closed disk encryption, nb-lock warning, minimum-versions table, probe-failure tri-state), tamper-evident audit hardening (HMAC-chained backups, anchor-every-append + keychain counter, cross-process flock, direction-aware verifyCounter), DoS bounding (limitio + WriteFilePath streaming), and a blocking govulncheck CI gate. All 20 requirements verified. Audit PASSED. Phase 26 (post-ship fold-in, after pushed tag `v3.0.1`): gated 8-stage init journey + first-run fixes (openURL, Stage 2 autoYes, pmset parse, sudo RunInteractive, terminal restore) — verification 25/25, human UAT approved. Deferred: Phase 23 FileVault mid-encryption `fdesetup` string literals (MED, real-hardware confirmation; fail-closed regardless).
+→ Archived: [`milestones/v3.0.1-ROADMAP.md`](milestones/v3.0.1-ROADMAP.md) · [`milestones/v3.0.1-REQUIREMENTS.md`](milestones/v3.0.1-REQUIREMENTS.md) · audits [`milestones/v3.0.1-MILESTONE-AUDIT.md`](milestones/v3.0.1-MILESTONE-AUDIT.md) (phases 22–25) + [`milestones/v3.0.1-MILESTONE-AUDIT-phase-26.md`](milestones/v3.0.1-MILESTONE-AUDIT-phase-26.md) (incremental, supersedes)
 
 ---
 
@@ -285,6 +285,7 @@ Plans:
 **Wave 1** *(parallel)*
 
 Plans:
+
 - [x] 24-01-PLAN.md — AUD-01: BackupWithChain + RestoreGated (HMAC-bound backup + chain-walk restore gate)
 - [x] 24-02-PLAN.md — CI-01: harden-runner on lint.yml + test.yml + REQUIREMENTS.md:93 Phase 24 fix
 - [x] 24-04-PLAN.md — DOS-01 Part A: limitedWriter (exec.go) + MaxBytesReader (/notify) + readLimited on 15 NetBird seam sites
@@ -307,11 +308,35 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 25-00-PLAN.md — Wave 0: Test scaffolding (limitio_test, config_load_test, flock.go stub, signed_test additions)
 - [x] 25-01-PLAN.md — limitio leaf package + backend/limit.go wrapper + DOC-03 nb-lock findingFix + DOC-04 ntfy-version threatRows
 - [x] 25-02-PLAN.md — config.Load fail-closed (D-01) + 4 swallowing callers fixed + NET-03 argv defense-in-depth (D-03)
 - [x] 25-03-PLAN.md — DOS-01 CLI bounded reads: 4 sites (D-05) + WR-02 audit.WriteFilePath streaming (D-06)
 - [x] 25-04-PLAN.md — AUD-02 flock (D-07) + appendNoRefresh single anchor/counter refresh per WriteFile (D-08)
+
+### Phase 26: Init journey gating & first-run fixes
+
+**Goal:** `abysslink init` becomes a genuinely gated interactive wizard: each journey stage pauses for user confirmation, stages 3–6 offer to actually run `up --apply` / `lock init --apply` / `enroll phone` / `doctor` (instead of printing the command and scrolling past), a new ACL stage guides `abysslink acl push --apply`, and three first-run bugs are fixed — (1) openURL macOS probe uses `open --version` which exits 1 so the browser never opens yet "Browser opened" is printed (cmd_init.go:228-246, 200-206); (2) journey Stage 2 hardcodes autoYes=true (journey.go:113,116) so sudo mutations run unprompted and duplicate init RunE work; (3) checkACSleepDisabled pmset parser requires exactly-2-field "sleep 0" lines, but `pmset -g` emits trailing annotations, so `sudo pmset` re-runs every init (cmd_init.go:594-606). Headless paths (--yes/--json/non-TTY) stay non-blocking; --resume keeps working via journey-state.json. The documented "journey is NON-BLOCKING" design comment in journey.go and the DESIGN.md §6/§7 references must be reconciled.
+**Requirements**: TBD
+**Depends on:** Phase 25
+**Plans:** 3/3 plans complete
+Plans:
+**Wave 1**
+
+- [x] 26-01-PLAN.md — shell.LookPath + openURL B1 fix + checkACSleepDisabled B3 fix + regression tests
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 26-02-PLAN.md — B2 fix (Stage 2 no-dup) + 8-stage gated journey + per-stage gates + ACL stage + updated tests
+
+**Wave 3 (gap-closure)** *(blocked on Wave 2 completion)*
+
+- [x] 26-03-PLAN.md — sudo tty-wiring (RunInteractive for privileged calls) + power module already-disabled short-circuit + terminal state teardown before child spawn
+
+**Cross-cutting constraints:**
+
+- make lint test green
 
 ---
 
@@ -344,6 +369,11 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
 | 22. Network & Dependency Lockdown | 4/4 | Complete    | 2026-06-03 |
 | 23. Doctor Honesty & Coverage | 4/4 | Complete   | 2026-06-03 |
+| 23.1 Doctor Probe-Failure Honesty (INSERTED) | 4/4 | Complete | 2026-06-04 |
+| 23.2 Doctor Probe-Failure Honesty round 2 (INSERTED) | 2/2 | Complete | 2026-06-04 |
+| 24. v3.0.1 Security Closeout | 7/7 | Complete | 2026-06-04 |
+| 25. Close v3.0.1 Debt | 5/5 | Complete | 2026-06-04 |
+| 26. Init Journey Gating & First-Run Fixes | 3/3 | Complete | 2026-06-04 |
 
 ### Phase 23.1: Doctor probe-failure honesty — no false-OK on unknown or failed probes and no double-emit (INSERTED)
 

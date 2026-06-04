@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -65,7 +66,10 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 func (m *Module) detectDarwin(ctx context.Context) []modules.Finding {
 	var findings []modules.Finding
 
-	res, err := m.runner.Run(ctx, "pmset", "-g")
+	// Read the AC (custom) profile explicitly so the read agrees with the
+	// write target (`pmset -c …`). Bare `pmset -g` reports the *active* power
+	// source, which on battery is the wrong profile (CR-01).
+	res, err := m.runner.Run(ctx, "pmset", "-g", "custom")
 	if err != nil || res.ExitCode != 0 {
 		slog.Warn("power detect: pmset failed", "error", err)
 		return findings
@@ -76,7 +80,12 @@ func (m *Module) detectDarwin(ctx context.Context) []modules.Finding {
 
 	// When closed_lid_ac = keep-awake, we need sleep = 0 (never) while on AC.
 	if m.cfg.Power.ClosedLidAC == "keep-awake" {
-		if hasSleepEnabled(output) {
+		state, found := acSleepState(output)
+		// Warn when sleep is positively parsed as enabled (non-zero). Unknown
+		// output (found == false) is not flagged here — Detect is advisory and
+		// a parse failure should not produce a spurious warning; the apply path
+		// (WR-02) errs toward running the fix on unknown state instead.
+		if found && state != 0 {
 			findings = append(findings, modules.Finding{
 				Module:   m.Name(),
 				Check:    "sleep_disabled",
@@ -89,19 +98,44 @@ func (m *Module) detectDarwin(ctx context.Context) []modules.Finding {
 	return findings
 }
 
-// hasSleepEnabled returns true if pmset output indicates sleep != 0.
-func hasSleepEnabled(output string) bool {
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		// Lines look like "sleep 10" or "sleep 0".
-		if strings.HasPrefix(line, "sleep") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 && parts[1] != "0" {
-				return true
+// acSleepState parses the AC-profile sleep value from `pmset -g custom` output.
+// It returns (value, true) when a `sleep` line is positively parsed for the AC
+// power source, and (0, false) when no AC sleep value can be determined (empty
+// output, parse failure, or unexpected pmset format).
+//
+// `pmset -g custom` emits two blocks headed by "AC Power:" and "Battery Power:".
+// Only the AC block is consulted so a non-zero battery sleep value is never
+// mistaken for AC (CR-01). When no power-source header is present (e.g. legacy
+// `pmset -g` output or a test fixture), every sleep line is considered so the
+// parser degrades gracefully.
+func acSleepState(output string) (int, bool) {
+	inAC := true // default: no header seen yet → treat all lines as in-scope
+	sawHeader := false
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, "AC Power"):
+			inAC, sawHeader = true, true
+			continue
+		case strings.HasPrefix(line, "Battery Power"):
+			inAC, sawHeader = false, true
+			continue
+		}
+		if sawHeader && !inAC {
+			continue
+		}
+		if !strings.HasPrefix(line, "sleep") {
+			continue
+		}
+		parts := strings.Fields(line)
+		// Lines look like "sleep 10" or "sleep  0 (sleep prevented by powerd)".
+		if len(parts) >= 2 && parts[0] == "sleep" {
+			if v, err := strconv.Atoi(parts[1]); err == nil {
+				return v, true
 			}
 		}
 	}
-	return false
+	return 0, false
 }
 
 // Plan computes actions needed.
@@ -141,13 +175,26 @@ func (m *Module) applyDarwin(ctx context.Context) error {
 	if m.cfg.Power.ClosedLidAC != "keep-awake" {
 		return nil
 	}
-	slog.Info("power apply: setting pmset -c sleep 0 disksleep 0")
-	res, err := m.runner.Run(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0")
-	if err != nil {
-		return fmt.Errorf("power apply: pmset: %w", err)
+
+	// Short-circuit: probe the AC sleep state before invoking sudo. When init
+	// already ran maybeFixSleep (via runSecurityFixes), sleep is already 0 —
+	// re-running sudo pmset would prompt for a password unnecessarily. Read the
+	// AC (custom) profile so the probe agrees with the `pmset -c` write target
+	// (CR-01). Only short-circuit on a positively-parsed `sleep 0`; on unknown
+	// output (parse failure / unexpected format) fall through to the fix rather
+	// than assuming sleep is already disabled (WR-02).
+	if res, err := m.runner.Run(ctx, "pmset", "-g", "custom"); err == nil && res.ExitCode == 0 {
+		if state, found := acSleepState(res.Stdout); found && state == 0 {
+			slog.Debug("power apply: sleep already disabled — skipping pmset")
+			return nil
+		}
 	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("power apply: pmset exited %d: %s", res.ExitCode, res.Stderr)
+
+	slog.Info("power apply: setting pmset -c sleep 0 disksleep 0")
+	// RunInteractive lets sudo reach the real tty so macOS's tty-keyed credential
+	// cache is reusable across privileged calls within the same init session.
+	if err := m.runner.RunInteractive(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"); err != nil {
+		return fmt.Errorf("power apply: pmset: %w", err)
 	}
 	return nil
 }

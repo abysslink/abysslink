@@ -98,14 +98,14 @@ func TestApplyAnimationEnabled_DisabledWhenSudoPresent(t *testing.T) {
 	sudo := []string{"power              set pmset hibernation mode"}
 	// Even with jsonOut=false (the case where animation would otherwise be
 	// considered), the presence of any sudo line forces the plain path.
-	assert.False(t, applyAnimationEnabled(false, sudo),
+	assert.False(t, applyAnimationEnabled(false, sudo, nil),
 		"apply animation must be disabled whenever sudo is required")
 }
 
 // TestApplyAnimationEnabled_DisabledInJSONMode asserts JSON mode always wins —
 // even with no sudo lines we never animate when emitting structured output.
 func TestApplyAnimationEnabled_DisabledInJSONMode(t *testing.T) {
-	assert.False(t, applyAnimationEnabled(true, nil),
+	assert.False(t, applyAnimationEnabled(true, nil, nil),
 		"apply animation must be disabled in JSON mode")
 }
 
@@ -116,7 +116,7 @@ func TestApplyAnimationEnabled_DisabledInJSONMode(t *testing.T) {
 func TestApplyAnimationEnabled_DisabledWhenNotTTY(t *testing.T) {
 	// Headless test environment: animationEnabled(false) returns false,
 	// so applyAnimationEnabled returns false too.
-	assert.False(t, applyAnimationEnabled(false, nil),
+	assert.False(t, applyAnimationEnabled(false, nil, nil),
 		"apply animation requires both no-sudo AND animationEnabled()=true")
 }
 
@@ -133,7 +133,7 @@ func TestApplyAnimationEnabled_PerSudoKeyword(t *testing.T) {
 		sudo := sudoActionsFromActions([]modules.Action{action})
 		assert.NotEmpty(t, sudo,
 			"sudoActionsFromActions must classify %q as sudo", action.Description)
-		assert.False(t, applyAnimationEnabled(false, sudo),
+		assert.False(t, applyAnimationEnabled(false, sudo, nil),
 			"apply animation must stay disabled for %q", action.Description)
 	}
 }
