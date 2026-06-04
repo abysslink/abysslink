@@ -33,6 +33,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/limitio"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
@@ -1030,7 +1031,11 @@ func rotateAPIKeyREST(ctx context.Context, baseURL, oldKey string, kc secrets.Ke
 	var result struct {
 		APIKey string `json:"apiKey"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	data, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("rotate API key: read response: %w", err)
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
 		return "", fmt.Errorf("rotate API key: decode response: %w", err)
 	}
 	if result.APIKey == "" {
@@ -1074,7 +1079,11 @@ func ensureHeadscaleUser(ctx context.Context, baseURL, apiKey, userName string) 
 	}
 	// A 200 body that fails to decode means we cannot reliably tell whether the
 	// user exists; returning an error here avoids a spurious recreate attempt.
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	userData, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+	if err != nil {
+		return fmt.Errorf("user-ensure GET: read response: %w", err)
+	}
+	if err := json.Unmarshal(userData, &result); err != nil {
 		return fmt.Errorf("user-ensure GET: decode user list: %w", err)
 	}
 	for _, u := range result.Users {
@@ -1144,7 +1153,11 @@ func mintPreAuthKey(ctx context.Context, baseURL, apiKey, userName string, expir
 			Key string `json:"key"`
 		} `json:"preAuthKey"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	pakData, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+	if err != nil {
+		return "", fmt.Errorf("mint pre-auth key: read response: %w", err)
+	}
+	if err := json.Unmarshal(pakData, &result); err != nil {
 		return "", fmt.Errorf("mint pre-auth key: decode response: %w", err)
 	}
 	if result.PreAuthKey.Key == "" {

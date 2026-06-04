@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -33,6 +32,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/limitio"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
@@ -507,7 +507,10 @@ func runNetBirdZitadelProbe(ctx context.Context, issuerBase string, p Printer) e
 		printerInfo(p, styleSuccess.Render("  [SC-2] ZITADEL CVE-2025-10678 gate: default admin credentials rejected (PASS)"))
 		return nil
 	case http.StatusOK:
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := limitio.ReadLimited(resp.Body, limitio.MaxBackendBody)
+		if err != nil {
+			return fmt.Errorf("ZITADEL CVE probe: read response: %w", err)
+		}
 		var result struct {
 			Result []any `json:"result"`
 		}
