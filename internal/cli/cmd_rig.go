@@ -17,8 +17,10 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 
@@ -124,9 +126,20 @@ func newRigImportCmd() *cobra.Command {
 // runRigLs loads cfg.Rigs and renders them as a human table or --json array.
 // jsonOut selects the format; out receives the output.
 func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
-	cfg, err := config.Load(cfgPath)
+	// WR-07: `rig ls` is read-only (it only renders cfg.Rigs, never feeds a value
+	// to argv or a mutation), so it must not hard-fail on a validation error in an
+	// unrelated stanza now that config.Load fails closed. A missing config
+	// degrades to defaults (empty rig list); a validation error is logged but the
+	// parsed rigs are still listed.
+	cfg, err := config.LoadForRead(cfgPath)
 	if err != nil {
-		return fmt.Errorf("rig ls: load config: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			cfg = config.Defaults()
+		} else if cfg != nil {
+			slog.Warn("rig ls: config has a validation error; listing rigs anyway (read-only)", "err", err)
+		} else {
+			return fmt.Errorf("rig ls: load config: %w", err)
+		}
 	}
 
 	records := make([]rigLsRecord, 0, len(cfg.Rigs))
@@ -172,9 +185,18 @@ func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
 // runRigExport marshals cfg.Rigs as YAML (rigs: section only) to out.
 // Secrets stay in the keychain (D-FS-02) — nothing secret is emitted.
 func runRigExport(cfgPath string, out io.Writer) error {
-	cfg, err := config.Load(cfgPath)
+	// WR-07: `rig export` is read-only (emits only cfg.Rigs as YAML, no secrets,
+	// no argv), so it degrades rather than hard-failing on a validation error in
+	// an unrelated stanza. A missing config exports an empty rigs list.
+	cfg, err := config.LoadForRead(cfgPath)
 	if err != nil {
-		return fmt.Errorf("rig export: load config: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			cfg = config.Defaults()
+		} else if cfg != nil {
+			slog.Warn("rig export: config has a validation error; exporting rigs anyway (read-only)", "err", err)
+		} else {
+			return fmt.Errorf("rig export: load config: %w", err)
+		}
 	}
 
 	wrapper := rigExportWrapper{Rigs: cfg.Rigs}
@@ -240,10 +262,18 @@ func runRigImport(cfgPath, importPath string, apply bool, out io.Writer) error {
 		return fmt.Errorf("rig import: parse %s: %w", importPath, err)
 	}
 
-	// Load current config.
+	// Load current config. rig import MUTATES config and validates the merged
+	// result before writing, so it keeps the fail-closed config.Load — a config
+	// that already fails validation must not be silently rewritten. WR-07: a
+	// MISSING config, however, degrades to defaults (matches loadCmdContext) so a
+	// fresh install can import its first rig.
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		return fmt.Errorf("rig import: load config: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			cfg = config.Defaults()
+		} else {
+			return fmt.Errorf("rig import: load config: %w", err)
+		}
 	}
 
 	// Validate each incoming rig before mutating state.

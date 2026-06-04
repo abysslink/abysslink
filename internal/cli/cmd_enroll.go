@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -108,9 +109,18 @@ func enrollRig(ctx context.Context, opts enrollRigOpts) error {
 		return fmt.Errorf("enroll rig: invalid rig name %q (must match ^[a-z0-9-]{1,63}$)", opts.name)
 	}
 
+	// enroll rig MUTATES config (enrollRigWriteConfig) and derives an ntfy topic
+	// from config values, so it keeps the fail-closed config.Load — an
+	// already-invalid config must not be silently rewritten. WR-07: a MISSING
+	// config degrades to defaults so the first rig can be enrolled on a fresh
+	// install (matches loadCmdContext / rig import).
 	cfg, err := config.Load(opts.cfgPath)
 	if err != nil {
-		return fmt.Errorf("config load: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			cfg = config.Defaults()
+		} else {
+			return fmt.Errorf("config load: %w", err)
+		}
 	}
 
 	rigSvc := fleet.RigService(opts.name)
