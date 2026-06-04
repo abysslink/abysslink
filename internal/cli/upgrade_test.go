@@ -16,6 +16,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -87,7 +88,7 @@ func TestAtomicReplace(t *testing.T) {
 	require.NoError(t, os.WriteFile(dst, []byte("old"), 0o600))
 	require.NoError(t, os.WriteFile(src, []byte("new"), 0o600))
 
-	require.NoError(t, atomicReplace(dst, src))
+	require.NoError(t, atomicReplace(context.Background(), dst, src))
 
 	got, err := os.ReadFile(dst)
 	require.NoError(t, err)
