@@ -562,7 +562,10 @@ func maybeFixFirewall(ctx context.Context, p Printer, runner shell.Runner, autoY
 		return nil
 	}
 	printerInfo(p, fmt.Sprintf("  %s  Enabling firewall...", iconSpinStr()))
-	if _, err := runner.Run(ctx, "sudo", fwBin, "--setglobalstate", "on"); err != nil {
+	// RunInteractive lets sudo reach the real tty so macOS's tty-keyed credential
+	// cache can reuse the timestamp from the earlier sudo call in maybeFixSleep
+	// (or vice versa) — avoids a second password prompt within the same init run.
+	if err := runner.RunInteractive(ctx, "sudo", fwBin, "--setglobalstate", "on"); err != nil {
 		return fmt.Errorf("init: enable firewall: %w", err)
 	}
 	printerInfo(p, fmt.Sprintf("  %s  %s  enabled", iconDoneStr(), nameCol))
@@ -592,7 +595,10 @@ func maybeFixSleep(ctx context.Context, p Printer, runner shell.Runner, autoYes 
 		return nil
 	}
 	printerInfo(p, fmt.Sprintf("  %s  Updating power settings...", iconSpinStr()))
-	if _, err := runner.Run(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"); err != nil {
+	// RunInteractive exposes stdin to the real tty so sudo's tty-keyed credential
+	// cache is shared with the maybeFixFirewall sudo call above — single password
+	// prompt for both privileged operations in the same init run.
+	if err := runner.RunInteractive(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"); err != nil {
 		return fmt.Errorf("init: disable AC sleep: %w", err)
 	}
 	printerInfo(p, fmt.Sprintf("  %s  %s  disabled", iconDoneStr(), nameCol))

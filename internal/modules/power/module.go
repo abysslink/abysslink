@@ -141,13 +141,20 @@ func (m *Module) applyDarwin(ctx context.Context) error {
 	if m.cfg.Power.ClosedLidAC != "keep-awake" {
 		return nil
 	}
-	slog.Info("power apply: setting pmset -c sleep 0 disksleep 0")
-	res, err := m.runner.Run(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0")
-	if err != nil {
-		return fmt.Errorf("power apply: pmset: %w", err)
+
+	// Short-circuit: probe current sleep state before invoking sudo. When init
+	// already ran maybeFixSleep (via runSecurityFixes), sleep is already 0 —
+	// re-running sudo pmset would prompt for a password unnecessarily.
+	if res, err := m.runner.Run(ctx, "pmset", "-g"); err == nil && !hasSleepEnabled(res.Stdout) {
+		slog.Debug("power apply: sleep already disabled — skipping pmset")
+		return nil
 	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("power apply: pmset exited %d: %s", res.ExitCode, res.Stderr)
+
+	slog.Info("power apply: setting pmset -c sleep 0 disksleep 0")
+	// RunInteractive lets sudo reach the real tty so macOS's tty-keyed credential
+	// cache is reusable across privileged calls within the same init session.
+	if err := m.runner.RunInteractive(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"); err != nil {
+		return fmt.Errorf("power apply: pmset: %w", err)
 	}
 	return nil
 }
