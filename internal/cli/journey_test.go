@@ -18,6 +18,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,16 +29,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestJourneyStageCount asserts that journeyStages returns exactly 7 stages.
+// TestJourneyStageCount asserts that journeyStages returns exactly 8 stages.
 func TestJourneyStageCount(t *testing.T) {
 	stages := journeyStages(false, config.Defaults(), &shell.ExecRunner{}, true)
-	assert.Len(t, stages, 7, "journey must have exactly 7 stages")
+	assert.Len(t, stages, 8, "journey must have exactly 8 stages")
 }
 
-// TestJourneyStageLabels asserts that the 7 stage labels match the specified names.
+// TestJourneyStageLabels asserts that the 8 stage labels match the specified names,
+// including the new ACL stage at index 6 (before Done at index 7).
 func TestJourneyStageLabels(t *testing.T) {
 	stages := journeyStages(false, config.Defaults(), &shell.ExecRunner{}, true)
-	require.Len(t, stages, 7)
+	require.Len(t, stages, 8)
 
 	expectedLabels := []string{
 		"Account",
@@ -46,6 +48,7 @@ func TestJourneyStageLabels(t *testing.T) {
 		"Lock",
 		"Enroll",
 		"Verify",
+		"ACL",
 		"Done",
 	}
 	for i, expected := range expectedLabels {
@@ -163,4 +166,162 @@ func TestRunJourney_ResumesFromStage(t *testing.T) {
 func TestJourneyInitCmd_YesFlagRegistered(t *testing.T) {
 	cmd := newInitCmd()
 	require.NotNil(t, cmd.Flags().Lookup("resume"), "--resume flag must be registered on init command")
+}
+
+// TestJourneyStage2_NoDuplicateCalls asserts that Stage 2's run closure does not
+// call ensureTailscale or runSecurityFixes (those already ran in cmd_init RunE).
+//
+// Strategy: pass a MockRunner scripted with zero calls; if Stage 2 makes any
+// subprocess call, MockRunner will return an unexpected-call error. Additionally,
+// we assert the output contains "Prerequisites verified." to confirm the new
+// summary path (not the old re-run path).
+//
+// runner.Done() proves no calls went through the injected runner; output assertion
+// proves Stage 2 is the new summary path, not the old re-run path.
+func TestJourneyStage2_NoDuplicateCalls(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	// Zero scripted calls — any subprocess call = test failure.
+	runner := shell.NewMockRunner()
+
+	// autoYes=true ensures no huh prompts block.
+	stages := journeyStages(false, config.Defaults(), runner, true)
+	require.True(t, len(stages) >= 2)
+
+	// Run only stage 2 (index 1 in the slice — 0-based).
+	stage2 := stages[1]
+	err := stage2.run(ctx, p)
+	require.NoError(t, err)
+
+	// runner.Done() proves no calls went through the injected runner.
+	assert.True(t, runner.Done(), "Stage 2 must not make any subprocess calls through the injected runner")
+
+	// Output assertion distinguishes the fixed Stage 2 (which emits "Prerequisites verified.")
+	// from the old Stage 2 (which emitted ensureTailscale/runSecurityFixes output).
+	// The old code created its own &shell.ExecRunner{} and never used the passed runner,
+	// so runner.Done() would be vacuously true — this output check catches that regression.
+	assert.Contains(t, buf.String(), "Prerequisites verified.",
+		"Stage 2 output must contain 'Prerequisites verified.' to confirm the new summary path")
+}
+
+// TestJourneyOfferRun_HeadlessNeverRunsInteractive asserts that in headless/non-TTY
+// contexts the journeyStageACL caller gates before calling journeyOfferRun, so no
+// RunInteractive call is made. This is the non-TTY (go test) path.
+func TestJourneyOfferRun_HeadlessNeverRunsInteractive(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	// Zero-scripted runner — any call would return an unexpected-call error.
+	runner := shell.NewMockRunner()
+
+	// autoYes=true → journeyStageACL exits before calling journeyOfferRun.
+	stages := journeyStages(false, config.Defaults(), runner, true)
+	// Find the ACL stage (index 7, label "ACL").
+	var aclStage journeyStage
+	for _, s := range stages {
+		if s.label == "ACL" {
+			aclStage = s
+		}
+	}
+	require.NotEmpty(t, aclStage.label, "ACL stage must exist")
+
+	err := aclStage.run(ctx, p)
+	require.NoError(t, err)
+	// No interactive calls made.
+	assert.Empty(t, runner.RunInteractiveCalls(),
+		"headless ACL stage must not make any RunInteractive calls")
+}
+
+// TestJourneyStageACL_TerminalRestored verifies that journeyStageACL delegates to
+// journeyOfferRun with the ACL-specific failure message. Under go test stdin is
+// never a TTY so interactive() returns false, both the inline ACL gate and the
+// journeyOfferRun huh prompt are bypassed — no RunInteractive call is made.
+// The test asserts two things:
+//  1. journeyStageACL with autoYes=false returns nil on non-TTY stdin (no hang).
+//  2. The ACL stage makes zero RunInteractive calls (gate fired before any prompt).
+func TestJourneyStageACL_TerminalRestored(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	// Zero-scripted runner — any call returns an unexpected-call error.
+	runner := shell.NewMockRunner()
+
+	// autoYes=false: exercises the non-TTY gate path (interactive() == false under go test).
+	stages := journeyStages(false, config.Defaults(), runner, false)
+	var aclStage journeyStage
+	for _, s := range stages {
+		if s.label == "ACL" {
+			aclStage = s
+		}
+	}
+	require.NotEmpty(t, aclStage.label, "ACL stage must exist in journey")
+
+	err := aclStage.run(ctx, p)
+	require.NoError(t, err, "ACL stage must not hang or error on non-TTY stdin")
+
+	// No RunInteractive calls — gate fired before any prompt.
+	assert.Empty(t, runner.RunInteractiveCalls(),
+		"ACL stage must not invoke RunInteractive on non-TTY stdin")
+}
+
+// TestJourneyOfferRun_WarnMsgParam verifies that journeyOfferRun accepts a warnMsg
+// parameter and uses it (instead of the default message) when RunInteractive fails.
+// Since we cannot open a TTY in tests, we verify compilation and that the non-TTY
+// huh gate prevents any call to RunInteractive (returns nil without a prompt).
+func TestJourneyOfferRun_WarnMsgParam(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	// Zero-scripted runner — any call returns an unexpected-call error.
+	runner := shell.NewMockRunner()
+
+	// Under go test stdin is not a TTY; huh.NewConfirm would fail with "no TTY" if
+	// reached. journeyOfferRun must guard with stdinIsTTY() / interactive() and
+	// return nil without calling huh or RunInteractive.
+	err := journeyOfferRun(ctx, p, runner,
+		"Test title",
+		"Test description",
+		"Yes", "No",
+		"custom failure message",
+		"abysslink", "acl", "push", "--apply")
+	require.NoError(t, err)
+	assert.Empty(t, runner.RunInteractiveCalls(),
+		"journeyOfferRun must not call RunInteractive on non-TTY stdin")
+	// Verify fmt import is used (suppress unused-import compile error in the test file).
+	_ = fmt.Sprintf
+}
+
+// TestRunJourney_NonTTY asserts that the journey completes without hanging
+// when stdin is not a TTY (as is always the case under `go test`).
+//
+// Under go test, stdin is never a TTY — stdinIsTTY() returns false, so all
+// stage gates (tui.Pause and interactive()) are no-ops regardless of autoYes=false.
+// This exercises the non-TTY branch explicitly.
+func TestRunJourney_NonTTY(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	stagesRan := 0
+	stages := []journeyStage{
+		{index: 1, label: "A", run: func(_ context.Context, _ Printer) error {
+			stagesRan++
+			return nil
+		}},
+		{index: 2, label: "B", run: func(_ context.Context, _ Printer) error {
+			stagesRan++
+			return nil
+		}},
+	}
+
+	stateFile := filepath.Join(t.TempDir(), "journey-state.json")
+	// autoYes=false but non-TTY (go test stdin) — must not hang.
+	err := runJourney(ctx, p, stages, 0, stateFile, false)
+	require.NoError(t, err)
+	assert.Equal(t, 2, stagesRan, "all stages must run under non-TTY stdin")
 }

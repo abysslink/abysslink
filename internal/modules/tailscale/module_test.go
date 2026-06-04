@@ -365,3 +365,38 @@ func TestVerifyCallsOnlyCheckNoPublicExposure(t *testing.T) {
 	}
 	assert.True(t, funnelOK, "expected SeverityOK funnel finding from Verify, got %+v", findings)
 }
+
+// TestEnsureConnected_NeedsLogin asserts that when needsLogin=true, ensureConnected
+// calls RunInteractive with argv ["tailscale", "login"] and no additional flags.
+// Bug 1 fix: --reauth must NOT appear in the argv.
+func TestEnsureConnected_NeedsLogin(t *testing.T) {
+	mr := shell.NewMockRunner(shell.Call{IsInteractive: true, Result: shell.Result{ExitCode: 0}})
+	m := New(modules.Deps{Runner: mr, Cfg: config.Defaults()})
+
+	err := m.ensureConnected(context.Background(), true, false)
+	require.NoError(t, err)
+
+	calls := mr.RunInteractiveCalls()
+	require.Len(t, calls, 1, "expected exactly one RunInteractive call for needsLogin=true")
+	assert.Equal(t, []string{"tailscale", "login"}, calls[0],
+		"ensureConnected must call tailscale login with no extra flags (no --reauth)")
+}
+
+// TestEnsureConnected_NotRunning asserts that when notRunning=true, ensureConnected
+// uses Run (not RunInteractive) and calls "tailscale up" with no flags.
+func TestEnsureConnected_NotRunning(t *testing.T) {
+	mr := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 0}})
+	m := New(modules.Deps{Runner: mr, Cfg: config.Defaults()})
+
+	err := m.ensureConnected(context.Background(), false, true)
+	require.NoError(t, err)
+
+	interactiveCalls := mr.RunInteractiveCalls()
+	assert.Len(t, interactiveCalls, 0,
+		"notRunning path must use Run, not RunInteractive")
+
+	runCalls := mr.RunCalls()
+	require.Len(t, runCalls, 1, "expected exactly one Run call for notRunning=true")
+	assert.Equal(t, []string{"tailscale", "up"}, runCalls[0],
+		"notRunning path must call tailscale up")
+}

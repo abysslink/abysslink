@@ -166,7 +166,8 @@ func newInitCmd() *cobra.Command {
 // If the user doesn't have an account yet, we show the signup URL and wait.
 // When headless is true (--yes flag or non-TTY stdin), the function prints the
 // informational signup-URL note and returns nil immediately — no huh, no /dev/tty.
-func ensureTailscaleAccount(p Printer, headless bool) error {
+// runner is used to open the browser URL if the user requests it.
+func ensureTailscaleAccount(p Printer, runner shell.Runner, headless bool) error {
 	const signupURL = "https://login.tailscale.com/start"
 
 	printerInfo(p, "  "+styleBold.Render("Tailscale account"))
@@ -198,7 +199,7 @@ func ensureTailscaleAccount(p Printer, headless bool) error {
 	}
 
 	if !hasAccount {
-		if err := openURL(signupURL); err != nil {
+		if err := openURL(runner, signupURL); err != nil {
 			printerInfo(p, "  "+iconWarnStr()+"  Could not open browser — visit manually:")
 			printerInfo(p, "  "+styleCode.Render(signupURL))
 		} else {
@@ -224,25 +225,33 @@ func ensureTailscaleAccount(p Printer, headless bool) error {
 	return nil
 }
 
-// openURL tries to open a URL in the system browser (best-effort, non-fatal).
-func openURL(url string) error {
-	runner := &shell.ExecRunner{}
+// openURL opens url in the system browser. Returns an error if no browser opener
+// is found on PATH or if the opener exits non-zero.
+// runner is used for the actual exec so tests can inject a mock (shell.LookPath is
+// a PATH probe that does not go through the runner).
+func openURL(runner shell.Runner, url string) error {
 	ctx := context.Background()
 	switch {
-	case isCommandAvailable(ctx, runner, "open"):
-		_, err := runner.Run(ctx, "open", url) // macOS
-		return err
-	case isCommandAvailable(ctx, runner, "xdg-open"):
-		_, err := runner.Run(ctx, "xdg-open", url) // Linux
-		return err
+	case shell.LookPath("open"):
+		res, err := runner.Run(ctx, "open", url) // macOS
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("open %s: exit %d", url, res.ExitCode)
+		}
+		return nil
+	case shell.LookPath("xdg-open"):
+		res, err := runner.Run(ctx, "xdg-open", url) // Linux
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("xdg-open %s: exit %d", url, res.ExitCode)
+		}
+		return nil
 	}
-	return nil
-}
-
-// isCommandAvailable returns true if the binary is on PATH.
-func isCommandAvailable(ctx context.Context, runner shell.Runner, binary string) bool {
-	_, err := runner.Run(ctx, binary, "--version")
-	return err == nil
+	return fmt.Errorf("no browser opener found (tried: open, xdg-open)")
 }
 
 // runToolCheck prints the prerequisites table and returns results keyed by tool name.
@@ -553,7 +562,10 @@ func maybeFixFirewall(ctx context.Context, p Printer, runner shell.Runner, autoY
 		return nil
 	}
 	printerInfo(p, fmt.Sprintf("  %s  Enabling firewall...", iconSpinStr()))
-	if _, err := runner.Run(ctx, "sudo", fwBin, "--setglobalstate", "on"); err != nil {
+	// RunInteractive lets sudo reach the real tty so macOS's tty-keyed credential
+	// cache can reuse the timestamp from the earlier sudo call in maybeFixSleep
+	// (or vice versa) — avoids a second password prompt within the same init run.
+	if err := runner.RunInteractive(ctx, "sudo", fwBin, "--setglobalstate", "on"); err != nil {
 		return fmt.Errorf("init: enable firewall: %w", err)
 	}
 	printerInfo(p, fmt.Sprintf("  %s  %s  enabled", iconDoneStr(), nameCol))
@@ -583,22 +595,47 @@ func maybeFixSleep(ctx context.Context, p Printer, runner shell.Runner, autoYes 
 		return nil
 	}
 	printerInfo(p, fmt.Sprintf("  %s  Updating power settings...", iconSpinStr()))
-	if _, err := runner.Run(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"); err != nil {
+	// RunInteractive exposes stdin to the real tty so sudo's tty-keyed credential
+	// cache is shared with the maybeFixFirewall sudo call above — single password
+	// prompt for both privileged operations in the same init run.
+	if err := runner.RunInteractive(ctx, "sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"); err != nil {
 		return fmt.Errorf("init: disable AC sleep: %w", err)
 	}
 	printerInfo(p, fmt.Sprintf("  %s  %s  disabled", iconDoneStr(), nameCol))
 	return nil
 }
 
-// checkACSleepDisabled returns true when pmset reports sleep=0 for current power source.
+// checkACSleepDisabled returns true when pmset reports sleep=0 for the AC power
+// source. It reads `pmset -g custom` (the AC/custom profile) rather than bare
+// `pmset -g` (the *active* power source) so the probe agrees with the AC profile
+// that maybeFixSleep mutates via `pmset -c …`; on battery the two never agree
+// otherwise (CR-01). A non-zero pmset exit is treated as "not disabled" to mirror
+// the power module's exit-code check and avoid a false positive (WR-03).
 func checkACSleepDisabled(ctx context.Context, runner shell.Runner) bool {
-	res, err := runner.Run(ctx, "pmset", "-g")
-	if err != nil {
+	res, err := runner.Run(ctx, "pmset", "-g", "custom")
+	if err != nil || res.ExitCode != 0 {
 		return false
 	}
-	for _, line := range strings.Split(res.Stdout, "\n") {
+	// pmset -g custom emits "AC Power:" and "Battery Power:" blocks; only the AC
+	// block is consulted so a non-zero battery sleep is never read as AC. When no
+	// power-source header is present (legacy output / test fixture), all lines are
+	// considered so the parser degrades gracefully.
+	inAC, sawHeader := true, false
+	for _, raw := range strings.Split(res.Stdout, "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, "AC Power"):
+			inAC, sawHeader = true, true
+			continue
+		case strings.HasPrefix(line, "Battery Power"):
+			inAC, sawHeader = false, true
+			continue
+		}
+		if sawHeader && !inAC {
+			continue
+		}
 		fields := strings.Fields(line)
-		if len(fields) == 2 && fields[0] == "sleep" && fields[1] == "0" {
+		if len(fields) >= 2 && fields[0] == "sleep" && fields[1] == "0" {
 			return true
 		}
 	}

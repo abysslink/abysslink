@@ -164,3 +164,15 @@ func (r *ExecRunner) RunWithStdin(ctx context.Context, stdin io.Reader, name str
 		ExitCode: 0,
 	}, nil
 }
+
+// LookPath reports whether binary is available on PATH.
+// It uses exec.LookPath which only consults the filesystem — no subprocess is spawned.
+// Use this instead of running `<binary> --version` to probe availability;
+// ExecRunner.Run normalises exec.ExitError to (Result, nil) which makes
+// exit-code-based availability checks unreliable (see B1 in Phase 26 notes).
+// LookPath is a package-level function, not a Runner method, because it is a
+// filesystem probe rather than a subprocess execution.
+func LookPath(binary string) bool {
+	_, err := exec.LookPath(binary)
+	return err == nil
+}

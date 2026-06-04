@@ -16,26 +16,90 @@
 package power
 
 import (
+	"context"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestHasSleepEnabled(t *testing.T) {
+// TestApplyDarwin_AlreadyDisabledShortCircuit asserts that applyDarwin makes zero
+// RunInteractive calls (does not invoke sudo pmset) when pmset -g already shows
+// sleep=0. The short-circuit avoids a redundant sudo password prompt when init
+// already disabled sleep in runSecurityFixes.
+func TestApplyDarwin_AlreadyDisabledShortCircuit(t *testing.T) {
+	// pmset -g → sleep is already 0 (sleep prevented by powerd)
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: " sleep  0 (sleep prevented by powerd)\n", ExitCode: 0}},
+	)
+	cfg := config.Defaults()
+	cfg.Power.ClosedLidAC = "keep-awake"
+	m := New(modules.Deps{Runner: runner, Cfg: cfg})
+
+	err := m.applyDarwin(context.Background())
+	require.NoError(t, err)
+
+	// No RunInteractive calls — sudo pmset must not have been invoked.
+	assert.Empty(t, runner.RunInteractiveCalls(),
+		"applyDarwin must not invoke sudo pmset when sleep is already disabled")
+}
+
+// TestApplyDarwin_SleepEnabledRunsSudo asserts that applyDarwin invokes
+// RunInteractive with the sudo pmset argv when sleep is enabled.
+func TestApplyDarwin_SleepEnabledRunsSudo(t *testing.T) {
+	// Call 1: pmset -g → sleep enabled (non-zero)
+	// Call 2: sudo pmset → success
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: " sleep         10\n", ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+	cfg := config.Defaults()
+	cfg.Power.ClosedLidAC = "keep-awake"
+	m := New(modules.Deps{Runner: runner, Cfg: cfg})
+
+	err := m.applyDarwin(context.Background())
+	require.NoError(t, err)
+
+	interactive := runner.RunInteractiveCalls()
+	require.Len(t, interactive, 1, "expected exactly one RunInteractive call for sudo pmset")
+	assert.Equal(t, []string{"sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"}, interactive[0])
+}
+
+func TestACSleepState(t *testing.T) {
 	cases := []struct {
-		name   string
-		output string
-		want   bool
+		name      string
+		output    string
+		wantValue int
+		wantFound bool
 	}{
-		{"sleep_zero", " sleep         0\n", false},
-		{"sleep_ten", " sleep         10\n", true},
-		{"disksleep_only", " disksleep     10\n", false},
-		{"empty", "", false},
-		{"no_sleep_line", "autopoweroffdelay 28800\n", false},
+		{"sleep_zero", " sleep         0\n", 0, true},
+		{"sleep_ten", " sleep         10\n", 10, true},
+		{"annotated_zero", " sleep  0 (sleep prevented by powerd)\n", 0, true},
+		{"disksleep_only", " disksleep     10\n", 0, false},
+		{"empty", "", 0, false},
+		{"no_sleep_line", "autopoweroffdelay 28800\n", 0, false},
+		// pmset -g custom emits both blocks; only the AC value must be read.
+		{
+			"ac_zero_battery_ten",
+			"AC Power:\n sleep 0\nBattery Power:\n sleep 10\n",
+			0, true,
+		},
+		{
+			"ac_ten_battery_zero",
+			"AC Power:\n sleep 10\nBattery Power:\n sleep 0\n",
+			10, true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, hasSleepEnabled(tc.output))
+			value, found := acSleepState(tc.output)
+			assert.Equal(t, tc.wantFound, found)
+			if found {
+				assert.Equal(t, tc.wantValue, value)
+			}
 		})
 	}
 }
