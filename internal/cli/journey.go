@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 
 	"github.com/charmbracelet/huh"
+	cterm "github.com/charmbracelet/x/term"
 
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
@@ -77,24 +78,55 @@ func journeyLabels() []string {
 }
 
 // journeyOfferRun presents a huh.NewConfirm prompt and, if confirmed, calls
-// runner.RunInteractive with the given command. Non-fatal on run failure: a warning
-// is printed and nil is returned so the stage doesn't abort the journey.
+// runner.RunInteractive with the given command. Non-fatal on run failure: warnMsg
+// is printed (or the default "Command failed — run it manually later." when warnMsg
+// is empty) and nil is returned so the stage doesn't abort the journey.
 //
-// The gate `if autoYes || !interactive(autoYes, jsonOut)` must be checked by the
-// caller BEFORE calling this helper — this function always attempts the prompt.
-func journeyOfferRun(ctx context.Context, p Printer, runner shell.Runner, title, desc, affirm, neg string, args ...string) error {
+// warnMsg is the caller-supplied failure warning; pass "" for the default.
+//
+// The function is a no-op (returns nil without prompting) when stdin is not a TTY,
+// so it is safe to call unconditionally — callers do not need to gate on stdinIsTTY().
+//
+// Terminal-state contract: huh leaves the terminal in raw mode after its form
+// exits. journeyOfferRun captures the terminal state with cterm.GetState before
+// the form, and restores it with cterm.Restore after the form returns (success or
+// error), before calling RunInteractive. This ensures the child process starts from
+// a clean cooked-mode terminal rather than inheriting huh's raw-mode state.
+func journeyOfferRun(ctx context.Context, p Printer, runner shell.Runner, title, desc, affirm, neg, warnMsg string, args ...string) error {
+	// Non-TTY guard: skip the prompt entirely when stdin is not a terminal.
+	// This keeps journeyOfferRun safe in CI, pipes, and go test contexts.
+	if !stdinIsTTY() {
+		return nil
+	}
+
+	// huh puts the terminal in raw mode; restore to cooked mode before spawning
+	// the child so the child's own raw-mode setup starts from a clean state.
+	savedState, _ := cterm.GetState(os.Stdin.Fd())
+
 	var runNow bool
-	if err := huh.NewConfirm().
+	formErr := huh.NewConfirm().
 		Title(title).
 		Description(desc).
 		Affirmative(affirm).
 		Negative(neg).
-		Value(&runNow).Run(); err != nil {
-		return err
+		Value(&runNow).Run()
+
+	// Restore terminal to cooked mode regardless of whether the form succeeded.
+	if savedState != nil {
+		_ = cterm.Restore(os.Stdin.Fd(), savedState)
 	}
+
+	if formErr != nil {
+		return formErr
+	}
+
 	if runNow {
 		if err := runner.RunInteractive(ctx, args[0], args[1:]...); err != nil {
-			printerInfo(p, "  "+iconWarnStr()+"  Command failed — run it manually later.")
+			msg := warnMsg
+			if msg == "" {
+				msg = "Command failed — run it manually later."
+			}
+			printerInfo(p, "  "+iconWarnStr()+"  "+msg)
 		}
 	}
 	return nil
@@ -137,6 +169,7 @@ func journeyStageConverge(jsonOut bool, runner shell.Runner, autoYes bool) func(
 			"Run `abysslink up --apply` now?",
 			"Converges your system to match abysslink.yaml.",
 			"Yes, run it", "No, I'll run it later",
+			"", // default failure message
 			"abysslink", "up", "--apply")
 	}
 }
@@ -164,6 +197,7 @@ func journeyStageLock(jsonOut bool, cfg *config.Config, runner shell.Runner, aut
 			"Run `abysslink lock init --apply` now?",
 			"Enables Tailnet Lock — disablement secrets printed ONCE.",
 			"Yes, run it", "No, I'll run it later",
+			"", // default failure message
 			"abysslink", "lock", "init", "--apply")
 	}
 }
@@ -182,6 +216,7 @@ func journeyStageEnroll(jsonOut bool, runner shell.Runner, autoYes bool) func(ct
 			"Run `abysslink enroll phone` now?",
 			"Shows a QR code for the Tailscale app.",
 			"Yes, run it", "No, I'll run it later",
+			"", // default failure message
 			"abysslink", "enroll", "phone")
 	}
 }
@@ -199,11 +234,14 @@ func journeyStageVerify(jsonOut bool, runner shell.Runner, autoYes bool) func(ct
 			"Run `abysslink doctor` now?",
 			"Checks all modules for misconfigurations.",
 			"Yes, run it", "No, I'll run it later",
+			"", // default failure message
 			"abysslink", "doctor")
 	}
 }
 
 // journeyStageACL is the run closure for Stage 7 (ACL).
+// It delegates to journeyOfferRun so the terminal-restore logic and custom failure
+// message live in a single place — no inline huh block.
 func journeyStageACL(jsonOut bool, runner shell.Runner, autoYes bool) func(ctx context.Context, p Printer) error {
 	return func(ctx context.Context, p Printer) error {
 		printerInfo(p, styleBold.Render("Configure the tailnet ACL:"))
@@ -213,21 +251,12 @@ func journeyStageACL(jsonOut bool, runner shell.Runner, autoYes bool) func(ctx c
 		if autoYes || !interactive(autoYes, jsonOut) {
 			return nil
 		}
-		var runNow bool
-		if err := huh.NewConfirm().
-			Title("Run `abysslink acl push --apply` now?").
-			Description("Pushes the abysslink ACL to your tailnet. Requires OAuth config.").
-			Affirmative("Yes, push ACL").
-			Negative("No, I'll manage it manually").
-			Value(&runNow).Run(); err != nil {
-			return err
-		}
-		if runNow {
-			if err := runner.RunInteractive(ctx, "abysslink", "acl", "push", "--apply"); err != nil {
-				printerInfo(p, "  "+iconWarnStr()+"  ACL push failed — manage manually at the URL above.")
-			}
-		}
-		return nil
+		return journeyOfferRun(ctx, p, runner,
+			"Run `abysslink acl push --apply` now?",
+			"Pushes the abysslink ACL to your tailnet. Requires OAuth config.",
+			"Yes, push ACL", "No, I'll manage it manually",
+			"ACL push failed — manage manually at the URL above.",
+			"abysslink", "acl", "push", "--apply")
 	}
 }
 
