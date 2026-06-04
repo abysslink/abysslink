@@ -62,6 +62,7 @@ Existing infrastructure covers all phase requirements — `internal/cli` already
 |----------|-------------|------------|-------------------|
 | Interactive stage gating (huh confirm prompts) | PHASE-26-GATED-JOURNEY | TTY interaction can't run in CI | Run `abysslink init` in a terminal; confirm each stage pauses and offers to run its command |
 | Browser actually opens on macOS | PHASE-26-B1 | Requires GUI session (unit test covers error paths via mock runner; real open call requires display) | Run `abysslink init` on macOS; verify browser opens for Tailscale auth when user selects "No, open the link for me" |
+| sudo credential cache reused across privileged calls | PHASE-26-SUDO-CACHE | Requires interactive macOS session with real sudo; cannot be mocked — tty-keyed timestamp reuse is a kernel/PAM behaviour | (1) On macOS with a fresh sudo timestamp, run `abysslink init --apply` in a terminal. (2) Observe that a sudo password prompt appears exactly once during the init run (for maybeFixFirewall or maybeFixSleep, whichever runs first). (3) Confirm the second privileged call completes without prompting again (sudo reuses the cached tty-keyed timestamp from the same controlling terminal). (4) If both calls produce separate prompts, the RunInteractive routing in cmd_init.go is not correctly forwarding the tty fd — re-examine the maybeFixFirewall/maybeFixSleep call sites. |
 
 ---
 
