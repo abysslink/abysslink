@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,7 +89,15 @@ func TestAtomicReplace(t *testing.T) {
 	require.NoError(t, os.WriteFile(dst, []byte("old"), 0o600))
 	require.NoError(t, os.WriteFile(src, []byte("new"), 0o600))
 
-	require.NoError(t, atomicReplace(context.Background(), dst, src))
+	// Inject a SignedAudit backed by a mock keychain + temp audit log so the test
+	// runs on platforms without a real keychain backend (Linux CI has no
+	// libsecret/secret-tool). nil would force the production ExecRunner keychain.
+	saLogPath := filepath.Join(dir, "audit.log")
+	mockKC := &mockKeychainStore{entries: map[string]string{}}
+	sa, err := audit.NewSigned(saLogPath, mockKC)
+	require.NoError(t, err)
+
+	require.NoError(t, atomicReplace(context.Background(), dst, src, sa))
 
 	got, err := os.ReadFile(dst)
 	require.NoError(t, err)
