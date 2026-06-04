@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0.0
 milestone_name: Harden, Observe & Control
-status: Phase 25 not planned yet
-last_updated: "2026-06-04T13:09:26.794Z"
-last_activity: 2026-06-03
+status: verifying
+last_updated: "2026-06-04T15:25:51.865Z"
+last_activity: 2026-06-04
 progress:
   total_phases: 16
-  completed_phases: 4
-  total_plans: 19
-  completed_plans: 21
-  percent: 25
+  completed_phases: 5
+  total_plans: 24
+  completed_plans: 26
+  percent: 31
 ---
 
 # Project State
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-30)
 
 **Core value:** `abysslink up` — one command that produces a working, auditable, paranoid-by-default phone-to-laptop remote setup on any macOS or Linux machine
-**Current focus:** Milestone complete
+**Current focus:** Phase 25 — close-v3-0-1-debt-config-validate-on-load-cli-bounded-reads-
 
 ## Current Position
 
-Phase: 25
-Plan: Not started
-Status: Phase 25 not planned yet
-Last activity: 2026-06-03
+Phase: 25 (close-v3-0-1-debt-config-validate-on-load-cli-bounded-reads-) — EXECUTING
+Plan: 5 of 5
+Status: Phase complete — ready for verification
+Last activity: 2026-06-04
 
 ## Performance Metrics
 
@@ -112,6 +112,11 @@ Last activity: 2026-06-03
 | Phase 24 P05 | 224 | 2 tasks | 5 files |
 | Phase 24 P06 | 6m | 2 tasks | 3 files |
 | Phase 24 P07 | 12m | 3 tasks | 5 files |
+| Phase 25 P00 | 3min | 3 tasks | 5 files |
+| Phase 25 P01 | 4min | 2 tasks | 5 files |
+| Phase 25 P02 | 35m | 2 tasks | 18 files |
+| Phase 25 P04 | 25m | 2 tasks | 3 files |
+| Phase 25 P03 | 12m | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -125,6 +130,12 @@ Last activity: 2026-06-03
 
 ### Decisions
 
+- [Phase 25-03]: atomicReplace uses &shell.ExecRunner{} for keychain — keychain ops are real system calls, never routed through the CLI mock runner
+- [Phase 25-03]: headscaleSwapBinary sa nil-fallback uses ExecRunner for NewStore — mirrors existing DB-backup nil-sa unchained fallback pattern
+- [Phase 25-04]: addCounter(delta) batch helper in anchor.go used by WriteFile; entryCount=2 for overwrite keeps counter==JSONL entries at any process-kill point (D-08 CR-02)
+- [Phase 25-04]: WriteFilePath streaming helper sole definition on *SignedAudit; 256 MiB N+1 sentinel; callers wired by plan 25-03 (D-06 WR-02)
+- [Phase 25-02]: D-01: config.Load calls Validate before return — fail-closed; os.ErrNotExist carve-out in loadCmdContext preserves pre-init UX
+- [Phase 25-02]: D-03: ValidateHostname exported helper guards all three --hostname= argv sites (tailscale/module.go, backend/headscale.go, backend/netbird.go)
 - Roadmap: Phases follow IMPLEMENTATION-TASKS.md Phase 0–8 structure exactly (user explicit choice)
 - Roadmap: Granularity is coarse — 9 phases, broad delivery boundaries, no horizontal layer splits
 - Architecture: claudecode is one opt-in consumer of generic notify module; no Claude logic in core modules
@@ -245,6 +256,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-04T13:09:26.788Z
+Last session: 2026-06-04T15:25:51.860Z
 Stopped at: Phase 25 context gathered
-Resume file: .planning/phases/25-close-v3-0-1-debt-config-validate-on-load-cli-bounded-reads-/25-CONTEXT.md
+Resume file: None
