@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v3.0.1
 milestone_name: Network & Dependency Security Hotfix
 status: milestone_complete
-last_updated: 2026-06-04T18:37:59.171Z
+last_updated: 2026-06-04T19:51:17.574Z
 last_activity: 2026-06-04
 progress:
   total_phases: 17
   completed_phases: 1
-  total_plans: 6
-  completed_plans: 2
+  total_plans: 7
+  completed_plans: 3
   percent: 6
 stopped_at: Milestone complete (Phase 26 was final phase)
 ---
@@ -34,7 +34,7 @@ Last activity: 2026-06-04
 
 **Velocity:**
 
-- Total plans completed: 98 (v1.0.0)
+- Total plans completed: 101 (v1.0.0)
 - Average duration: -
 - Total execution time: 2026-05-26 (v1 single session)
 
@@ -119,6 +119,7 @@ Last activity: 2026-06-04
 | Phase 25 P04 | 25m | 2 tasks | 3 files |
 | Phase 25 P03 | 12m | 2 tasks | 6 files |
 | Phase 26 P02 | ~12m | 2 tasks | 2 files |
+| Phase 26 P03 | 7 | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -211,6 +212,9 @@ Last activity: 2026-06-04
 - [Phase ?]: DOS-01 Part A (A11): limitedWriter(16MiB)+MaxBytesReader(256KiB)+readLimited(8MiB) close all three subprocess/daemon/REST attack surfaces with hard errors, no silent truncation
 - [Phase ?]: Phase 24-02 CI hardening
 - [Phase ?]: AUD-02 IncrementCounter exported; WriteAnchor unique tmp; verifyCounter helper extracted
+- [Phase ?]: applyDarwin uses RunInteractive for sudo pmset — consistent with behavior spec
+- [Phase ?]: journeyOfferRun non-TTY guard added inline — callers no longer need to gate on stdinIsTTY()
+- [Phase ?]: journeyStageACL delegates to journeyOfferRun — terminal-restore in one place
 
 ### Pending Todos
 
@@ -267,8 +271,8 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-06-04T18:20:20.062Z
-Stopped at: Phase 25 context gathered
+Last session: 2026-06-04T19:34:36.717Z
+Stopped at: Completed 26-03-PLAN.md
 Resume file: None
 
 ## Operator Next Steps
