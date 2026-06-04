@@ -2,16 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0.1
 milestone_name: Network & Dependency Security Hotfix
-status: milestone_complete
-last_updated: 2026-06-04T16:24:36.023Z
-last_activity: 2026-06-04
+status: Awaiting next milestone
+last_updated: "2026-06-04T16:39:54.195Z"
+last_activity: 2026-06-04 — Milestone v3.0.1 completed and archived
 progress:
-  total_phases: 6
-  completed_phases: 6
-  total_plans: 26
+  total_phases: 16
+  completed_phases: 5
+  total_plans: 24
   completed_plans: 26
-  percent: 100
-stopped_at: Milestone v3.0.1 complete (Phase 25 was final phase)
+  percent: 31
 ---
 
 # Project State
@@ -25,10 +24,10 @@ See: .planning/PROJECT.md (updated 2026-05-30)
 
 ## Current Position
 
-Phase: 25
-Plan: Not started
-Status: Milestone complete
-Last activity: 2026-06-04
+Phase: Milestone v3.0.1 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-06-04 — Milestone v3.0.1 completed and archived
 
 ## Performance Metrics
 
@@ -255,8 +254,20 @@ None.
 | tech-debt | TestUpDryRunParity environment-dependent golden (not a regression) | RESOLVED 2026-06-02 (3cbeb36 — notify.HealthProbe seam; golden now deterministic) | v2.0.0 close 2026-06-02 |
 | issue | `init --yes </dev/null` (non-TTY) errors on TTY open instead of degrading gracefully (found in phase-10 UAT self-test; config writes OK, exit 1) | RESOLVED 2026-06-02 (e2cefa9 — headless guard in ensureTailscaleAccount; both init --yes and plain init now exit 0 on non-TTY) | v2.0.0 close 2026-06-02 |
 
+### Acknowledged at v3.0.1 close (2026-06-04)
+
+| Category | Item | Status |
+|----------|------|--------|
+| verification | phase-23 VERIFICATION human_needed — FileVault mid-encryption fdesetup string literals need real-hardware confirmation (fail-closed regardless; message-text only) | Deferred (MED/B2) |
+| uat | phase-23 HUMAN-UAT 1 open scenario (same FileVault item) | Deferred |
+| quick-task | 5 stale quick-task slugs from v1/v2 era (260526-l51, 260530-8mf/8uz/nl4, 260602-1nz) — SUMMARYs exist on disk; only frontmatter status missing | Deferred (historical) |
+
 ## Session Continuity
 
 Last session: 2026-06-04T15:25:51.860Z
 Stopped at: Phase 25 context gathered
 Resume file: None
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
