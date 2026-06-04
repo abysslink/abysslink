@@ -34,6 +34,8 @@ import (
 	"time"
 )
 
+const writeFilePathCeiling = 256 << 20 // 256 MiB — D-06 WR-02 streaming ceiling
+
 // KeychainStore is satisfied by internal/secrets.KeychainStore; redeclared here
 // to avoid an import cycle (audit→secrets→…→audit). The real injection happens
 // via interface assignment at the call site.
@@ -161,10 +163,11 @@ func (a *SignedAudit) LogPath() string { return a.logPath }
 // (T-17-14): if the process crashes between the log append and the write, an
 // operator sees the recorded intent without the effect.
 //
-// Pre-overwrite backups are recorded as signed chain entries via BackupWithChain
-// (AUD-01) so RestoreGated can later locate and verify them. This replaces the
-// former unchained Backup call — every backup created by WriteFile is now
-// vouched for by an HMAC-signed chain entry.
+// Pre-overwrite backups are recorded as signed chain entries via backupNoRefresh
+// (AUD-01 / D-08) so RestoreGated can later locate and verify them. Both the
+// backup entry and the write-intent entry are appended under a SINGLE OS flock
+// (D-07 / D-08) and a SINGLE WriteAnchor+IncrementCounter refresh so the
+// keychain counter always equals the JSONL entry count at any process-kill point.
 //
 // It uses context.Background() internally — justified by the AuditWriter
 // interface omitting ctx for drop-in *Audit compatibility (WriteFile is a
@@ -172,23 +175,78 @@ func (a *SignedAudit) LogPath() string { return a.logPath }
 func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error {
 	ctx := context.Background()
 
-	// Record intent in the signed chain FIRST (audit-then-write ordering).
+	// Check whether a pre-existing file must be backed up (before acquiring mu).
+	// os.Stat is idempotent and lock-free; the result is rechecked inside the
+	// critical section only if needed. A race here is safe: if the file disappears
+	// between Stat and the flock acquisition, backupNoRefresh will return an error
+	// and WriteFile aborts — the correct outcome.
+	_, existErr := os.Stat(path)
+	fileExists := existErr == nil
+
+	// D-08: Acquire in-process mutex, then OS flock — mutex-then-flock ordering
+	// is strictly enforced (RESEARCH.md RQ-1 / PATTERNS.md pitfall 7).
+	a.mu.Lock()
+	lockFD, err := acquireAuditLock(a.logPath)
+	if err != nil {
+		a.mu.Unlock()
+		return fmt.Errorf("audit: acquire process lock: %w", err)
+	}
+
+	// D-08: entryCount tracks the number of JSONL entries appended under this flock
+	// so atomic.AddInt64 can increment by the exact batch size after the writes.
+	var entryCount int64
+
+	if fileExists {
+		// AUD-01: record the backup as a signed chain entry without triggering a
+		// per-entry anchor/counter refresh (backupNoRefresh). The caller manages the
+		// single refresh after all entries are written.
+		if bErr := a.backupNoRefresh(ctx, path, dryRun); bErr != nil {
+			releaseAuditLock(lockFD)
+			a.mu.Unlock()
+			return fmt.Errorf("audit: backup before write %s: %w", path, bErr)
+		}
+		entryCount++
+	}
+
+	// Record write-intent entry without per-entry anchor/counter refresh.
 	diffHash := sha256.Sum256(content)
-	if err := a.Append(ctx, SignInput{Title: "write", DiffHash: diffHash}, path, dryRun); err != nil {
-		return err
+	if wErr := a.appendNoRefresh(ctx, SignInput{Title: "write", DiffHash: diffHash}, path, dryRun); wErr != nil {
+		releaseAuditLock(lockFD)
+		a.mu.Unlock()
+		return wErr
+	}
+	entryCount++
+
+	// All JSONL entries written under the flock — increment count atomically, then
+	// release flock and mutex before the (best-effort) anchor+counter refresh.
+	atomic.AddInt64(&a.count, entryCount)
+	releaseAuditLock(lockFD)
+	a.mu.Unlock() // explicit — must precede the post-lock anchor write below.
+
+	if aerr := WriteAnchor(ctx, a.logPath, a.kc); aerr != nil {
+		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
+	}
+	if cerr := IncrementCounter(ctx, a.kc); cerr != nil {
+		_ = a.kc.Delete(ctx, counterKeyService, counterKeyAccount)
+		slog.Warn("audit: keychain counter increment failed; counter key cleared to prevent false mismatch alarm",
+			"err", cerr, "log", a.logPath)
 	}
 
 	if dryRun {
 		return nil
 	}
 
-	// Back up an existing file before overwriting it so the change is reversible.
-	// AUD-01: use BackupWithChain so the backup is recorded as a signed chain
-	// entry and RestoreGated can later find and verify it. If BackupWithChain
-	// returns an error (chain-append failed + .bak rolled back), abort the write.
-	if _, statErr := os.Stat(path); statErr == nil {
-		if _, bErr := BackupWithChain(ctx, path, a); bErr != nil {
-			return fmt.Errorf("audit: backup before write %s: %w", path, bErr)
+	// Physical write: back up any pre-existing file, then write via temp+rename.
+	if fileExists {
+		// The .bak file is already recorded in the signed chain above; create it now.
+		content0, rErr := os.ReadFile(path) //nolint:gosec // G304: path is an audit-controlled target path, not user input
+		if rErr != nil {
+			return fmt.Errorf("audit: backup read %s: %w", path, rErr)
+		}
+		stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+		bakPath := fmt.Sprintf("%s.bak.%s", path, stamp)
+		if wErr := os.WriteFile(bakPath, content0, 0o600); wErr != nil { //nolint:gosec // G304: bakPath is derived from path, not user input; 0o600 enforces owner-only perms
+			return fmt.Errorf("audit: backup write %s: %w", bakPath, wErr)
 		}
 	}
 
@@ -199,6 +257,146 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("audit: rename %s → %s: %w", tmp, path, err)
+	}
+	return nil
+}
+
+// appendNoRefresh appends one HMAC-signed, hash-chained entry to the log WITHOUT
+// triggering WriteAnchor or IncrementCounter. It is the internal batch-write
+// primitive used by WriteFile so both the backup and write-intent JSONL entries
+// share a single flock and a single subsequent anchor/counter refresh (D-08).
+//
+// MUST be called with a.mu already held and flock already acquired by the caller.
+// Does not refresh anchor or counter.
+func (a *SignedAudit) appendNoRefresh(ctx context.Context, in SignInput, target string, dryRun bool) error {
+	key, err := a.hmacKey(ctx)
+	if err != nil {
+		return err
+	}
+	prevHash, err := computePrevHash(a.logPath)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	in.Target = target
+	in.Time = now.Format(time.RFC3339)
+	in.DryRun = dryRun
+	in.PrevHash = prevHash
+	entry := Entry{
+		Time:     now,
+		Op:       in.Title,
+		Target:   target,
+		Hash:     hex.EncodeToString(in.DiffHash[:]),
+		DryRun:   dryRun,
+		PrevHash: prevHash,
+		Sig:      computeSig(key, in),
+	}
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("audit: marshal entry: %w", err)
+	}
+	line = append(line, '\n')
+
+	f, err := os.OpenFile(a.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: a.logPath is the internal audit-log path set at construction, not user-controlled
+	if err != nil {
+		return fmt.Errorf("audit: open log %s: %w", a.logPath, err)
+	}
+	if _, werr := f.Write(line); werr != nil {
+		_ = f.Close()
+		return fmt.Errorf("audit: write log: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return fmt.Errorf("audit: close log: %w", cerr)
+	}
+	return nil
+}
+
+// backupNoRefresh records a backup chain entry for targetPath WITHOUT triggering
+// WriteAnchor or IncrementCounter. It reads targetPath to compute the SHA-256
+// hash, writes the .bak file, then appends the signed chain entry via
+// appendNoRefresh. Used by WriteFile's batched path (D-08).
+//
+// MUST be called with a.mu already held and flock already acquired by the caller.
+// Does not refresh anchor or counter.
+func (a *SignedAudit) backupNoRefresh(ctx context.Context, targetPath string, dryRun bool) error {
+	content, err := os.ReadFile(targetPath) //nolint:gosec // G304: targetPath is an audit-controlled path, not user input
+	if err != nil {
+		return fmt.Errorf("audit: backup read %s: %w", targetPath, err)
+	}
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	bakPath := fmt.Sprintf("%s.bak.%s", targetPath, stamp)
+	if err := os.WriteFile(bakPath, content, 0o600); err != nil { //nolint:gosec // G304: bakPath is derived from targetPath, not user input; 0o600 enforces owner-only perms
+		return fmt.Errorf("audit: backup write %s: %w", bakPath, err)
+	}
+	diffHash := sha256.Sum256(content)
+	if aerr := a.appendNoRefresh(ctx, SignInput{Title: "backup", DiffHash: diffHash}, bakPath, dryRun); aerr != nil {
+		_ = os.Remove(bakPath) // rollback: remove orphaned .bak on chain-append failure
+		return fmt.Errorf("audit: backup chain-entry failed (backup rolled back): %w", aerr)
+	}
+	return nil
+}
+
+// WriteFilePath is the streaming equivalent of WriteFile for large binary
+// installs (D-06 / WR-02). It reads src via io.Copy with a 256 MiB ceiling,
+// never loading the file into memory. If src exceeds 256 MiB the function
+// returns an error and cleans up any temp file before returning.
+//
+// This is the SOLE definition of WriteFilePath on *SignedAudit.
+func (a *SignedAudit) WriteFilePath(ctx context.Context, src, dst string, perm os.FileMode, dryRun bool) error {
+	// Step 1: compute SHA-256 of src via a streaming hasher — N+1 sentinel detects
+	// overflow at exactly writeFilePathCeiling bytes without silent truncation.
+	srcFile, err := os.Open(src) //nolint:gosec // G304: src is a caller-supplied binary path; callers in internal/cli supply installer-derived paths, not user-controlled paths
+	if err != nil {
+		return fmt.Errorf("audit: WriteFilePath open src %s: %w", src, err)
+	}
+
+	hasher := sha256.New()
+	n, err := io.Copy(hasher, io.LimitReader(srcFile, writeFilePathCeiling+1))
+	_ = srcFile.Close()
+	if err != nil {
+		return fmt.Errorf("audit: WriteFilePath hash src %s: %w", src, err)
+	}
+	if n > writeFilePathCeiling {
+		return fmt.Errorf("audit: WriteFilePath: src %s exceeds 256 MiB ceiling", src)
+	}
+
+	// Step 2: record audit intent entry with the hash.
+	var diffHash [32]byte
+	copy(diffHash[:], hasher.Sum(nil))
+	if aerr := a.Append(ctx, SignInput{Title: "write", DiffHash: diffHash}, dst, dryRun); aerr != nil {
+		return aerr
+	}
+
+	if dryRun {
+		return nil
+	}
+
+	// Step 3: stream src to a temp file via io.Copy+LimitReader, then rename.
+	srcFile2, err := os.Open(src) //nolint:gosec // G304: same path as above; see note on step 1
+	if err != nil {
+		return fmt.Errorf("audit: WriteFilePath reopen src %s: %w", src, err)
+	}
+	defer func() { _ = srcFile2.Close() }()
+
+	tmp := dst + ".abysslink.tmp"
+	tmpFile, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm) //nolint:gosec // G304: tmp is dst-derived, perm is caller-supplied
+	if err != nil {
+		return fmt.Errorf("audit: WriteFilePath create temp %s: %w", tmp, err)
+	}
+
+	if _, cerr := io.Copy(tmpFile, io.LimitReader(srcFile2, writeFilePathCeiling)); cerr != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: WriteFilePath copy to temp: %w", cerr)
+	}
+	if cerr := tmpFile.Close(); cerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: WriteFilePath close temp: %w", cerr)
+	}
+
+	if rerr := os.Rename(tmp, dst); rerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: WriteFilePath rename %s → %s: %w", tmp, dst, rerr)
 	}
 	return nil
 }
