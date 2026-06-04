@@ -90,10 +90,17 @@ func (m *MockRunner) RunWithStdin(_ context.Context, stdin io.Reader, name strin
 	return c.Result, c.Err
 }
 
-// RunInteractive returns the next scripted Call's error, recording the actual
-// name and args. Scripted Result output is ignored since interactive calls do
-// not capture output. The recorded call is stamped with IsInteractive=true so
-// tests can distinguish RunInteractive calls from Run calls via RunInteractiveCalls().
+// RunInteractive returns an error for the next scripted Call, recording the
+// actual name and args. The recorded call is stamped with IsInteractive=true so
+// tests can distinguish RunInteractive calls from Run calls via
+// RunInteractiveCalls().
+//
+// Interactive calls do not capture output, so c.Result.Stdout/Stderr are ignored.
+// A scripted non-zero c.Result.ExitCode is, however, mapped to an error to mirror
+// the real ExecRunner.RunInteractive, which returns exec.Cmd.Run's *exec.ExitError
+// for a non-zero exit. An explicit c.Err always takes precedence so tests can
+// script an arbitrary failure. Scripting Result.ExitCode: 0 yields nil (success),
+// keeping existing success-path tests green.
 func (m *MockRunner) RunInteractive(_ context.Context, name string, args ...string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -105,7 +112,13 @@ func (m *MockRunner) RunInteractive(_ context.Context, name string, args ...stri
 	m.calls[m.idx].Args = args
 	m.calls[m.idx].IsInteractive = true
 	m.idx++
-	return c.Err
+	if c.Err != nil {
+		return c.Err
+	}
+	if c.Result.ExitCode != 0 {
+		return fmt.Errorf("shell: interactive command %q exited with code %d", name, c.Result.ExitCode)
+	}
+	return nil
 }
 
 // RunInteractiveCalls returns the full argv (name prepended to args) for every
