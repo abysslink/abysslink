@@ -42,8 +42,8 @@ Phases 16–21 (6 phases, 24 plans) — supply-chain hardening (cosign v3 / SLSA
 
 ## v3.0.1 — Network & Dependency Security Hotfix ✅ SHIPPED 2026-06-04
 
-Phases 22, 23, 23.1, 23.2, 24, 25 (6 phases, 26 plans) — closes the 2026-06-03 full security audit (11 agents): network/dependency lockdown (ntfy tailnet-only bind, NetBird https-only server_url, argv-injection guards, go1.26.4 / x/crypto v0.52.0 / CSRF→net/http.CrossOriginProtection), doctor/threat-model honesty (shared finding set, fail-closed disk encryption, nb-lock warning, minimum-versions table, probe-failure tri-state), tamper-evident audit hardening (HMAC-chained backups, anchor-every-append + keychain counter, cross-process flock, direction-aware verifyCounter), DoS bounding (limitio + WriteFilePath streaming), and a blocking govulncheck CI gate. All 20 requirements verified. Audit PASSED. Local tag `v3.0.1`. Deferred: Phase 23 FileVault mid-encryption `fdesetup` string literals (MED, real-hardware confirmation; fail-closed regardless).
-→ Archived: [`milestones/v3.0.1-ROADMAP.md`](milestones/v3.0.1-ROADMAP.md) · [`milestones/v3.0.1-REQUIREMENTS.md`](milestones/v3.0.1-REQUIREMENTS.md) · audit [`milestones/v3.0.1-MILESTONE-AUDIT.md`](milestones/v3.0.1-MILESTONE-AUDIT.md)
+Phases 22, 23, 23.1, 23.2, 24, 25, 26 (7 phases, 29 plans) — closes the 2026-06-03 full security audit (11 agents): network/dependency lockdown (ntfy tailnet-only bind, NetBird https-only server_url, argv-injection guards, go1.26.4 / x/crypto v0.52.0 / CSRF→net/http.CrossOriginProtection), doctor/threat-model honesty (shared finding set, fail-closed disk encryption, nb-lock warning, minimum-versions table, probe-failure tri-state), tamper-evident audit hardening (HMAC-chained backups, anchor-every-append + keychain counter, cross-process flock, direction-aware verifyCounter), DoS bounding (limitio + WriteFilePath streaming), and a blocking govulncheck CI gate. All 20 requirements verified. Audit PASSED. Phase 26 (post-ship fold-in, after pushed tag `v3.0.1`): gated 8-stage init journey + first-run fixes (openURL, Stage 2 autoYes, pmset parse, sudo RunInteractive, terminal restore) — verification 25/25, human UAT approved. Deferred: Phase 23 FileVault mid-encryption `fdesetup` string literals (MED, real-hardware confirmation; fail-closed regardless).
+→ Archived: [`milestones/v3.0.1-ROADMAP.md`](milestones/v3.0.1-ROADMAP.md) · [`milestones/v3.0.1-REQUIREMENTS.md`](milestones/v3.0.1-REQUIREMENTS.md) · audits [`milestones/v3.0.1-MILESTONE-AUDIT.md`](milestones/v3.0.1-MILESTONE-AUDIT.md) (phases 22–25) + [`milestones/v3.0.1-MILESTONE-AUDIT-phase-26.md`](milestones/v3.0.1-MILESTONE-AUDIT-phase-26.md) (incremental, supersedes)
 
 ---
 
@@ -369,6 +369,11 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 21. Optional Modules & Fleet Polish | 5/5 | Complete    | 2026-06-02 |
 | 22. Network & Dependency Lockdown | 4/4 | Complete    | 2026-06-03 |
 | 23. Doctor Honesty & Coverage | 4/4 | Complete   | 2026-06-03 |
+| 23.1 Doctor Probe-Failure Honesty (INSERTED) | 4/4 | Complete | 2026-06-04 |
+| 23.2 Doctor Probe-Failure Honesty round 2 (INSERTED) | 2/2 | Complete | 2026-06-04 |
+| 24. v3.0.1 Security Closeout | 7/7 | Complete | 2026-06-04 |
+| 25. Close v3.0.1 Debt | 5/5 | Complete | 2026-06-04 |
+| 26. Init Journey Gating & First-Run Fixes | 3/3 | Complete | 2026-06-04 |
 
 ### Phase 23.1: Doctor probe-failure honesty — no false-OK on unknown or failed probes and no double-emit (INSERTED)
 

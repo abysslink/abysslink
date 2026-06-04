@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v3.0.1
 milestone_name: Network & Dependency Security Hotfix
 status: milestone_complete
-last_updated: 2026-06-04T19:51:17.574Z
+last_updated: 2026-06-04T23:30:00.000Z
 last_activity: 2026-06-04
 progress:
   total_phases: 17
@@ -269,10 +269,17 @@ None.
 | uat | phase-23 HUMAN-UAT 1 open scenario (same FileVault item) | Deferred |
 | quick-task | 5 stale quick-task slugs from v1/v2 era (260526-l51, 260530-8mf/8uz/nl4, 260602-1nz) — SUMMARYs exist on disk; only frontmatter status missing | Deferred (historical) |
 
+### Acknowledged at v3.0.1 re-close — Phase 26 fold-in (2026-06-04)
+
+| Category | Item | Status |
+|----------|------|--------|
+| uat | phase-26 26-UAT.md scenarios 2–6 never individually exercised (scenario 1 blocker → fixed by plan 26-03; re-verification 25/25 + 26-HUMAN-UAT.md passed cover the behaviours) | Acknowledged — covered by HUMAN-UAT pass |
+| verification | phase-26 26-VERIFICATION.md status human_needed (sudo credential-cache reuse, terminal restore, stage gates) | Acknowledged — 26-HUMAN-UAT.md complete, user approved 2026-06-04 |
+
 ## Session Continuity
 
-Last session: 2026-06-04T19:34:36.717Z
-Stopped at: Completed 26-03-PLAN.md
+Last session: 2026-06-04T23:30:00.000Z
+Stopped at: v3.0.1 re-closed with Phase 26 folded in (archives updated, phase dirs archived)
 Resume file: None
 
 ## Operator Next Steps
