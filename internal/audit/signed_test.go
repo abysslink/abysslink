@@ -174,7 +174,7 @@ func TestAuditWriteFilePath(t *testing.T) {
 	err = sa.WriteFilePath(ctx, src, dst, 0o644, false)
 	require.NoError(t, err, "WriteFilePath must succeed for a small source file")
 
-	got, err := os.ReadFile(dst) //nolint:gosec
+	got, err := os.ReadFile(dst) //nolint:gosec // G304: test reads a fixture path under the test's own temp dir, not user input
 	require.NoError(t, err)
 	assert.Equal(t, content, got, "dst content must match src content")
 
