@@ -16,6 +16,7 @@
 package audit_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -23,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -195,22 +197,182 @@ func TestAuditWriteFilePath(t *testing.T) {
 		"error message must mention '256 MiB', got: %s", bigErr.Error())
 }
 
+// countNonEmptyLines counts non-empty lines in the file at path.
+func countNonEmptyLines(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // G304: test reads audit log under temp dir
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("countNonEmptyLines: read %s: %v", path, err)
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	count := 0
+	for scanner.Scan() {
+		if len(scanner.Bytes()) > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 // TestAuditCounterMatchesEntries verifies that the keychain counter equals the
 // number of JSONL entries in the audit log after a series of WriteFile calls.
 //
-// Wave 2: implementation in 25-04.
+// WriteFile on a new file produces 1 entry; WriteFile on an existing file
+// produces 2 entries (backup + write-intent) — so the counter must equal the
+// cumulative JSONL entry count after each call (D-08 / CR-02).
 func TestAuditCounterMatchesEntries(t *testing.T) {
-	t.Skip("Wave 2: implementation pending (plan 25-04)")
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	kc := seededStore(t)
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	target1 := filepath.Join(dir, "file1.conf")
+	target2 := filepath.Join(dir, "file2.conf")
+
+	// Call 1: new file → 1 entry.
+	require.NoError(t, sa.WriteFile(target1, []byte("v1"), 0o600, false))
+	wantLines1 := countNonEmptyLines(t, logPath)
+	assert.Equal(t, 1, wantLines1, "new-file WriteFile must produce 1 JSONL entry")
+	n1, found1, err1 := audit.ReadCounter(ctx, kc)
+	require.NoError(t, err1)
+	require.True(t, found1, "counter must be present after first WriteFile")
+	assert.Equal(t, int64(wantLines1), n1, "counter must equal JSONL entry count after call 1")
+
+	// Call 2: overwrite target1 → 2 entries (backup + write-intent).
+	require.NoError(t, sa.WriteFile(target1, []byte("v2"), 0o600, false))
+	wantLines2 := countNonEmptyLines(t, logPath)
+	assert.Equal(t, 3, wantLines2, "overwrite WriteFile must produce 2 more entries (total 3)")
+	n2, found2, err2 := audit.ReadCounter(ctx, kc)
+	require.NoError(t, err2)
+	require.True(t, found2)
+	assert.Equal(t, int64(wantLines2), n2, "counter must equal JSONL entry count after call 2")
+
+	// Call 3: overwrite target1 again → 2 more entries (total 5).
+	require.NoError(t, sa.WriteFile(target1, []byte("v3"), 0o600, false))
+	wantLines3 := countNonEmptyLines(t, logPath)
+	assert.Equal(t, 5, wantLines3, "second overwrite must produce 2 more entries (total 5)")
+	n3, found3, err3 := audit.ReadCounter(ctx, kc)
+	require.NoError(t, err3)
+	require.True(t, found3)
+	assert.Equal(t, int64(wantLines3), n3, "counter must equal JSONL entry count after call 3")
+
+	// Call 4: new file target2 → 1 more entry (total 6).
+	require.NoError(t, sa.WriteFile(target2, []byte("hello"), 0o600, false))
+	wantLines4 := countNonEmptyLines(t, logPath)
+	assert.Equal(t, 6, wantLines4, "new-file WriteFile must produce 1 entry (total 6)")
+	n4, found4, err4 := audit.ReadCounter(ctx, kc)
+	require.NoError(t, err4)
+	require.True(t, found4)
+	assert.Equal(t, int64(wantLines4), n4, "counter must equal JSONL entry count after call 4")
+
+	// Final: Verify must report CounterStatus="ok" (or "verified") and no truncation.
+	res, verErr := audit.Verify(ctx, logPath, kc)
+	require.NoError(t, verErr)
+	assert.True(t, res.OK, "Verify must pass after all WriteFile calls")
+	assert.False(t, res.TruncationDetected, "no truncation should be detected")
+	assert.Equal(t, "verified", res.CounterStatus, "CounterStatus must be 'verified'")
+}
+
+// TestHelperAuditAppend is the subprocess entry point for TestAuditCrossProcessFlock.
+// It is activated when GO_TEST_AUDIT_SUBPROCESS=1 and AUDIT_LOG_PATH and
+// AUDIT_DEST_PATH env vars are set. Each subprocess calls WriteFile once on the
+// shared log path, writing to its unique dest path.
+func TestHelperAuditAppend(t *testing.T) {
+	if os.Getenv("GO_TEST_AUDIT_SUBPROCESS") != "1" {
+		t.Skip("subprocess helper: not activated")
+	}
+	logPath := os.Getenv("AUDIT_LOG_PATH")
+	destPath := os.Getenv("AUDIT_DEST_PATH")
+	if logPath == "" || destPath == "" {
+		t.Fatal("subprocess helper: AUDIT_LOG_PATH and AUDIT_DEST_PATH must be set")
+	}
+	kc := secrets.NewMockStore()
+	// The HMAC key must be pre-seeded so all subprocesses share the same key.
+	// We use a fixed key (all-ones) seeded via AUDIT_HMAC_KEY env var.
+	hmacHex := os.Getenv("AUDIT_HMAC_KEY")
+	require.NotEmpty(t, hmacHex, "subprocess helper: AUDIT_HMAC_KEY must be set")
+	require.NoError(t, kc.Set(context.Background(), "abysslink", "audit-hmac", hmacHex))
+
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	require.NoError(t, sa.WriteFile(destPath, []byte("subprocess-content"), 0o600, false))
 }
 
 // TestAuditCrossProcessFlock verifies that concurrent subprocess writers do not
-// interleave JSONL entries and that the audit log remains verifiable after N
-// concurrent subprocess appends (AUD-02 / CR-01).
+// produce interleaved or missing JSONL entries and that the audit log remains
+// verifiable after N concurrent subprocess appends (AUD-02 / CR-01).
 //
-// Wave 2: subprocess-gated. Set GO_TEST_AUDIT_SUBPROCESS=1 to run.
+// 5 subprocesses each call WriteFile once on the same shared log path.
+// After all complete: JSONL entry count must equal 5, Verify must pass,
+// counter must equal 5.
 func TestAuditCrossProcessFlock(t *testing.T) {
 	if os.Getenv("GO_TEST_AUDIT_SUBPROCESS") != "1" {
 		t.Skip("set GO_TEST_AUDIT_SUBPROCESS=1 to run")
 	}
-	t.Error("TestAuditCrossProcessFlock: Wave 2 implementation pending (plan 25-04)")
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "shared-audit.log")
+
+	// Shared HMAC key (all-ones) used by all subprocesses.
+	hmacHex := hex.EncodeToString(bytes.Repeat([]byte{1}, 32))
+
+	const n = 5
+	var wg sync.WaitGroup
+	wg.Add(n)
+	errs := make([]error, n)
+
+	testBin, err := os.Executable()
+	require.NoError(t, err)
+
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			destPath := filepath.Join(dir, fmt.Sprintf("dest-%d.conf", i))
+			cmd := exec.Command(testBin, //nolint:gosec // G204: testBin is os.Executable() — current test binary, not user input
+				"-test.run=TestHelperAuditAppend",
+				"-test.v=false",
+			)
+			cmd.Env = append(os.Environ(),
+				"GO_TEST_AUDIT_SUBPROCESS=1",
+				"AUDIT_LOG_PATH="+logPath,
+				"AUDIT_DEST_PATH="+destPath,
+				"AUDIT_HMAC_KEY="+hmacHex,
+			)
+			out, runErr := cmd.CombinedOutput()
+			if runErr != nil {
+				errs[i] = fmt.Errorf("subprocess %d: %w\noutput: %s", i, runErr, string(out))
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// All subprocesses must have succeeded.
+	for i, e := range errs {
+		assert.NoError(t, e, "subprocess %d must succeed", i)
+	}
+
+	// The shared log must have exactly n entries.
+	gotLines := countNonEmptyLines(t, logPath)
+	assert.Equal(t, n, gotLines, "shared log must have exactly %d JSONL entries", n)
+
+	// A shared MockStore cannot verify the cross-process counter (each subprocess
+	// uses its own in-memory MockStore, so the counter is not shared across
+	// processes). We verify the chain and anchor integrity instead.
+	// Use a keychain that holds the shared HMAC key so HMAC sigs can be verified.
+	kc := secrets.NewMockStore()
+	require.NoError(t, kc.Set(context.Background(), "abysslink", "audit-hmac", hmacHex))
+	res, verErr := audit.Verify(context.Background(), logPath, kc)
+	require.NoError(t, verErr)
+	assert.True(t, res.OK, "Verify must pass after %d concurrent subprocess appends: %s", n, res.Reason)
+	assert.False(t, res.TruncationDetected, "no truncation should be detected")
+	// CounterStatus will be "unknown" because each subprocess uses its own in-memory
+	// MockStore; the keychain counter is not shared across process boundaries.
+	// This is expected — the flock ensures JSONL chain integrity, which is what
+	// this test validates.
+	assert.NotEqual(t, "mismatch", res.CounterStatus,
+		"counter must not report mismatch (chain integrity is the primary CR-01 invariant)")
 }

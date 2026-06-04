@@ -199,6 +199,22 @@ func IncrementCounter(ctx context.Context, kc KeychainStore) error {
 	return WriteCounter(ctx, kc, n+1)
 }
 
+// addCounter reads the current counter and increments it by delta (>= 1).
+// Used by WriteFile's batched path to add exactly entryCount (2 for overwrite,
+// 1 for new-file) so the keychain counter always equals the JSONL entry count
+// at any process-kill point (D-08 / CR-02).
+// A missing counter (found=false) initialises to 0 base before adding delta.
+func addCounter(ctx context.Context, kc KeychainStore, delta int64) error {
+	n, found, err := ReadCounter(ctx, kc)
+	if err != nil && !found {
+		return err
+	}
+	if !found {
+		n = 0 // first use
+	}
+	return WriteCounter(ctx, kc, n+delta)
+}
+
 // VerifyAnchor returns true when the anchor's HMAC matches its contents. A
 // missing anchor is not a violation (returns true, nil — no anchor yet).
 func VerifyAnchor(logPath string, kc KeychainStore) (bool, error) {
