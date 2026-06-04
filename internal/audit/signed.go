@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -164,10 +165,14 @@ func (a *SignedAudit) LogPath() string { return a.logPath }
 // operator sees the recorded intent without the effect.
 //
 // Pre-overwrite backups are recorded as signed chain entries via backupNoRefresh
-// (AUD-01 / D-08) so RestoreGated can later locate and verify them. Both the
-// backup entry and the write-intent entry are appended under a SINGLE OS flock
-// (D-07 / D-08) and a SINGLE WriteAnchor+IncrementCounter refresh so the
-// keychain counter always equals the JSONL entry count at any process-kill point.
+// (AUD-01 / D-08) so RestoreGated can later locate and verify them. The backup
+// entry, the write-intent entry, the WriteAnchor+addCounter refresh, AND the
+// physical target write+rename ALL run under a SINGLE mutex+OS-flock critical
+// section (D-07 / D-08 / CR-01 / CR-02): the keychain counter always equals the
+// JSONL entry count at any process-kill point, the chain-attested .bak is the
+// byte-identical file on disk, and concurrent same-target writers serialise on
+// the physical write (each using a unique os.CreateTemp temp path) instead of
+// racing on a shared temp suffix.
 //
 // It uses context.Background() internally — justified by the AuditWriter
 // interface omitting ctx for drop-in *Audit compatibility (WriteFile is a
@@ -192,17 +197,35 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 		return fmt.Errorf("audit: acquire process lock: %w", err)
 	}
 
+	// CR-01 / CR-02: EVERYTHING below — the backup .bak, the JSONL chain entries,
+	// the anchor+counter refresh, AND the physical target write+rename — happens
+	// under the SAME mutex+flock. The lock is released exactly once, on every exit
+	// path, via the deferred unlock. This is what guarantees:
+	//   * the .bak attested in the chain is the byte-identical file on disk
+	//     (no unlocked re-read that a concurrent writer could change — CR-01), and
+	//   * two WriteFile calls to the same target serialise their physical writes
+	//     instead of racing on a shared temp path (CR-02).
+	unlocked := false
+	unlock := func() {
+		if unlocked {
+			return
+		}
+		unlocked = true
+		releaseAuditLock(lockFD)
+		a.mu.Unlock()
+	}
+	defer unlock()
+
 	// D-08: entryCount tracks the number of JSONL entries appended under this flock
-	// so atomic.AddInt64 can increment by the exact batch size after the writes.
+	// so the keychain counter can be advanced by the exact batch size.
 	var entryCount int64
 
 	if fileExists {
 		// AUD-01: record the backup as a signed chain entry without triggering a
-		// per-entry anchor/counter refresh (backupNoRefresh). The caller manages the
-		// single refresh after all entries are written.
+		// per-entry anchor/counter refresh (backupNoRefresh). backupNoRefresh ALSO
+		// creates the physical .bak under this flock with the exact stamp recorded
+		// in the chain entry — there is no separate unlocked backup write (CR-01).
 		if bErr := a.backupNoRefresh(ctx, path, dryRun); bErr != nil {
-			releaseAuditLock(lockFD)
-			a.mu.Unlock()
 			return fmt.Errorf("audit: backup before write %s: %w", path, bErr)
 		}
 		entryCount++
@@ -211,22 +234,21 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 	// Record write-intent entry without per-entry anchor/counter refresh.
 	diffHash := sha256.Sum256(content)
 	if wErr := a.appendNoRefresh(ctx, SignInput{Title: "write", DiffHash: diffHash}, path, dryRun); wErr != nil {
-		releaseAuditLock(lockFD)
-		a.mu.Unlock()
 		return wErr
 	}
 	entryCount++
 
-	// All JSONL entries written under the flock — increment count atomically, then
-	// release flock and mutex before the (best-effort) anchor+counter refresh.
+	// Refresh anchor and counter while STILL holding the flock (CR-02). Doing this
+	// under the lock keeps the keychain counter and the JSONL entry count in step
+	// at every process-kill point: a crash can leave recorded intent without the
+	// physical effect (the documented append-before-write window), but never a
+	// "counter behind entries" state that audit-count-vs-anchor reads as a false
+	// truncation alarm.
 	atomic.AddInt64(&a.count, entryCount)
-	releaseAuditLock(lockFD)
-	a.mu.Unlock() // explicit — must precede the post-lock anchor write below.
-
 	if aerr := WriteAnchor(ctx, a.logPath, a.kc); aerr != nil {
 		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
 	}
-	if cerr := IncrementCounter(ctx, a.kc); cerr != nil {
+	if cerr := addCounter(ctx, a.kc, entryCount); cerr != nil {
 		_ = a.kc.Delete(ctx, counterKeyService, counterKeyAccount)
 		slog.Warn("audit: keychain counter increment failed; counter key cleared to prevent false mismatch alarm",
 			"err", cerr, "log", a.logPath)
@@ -236,23 +258,28 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 		return nil
 	}
 
-	// Physical write: back up any pre-existing file, then write via temp+rename.
-	if fileExists {
-		// The .bak file is already recorded in the signed chain above; create it now.
-		content0, rErr := os.ReadFile(path) //nolint:gosec // G304: path is an audit-controlled target path, not user input
-		if rErr != nil {
-			return fmt.Errorf("audit: backup read %s: %w", path, rErr)
-		}
-		stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
-		bakPath := fmt.Sprintf("%s.bak.%s", path, stamp)
-		if wErr := os.WriteFile(bakPath, content0, 0o600); wErr != nil { //nolint:gosec // G304: bakPath is derived from path, not user input; 0o600 enforces owner-only perms
-			return fmt.Errorf("audit: backup write %s: %w", bakPath, wErr)
-		}
+	// Physical write of the target, still under the flock. Use os.CreateTemp for a
+	// unique temp name per call so concurrent same-target writers cannot clobber
+	// each other's temp file (CR-02) — mirrors the WriteAnchor fix in anchor.go.
+	// The temp lives in the target's directory so the rename stays on one device.
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	tmpFile, err := os.CreateTemp(dir, base+".*.abysslink.tmp")
+	if err != nil {
+		return fmt.Errorf("audit: create temp for %s: %w", path, err)
 	}
-
-	tmp := path + ".abysslink.tmp"
-	if err := os.WriteFile(tmp, content, perm); err != nil { //nolint:gosec // perm supplied by caller; tmp is path-derived
-		return fmt.Errorf("audit: write temp %s: %w", tmp, err)
+	tmp := tmpFile.Name()
+	_, werr := tmpFile.Write(content)
+	if cerr := tmpFile.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: write temp %s: %w", tmp, werr)
+	}
+	if cerr := os.Chmod(tmp, perm); cerr != nil { //nolint:gosec // perm supplied by caller; tmp is os.CreateTemp-derived, app-controlled
+		_ = os.Remove(tmp)
+		return fmt.Errorf("audit: chmod temp %s: %w", tmp, cerr)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
