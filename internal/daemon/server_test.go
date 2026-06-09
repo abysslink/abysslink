@@ -39,9 +39,11 @@ func (notifyStubNotifier) Send(_ context.Context, _, _ string) error { return ni
 
 // startNotifyServer spins up a daemon Server on a temp Unix socket and returns
 // an HTTP client wired to that socket plus a cancel function.
+// The socket dir comes from shortRuntimeDir (daemon_test.go): macOS limits Unix
+// socket paths to ~104 bytes and t.TempDir() under /var/folders exceeds it.
 func startNotifyServer(t *testing.T) (*http.Client, context.CancelFunc) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := shortRuntimeDir(t)
 	sock := filepath.Join(dir, "abysslinkd-notify.sock")
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	_ = os.Remove(sock)

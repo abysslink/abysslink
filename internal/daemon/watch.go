@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,6 +33,11 @@ const (
 	filePollInterval    = 2 * time.Second
 	defaultHTTPInterval = 60 * time.Second
 	maxBodyLine         = 200
+	// maxScanLine bounds a single watched-file line (NET-11). bufio.Scanner's
+	// default 64 KiB cap is easily exceeded by real-world log lines (JSON
+	// blobs, stack traces); 1 MiB gives generous headroom while still bounding
+	// memory per watcher.
+	maxScanLine = 1 << 20 // 1 MiB
 )
 
 // startFileAndHTTPWatchers launches the configured file and HTTP watchers.
@@ -95,6 +101,9 @@ func (s *Server) scanFileFrom(ctx context.Context, path string, offset int64, re
 	}
 
 	scanner := bufio.NewScanner(f)
+	// NET-11: enlarge the scanner buffer past bufio's 64 KiB default so long
+	// log lines do not poison the watcher.
+	scanner.Buffer(make([]byte, 64*1024), maxScanLine)
 	for scanner.Scan() {
 		line := scanner.Text()
 		offset += int64(len(line)) + 1
@@ -109,11 +118,24 @@ func (s *Server) scanFileFrom(ctx context.Context, path string, offset int64, re
 			slog.Warn("daemon: file watcher notify failed", "path", path, "err", err)
 		}
 	}
+	// NET-11: a scan error (line > maxScanLine, read error) used to be silently
+	// ignored — the offset never advanced past the poison line, stalling the
+	// watcher forever. Log it and skip to the current end of file so the
+	// watcher recovers and keeps tailing subsequent appends.
+	if err := scanner.Err(); err != nil {
+		slog.Warn("daemon: file watcher scan error; skipping to end of file to recover",
+			"path", path, "err", err)
+		if end, seekErr := f.Seek(0, io.SeekEnd); seekErr == nil {
+			return end
+		}
+	}
 	return offset
 }
 
 // watchHTTP polls a URL and notifies when its status code changes from the
-// expected (or previously seen) value.
+// expected (or previously seen) value. Transport failures are an explicit
+// "unreachable" state with the error logged (NET-17) — never conflated with a
+// fabricated "HTTP status 0".
 func (s *Server) watchHTTP(ctx context.Context, hw config.HTTPWatch) {
 	interval := defaultHTTPInterval
 	if hw.IntervalSecs > 0 {
@@ -125,6 +147,11 @@ func (s *Server) watchHTTP(ctx context.Context, hw config.HTTPWatch) {
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	last := hw.Expect
+	// baselined distinguishes "no baseline yet" (Expect unset; adopt the first
+	// probe result silently) from "previously unreachable" (code 0 after a
+	// transport failure). Without it, a recovery after an outage would be
+	// swallowed as a new baseline (NET-17).
+	baselined := hw.Expect != 0
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -135,19 +162,38 @@ func (s *Server) watchHTTP(ctx context.Context, hw config.HTTPWatch) {
 		case <-ticker.C:
 		}
 		code := 0
+		var probeErr error
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, hw.URL, nil)
-		if err == nil {
-			if resp, derr := client.Do(req); derr == nil {
-				code = resp.StatusCode
-				_ = resp.Body.Close()
-			}
+		if err != nil {
+			probeErr = err
+		} else if resp, derr := client.Do(req); derr != nil {
+			probeErr = derr
+		} else {
+			code = resp.StatusCode
+			// Drain before Close so the keep-alive connection is reusable (NET-17).
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
 		}
-		if last == 0 {
+		if probeErr != nil {
+			// NET-17: log the transport error detail; the notification below
+			// reports an explicit unreachable state, not a fake status code.
+			slog.Warn("daemon: http watcher probe failed", "url", hw.URL, "err", probeErr)
+		}
+		if !baselined {
 			last = code
+			baselined = true
 			continue
 		}
 		if code != last {
-			msg := fmt.Sprintf("%s: HTTP status changed %d → %d", label, last, code)
+			var msg string
+			switch {
+			case code == 0:
+				msg = fmt.Sprintf("%s: unreachable (was HTTP %d)", label, last)
+			case last == 0:
+				msg = fmt.Sprintf("%s: reachable again (HTTP %d)", label, code)
+			default:
+				msg = fmt.Sprintf("%s: HTTP status changed %d → %d", label, last, code)
+			}
 			if err := s.notifier.Send(ctx, "watch: "+label, msg); err != nil {
 				slog.Warn("daemon: http watcher notify failed", "url", hw.URL, "err", err)
 			}

@@ -93,7 +93,14 @@ func NewServer(notifier Notifier, runner shell.Runner, cfg *config.Config) *Serv
 func (s *Server) SetRing(r RingAdder) { s.ring = r }
 
 // Run listens on the Unix socket and starts watchers until ctx is cancelled.
+// On cancellation it waits for the graceful shutdown (connection drain +
+// socket-file removal) to complete before returning (NET-14) so the process
+// cannot exit mid-drain or leave a stale socket file behind.
 func (s *Server) Run(ctx context.Context) error {
+	if s.socketPath == "" {
+		// SocketPath failed closed (NET-13: socket dir verification failed).
+		return fmt.Errorf("daemon: no usable socket path (socket directory verification failed — see prior log)")
+	}
 	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("daemon: clear stale socket: %w", err)
 	}
@@ -118,7 +125,9 @@ func (s *Server) Run(ctx context.Context) error {
 	// #nosec G118 -- graceful-shutdown goroutine: by the time it runs, ctx is
 	// already Done, so a fresh context.Background with a timeout is the correct
 	// context for srv.Shutdown (the request-scoped ctx is cancelled).
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -130,6 +139,10 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("daemon: serve: %w", err)
 	}
+	// Serve returned ErrServerClosed, which only srv.Shutdown (in the goroutine
+	// above) can trigger. Wait for the drain and socket-file removal to finish
+	// before returning so the caller cannot exit mid-shutdown (NET-14).
+	<-shutdownDone
 	return nil
 }
 

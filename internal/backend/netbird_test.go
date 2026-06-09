@@ -33,11 +33,14 @@ import (
 // netbirdCfg returns a minimal *config.Config for NetBird adapter tests.
 // Backend.Type is "netbird"; Server.NetBird.ServerURL is set to serverURL.
 // AcceptNoSSHCheck is set to true to bypass the D-04 gate in tests.
+// Tailnet.Hostname matches the mock peer name so the NET-07 local-peer
+// identification resolves to the "test-laptop" entry served by the mock.
 func netbirdCfg(serverURL string) *config.Config {
 	cfg := config.Defaults()
 	cfg.Backend.Type = "netbird"
 	cfg.Server.NetBird.ServerURL = serverURL
 	cfg.Server.NetBird.AcceptNoSSHCheck = true
+	cfg.Tailnet.Hostname = "test-laptop"
 	return cfg
 }
 
@@ -642,7 +645,9 @@ func TestNetBird_SetACL_ValidatesAfterPush(t *testing.T) {
 }
 
 // TestNetBird_Up_EnvInjection verifies that Up():
-//   - reads TS_AUTHKEY from env (never argv)
+//   - drives the `netbird` agent binary with --management-url (NET-05: NetBird
+//     does not speak the Tailscale coordination protocol)
+//   - injects the setup key via NB_SETUP_KEY env (never argv)
 //   - calls PushDenyAllBaseline via netbird editor
 func TestNetBird_Up_EnvInjection(t *testing.T) {
 	t.Setenv("ABYSSLINK_NB_API_KEY", "nbp_test_key")
@@ -652,7 +657,7 @@ func TestNetBird_Up_EnvInjection(t *testing.T) {
 	srv := newNetBirdMockServer(t, state)
 	cfg := netbirdCfg(srv.URL)
 
-	// MockRunner is scripted to succeed for `tailscale up`.
+	// MockRunner is scripted to succeed for `netbird up`.
 	runner := shell.NewMockRunner(shell.Call{
 		Result: shell.Result{Stdout: "", ExitCode: 0},
 	})
@@ -663,17 +668,24 @@ func TestNetBird_Up_EnvInjection(t *testing.T) {
 	err = b.Up(context.Background(), backend.UpOpts{})
 	require.NoError(t, err)
 
-	// Assert TS_AUTHKEY env was injected and NEVER on argv.
+	// Assert the netbird agent binary was driven (NET-05) and NB_SETUP_KEY env
+	// was injected and NEVER on argv.
 	calls := runner.RecordedCalls()
-	require.Len(t, calls, 1, "expected exactly one shell call for tailscale up")
-	tsUp := calls[0]
+	require.Len(t, calls, 1, "expected exactly one shell call for netbird up")
+	nbUp := calls[0]
 
-	assert.Equal(t, "tailscale", tsUp.Name)
-	require.Contains(t, tsUp.Env, "TS_AUTHKEY",
-		"TS_AUTHKEY must be injected via env, not argv")
-	assert.Equal(t, "nbk_setup_key", tsUp.Env["TS_AUTHKEY"],
-		"TS_AUTHKEY env value must match ABYSSLINK_NB_SETUP_KEY")
-	for _, arg := range tsUp.Args {
+	assert.Equal(t, "netbird", nbUp.Name,
+		"Up() must drive the netbird agent binary, not tailscale (NET-05)")
+	assert.Contains(t, nbUp.Args, "up")
+	assert.Contains(t, nbUp.Args, "--management-url",
+		"Up() must pass --management-url to the netbird agent (NET-05)")
+	assert.NotContains(t, nbUp.Args, "--login-server",
+		"--login-server is a tailscale flag; netbird uses --management-url (NET-05)")
+	require.Contains(t, nbUp.Env, "NB_SETUP_KEY",
+		"NB_SETUP_KEY must be injected via env, not argv")
+	assert.Equal(t, "nbk_setup_key", nbUp.Env["NB_SETUP_KEY"],
+		"NB_SETUP_KEY env value must match ABYSSLINK_NB_SETUP_KEY")
+	for _, arg := range nbUp.Args {
 		assert.NotContains(t, arg, "nbk_setup_key",
 			"setup key must NOT appear in argv (T-13-02-02)")
 	}
@@ -681,4 +693,126 @@ func TestNetBird_Up_EnvInjection(t *testing.T) {
 	// Assert PushDenyAllBaseline was called (there should be a POST to /api/policies).
 	assert.NotEmpty(t, state.createdPolicies,
 		"Up() must call PushDenyAllBaseline which POSTs to /api/policies")
+}
+
+// TestNetBird_Up_NonZeroExit is the NET-03 regression: a non-zero `netbird up`
+// exit (which ExecRunner reports as (Result{ExitCode:N}, nil)) MUST fail Up()
+// — and in particular MUST NOT proceed to push the deny-all policy against a
+// peer that never enrolled.
+func TestNetBird_Up_NonZeroExit(t *testing.T) {
+	t.Setenv("ABYSSLINK_NB_API_KEY", "nbp_test_key")
+	t.Setenv("ABYSSLINK_NB_SETUP_KEY", "nbk_setup_key")
+
+	state := &nbTestState{}
+	srv := newNetBirdMockServer(t, state)
+	cfg := netbirdCfg(srv.URL)
+
+	runner := shell.NewMockRunner(shell.Call{
+		Result: shell.Result{ExitCode: 1, Stderr: "Error: connect: connection refused"},
+	})
+
+	b, err := backend.New(cfg, runner)
+	require.NoError(t, err)
+
+	err = b.Up(context.Background(), backend.UpOpts{})
+	require.Error(t, err, "Up() must fail when netbird up exits non-zero (NET-03)")
+	assert.Contains(t, err.Error(), "exited 1")
+	assert.Contains(t, err.Error(), "connection refused",
+		"error must surface the trimmed stderr for diagnosis")
+	assert.Empty(t, state.createdPolicies,
+		"a failed enrollment must NOT push the deny-all policy (NET-03)")
+}
+
+// TestNetBird_Down drives `netbird down` (NET-05) and fails on non-zero exit (NET-03).
+func TestNetBird_Down(t *testing.T) {
+	t.Setenv("ABYSSLINK_NB_API_KEY", "nbp_test_key")
+	state := &nbTestState{}
+	srv := newNetBirdMockServer(t, state)
+	cfg := netbirdCfg(srv.URL)
+
+	t.Run("success", func(t *testing.T) {
+		runner := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 0}})
+		b, err := backend.New(cfg, runner)
+		require.NoError(t, err)
+		require.NoError(t, b.Down(context.Background()))
+
+		calls := runner.RecordedCalls()
+		require.Len(t, calls, 1)
+		assert.Equal(t, "netbird", calls[0].Name, "Down() must drive the netbird agent binary (NET-05)")
+		assert.Equal(t, []string{"down"}, calls[0].Args)
+	})
+
+	t.Run("non_zero_exit_is_error", func(t *testing.T) {
+		runner := shell.NewMockRunner(shell.Call{
+			Result: shell.Result{ExitCode: 1, Stderr: "daemon not running"},
+		})
+		b, err := backend.New(cfg, runner)
+		require.NoError(t, err)
+		err = b.Down(context.Background())
+		require.Error(t, err, "Down() must fail when netbird down exits non-zero (NET-03)")
+		assert.Contains(t, err.Error(), "daemon not running")
+	})
+}
+
+// TestNetBird_Set_Unsupported verifies Set() fails honest for requested
+// settings (the netbird agent has no runtime settings mutation, NET-05) and
+// is a no-op success when nothing is requested.
+func TestNetBird_Set_Unsupported(t *testing.T) {
+	t.Setenv("ABYSSLINK_NB_API_KEY", "nbp_test_key")
+	state := &nbTestState{}
+	srv := newNetBirdMockServer(t, state)
+	cfg := netbirdCfg(srv.URL)
+
+	runner := shell.NewMockRunner() // any shell call would error: Set must not shell out
+	b, err := backend.New(cfg, runner)
+	require.NoError(t, err)
+
+	require.NoError(t, b.Set(context.Background(), backend.SetOpts{}),
+		"Set() with no requested changes is a no-op success")
+
+	err = b.Set(context.Background(), backend.SetOpts{Hostname: "new-name"})
+	require.Error(t, err, "Set() must report unsupported for requested settings")
+	require.ErrorIs(t, err, backend.ErrUnsupported)
+	assert.Empty(t, runner.RecordedCalls(), "Set() must never shell out to tailscale (NET-05)")
+}
+
+// TestNetBird_LocalPeerIdentification is the NET-07 regression: IP() and
+// Hostname() must return THIS machine's peer (matched via tailnet.hostname),
+// not the first entry of the account-wide peer list, and must error clearly
+// when the local peer is not in the list.
+func TestNetBird_LocalPeerIdentification(t *testing.T) {
+	t.Setenv("ABYSSLINK_NB_API_KEY", "nbp_test_key")
+	state := &nbTestState{}
+	srv := newNetBirdMockServer(t, state)
+
+	t.Run("matches_local_peer_not_first", func(t *testing.T) {
+		// The mock serves peer-1 "test-laptop" first and peer-2 "test-phone"
+		// second; configuring the phone's name must return the phone's data.
+		cfg := netbirdCfg(srv.URL)
+		cfg.Tailnet.Hostname = "test-phone"
+		b, err := backend.New(cfg, shell.NewMockRunner())
+		require.NoError(t, err)
+
+		ip, err := b.IP(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, "100.64.0.2", ip, "IP() must return the LOCAL peer's address (NET-07)")
+
+		name, err := b.Hostname(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, "test-phone", name)
+	})
+
+	t.Run("local_peer_not_found_is_error", func(t *testing.T) {
+		cfg := netbirdCfg(srv.URL)
+		cfg.Tailnet.Hostname = "machine-not-enrolled-anywhere"
+		b, err := backend.New(cfg, shell.NewMockRunner())
+		require.NoError(t, err)
+
+		_, err = b.IP(context.Background())
+		require.Error(t, err, "IP() must error when the local peer is absent (NET-07)")
+		assert.Contains(t, err.Error(), "local peer not found")
+
+		_, err = b.Hostname(context.Background())
+		require.Error(t, err, "Hostname() must error when the local peer is absent (NET-07)")
+	})
 }

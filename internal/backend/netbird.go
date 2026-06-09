@@ -50,7 +50,7 @@ const netbirdSetupKeyEnv = "ABYSSLINK_NB_SETUP_KEY" //nolint:gosec // env var na
 //     the Authorization: Token header inside doRequest() — never to slog, audit,
 //     or argv (CLAUDE.md hard rule, T-13-02-01).
 //   - The setup key is read from ABYSSLINK_NB_SETUP_KEY env and injected via
-//     TS_AUTHKEY env in RunWithEnv — never on argv (T-13-02-02).
+//     NB_SETUP_KEY env in RunWithEnv — never on argv (T-13-02-02).
 //   - Authorization header uses "Token" not "Bearer" — NetBird PAT tokens use
 //     the Token scheme (T-13-02-05, RESEARCH Anti-Patterns).
 type netbirdAdapter struct {
@@ -101,31 +101,61 @@ func (a *netbirdAdapter) setupKeyExpiry() time.Duration {
 
 // ── Core Client methods ────────────────────────────────────────────────────
 
-// Status returns a synthetic Status for the NetBird backend.
-// It queries GET /api/peers and synthesizes a running status if any peers exist.
-func (a *netbirdAdapter) Status(ctx context.Context) (*Status, error) {
+// listPeers queries GET /api/peers and decodes the account-wide peer list.
+// op names the calling operation for error wrapping.
+func (a *netbirdAdapter) listPeers(ctx context.Context, op string) ([]nbPeer, error) {
 	resp, err := a.doRequest(ctx, http.MethodGet, "/api/peers", nil)
 	if err != nil {
-		return nil, fmt.Errorf("netbird: status: %w", err)
+		return nil, fmt.Errorf("netbird: %s: %w", op, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("netbird: status: unexpected HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("netbird: %s: unexpected HTTP %d", op, resp.StatusCode)
 	}
 	data, err := readLimited(resp.Body, maxBackendBody)
 	if err != nil {
-		return nil, fmt.Errorf("netbird: status: read response: %w", err)
+		return nil, fmt.Errorf("netbird: %s: read response: %w", op, err)
 	}
 	var peers []nbPeer
 	if err := json.Unmarshal(data, &peers); err != nil {
-		return nil, fmt.Errorf("netbird: status: decode: %w", err)
+		return nil, fmt.Errorf("netbird: %s: decode: %w", op, err)
+	}
+	return peers, nil
+}
+
+// localPeer identifies THIS machine in the account-wide peer list by matching
+// the configured tailnet hostname and the OS hostname against each peer's
+// name/hostname (NET-07). Returns a clear error when the local peer is not
+// found — never an arbitrary other machine's entry.
+func (a *netbirdAdapter) localPeer(peers []nbPeer) (*nbPeer, error) {
+	candidates := localNodeCandidates(a.cfg.Tailnet.Hostname)
+	for i := range peers {
+		if matchesLocalNode(candidates, peers[i].Name, peers[i].Hostname) {
+			return &peers[i], nil
+		}
+	}
+	return nil, fmt.Errorf(
+		"netbird: local peer not found among %d enrolled peer(s) (looked for %v) — "+
+			"set tailnet.hostname in abysslink.yaml to this machine's enrolled name, or enroll first (abysslink up)",
+		len(peers), candidates)
+}
+
+// Status returns a synthetic Status for the NetBird backend.
+// It queries GET /api/peers and synthesizes a running status. Self is set
+// only when THIS machine is identified in the peer list (NET-07) — never the
+// arbitrary first entry of the account-wide list.
+func (a *netbirdAdapter) Status(ctx context.Context) (*Status, error) {
+	peers, err := a.listPeers(ctx, "status")
+	if err != nil {
+		return nil, err
 	}
 
 	st := &Status{
 		BackendState: StateRunning,
 	}
-	if len(peers) > 0 {
-		p := peers[0]
+	// Honest absence: when the local peer cannot be identified, Self stays nil
+	// rather than reporting another machine's identity (NET-07).
+	if p, lErr := a.localPeer(peers); lErr == nil {
 		st.Self = &PeerStatus{
 			HostName: p.Name,
 			Online:   true,
@@ -134,64 +164,45 @@ func (a *netbirdAdapter) Status(ctx context.Context) (*Status, error) {
 	return st, nil
 }
 
-// IP returns the first IPv4 address for the first enrolled peer.
-// Returns ErrUnsupported if no peers are enrolled or none have IP addresses.
+// IP returns the IPv4 address of THIS machine's peer (NET-07). It returns an
+// error when the local peer cannot be identified in the account-wide list, and
+// ErrUnsupported when the local peer has no IP addresses yet.
 func (a *netbirdAdapter) IP(ctx context.Context) (string, error) {
-	resp, err := a.doRequest(ctx, http.MethodGet, "/api/peers", nil)
+	peers, err := a.listPeers(ctx, "ip")
+	if err != nil {
+		return "", err
+	}
+	p, err := a.localPeer(peers)
 	if err != nil {
 		return "", fmt.Errorf("netbird: ip: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("netbird: ip: unexpected HTTP %d", resp.StatusCode)
-	}
-	data, err := readLimited(resp.Body, maxBackendBody)
-	if err != nil {
-		return "", fmt.Errorf("netbird: ip: read response: %w", err)
-	}
-	var peers []nbPeer
-	if err := json.Unmarshal(data, &peers); err != nil {
-		return "", fmt.Errorf("netbird: ip: decode: %w", err)
-	}
 	var firstIP string
-	for _, p := range peers {
-		for _, ip := range p.IPAddresses {
-			if firstIP == "" {
-				firstIP = ip
-			}
-			if !strings.Contains(ip, ":") {
-				return ip, nil
-			}
+	for _, ip := range p.IPAddresses {
+		if firstIP == "" {
+			firstIP = ip
+		}
+		if !strings.Contains(ip, ":") {
+			return ip, nil
 		}
 	}
 	if firstIP != "" {
 		return firstIP, nil
 	}
-	return "", fmt.Errorf("netbird: ip: no enrolled peers with IP addresses: %w", ErrUnsupported)
+	return "", fmt.Errorf("netbird: ip: local peer %q has no IP addresses: %w", p.Name, ErrUnsupported)
 }
 
-// Hostname returns the hostname of the first enrolled peer.
+// Hostname returns the control-plane name of THIS machine's peer (NET-07).
+// It returns an error when the local peer cannot be identified.
 func (a *netbirdAdapter) Hostname(ctx context.Context) (string, error) {
-	resp, err := a.doRequest(ctx, http.MethodGet, "/api/peers", nil)
+	peers, err := a.listPeers(ctx, "hostname")
+	if err != nil {
+		return "", err
+	}
+	p, err := a.localPeer(peers)
 	if err != nil {
 		return "", fmt.Errorf("netbird: hostname: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("netbird: hostname: unexpected HTTP %d", resp.StatusCode)
-	}
-	data, err := readLimited(resp.Body, maxBackendBody)
-	if err != nil {
-		return "", fmt.Errorf("netbird: hostname: read response: %w", err)
-	}
-	var peers []nbPeer
-	if err := json.Unmarshal(data, &peers); err != nil {
-		return "", fmt.Errorf("netbird: hostname: decode: %w", err)
-	}
-	if len(peers) > 0 {
-		return peers[0].Name, nil
-	}
-	return "", nil
+	return p.Name, nil
 }
 
 // SSHConfig parses cfg.Mobile.SSHCheckPeriod (a string, e.g. "12h") via
@@ -228,8 +239,12 @@ func (a *netbirdAdapter) Capabilities() Capabilities {
 	}
 }
 
-// Up enrolls this node against the NetBird control server using a setup key.
-// The setup key is injected via TS_AUTHKEY env var — NEVER on argv (T-13-02-02).
+// Up enrolls this node against the NetBird control server using a setup key,
+// by driving the `netbird` agent binary (NET-05: NetBird does NOT speak the
+// Tailscale coordination protocol — shelling out to `tailscale up
+// --login-server <netbird mgmt URL>` could never join the network).
+// The setup key is injected via NB_SETUP_KEY env var — NEVER on argv
+// (T-13-02-02; the netbird CLI reads NB_-prefixed env vars for its flags).
 // After enrollment, Up pushes the deny-all ACL baseline before returning (NB-01 SC-1).
 //
 // D-04: Up refuses to continue unless AcceptNoSSHCheck is set in config (one-time
@@ -240,6 +255,14 @@ func (a *netbirdAdapter) Up(ctx context.Context, opts UpOpts) error {
 		return fmt.Errorf("netbird: up: SSHCheck not available on NetBird — " +
 			"set accept_no_sshcheck: true in abysslink.yaml or pass --accept-no-sshcheck to acknowledge " +
 			"(SSHCheck unavailable; no periodic re-auth mechanism exists for setup-key-enrolled peers)")
+	}
+
+	// Route/exit-node propagation is managed server-side on NetBird (network
+	// routes via the management API), not via agent flags. Fail honest rather
+	// than silently dropping a requested option.
+	if opts.AcceptRoutes || opts.AdvertiseExitNode {
+		return fmt.Errorf("netbird: up: accept-routes / advertise-exit-node are managed "+
+			"server-side on NetBird (network routes), not by the agent: %w", ErrUnsupported)
 	}
 
 	// Setup key read from env — NEVER from argv (T-13-02-02).
@@ -261,25 +284,28 @@ func (a *netbirdAdapter) Up(ctx context.Context, opts UpOpts) error {
 	}
 
 	args := []string{"up",
-		"--login-server", a.baseURL,
+		"--management-url", a.baseURL,
 	}
 	if hostname != "" {
 		args = append(args, "--hostname", hostname)
 	}
 	if opts.SSH {
-		args = append(args, "--ssh")
-	}
-	if opts.AcceptRoutes {
-		args = append(args, "--accept-routes")
-	}
-	if opts.AdvertiseExitNode {
-		args = append(args, "--advertise-exit-node")
+		args = append(args, "--allow-server-ssh")
 	}
 
-	// Setup key injected via env — never on argv (T-13-02-02, CLAUDE.md hard rule).
-	slog.Debug("netbird: up: invoking tailscale up with TS_AUTHKEY env")
-	if _, err := a.runner.RunWithEnv(ctx, map[string]string{"TS_AUTHKEY": setupKey}, "tailscale", args...); err != nil {
-		return fmt.Errorf("netbird: up: tailscale up: %w", err)
+	// Setup key injected via NB_SETUP_KEY env — never on argv (T-13-02-02,
+	// CLAUDE.md hard rule). The netbird agent binds NB_SETUP_KEY to --setup-key.
+	slog.Debug("netbird: up: invoking netbird up with NB_SETUP_KEY env")
+	res, err := a.runner.RunWithEnv(ctx, map[string]string{"NB_SETUP_KEY": setupKey}, "netbird", args...)
+	if err != nil {
+		return fmt.Errorf("netbird: up: netbird up: %w", err)
+	}
+	// NET-03: shell.ExecRunner returns (Result{ExitCode:N}, nil) on a non-zero
+	// exit — err alone does NOT signal enrollment failure. Without this check a
+	// failed `netbird up` would be treated as success and the deny-all policy
+	// pushed against a peer that never enrolled.
+	if res.ExitCode != 0 {
+		return fmt.Errorf("netbird: up: netbird up exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 
 	// NB-01 SC-1: Push deny-all ACL baseline before returning. The deny-all policy
@@ -293,25 +319,31 @@ func (a *netbirdAdapter) Up(ctx context.Context, opts UpOpts) error {
 	return nil
 }
 
-// Set applies daemon settings by calling `tailscale set`.
-func (a *netbirdAdapter) Set(ctx context.Context, opts SetOpts) error {
-	args := []string{"set"}
-	if opts.Hostname != "" {
-		args = append(args, "--hostname", opts.Hostname)
+// Set reports ErrUnsupported for any requested setting: the netbird agent has
+// no runtime settings-mutation command (NET-05 — the previous `tailscale set`
+// shellout targeted a binary that does not manage the NetBird interface).
+// Hostname is set at enrollment time (`netbird up --hostname`); agent
+// auto-update is managed by the OS package manager. A Set with no requested
+// changes is a no-op success.
+func (a *netbirdAdapter) Set(_ context.Context, opts SetOpts) error {
+	if opts.Hostname == "" && !opts.AutoUpdate {
+		return nil // nothing requested — nothing to do
 	}
-	if opts.AutoUpdate {
-		args = append(args, "--auto-update")
-	}
-	if _, err := a.runner.Run(ctx, "tailscale", args...); err != nil {
-		return fmt.Errorf("netbird: set: %w", err)
-	}
-	return nil
+	return fmt.Errorf("netbird: set: the netbird agent has no runtime settings mutation "+
+		"(hostname is set at enrollment via `netbird up --hostname`; auto-update is managed "+
+		"by the OS package manager): %w", ErrUnsupported)
 }
 
-// Down brings the Tailscale daemon down.
+// Down disconnects the NetBird agent via `netbird down` (NET-05: the previous
+// `tailscale down` shellout targeted a binary that does not manage the NetBird
+// interface).
 func (a *netbirdAdapter) Down(ctx context.Context) error {
-	if _, err := a.runner.Run(ctx, "tailscale", "down"); err != nil {
+	res, err := a.runner.Run(ctx, "netbird", "down")
+	if err != nil {
 		return fmt.Errorf("netbird: down: %w", err)
+	}
+	if res.ExitCode != 0 { // NET-03: non-zero exit is failure, not success
+		return fmt.Errorf("netbird: down: netbird down exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return nil
 }
@@ -534,8 +566,9 @@ func (a *netbirdAdapter) Diff(oldBytes, newBytes []byte) string {
 // Authorization header: "Token <nbp_...>" — NOT "Bearer" for PAT tokens.
 // NetBird's auth_middleware.go confirms the "Token" scheme for PAT tokens (T-13-02-05).
 //
-// TLS: http.DefaultClient uses the system TLS root store with full verification.
-// InsecureSkipVerify is NEVER set.
+// TLS: backendHTTPClient uses the system TLS root store with full verification.
+// InsecureSkipVerify is NEVER set. The shared client carries a 30s timeout so
+// a hung control plane cannot stall callers forever (NET-06).
 func (a *netbirdAdapter) doRequest(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var buf io.Reader
 	if body != nil {
@@ -553,7 +586,7 @@ func (a *netbirdAdapter) doRequest(ctx context.Context, method, path string, bod
 	// API key flows ONLY into this header — never logged, never on argv (T-13-02-01).
 	req.Header.Set("Authorization", "Token "+a.apiKey())
 	req.Header.Set("Content-Type", "application/json")
-	return http.DefaultClient.Do(req) //nolint:wrapcheck // caller wraps
+	return backendHTTPClient.Do(req) //nolint:wrapcheck // caller wraps
 }
 
 // ── NetBird REST API response types ─────────────────────────────────────

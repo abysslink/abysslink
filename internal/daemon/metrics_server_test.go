@@ -336,6 +336,55 @@ func TestMetricsServerShutdown(t *testing.T) {
 	assert.Error(t, lastErr, "listener should be closed within 500ms of cancel")
 }
 
+// TestMetricsServer_NoFabricatedPosture is the NET-04 regression: the daemon's
+// /metrics endpoint must not fabricate an all-clear security posture. The
+// doctor-findings and cert-expiry series must be ABSENT (the daemon has no
+// real doctor or certificate data), and rig_reachable must reflect the real
+// backend probe (1 here, because the mock backend resolves an IP).
+func TestMetricsServer_NoFabricatedPosture(t *testing.T) {
+	port := freePort(t)
+	cfg := metricsEnabledCfg(port)
+	cfg.Tailnet.Lock.Enabled = true
+	reg := metrics.NewMemRegistry()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	daemon.StartMetricsServer(ctx, cfg, reg, &localMockBackend{ip: "127.0.0.1"})
+
+	body := waitForMetrics(t, port)
+	assert.NotContains(t, body, "abysslink_doctor_findings",
+		"doctor findings must be OMITTED — the daemon has no real doctor counts (NET-04)")
+	assert.NotContains(t, body, "abysslink_cert_expiry_seconds",
+		"cert expiry must be OMITTED — the daemon has no real certificate data (NET-04)")
+	assert.Contains(t, body, "abysslink_rig_reachable")
+	assert.Regexp(t, `abysslink_rig_reachable\{rig="[^"]+"\} 1`, body,
+		"reachable must be 1 from the REAL backend probe, not hardcoded")
+	assert.Contains(t, body, "abysslink_lock_status 1", "lock status is real (from config)")
+	assert.Contains(t, body, "abysslink_last_seen_timestamp",
+		"last_seen must be present after a successful probe")
+}
+
+// TestMetricsServer_UnreachableBackendHonest verifies the fail-honest side of
+// NET-04: a backend that cannot resolve an IP yields no metrics listener at
+// all (resolveMetricsAddr fails closed), so no fabricated reachable=1 can be
+// scraped. Covered by the existing fail-closed tests; this asserts the
+// registry stays free of OBS-05 series too.
+func TestMetricsServer_UnreachableBackendHonest(t *testing.T) {
+	port := freePort(t)
+	cfg := metricsEnabledCfg(port)
+	reg := metrics.NewMemRegistry()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	daemon.StartMetricsServer(ctx, cfg, reg, &localMockBackend{ip: ""})
+	time.Sleep(100 * time.Millisecond)
+
+	for _, f := range reg.Snapshot() {
+		assert.NotEqual(t, "abysslink_doctor_findings", f.Name,
+			"no doctor findings may be registered without real data (NET-04)")
+	}
+}
+
 func TestRegisterOBS05Metrics(t *testing.T) {
 	reg := metrics.NewMemRegistry()
 	daemon.RegisterOBS05Metrics(reg, "test-rig", true, 1, 2, true, time.Now().Add(time.Hour), time.Now())

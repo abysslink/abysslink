@@ -34,10 +34,13 @@ import (
 
 // headscaleCfg returns a minimal *config.Config for Headscale adapter tests.
 // Backend.Type is "headscale"; Server.Headscale.ServerURL is set to serverURL.
+// Tailnet.Hostname matches the fixture node name so the NET-07 local-node
+// identification resolves to the testdata/headscale_nodes.json entry.
 func headscaleCfg(serverURL string) *config.Config {
 	cfg := config.Defaults()
 	cfg.Backend.Type = "headscale"
 	cfg.Server.Headscale.ServerURL = serverURL
+	cfg.Tailnet.Hostname = "my-laptop"
 	return cfg
 }
 
@@ -287,6 +290,51 @@ func TestHeadscaleDenyAllOnUp(t *testing.T) {
 
 	require.GreaterOrEqual(t, policyPushed.Load(), int32(1),
 		"Up() must push deny-all ACL baseline via PUT /api/v1/policy before returning (HS-01 SC-1)")
+}
+
+// TestHeadscaleUp_NonZeroExit is the NET-03 regression: a non-zero `tailscale up`
+// exit (which ExecRunner reports as (Result{ExitCode:N}, nil)) MUST fail Up() —
+// and in particular MUST NOT proceed to push the deny-all ACL against a node
+// that never enrolled.
+func TestHeadscaleUp_NonZeroExit(t *testing.T) {
+	var policyPushed atomic.Int32
+	srv := newHeadscaleMockServer(t, &policyPushed, nil)
+
+	t.Setenv("ABYSSLINK_HS_PREAUTHKEY", "tskey-auth-test-fixture")
+
+	runner := shell.NewMockRunner(shell.Call{
+		Result: shell.Result{ExitCode: 1, Stderr: "backend error: invalid key\n"},
+	})
+
+	b, err := backend.New(headscaleCfg(srv.URL), runner)
+	require.NoError(t, err)
+
+	err = b.Up(context.Background(), backend.UpOpts{Hostname: "test-laptop"})
+	require.Error(t, err, "Up() must fail when tailscale up exits non-zero (NET-03)")
+	require.Contains(t, err.Error(), "exited 1")
+	require.Contains(t, err.Error(), "invalid key",
+		"error must surface the trimmed stderr for diagnosis")
+	require.Zero(t, policyPushed.Load(),
+		"a failed enrollment must NOT push the deny-all ACL (NET-03)")
+}
+
+// TestHeadscaleLocalNodeNotFound is the NET-07 regression: IP() and Hostname()
+// must error clearly when THIS machine cannot be identified in the account-wide
+// node list, rather than returning the first (arbitrary) node's identity.
+func TestHeadscaleLocalNodeNotFound(t *testing.T) {
+	srv := newHeadscaleMockServer(t, nil, nil)
+
+	cfg := headscaleCfg(srv.URL)
+	cfg.Tailnet.Hostname = "machine-not-enrolled-anywhere"
+	b, err := backend.New(cfg, shell.NewMockRunner())
+	require.NoError(t, err)
+
+	_, err = b.IP(context.Background())
+	require.Error(t, err, "IP() must error when the local node is absent (NET-07)")
+	require.Contains(t, err.Error(), "local node not found")
+
+	_, err = b.Hostname(context.Background())
+	require.Error(t, err, "Hostname() must error when the local node is absent (NET-07)")
 }
 
 // TestHeadscaleDevices asserts that Devices() calls GET /api/v1/node and returns

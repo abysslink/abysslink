@@ -88,31 +88,61 @@ func (a *headscaleAdapter) preAuthKeyExpiry() time.Duration {
 
 // ── Core Client methods ────────────────────────────────────────────────────
 
-// Status returns a synthetic Status for the Headscale backend.
-// It queries GET /api/v1/node and synthesizes a running status if any nodes exist.
-func (a *headscaleAdapter) Status(ctx context.Context) (*Status, error) {
+// listNodes queries GET /api/v1/node and decodes the account-wide node list.
+// op names the calling operation for error wrapping.
+func (a *headscaleAdapter) listNodes(ctx context.Context, op string) ([]hsNode, error) {
 	resp, err := a.doRequest(ctx, http.MethodGet, "/api/v1/node", nil)
 	if err != nil {
-		return nil, fmt.Errorf("headscale: status: %w", err)
+		return nil, fmt.Errorf("headscale: %s: %w", op, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("headscale: status: unexpected HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("headscale: %s: unexpected HTTP %d", op, resp.StatusCode)
 	}
 	data, err := readLimited(resp.Body, maxBackendBody)
 	if err != nil {
-		return nil, fmt.Errorf("headscale: status: read response: %w", err)
+		return nil, fmt.Errorf("headscale: %s: read response: %w", op, err)
 	}
 	var result hsNodesResponse
 	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("headscale: status: decode: %w", err)
+		return nil, fmt.Errorf("headscale: %s: decode: %w", op, err)
+	}
+	return result.Nodes, nil
+}
+
+// localNode identifies THIS machine in the account-wide node list by matching
+// the configured tailnet hostname and the OS hostname against each node's
+// name/givenName (NET-07). Returns a clear error when the local node is not
+// found — never an arbitrary other machine's entry.
+func (a *headscaleAdapter) localNode(nodes []hsNode) (*hsNode, error) {
+	candidates := localNodeCandidates(a.cfg.Tailnet.Hostname)
+	for i := range nodes {
+		if matchesLocalNode(candidates, nodes[i].Name, nodes[i].GivenName) {
+			return &nodes[i], nil
+		}
+	}
+	return nil, fmt.Errorf(
+		"headscale: local node not found among %d enrolled node(s) (looked for %v) — "+
+			"set tailnet.hostname in abysslink.yaml to this machine's enrolled name, or enroll first (abysslink up)",
+		len(nodes), candidates)
+}
+
+// Status returns a synthetic Status for the Headscale backend.
+// It queries GET /api/v1/node and synthesizes a running status. Self is set
+// only when THIS machine is identified in the node list (NET-07) — never the
+// arbitrary first entry of the account-wide list.
+func (a *headscaleAdapter) Status(ctx context.Context) (*Status, error) {
+	nodes, err := a.listNodes(ctx, "status")
+	if err != nil {
+		return nil, err
 	}
 
 	st := &Status{
 		BackendState: StateRunning,
 	}
-	if len(result.Nodes) > 0 {
-		n := result.Nodes[0]
+	// Honest absence: when the local node cannot be identified, Self stays nil
+	// rather than reporting another machine's identity (NET-07).
+	if n, lErr := a.localNode(nodes); lErr == nil {
 		st.Self = &PeerStatus{
 			HostName: n.Name,
 			Online:   n.Online,
@@ -121,68 +151,49 @@ func (a *headscaleAdapter) Status(ctx context.Context) (*Status, error) {
 	return st, nil
 }
 
-// IP returns the first IP address for the first enrolled node.
-// Returns ErrUnsupported if no nodes are enrolled yet.
+// IP returns the IP address of THIS machine's node (NET-07). It returns an
+// error when the local node cannot be identified in the account-wide list, and
+// ErrUnsupported when the local node has no IP addresses yet.
 func (a *headscaleAdapter) IP(ctx context.Context) (string, error) {
-	resp, err := a.doRequest(ctx, http.MethodGet, "/api/v1/node", nil)
+	nodes, err := a.listNodes(ctx, "ip")
+	if err != nil {
+		return "", err
+	}
+	n, err := a.localNode(nodes)
 	if err != nil {
 		return "", fmt.Errorf("headscale: ip: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("headscale: ip: unexpected HTTP %d", resp.StatusCode)
-	}
-	data, err := readLimited(resp.Body, maxBackendBody)
-	if err != nil {
-		return "", fmt.Errorf("headscale: ip: read response: %w", err)
-	}
-	var result hsNodesResponse
-	if err := json.Unmarshal(data, &result); err != nil {
-		return "", fmt.Errorf("headscale: ip: decode: %w", err)
 	}
 	// Select the IPv4 address explicitly rather than IPAddresses[0]: Headscale's
 	// ordering is not guaranteed, and downstream consumers follow the tailscale
 	// adapter convention of an IPv4 address. Fall back to the first address only
 	// if no IPv4 entry is present (IPv6-only node).
 	var firstIP string
-	for _, n := range result.Nodes {
-		for _, ip := range n.IPAddresses {
-			if firstIP == "" {
-				firstIP = ip
-			}
-			if !strings.Contains(ip, ":") {
-				return ip, nil
-			}
+	for _, ip := range n.IPAddresses {
+		if firstIP == "" {
+			firstIP = ip
+		}
+		if !strings.Contains(ip, ":") {
+			return ip, nil
 		}
 	}
 	if firstIP != "" {
 		return firstIP, nil
 	}
-	return "", fmt.Errorf("headscale: ip: no enrolled nodes with IP addresses: %w", ErrUnsupported)
+	return "", fmt.Errorf("headscale: ip: local node %q has no IP addresses: %w", n.Name, ErrUnsupported)
 }
 
-// Hostname returns the hostname of the first enrolled node.
+// Hostname returns the control-plane name of THIS machine's node (NET-07).
+// It returns an error when the local node cannot be identified.
 func (a *headscaleAdapter) Hostname(ctx context.Context) (string, error) {
-	resp, err := a.doRequest(ctx, http.MethodGet, "/api/v1/node", nil)
+	nodes, err := a.listNodes(ctx, "hostname")
+	if err != nil {
+		return "", err
+	}
+	n, err := a.localNode(nodes)
 	if err != nil {
 		return "", fmt.Errorf("headscale: hostname: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("headscale: hostname: unexpected HTTP %d", resp.StatusCode)
-	}
-	data, err := readLimited(resp.Body, maxBackendBody)
-	if err != nil {
-		return "", fmt.Errorf("headscale: hostname: read response: %w", err)
-	}
-	var result hsNodesResponse
-	if err := json.Unmarshal(data, &result); err != nil {
-		return "", fmt.Errorf("headscale: hostname: decode: %w", err)
-	}
-	if len(result.Nodes) > 0 {
-		return result.Nodes[0].Name, nil
-	}
-	return "", nil
+	return n.Name, nil
 }
 
 // SSHConfig parses cfg.Mobile.SSHCheckPeriod (a string, e.g. "12h") via
@@ -257,8 +268,16 @@ func (a *headscaleAdapter) Up(ctx context.Context, opts UpOpts) error {
 
 	// Key injected via env — never on argv (D-11, CLAUDE.md hard rule).
 	slog.Debug("headscale: up: invoking tailscale up with TS_AUTHKEY env")
-	if _, err := a.runner.RunWithEnv(ctx, map[string]string{"TS_AUTHKEY": preAuthKey}, "tailscale", args...); err != nil {
+	res, err := a.runner.RunWithEnv(ctx, map[string]string{"TS_AUTHKEY": preAuthKey}, "tailscale", args...)
+	if err != nil {
 		return fmt.Errorf("headscale: up: tailscale up: %w", err)
+	}
+	// NET-03: shell.ExecRunner returns (Result{ExitCode:N}, nil) on a non-zero
+	// exit — err alone does NOT signal enrollment failure. Without this check a
+	// failed `tailscale up` would be treated as success and the deny-all ACL
+	// pushed against a node that never enrolled.
+	if res.ExitCode != 0 {
+		return fmt.Errorf("headscale: up: tailscale up exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 
 	// HS-01: Push deny-all ACL baseline before returning. The deny-all policy is
@@ -284,16 +303,24 @@ func (a *headscaleAdapter) Set(ctx context.Context, opts SetOpts) error {
 	if opts.AutoUpdate {
 		args = append(args, "--auto-update")
 	}
-	if _, err := a.runner.Run(ctx, "tailscale", args...); err != nil {
+	res, err := a.runner.Run(ctx, "tailscale", args...)
+	if err != nil {
 		return fmt.Errorf("headscale: set: %w", err)
+	}
+	if res.ExitCode != 0 { // NET-03: non-zero exit is failure, not success
+		return fmt.Errorf("headscale: set: tailscale set exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return nil
 }
 
 // Down brings the Tailscale daemon down.
 func (a *headscaleAdapter) Down(ctx context.Context) error {
-	if _, err := a.runner.Run(ctx, "tailscale", "down"); err != nil {
+	res, err := a.runner.Run(ctx, "tailscale", "down")
+	if err != nil {
 		return fmt.Errorf("headscale: down: %w", err)
+	}
+	if res.ExitCode != 0 { // NET-03: non-zero exit is failure, not success
+		return fmt.Errorf("headscale: down: tailscale down exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return nil
 }
@@ -458,9 +485,10 @@ func (a *headscaleAdapter) Diff(oldBytes, newBytes []byte) string {
 //   - passed to audit.Append or any log entry content field
 //   - passed as argv to any subprocess
 //
-// TLS: http.DefaultClient uses the system TLS root store with full verification.
+// TLS: backendHTTPClient uses the system TLS root store with full verification.
 // InsecureSkipVerify is NEVER set (T-12-02-04). The TLS cert gate is enforced
-// at init time (Wave 4), not here.
+// at init time (Wave 4), not here. The shared client carries a 30s timeout so
+// a hung control plane cannot stall callers forever (NET-06).
 func (a *headscaleAdapter) doRequest(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var buf io.Reader
 	if body != nil {
@@ -477,7 +505,7 @@ func (a *headscaleAdapter) doRequest(ctx context.Context, method, path string, b
 	// API key flows ONLY into this header — never logged, never on argv (D-10).
 	req.Header.Set("Authorization", "Bearer "+a.apiKey())
 	req.Header.Set("Content-Type", "application/json")
-	return http.DefaultClient.Do(req) //nolint:wrapcheck // caller wraps
+	return backendHTTPClient.Do(req) //nolint:wrapcheck // caller wraps
 }
 
 // ── Headscale REST API response types ─────────────────────────────────────
