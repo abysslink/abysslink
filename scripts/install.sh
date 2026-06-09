@@ -2,9 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Abysslink Contributors
 #
-# Abysslink installer — downloads, verifies, and installs the abysslink binary.
+# Abysslink installer — downloads, verifies, and installs the abysslink CLI
+# and the abysslinkd daemon.
+#
+# NOTE: scripts/install.sh is the canonical source of this script. The
+# repository-root install.sh is a byte-identical copy kept only so the
+#   curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
+# one-liner works. Edit scripts/install.sh first, then copy it over the
+# root install.sh.
+#
 # Usage: curl -fsSL https://abysslink.dev/install.sh | sh
 #        ABYSSLINK_VERSION=v0.1.0 sh install.sh
+#
+# Environment:
+#   ABYSSLINK_VERSION=vX.Y.Z      pin a release (default: latest)
+#   ABYSSLINK_REQUIRE_COSIGN=1    fail closed when cosign is not installed
 #
 # Requirements: curl or wget, sha256sum or shasum, tar.
 # Optional:     cosign (for signature verification).
@@ -12,6 +24,7 @@ set -e
 
 REPO="abysslink/abysslink"
 BINARY="abysslink"
+DAEMON="abysslinkd"
 VERSION="${ABYSSLINK_VERSION:-latest}"
 
 # --------------------------------------------------------------------------- #
@@ -212,6 +225,16 @@ main() {
 
     info "installing ${BINARY} to ${_dest_dir}/ …"
     install -m 755 "${_tmpdir}/${BINARY}" "${_dest_dir}/${BINARY}"
+
+    # Install the abysslinkd daemon alongside the CLI — `abysslink daemon
+    # start` expects it next to the CLI or on PATH. Older releases shipped
+    # only the CLI in the tarball, so its absence is not an error.
+    if [ -f "${_tmpdir}/${DAEMON}" ]; then
+        info "installing ${DAEMON} to ${_dest_dir}/ …"
+        install -m 755 "${_tmpdir}/${DAEMON}" "${_dest_dir}/${DAEMON}"
+    else
+        info "${DAEMON} not found in this release archive — skipping (daemon features need a newer release)"
+    fi
 
     # Verify the installed binary runs (fail closed: a binary that cannot
     # execute — wrong arch, corrupt extraction, missing loader — must not be
