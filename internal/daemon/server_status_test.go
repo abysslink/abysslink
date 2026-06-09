@@ -41,9 +41,11 @@ func (stubNotifier) Send(_ context.Context, _, _ string) error { return nil }
 
 // startStatusServer spins up a daemon Server on a temp socket and returns an
 // HTTP client wired to that socket plus a cancel func.
+// The socket dir comes from shortRuntimeDir (daemon_test.go): macOS limits Unix
+// socket paths to ~104 bytes and t.TempDir() under /var/folders exceeds it.
 func startStatusServer(t *testing.T, cfg *config.Config) (*http.Client, context.CancelFunc) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := shortRuntimeDir(t)
 	sock := filepath.Join(dir, "abysslinkd.sock")
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	// Ensure the socket path resolves under our temp dir.

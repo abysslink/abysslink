@@ -85,6 +85,28 @@ func TestNextFireAt_Exact(t *testing.T) {
 	assert.Greater(t, d, time.Duration(0))
 }
 
+// TestDigestHour is the NET-16 regression: an explicit hour: 0 (midnight)
+// must be honored, not silently replaced by the 08:00 default. nil (unset)
+// and out-of-range values fall back to 08:00.
+func TestDigestHour(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	cfg := config.Defaults()
+	assert.Equal(t, 8, digestHour(cfg), "unset hour (nil) defaults to 08:00")
+
+	cfg.Observability.Digest.Hour = intPtr(0)
+	assert.Equal(t, 0, digestHour(cfg), "explicit hour: 0 (midnight) must be honored (NET-16)")
+
+	cfg.Observability.Digest.Hour = intPtr(17)
+	assert.Equal(t, 17, digestHour(cfg))
+
+	cfg.Observability.Digest.Hour = intPtr(24)
+	assert.Equal(t, 8, digestHour(cfg), "out-of-range hour falls back to the default")
+
+	cfg.Observability.Digest.Hour = intPtr(-1)
+	assert.Equal(t, 8, digestHour(cfg), "negative hour falls back to the default")
+}
+
 func TestSendDigestRunner(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Tailnet.Hostname = "my-laptop"
