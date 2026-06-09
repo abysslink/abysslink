@@ -62,22 +62,43 @@ func TestSignedWriteFile_LogsThenWrites(t *testing.T) {
 	assert.True(t, res.OK)
 }
 
-func TestSignedWriteFile_DryRunLogsButNoWrite(t *testing.T) {
+// TestSignedWriteFile_DryRunWritesNothing proves CORE-05: a dry-run signed
+// WriteFile mutates NOTHING — no target file, no .bak, no chain entries, no
+// keychain counter bump.
+func TestSignedWriteFile_DryRunWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")
-	target := filepath.Join(dir, "new.conf")
-	sa, err := audit.NewSigned(logPath, secrets.NewMockStore())
+	target := filepath.Join(dir, "existing.conf")
+	kc := secrets.NewMockStore()
+	sa, err := audit.NewSigned(logPath, kc)
 	require.NoError(t, err)
+
+	// Pre-existing file: the overwrite path is the one that used to create a
+	// .bak and bump the counter even under dry-run.
+	require.NoError(t, os.WriteFile(target, []byte("original"), 0o600)) //nolint:gosec // G306: test fixture under temp dir
 
 	require.NoError(t, sa.WriteFile(target, []byte("body"), 0o600, true))
 
-	_, statErr := os.Stat(target)
-	assert.True(t, os.IsNotExist(statErr), "dry-run must not create the file")
+	// Target untouched.
+	got, err := os.ReadFile(target) //nolint:gosec // G304: test reads its own temp fixture
+	require.NoError(t, err)
+	assert.Equal(t, "original", string(got), "dry-run must not modify the target")
 
+	// No .bak created.
+	baks, err := filepath.Glob(target + ".bak.*")
+	require.NoError(t, err)
+	assert.Empty(t, baks, "dry-run must not create a backup")
+
+	// No chain entries recorded.
 	entries, err := audit.ReadLog(logPath)
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.True(t, entries[0].DryRun)
+	assert.Empty(t, entries, "dry-run must not append chain entries")
+
+	// Keychain counter untouched (never initialised).
+	n, found, err := audit.ReadCounter(context.Background(), kc)
+	require.NoError(t, err)
+	assert.False(t, found, "dry-run must not initialise the keychain counter")
+	assert.Zero(t, n)
 }
 
 // TestSignedWriteFile_OverwriteAttestedBackup proves CR-01: the .bak recorded in

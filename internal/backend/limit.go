@@ -26,7 +26,8 @@ import (
 const maxBackendBody = limitio.MaxBackendBody
 
 // readLimited re-exports limitio.ReadLimited so existing backend call sites
-// need no change (D-04 thin wrapper).
-func readLimited(r io.ReadCloser, n int64) ([]byte, error) {
+// need no change (D-04 thin wrapper). CORE-08: takes a plain io.Reader and
+// never closes it — the caller retains ownership of any underlying Closer.
+func readLimited(r io.Reader, n int64) ([]byte, error) {
 	return limitio.ReadLimited(r, n)
 }

@@ -22,12 +22,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/abysslink/abysslink/internal/secrets"
 )
 
 // Anchor is the external truncation/tamper checkpoint written beside the log.
@@ -215,17 +217,16 @@ const (
 // (0, false, nil) when the counter key is absent (first use — not an error),
 // and (0, false, err) when the keychain is unavailable or corrupt.
 //
-// The "not found" sentinel is detected by the error message substring
-// "secret not found", which is the shared convention used by MockStore,
-// DarwinStore, and LinuxStore in internal/secrets.
+// The "not found" condition is detected via errors.Is(err,
+// secrets.ErrNotFound) — the sentinel every internal/secrets store wraps when
+// (and ONLY when) the entry genuinely does not exist (CORE-02). Any other Get
+// failure (keychain locked, denied, dbus down) is a real error.
 func ReadCounter(ctx context.Context, kc KeychainStore) (n int64, found bool, err error) {
 	val, kerr := kc.Get(ctx, counterKeyService, counterKeyAccount)
 	if kerr != nil {
-		// Distinguish "key absent" from "keychain unavailable/error".
-		// All KeychainStore implementations return an error containing
-		// "secret not found" when the key does not exist — absent counter
-		// means first use, not a failure.
-		if strings.Contains(kerr.Error(), "secret not found") {
+		// Distinguish "key absent" (first use — not a failure) from
+		// "keychain unavailable/error" (CORE-02: must not be conflated).
+		if errors.Is(kerr, secrets.ErrNotFound) {
 			return 0, false, nil
 		}
 		return 0, false, kerr
