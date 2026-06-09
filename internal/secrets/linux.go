@@ -119,9 +119,18 @@ func (s *LinuxStore) secretToolGet(ctx context.Context, service, account string)
 	if err != nil {
 		return "", fmt.Errorf("secrets(linux/secret-tool): lookup: %w", err)
 	}
+	// CORE-02: `secret-tool lookup` exits non-zero BOTH when the secret is
+	// absent (silently — no stderr output) AND when the secret service is
+	// unreachable (dbus down, collection locked — with a diagnostic on
+	// stderr). Only the genuinely-empty, silent failure maps to ErrNotFound;
+	// anything with stderr output is "keychain unavailable" so callers fail
+	// closed instead of treating a transient hiccup as an absent secret.
 	if res.ExitCode != 0 {
-		return "", fmt.Errorf("secrets(linux/secret-tool): secret not found (service=%s account=%s): %s",
-			service, account, strings.TrimSpace(res.Stderr))
+		if strings.TrimSpace(res.Stderr) == "" && strings.TrimSpace(res.Stdout) == "" {
+			return "", fmt.Errorf("secrets(linux/secret-tool): %w (service=%s account=%s)", ErrNotFound, service, account)
+		}
+		return "", fmt.Errorf("secrets(linux/secret-tool): keychain unavailable: lookup exited %d (service=%s account=%s): %s",
+			res.ExitCode, service, account, strings.TrimSpace(res.Stderr))
 	}
 	return strings.TrimRight(res.Stdout, "\n"), nil
 }
@@ -171,9 +180,16 @@ func (s *LinuxStore) passGet(ctx context.Context, service, account string) (stri
 	if err != nil {
 		return "", fmt.Errorf("secrets(linux/pass): show: %w", err)
 	}
+	// CORE-02: `pass show` prints "<name> is not in the password store." for a
+	// genuinely missing entry; every other non-zero exit (gpg decryption
+	// failure, missing store, locked agent) is a distinct "keychain
+	// unavailable" error so callers can fail closed.
 	if res.ExitCode != 0 {
-		return "", fmt.Errorf("secrets(linux/pass): secret not found (service=%s account=%s): %s",
-			service, account, strings.TrimSpace(res.Stderr))
+		if strings.Contains(res.Stderr, "is not in the password store") {
+			return "", fmt.Errorf("secrets(linux/pass): %w (service=%s account=%s)", ErrNotFound, service, account)
+		}
+		return "", fmt.Errorf("secrets(linux/pass): keychain unavailable: show exited %d (service=%s account=%s): %s",
+			res.ExitCode, service, account, strings.TrimSpace(res.Stderr))
 	}
 	// pass show outputs the password on the first line, possibly followed by metadata.
 	first := strings.SplitN(res.Stdout, "\n", 2)[0]

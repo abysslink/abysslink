@@ -45,6 +45,22 @@ func NewDarwinStore(runner shell.Runner) *DarwinStore {
 // It uses `security -i` interactive mode so the secret never appears on argv.
 // The -U flag updates an existing entry if one is already present.
 func (s *DarwinStore) Set(ctx context.Context, service, account, secret string) error {
+	// CORE-01: `security -i` is a LINE-oriented command parser. shellQuote
+	// escapes backslashes and double quotes but cannot neutralise control
+	// characters — an embedded "\n" would terminate the add-generic-password
+	// line early (truncating the stored secret) and inject a second keychain
+	// command from attacker-influenced input. Reject all control bytes in
+	// every field before composing the command line.
+	if err := rejectControlChars("service", service); err != nil {
+		return err
+	}
+	if err := rejectControlChars("account", account); err != nil {
+		return err
+	}
+	if err := rejectControlChars("secret", secret); err != nil {
+		return err
+	}
+
 	// security -i reads security commands from stdin, one per line.
 	// The format mirrors the CLI subcommand syntax exactly.
 	// We quote each argument with %q to handle spaces; security -i parses
@@ -63,9 +79,18 @@ func (s *DarwinStore) Set(ctx context.Context, service, account, secret string) 
 	return nil
 }
 
+// errSecItemNotFound is the `security` CLI exit code for errSecItemNotFound
+// (-25300): the queried item does not exist in any searched keychain.
+const errSecItemNotFound = 44
+
 // Get retrieves the secret for service+account from the macOS Keychain.
 // `security find-generic-password -w` prints only the password to stdout;
 // no secret appears on argv.
+//
+// CORE-02: only exit code 44 (errSecItemNotFound) maps to ErrNotFound. Every
+// other non-zero exit (keychain locked, access denied, user cancelled the
+// prompt, ...) is a distinct "keychain unavailable" error so callers can fail
+// closed instead of treating a transient keychain hiccup as an absent secret.
 func (s *DarwinStore) Get(ctx context.Context, service, account string) (string, error) {
 	res, err := s.runner.Run(ctx, "security",
 		"find-generic-password",
@@ -76,9 +101,12 @@ func (s *DarwinStore) Get(ctx context.Context, service, account string) (string,
 	if err != nil {
 		return "", fmt.Errorf("secrets(darwin): security find-generic-password: %w", err)
 	}
+	if res.ExitCode == errSecItemNotFound {
+		return "", fmt.Errorf("secrets(darwin): %w (service=%s account=%s)", ErrNotFound, service, account)
+	}
 	if res.ExitCode != 0 {
-		return "", fmt.Errorf("secrets(darwin): secret not found (service=%s account=%s): %s",
-			service, account, strings.TrimSpace(res.Stderr))
+		return "", fmt.Errorf("secrets(darwin): keychain unavailable: security find-generic-password exited %d (service=%s account=%s): %s",
+			res.ExitCode, service, account, strings.TrimSpace(res.Stderr))
 	}
 	return strings.TrimRight(res.Stdout, "\n"), nil
 }
@@ -103,9 +131,27 @@ func (s *DarwinStore) Delete(ctx context.Context, service, account string) error
 
 // shellQuote wraps s in double quotes and escapes backslashes and double quotes
 // within. This is sufficient for the security -i command parser which uses
-// standard POSIX-style double-quote rules.
+// standard POSIX-style double-quote rules — PROVIDED the input contains no
+// control characters. shellQuote cannot escape a newline for the line-oriented
+// security -i parser; callers must run rejectControlChars first (CORE-01).
 func shellQuote(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return `"` + s + `"`
+}
+
+// rejectControlChars returns an error when value contains any control byte
+// (< 0x20) or DEL (0x7F). The security -i parser is line-oriented, so a "\n"
+// (or "\r") cannot be escaped — it would split the composed command into two
+// keychain commands and truncate the stored value (CORE-01). The remaining
+// control characters have no legitimate use in service names, account names,
+// or secrets, so they are rejected wholesale rather than enumerated.
+// The error never echoes the offending value (it may be a secret).
+func rejectControlChars(field, value string) error {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7F {
+			return fmt.Errorf("secrets(darwin): %s contains a control character (U+%04X); refusing to compose security -i command", field, r)
+		}
+	}
+	return nil
 }

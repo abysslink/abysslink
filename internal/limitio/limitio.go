@@ -36,7 +36,11 @@ const ErrSnippetMax int64 = 256
 // ReadLimited reads at most n bytes from r. If the body exceeds n bytes it
 // returns an explicit error — io.LimitReader alone silently truncates; the
 // N+1 sentinel detects overflow before JSON decode (DOS-01).
-func ReadLimited(r io.ReadCloser, n int64) ([]byte, error) {
+//
+// CORE-08: r is a plain io.Reader — ReadLimited never closes it. The caller
+// retains ownership of any underlying Closer (resp.Body, *os.File, ...) and
+// must close it itself (typically via defer at the call site).
+func ReadLimited(r io.Reader, n int64) ([]byte, error) {
 	limited := io.LimitReader(r, n+1) // N+1 sentinel: reads one extra byte to detect overflow
 	data, err := io.ReadAll(limited)
 	if err != nil {
