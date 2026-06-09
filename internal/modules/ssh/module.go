@@ -134,12 +134,24 @@ func (m *Module) detectLinux(ctx context.Context) []modules.Finding {
 	var findings []modules.Finding
 
 	res, err := m.runner.Run(ctx, "systemctl", "is-active", "sshd")
-	if err != nil {
-		// Try ssh.service as alternate name.
-		res, err = m.runner.Run(ctx, "systemctl", "is-active", "ssh")
-		if err != nil {
+	if err != nil || strings.TrimSpace(res.Stdout) != "active" {
+		// Fall back to ssh.service whenever the sshd unit did not report
+		// "active" — NOT only on exec error. On distros that ship only
+		// ssh.service (Debian/Ubuntu), `systemctl is-active sshd` exits
+		// non-zero with "inactive"/"unknown" on stdout but WITHOUT an exec
+		// error, so gating the fallback on err != nil alone reports a running
+		// daemon as correctly off and Apply never disables it (NET-08).
+		res2, err2 := m.runner.Run(ctx, "systemctl", "is-active", "ssh")
+		switch {
+		case err2 == nil:
+			res = res2
+		case err != nil:
+			// Both probes failed to execute — cannot determine state.
 			slog.Warn("ssh detect: systemctl failed", "error", err)
 			return findings
+		default:
+			// First probe executed (not active), second failed to execute:
+			// keep the first result.
 		}
 	}
 

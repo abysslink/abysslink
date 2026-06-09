@@ -229,3 +229,67 @@ func TestApplyManual_PausesBeforeAndAfterOpenURL(t *testing.T) {
 	assert.GreaterOrEqual(t, promptCount, 2,
 		"applyManual must call m.prompt at least twice: once before openURL (pre-open notice) and once after (post-paste confirmation); got %d", promptCount)
 }
+
+// TestEnforceCheckPeriodCeiling covers the NET-01 module-level gate that
+// mirrors checkPeriodGate in cmd_up.go: checkPeriod is settable down but never
+// up past 12h without explicit consent, and malformed values fail closed.
+func TestEnforceCheckPeriodCeiling(t *testing.T) {
+	// Allowed without consent: empty (defaults to 12h), 12h, and lower.
+	require.NoError(t, enforceCheckPeriodCeiling("", false), "empty defaults to 12h and must pass")
+	require.NoError(t, enforceCheckPeriodCeiling("12h", false), "12h is the default and must pass")
+	require.NoError(t, enforceCheckPeriodCeiling("6h", false), "lowering below 12h must pass")
+
+	// Blocked without consent: anything above 12h.
+	assert.Error(t, enforceCheckPeriodCeiling("12h1m", false), "raising above 12h must be blocked")
+	assert.Error(t, enforceCheckPeriodCeiling("24h", false))
+	assert.Error(t, enforceCheckPeriodCeiling("168h", false), "config.Validate allows 168h — the module gate must not")
+
+	// Allowed with explicit consent threaded in.
+	assert.NoError(t, enforceCheckPeriodCeiling("24h", true), "above 12h allowed with explicit consent")
+	assert.NoError(t, enforceCheckPeriodCeiling("168h", true))
+
+	// Malformed durations fail closed regardless of consent.
+	assert.Error(t, enforceCheckPeriodCeiling("not-a-duration", false))
+	assert.Error(t, enforceCheckPeriodCeiling("not-a-duration", true), "malformed must fail closed even with consent")
+}
+
+// TestApply_CheckPeriodCeilingEnforced is the NET-01 regression test:
+// `abysslink repair` and `acl apply` reach Module.Apply without passing
+// through cmd_up's checkPeriodGate, so the module itself must refuse to push
+// an extended checkPeriod into the tailnet ACL unless the acceptance flag was
+// threaded in via modules.Deps.
+func TestApply_CheckPeriodCeilingEnforced(t *testing.T) {
+	t.Setenv("ABYSSLINK_TS_OAUTH_SECRET", "test-secret")
+
+	cfg := config.Defaults()
+	cfg.Identity.Email = "owner@example.com"
+	cfg.Identity.UnixUser = "alice"
+	cfg.Mobile.SSHCheckPeriod = "24h" // above the immutable 12h default
+	cfg.Tailnet.Admin.Tailnet = "example.com"
+	cfg.Tailnet.Admin.OAuthClientID = "client-id"
+
+	r := shell.NewMockRunner() // no shell calls may happen on the refusal path
+	realBknd, err := backend.New(cfg, r)
+	require.NoError(t, err)
+	realACLMgr, ok := realBknd.(backend.ACLManager)
+	require.True(t, ok)
+	raw := realACLMgr.DefaultACL(cfg.Identity.Email, cfg.Identity.UnixUser)
+	mock := &mockACLBackend{Client: realBknd, aclMgr: realACLMgr, raw: raw}
+
+	// Without consent: Apply must refuse before touching the backend.
+	m := New(modules.Deps{Cfg: cfg, Runner: r, Backend: mock})
+	err = m.Apply(context.Background())
+	require.Error(t, err, "Apply must refuse to push checkPeriod 24h without consent")
+	assert.Contains(t, err.Error(), "accept-checkperiod-extension",
+		"error must tell the user how to consent explicitly")
+
+	// Repair delegates to Apply — the exact path NET-01 flagged as bypassing
+	// the cmd_up gate.
+	err = m.Repair(context.Background())
+	require.Error(t, err, "Repair must hit the same ceiling gate as Apply")
+
+	// With explicit consent threaded through Deps, Apply proceeds.
+	m2 := New(modules.Deps{Cfg: cfg, Runner: r, Backend: mock, AcceptCheckPeriodExtension: true})
+	require.NoError(t, m2.Apply(context.Background()),
+		"Apply must proceed when the user explicitly accepted the extension")
+}

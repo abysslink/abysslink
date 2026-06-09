@@ -27,6 +27,7 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -194,13 +195,15 @@ func TestApplyDockerBindsTailnetIPOnly(t *testing.T) {
 	auditLog := filepath.Join(t.TempDir(), "audit.log")
 
 	// Script every runner call applyDocker makes, in order, all exit-0:
-	//   1. getTailnetHostname → tailscale status --json
+	//   1. getTailnetHostname → tailscale status --json (valid JSON with
+	//      Self.DNSName — NET-19: the hostname is now parsed structurally,
+	//      not by string-matching the first "DNSName" line)
 	//   2. docker pull
 	//   3. docker rm -f
 	//   4. docker run -d ... (the call under test)
 	//   5. ensureAdminUserDocker → docker exec -i ... (RunWithStdin)
 	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{Stdout: `"DNSName": "rig.example.ts.net.",`, ExitCode: 0}},
+		shell.Call{Result: shell.Result{Stdout: `{"Self":{"DNSName":"rig.example.ts.net."}}`, ExitCode: 0}},
 		shell.Call{Result: shell.Result{ExitCode: 0}},
 		shell.Call{Result: shell.Result{ExitCode: 0}},
 		shell.Call{Result: shell.Result{ExitCode: 0}},
@@ -270,4 +273,123 @@ func TestVerifyReturnsNil(t *testing.T) {
 	findings, err := m.Verify(context.Background())
 	assert.NoError(t, err, "Verify must return nil error")
 	assert.Empty(t, findings, "Verify must return nil/empty findings (Pitfall-4: no double-emit)")
+}
+
+// errKeychain is a KeychainStore whose Get fails with a non-ErrNotFound error
+// (e.g. keychain locked / backend unreachable). Used by the NET-12 tests.
+type errKeychain struct{}
+
+func (errKeychain) Set(_ context.Context, _, _, _ string) error { return nil }
+func (errKeychain) Get(_ context.Context, _, _ string) (string, error) {
+	return "", fmt.Errorf("keychain locked")
+}
+func (errKeychain) Delete(_ context.Context, _, _ string) error { return nil }
+
+// TestEnsureAdminUser_KeychainUnavailableAborts is the NET-12 regression test:
+// a keychain Get failure that is NOT secrets.ErrNotFound must abort — never
+// generate a fresh password. Generating while user.db still holds the old
+// password would desync keychain and server permanently (`ntfy user add` on
+// an existing admin is tolerated as "already exists" and changes nothing).
+func TestEnsureAdminUser_KeychainUnavailableAborts(t *testing.T) {
+	r := shell.NewMockRunner() // NO runner calls may happen
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}, Keychain: errKeychain{}})
+
+	err := m.ensureAdminUser(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "keychain unavailable",
+		"a non-NotFound keychain error must abort with a clear message")
+	assert.True(t, r.Done(), "no ntfy commands may run when the keychain state is unknown")
+
+	// Same gate on the Docker path.
+	err = m.ensureAdminUserDocker(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "keychain unavailable")
+	assert.True(t, r.Done())
+}
+
+// TestEnsureAdminUser_NotFoundGenerates asserts the legitimate first-run path:
+// a definitive secrets.ErrNotFound miss generates a password, stores it in the
+// keychain, and provisions the admin user.
+func TestEnsureAdminUser_NotFoundGenerates(t *testing.T) {
+	kc := secrets.NewMockStore() // empty store: Get wraps secrets.ErrNotFound
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ntfy user add succeeds
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}, Keychain: kc})
+
+	require.NoError(t, m.ensureAdminUser(context.Background()))
+	require.True(t, r.Done())
+
+	pw, err := kc.Get(context.Background(), keychainService, keychainAccount)
+	require.NoError(t, err, "generated password must be stored in the keychain")
+	assert.NotEmpty(t, pw)
+}
+
+// TestEnsureAdminUser_AlreadyExistsForcesChangePass asserts the NET-12 repair
+// path: when the admin user already exists, the server-side password is forced
+// to match the keychain via `ntfy user change-pass` instead of silently
+// tolerating a potential divergence.
+func TestEnsureAdminUser_AlreadyExistsForcesChangePass(t *testing.T) {
+	kc := secrets.NewMockStore()
+	require.NoError(t, kc.Set(context.Background(), keychainService, keychainAccount, "existing-pw"))
+
+	r := shell.NewMockRunner(
+		// ntfy user add → exit 1, "already exists" (tolerated)
+		shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "user admin already exists"}},
+		// ntfy user change-pass admin → exit 0
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}, Keychain: kc})
+
+	require.NoError(t, m.ensureAdminUser(context.Background()))
+	require.True(t, r.Done(), "change-pass must run when the admin already exists")
+
+	calls := r.RecordedCalls()
+	require.Len(t, calls, 2)
+	assert.Contains(t, calls[1].Args, "change-pass",
+		"second call must be ntfy user change-pass to converge user.db to the keychain")
+	assert.Equal(t, "existing-pw\nexisting-pw\n", calls[1].Stdin,
+		"change-pass must receive the KEYCHAIN password via stdin (never argv)")
+}
+
+// TestEnsureAdminUserDocker_AlreadyExistsForcesChangePass covers the same
+// NET-12 convergence on the Docker code path.
+func TestEnsureAdminUserDocker_AlreadyExistsForcesChangePass(t *testing.T) {
+	kc := secrets.NewMockStore()
+	require.NoError(t, kc.Set(context.Background(), keychainService, keychainAccount, "existing-pw"))
+
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "user admin already exists"}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}, Keychain: kc})
+
+	require.NoError(t, m.ensureAdminUserDocker(context.Background()))
+	require.True(t, r.Done())
+
+	calls := r.RecordedCalls()
+	require.Len(t, calls, 2)
+	assert.Equal(t, "docker", calls[1].Name)
+	assert.Contains(t, calls[1].Args, "change-pass")
+	assert.Equal(t, "existing-pw\nexisting-pw\n", calls[1].Stdin)
+}
+
+// TestGetTailnetHostname_SelfNotPeer is the NET-19 regression test: when a
+// Peer's DNSName appears before Self in the `tailscale status --json` output,
+// the hostname must still come from Self.DNSName.
+func TestGetTailnetHostname_SelfNotPeer(t *testing.T) {
+	statusJSON := `{
+		"Peer": {
+			"nodekey:abc": {"DNSName": "phone.example.ts.net."}
+		},
+		"Self": {"DNSName": "rig.example.ts.net."}
+	}`
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: statusJSON, ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	got := m.getTailnetHostname(context.Background())
+	assert.Equal(t, "rig.example.ts.net", got,
+		"hostname must be Self.DNSName (trailing dot trimmed), never a Peer's DNSName")
 }

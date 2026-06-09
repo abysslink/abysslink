@@ -19,6 +19,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"path/filepath"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -71,22 +73,98 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 
 	slog.Debug("ttyd version", "output", strings.TrimSpace(res.Stdout))
 
-	// Check if ttyd is running and bound to the tailnet IP.
-	// We inspect running processes for ttyd invocations binding to 0.0.0.0.
+	// Check if ttyd is running and bound to the tailnet IP. We inspect each
+	// running ttyd invocation's argv: a ttyd started without an explicit
+	// `-i <addr>` binds 0.0.0.0 by default — the most common insecure case —
+	// and when -i IS present its value must not be a wildcard or loopback
+	// address (NET-10). Naive substring greps for "0.0.0.0"/"::" miss the
+	// default-bind case entirely and false-positive on IPv6 literals.
 	res, err = m.runner.Run(ctx, "pgrep", "-a", "ttyd")
 	if err == nil && res.ExitCode == 0 {
-		output := res.Stdout
-		if strings.Contains(output, "0.0.0.0") || strings.Contains(output, "::") {
+		findings = append(findings, m.bindFindings(res.Stdout)...)
+	}
+
+	return findings, nil
+}
+
+// bindFindings parses `pgrep -a ttyd` output (one "PID argv..." line per
+// process) and returns a finding for every ttyd process that is not bound to
+// a specific non-wildcard, non-loopback address.
+func (m *Module) bindFindings(pgrepOut string) []modules.Finding {
+	var findings []modules.Finding
+	for _, line := range strings.Split(pgrepOut, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		// fields[0] is the PID, fields[1] the command path. pgrep matches on
+		// process name, but be defensive: only inspect real ttyd commands.
+		if filepath.Base(fields[1]) != "ttyd" {
+			continue
+		}
+		pid := fields[0]
+		addr, hasFlag := ttydInterfaceArg(fields[2:])
+		switch {
+		case !hasFlag:
 			findings = append(findings, modules.Finding{
 				Module:   m.Name(),
 				Check:    "ttyd_bind_tailnet",
 				Severity: modules.SeverityWarning,
-				Message:  "ttyd appears to be bound to 0.0.0.0 or :: — it must bind to the tailnet IP only",
+				Message: fmt.Sprintf(
+					"ttyd (pid %s) is running without -i — it binds 0.0.0.0 by default; restart it bound to the tailnet IP only", pid),
+			})
+		case isWildcardOrLoopbackAddr(addr):
+			findings = append(findings, modules.Finding{
+				Module:   m.Name(),
+				Check:    "ttyd_bind_tailnet",
+				Severity: modules.SeverityWarning,
+				Message: fmt.Sprintf(
+					"ttyd (pid %s) is bound to %q — it must bind to the tailnet IP only (not a wildcard or loopback address)", pid, addr),
 			})
 		}
 	}
+	return findings
+}
 
-	return findings, nil
+// ttydInterfaceArg extracts the value of the -i/--interface flag from a ttyd
+// argv. The second return value reports whether the flag is present at all —
+// absence means ttyd is using its insecure 0.0.0.0 default.
+func ttydInterfaceArg(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-i" || a == "--interface":
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return "", true // flag present but value missing — treated as wildcard
+		case strings.HasPrefix(a, "--interface="):
+			return strings.TrimPrefix(a, "--interface="), true
+		case strings.HasPrefix(a, "-i="):
+			return strings.TrimPrefix(a, "-i="), true
+		}
+	}
+	return "", false
+}
+
+// isWildcardOrLoopbackAddr reports whether addr is an all-interfaces wildcard
+// or a loopback address. Interface names (e.g. "tailscale0") and non-loopback
+// hostnames are accepted — they cannot be classified without resolving them.
+func isWildcardOrLoopbackAddr(addr string) bool {
+	if addr == "" {
+		return true
+	}
+	if strings.EqualFold(addr, "localhost") {
+		return true
+	}
+	host := addr
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsUnspecified() || ip.IsLoopback()
+	}
+	return false
 }
 
 // Plan computes the actions needed to reach the desired state.
@@ -165,9 +243,13 @@ func (m *Module) Apply(ctx context.Context) error {
 	return nil
 }
 
-// Verify re-runs Detect to confirm ttyd is correctly installed and bound.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// Verify is a no-op for the ttyd module — all checks run in Detect.
+// Pitfall 4 (Doctor double-emission): do NOT call Detect here — runner.Doctor
+// calls both Detect and Verify, so re-running Detect would double-emit every
+// Detect finding per doctor pass (NET-18). Verify adds no new information
+// beyond Detect; returning nil avoids the duplication (mirrors ssh/ntfy).
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair re-runs Apply.

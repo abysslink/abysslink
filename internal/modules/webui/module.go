@@ -108,6 +108,25 @@ func (m *Module) Apply(ctx context.Context) error {
 	return nil
 }
 
+// Stop terminates the background webui server started by Apply. Apply detaches
+// the server goroutine from the caller's context (context.WithoutCancel), so
+// without Stop nothing could ever cancel it (NET-20). Cancelling the stored
+// context triggers the graceful shutdown path inside StartWebUIServer
+// (ctx.Done → srv.Shutdown with a 5 s drain, then listener close).
+//
+// Stop is idempotent and safe to call when no server is running. Lifecycle
+// owners (the daemon entrypoint in -tags webui builds) must call Stop on
+// shutdown; after Stop returns, Apply may be called again to start a fresh
+// server.
+func (m *Module) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
+}
+
 // Verify runs the webui security posture checks. The load-bearing check in this
 // plan is the TLS fail-closed probe (WEB-03): when the backend is not Tailscale,
 // GetCertificate is unimplemented (Headscale/NetBird, #2137), so the dashboard

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
@@ -45,11 +46,23 @@ type Module struct {
 	bknd   backend.Client
 	audit  audit.AuditWriter
 	prompt func(ctx context.Context, msg string) error
+	// acceptCheckPeriodExt records explicit user consent (the
+	// --accept-checkperiod-extension flag) to raise the SSH re-auth interval
+	// above the immutable 12h security default. Threaded in via
+	// modules.Deps.AcceptCheckPeriodExtension (NET-01).
+	acceptCheckPeriodExt bool
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, bknd: d.Backend, audit: d.Audit, prompt: d.Prompt}
+	return &Module{
+		runner:               d.Runner,
+		cfg:                  d.Cfg,
+		bknd:                 d.Backend,
+		audit:                d.Audit,
+		prompt:               d.Prompt,
+		acceptCheckPeriodExt: d.AcceptCheckPeriodExtension,
+	}
 }
 
 // Name returns the module name.
@@ -135,6 +148,14 @@ func (m *Module) Apply(ctx context.Context) error {
 	owner := m.cfg.Identity.Email
 	user := m.sshUser()
 	checkPeriod := m.cfg.Mobile.SSHCheckPeriod
+
+	// Enforce the 12h ceiling HERE, not only in the CLI's checkPeriodGate
+	// (cmd_up.go): `abysslink repair` and `abysslink acl apply` also reach this
+	// code path and must not push an extended checkPeriod into the tailnet ACL
+	// without explicit consent (NET-01).
+	if err := enforceCheckPeriodCeiling(checkPeriod, m.acceptCheckPeriodExt); err != nil {
+		return err
+	}
 
 	if !m.hasAdminCreds() {
 		return m.applyManual(ctx, aclMgr, owner, user, checkPeriod)
@@ -285,6 +306,35 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 // Repair re-applies the ACL.
 func (m *Module) Repair(ctx context.Context) error {
 	return m.Apply(ctx)
+}
+
+// enforceCheckPeriodCeiling mirrors checkPeriodGate in internal/cli/cmd_up.go:
+// the SSH re-auth interval (checkPeriod) is an immutable security default that
+// may be lowered but never raised above 12h without the user explicitly passing
+// --accept-checkperiod-extension. config.Validate allows values up to 168h, so
+// this module-level gate is the last line of defense for code paths that bypass
+// the `up` command gate (repair, acl apply) — NET-01.
+//
+// Semantics mirrored from checkPeriodGate:
+//   - empty period: OK (applyDesired falls back to the 12h default)
+//   - malformed duration: fail closed (never silently bypass the ceiling)
+//   - >12h without consent: error instructing the user how to proceed
+func enforceCheckPeriodCeiling(period string, accept bool) error {
+	if period == "" {
+		return nil // applyDesired defaults empty to "12h"
+	}
+	d, err := time.ParseDuration(period)
+	if err != nil {
+		// Fail closed: a malformed duration must NOT silently bypass the 12h
+		// re-auth ceiling (an immutable security default).
+		return fmt.Errorf("acl apply: mobile.ssh_check_period %q is not a valid duration; refusing to apply (fail-closed)", period)
+	}
+	if d > 12*time.Hour && !accept {
+		return fmt.Errorf("acl apply: mobile.ssh_check_period %s exceeds the 12h security default; "+
+			"re-run `abysslink up --apply --accept-checkperiod-extension` to consent to a longer "+
+			"re-auth interval, or lower mobile.ssh_check_period to 12h or less", period)
+	}
+	return nil
 }
 
 // applyDesired applies abysslink's required ACL edits idempotently.

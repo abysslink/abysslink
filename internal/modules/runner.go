@@ -291,42 +291,9 @@ func (r *Runner) ApplyAll(ctx context.Context, progress ProgressFunc) ([]Finding
 	return allFindings, firstApplyErr
 }
 
-// Down runs modules in reverse dependency order, calling Verify then Apply(disable).
-func (r *Runner) Down(ctx context.Context) error {
-	reversed, err := TopoSortReverse(r.modules)
-	if err != nil {
-		return fmt.Errorf("module runner down: %w", err)
-	}
-
-	for _, m := range reversed {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		log := slog.With("module", m.Name())
-
-		findings, err := m.Verify(ctx)
-		if err != nil {
-			return fmt.Errorf("module %s verify: %w", m.Name(), err)
-		}
-		for _, f := range findings {
-			log.Info("down verify", "check", f.Check, "severity", f.Severity, "message", f.Message)
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		log.Info("bringing down")
-		if err := m.Apply(ctx); err != nil {
-			return fmt.Errorf("module %s apply (down): %w", m.Name(), err)
-		}
-		log.Info("brought down successfully")
-	}
-
-	return nil
-}
+// NOTE: Runner.Down was deleted (NET-15). It documented "Verify then
+// Apply(disable)" but called m.Apply — the converge-UP path — for every
+// module, so running it would have REINSTALLED everything instead of tearing
+// it down. No CLI command referenced it. If module teardown is ever needed,
+// design a dedicated disable path per module (TopoSortReverse in registry.go
+// already provides the reverse dependency order).
