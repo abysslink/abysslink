@@ -422,12 +422,15 @@ func newEnrollCmd() *cobra.Command {
 func newEnrollPhoneCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "phone",
-		Short: "Mint a tagged auth key, show a QR, and walk through phone pairing",
-		Example: `  # Show a QR code for phone pairing and walk through enrollment
+		Short: "Mint a tagged auth key, show a QR, and walk through phone pairing (dry-run by default)",
+		Example: `  # Preview what enrollment would do (default: dry-run)
   abysslink enroll phone
 
+  # Mint the auth key, show QRs, and walk through enrollment
+  abysslink enroll phone --apply
+
   # Non-interactive enrollment (skip Pause stops)
-  abysslink enroll phone --yes`,
+  abysslink enroll phone --apply --yes`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -436,6 +439,27 @@ func newEnrollPhoneCmd() *cobra.Command {
 			}
 			p := newPrinter(cmd)
 			tag := "tag:" + cc.cfg.Mobile.Tag
+
+			printerInfo(p, styleBold.Render("Enroll phone"))
+
+			// CLI-30: `enroll phone` mints a pre-authorized tailnet auth key and
+			// writes a runbook file — both are mutations, so the standard
+			// [plan]/--apply gate applies (mirrors `enroll rig`). Without --apply,
+			// print the plan preview and mint NOTHING.
+			if !cc.apply {
+				hasCfgCreds := cc.cfg.Tailnet.Admin.Tailnet != "" &&
+					cc.cfg.Tailnet.Admin.OAuthClientID != "" &&
+					os.Getenv(oauthSecretEnv) != ""
+				printerInfo(p, styleMuted.Render("Dry-run mode — no changes will be made. Use --apply to execute."))
+				if hasCfgCreds {
+					printerInfo(p, "[plan] would mint a single-use, pre-authorized tailnet auth key tagged "+tag+" (backend-default expiry) via the admin API and show it as a QR code")
+				} else {
+					printerInfo(p, "[plan] no admin OAuth client configured — would print manual key-creation instructions (single-use, pre-authorized, tagged "+tag+") instead of minting a key")
+				}
+				printerInfo(p, "[plan] would walk through phone pairing (install QR, auth-key QR, ntfy subscription QR)")
+				printerInfo(p, "[plan] would write a pairing runbook with the remaining manual steps")
+				return nil
+			}
 
 			b, err := cc.backend()
 			if err != nil {
@@ -447,10 +471,9 @@ func newEnrollPhoneCmd() *cobra.Command {
 				cc.cfg.Tailnet.Admin.OAuthClientID != "" &&
 				os.Getenv(oauthSecretEnv) != ""
 
-			printerInfo(p, styleBold.Render("Enroll phone"))
 			printerInfo(p, "")
 			printerInfo(p, "1. Install Tailscale on your phone (scan to open the download page):")
-			qr.PrintANSI(os.Stdout, "https://tailscale.com/download")
+			printQR(p, cmd.OutOrStdout(), cc.jsonOut, "tailscale-download", "https://tailscale.com/download")
 			printerInfo(p, "")
 
 			// §6-sanctioned stop point: external action (phone install).
@@ -467,12 +490,12 @@ func newEnrollPhoneCmd() *cobra.Command {
 				printerInfo(p, "Create a single-use, pre-authorized key tagged "+styleCode.Render(tag)+" at:")
 				printerInfo(p, "  "+styleCode.Render("https://login.tailscale.com/admin/settings/keys"))
 				printerInfo(p, "Then sign in on the phone with that key.")
-			} else if err := enrollWithAdminKey(ctx, p, adminAPI, tag); err != nil {
+			} else if err := enrollWithAdminKey(ctx, p, cmd.OutOrStdout(), cc.jsonOut, adminAPI, tag); err != nil {
 				return fmt.Errorf("enroll phone: %w", err)
 			}
 
 			// ntfy subscription QR (best-effort — needs the tailnet IP).
-			printNtfyQR(ctx, p, cc, b)
+			printNtfyQR(ctx, p, cmd.OutOrStdout(), cc, b)
 
 			// Printable runbook for the remaining manual steps.
 			// §7 note 10 (lock-screen hygiene) fires here alongside the runbook.
@@ -481,10 +504,25 @@ func newEnrollPhoneCmd() *cobra.Command {
 				printerInfo(p, "")
 				printerInfo(p, "Manual steps (SSO passkey, disable SMS 2FA, hide lock-screen previews) are in:")
 				printerInfo(p, "  "+styleCode.Render(path))
+			} else {
+				// CLI-27: never swallow the runbook write failure silently.
+				printerError(p, "Warning: could not write the pairing runbook: "+err.Error())
 			}
 			return nil
 		},
 	}
+}
+
+// printQR renders an ANSI QR code for payload to out. Under --json the raw
+// ANSI block would corrupt the structured output stream (CLI-17), so instead
+// the payload is emitted as a typed JSON record ({"qr": label, "payload": ...})
+// that consumers can render themselves.
+func printQR(p Printer, out io.Writer, jsonOut bool, label, payload string) {
+	if jsonOut {
+		p.PrintJSON(map[string]string{"qr": label, "payload": payload})
+		return
+	}
+	qr.PrintANSI(out, payload)
 }
 
 // enrollPhoneInstallPause is the §6-sanctioned stop after the Tailscale install
@@ -498,14 +536,15 @@ func enrollPhoneInstallPause(ctx context.Context, p Printer, autoYes bool) error
 }
 
 // enrollWithAdminKey mints a tagged auth key, shows its QR, and polls for the
-// phone to appear on the tailnet with the expected tag.
-func enrollWithAdminKey(ctx context.Context, p Printer, admin backend.AdminAPI, tag string) error {
+// phone to appear on the tailnet with the expected tag. The QR is rendered to
+// out (never os.Stdout directly — CLI-17) and suppressed under --json.
+func enrollWithAdminKey(ctx context.Context, p Printer, out io.Writer, jsonOut bool, admin backend.AdminAPI, tag string) error {
 	key, err := admin.CreateAuthKey(ctx, []string{tag})
 	if err != nil {
 		return fmt.Errorf("mint auth key: %w", err)
 	}
 	printerInfo(p, "2. In the Tailscale app choose \"Sign in with auth key\" and scan:")
-	qr.PrintANSI(os.Stdout, key)
+	printQR(p, out, jsonOut, "tailscale-auth-key", key)
 	printerInfo(p, "")
 	printerInfo(p, "Waiting for the phone to join the tailnet (up to 2 minutes)...")
 
@@ -537,7 +576,8 @@ func enrollWithAdminKey(ctx context.Context, p Printer, admin backend.AdminAPI, 
 // known. It uses the backend.Client already in scope (Status) rather than
 // re-shelling `tailscale ip`/`tailscale status --json`, so it stays
 // backend-neutral and avoids the fragile hand-rolled JSON line parser (WR-01).
-func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext, b backend.Client) {
+// The QR is rendered to out (never os.Stdout directly — CLI-17).
+func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, b backend.Client) {
 	if !cc.cfg.Modules.Ntfy.Enabled {
 		return
 	}
@@ -569,7 +609,7 @@ func printNtfyQR(ctx context.Context, p Printer, cc *cmdContext, b backend.Clien
 	printerInfo(p, "")
 	printerInfo(p, "3. Subscribe to notifications in the ntfy app:")
 	printerInfo(p, styleMuted.Render("   Android: tap + → Scan QR code"))
-	qr.PrintANSI(os.Stdout, deepLink)
+	printQR(p, out, cc.jsonOut, "ntfy-subscription", deepLink)
 	printerInfo(p, styleMuted.Render("   iPhone:  tap + → enter manually:"))
 	printerInfo(p, fmt.Sprintf("     Server:  http://%s:%d", hostname, port))
 	printerInfo(p, fmt.Sprintf("     Topic:   %s", topic))

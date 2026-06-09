@@ -97,9 +97,13 @@ func netbirdPostureListRunE(ctx context.Context, cc *cmdContext, p Printer) erro
 func newNetBirdPostureCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Create a NetBird posture check",
-		Example: `  abysslink netbird posture create --name min-os --description "Require minimum OS version"
-  abysslink netbird posture create --name nb-ver --checks '{"nb_version_check":{"min_version":"0.57.0"}}'`,
+		Short: "Create a NetBird posture check (dry-run by default)",
+		Example: `  # Preview (dry-run — no changes)
+  abysslink netbird posture create --name min-os --description "Require minimum OS version"
+
+  # Create on the control plane
+  abysslink netbird posture create --name min-os --description "Require minimum OS version" --apply
+  abysslink netbird posture create --name nb-ver --checks '{"nb_version_check":{"min_version":"0.57.0"}}' --apply`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cc, err := loadCmdContext(cmd)
 			if err != nil {
@@ -121,9 +125,21 @@ func newNetBirdPostureCreateCmd() *cobra.Command {
 // netbirdPostureCreateRunE creates a posture check and prints the result.
 // The --checks value is passed verbatim as raw JSON (validated server-side;
 // no shell interpolation — discrete argv per T-21-04-03).
+// CLI-08: creating a posture check mutates the remote NetBird control plane —
+// dry-run is the default; without --apply a [plan] preview is printed and no
+// request is sent.
 func netbirdPostureCreateRunE(ctx context.Context, cc *cmdContext, p Printer, name, description, checksJSON string) error {
 	if name == "" {
 		return fmt.Errorf("netbird posture create: --name is required")
+	}
+	if !cc.apply {
+		if cc.jsonOut {
+			p.PrintJSON(map[string]string{"plan": "create posture check", "name": name, "description": description})
+			return nil
+		}
+		printerInfo(p, fmt.Sprintf("[plan] would create NetBird posture check %q on the control plane", name))
+		printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))
+		return nil
 	}
 	created, err := backend.NetBirdCreatePostureCheck(ctx, cc.cfg, name, description, []byte(checksJSON))
 	if err != nil {
@@ -140,10 +156,14 @@ func netbirdPostureCreateRunE(ctx context.Context, cc *cmdContext, p Printer, na
 
 func newNetBirdPostureDeleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "delete <id>",
-		Short:   "Delete a NetBird posture check by ID",
-		Args:    cobra.ExactArgs(1),
-		Example: `  abysslink netbird posture delete pc-abc123`,
+		Use:   "delete <id>",
+		Short: "Delete a NetBird posture check by ID (dry-run by default)",
+		Args:  cobra.ExactArgs(1),
+		Example: `  # Preview (dry-run — no changes)
+  abysslink netbird posture delete pc-abc123
+
+  # Delete on the control plane
+  abysslink netbird posture delete pc-abc123 --apply`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cc, err := loadCmdContext(cmd)
 			if err != nil {
@@ -155,7 +175,19 @@ func newNetBirdPostureDeleteCmd() *cobra.Command {
 }
 
 // netbirdPostureDeleteRunE deletes a posture check by ID and prints confirmation.
+// CLI-08: deleting a posture check mutates the remote NetBird control plane —
+// dry-run is the default; without --apply a [plan] preview is printed and no
+// request is sent.
 func netbirdPostureDeleteRunE(ctx context.Context, cc *cmdContext, p Printer, id string) error {
+	if !cc.apply {
+		if cc.jsonOut {
+			p.PrintJSON(map[string]string{"plan": "delete posture check", "id": id})
+			return nil
+		}
+		printerInfo(p, "[plan] would delete NetBird posture check "+id+" from the control plane")
+		printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))
+		return nil
+	}
 	if err := backend.NetBirdDeletePostureCheck(ctx, cc.cfg, id); err != nil {
 		return fmt.Errorf("netbird posture delete: %w", err)
 	}

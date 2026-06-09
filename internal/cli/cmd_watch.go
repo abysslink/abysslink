@@ -16,7 +16,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/spf13/cobra"
@@ -34,12 +36,15 @@ func newWatchCmd() *cobra.Command {
 func newWatchAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add",
-		Short: "Add a watcher: --pane <p>, or --file <path> --grep <re>, or --http <url>",
-		Example: `  # Watch a tmux pane for idle
+		Short: "Add a watcher: --pane <p>, or --file <path> --grep <re>, or --http <url> (dry-run by default)",
+		Example: `  # Preview adding a tmux pane watcher (dry-run — no changes)
   abysslink watch add --pane 0 --label "main session"
 
+  # Watch a tmux pane for idle
+  abysslink watch add --pane 0 --label "main session" --apply
+
   # Watch a log file for a pattern
-  abysslink watch add --file /var/log/app.log --grep "ERROR"`,
+  abysslink watch add --file /var/log/app.log --grep "ERROR" --apply`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			pane, _ := cmd.Flags().GetString("pane")
 			file, _ := cmd.Flags().GetString("file")
@@ -54,16 +59,16 @@ func newWatchAddCmd() *cobra.Command {
 				switch {
 				case pane != "":
 					w.Panes = append(w.Panes, pane)
-					return "Watching tmux pane " + pane, nil
+					return "add tmux pane watcher " + pane, nil
 				case file != "":
 					if grep == "" {
 						return "", fmt.Errorf("--file requires --grep <regexp>")
 					}
 					w.Files = append(w.Files, config.FileWatch{Path: file, Grep: grep, Label: label, PollSecs: poll})
-					return "Watching file " + file, nil
+					return "add file watcher " + file, nil
 				case httpURL != "":
 					w.HTTP = append(w.HTTP, config.HTTPWatch{URL: httpURL, Expect: expect, Label: label, IntervalSecs: interval})
-					return "Watching URL " + httpURL, nil
+					return "add HTTP watcher " + httpURL, nil
 				default:
 					return "", fmt.Errorf("specify one of --pane, --file (+--grep), or --http")
 				}
@@ -96,10 +101,16 @@ func newWatchRemoveCmd() *cobra.Command {
 			httpURL, _ := cmd.Flags().GetString("http")
 
 			return mutateWatch(cmd, func(w *config.WatchModule) (string, error) {
+				// CLI-03: removing a watcher that does not exist is an error —
+				// never report success for a no-op removal.
 				switch {
 				case pane != "":
-					w.Panes = removeString(w.Panes, pane)
-					return "Removed pane watcher " + pane, nil
+					kept := removeString(w.Panes, pane)
+					if len(kept) == len(w.Panes) {
+						return "", fmt.Errorf("watch remove: no pane watcher %q configured", pane)
+					}
+					w.Panes = kept
+					return "remove pane watcher " + pane, nil
 				case file != "":
 					kept := w.Files[:0:0]
 					for _, f := range w.Files {
@@ -107,8 +118,11 @@ func newWatchRemoveCmd() *cobra.Command {
 							kept = append(kept, f)
 						}
 					}
+					if len(kept) == len(w.Files) {
+						return "", fmt.Errorf("watch remove: no file watcher %q configured", file)
+					}
 					w.Files = kept
-					return "Removed file watcher " + file, nil
+					return "remove file watcher " + file, nil
 				case httpURL != "":
 					kept := w.HTTP[:0:0]
 					for _, h := range w.HTTP {
@@ -116,8 +130,11 @@ func newWatchRemoveCmd() *cobra.Command {
 							kept = append(kept, h)
 						}
 					}
+					if len(kept) == len(w.HTTP) {
+						return "", fmt.Errorf("watch remove: no HTTP watcher %q configured", httpURL)
+					}
 					w.HTTP = kept
-					return "Removed HTTP watcher " + httpURL, nil
+					return "remove HTTP watcher " + httpURL, nil
 				default:
 					return "", fmt.Errorf("specify one of --pane, --file, or --http")
 				}
@@ -140,7 +157,16 @@ func newWatchListCmd() *cobra.Command {
 			p := newPrinter(cmd)
 			cfg, err := config.Load(resolveConfigPath(cmd))
 			if err != nil {
-				return fmt.Errorf("watch list: %w", err)
+				// CLI-23: `watch list` is read-only — a missing config simply
+				// means no watchers are configured yet. Degrade gracefully
+				// instead of hard-failing with a raw error. (config.Defaults()
+				// ships a "main" pane watcher, so render the empty state
+				// directly rather than listing defaults the user never wrote.)
+				if !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("watch list: %w", err)
+				}
+				printerInfo(p, "No watchers configured.")
+				return nil
 			}
 			w := cfg.Modules.Watch
 			if len(w.Panes) == 0 && len(w.Files) == 0 && len(w.HTTP) == 0 {
@@ -162,16 +188,23 @@ func newWatchListCmd() *cobra.Command {
 	}
 }
 
-// mutateWatch loads config, applies fn to the watch module, persists, and prints
-// fn's message. Enables the watch module if any watcher remains.
+// mutateWatch loads config, applies fn to the watch module, and — only under
+// --apply — persists the change (CLI-03: dry-run is the default; without
+// --apply it prints a [plan] preview and writes nothing). fn returns an
+// imperative change description ("add tmux pane watcher 0"). Enables the watch
+// module if any watcher remains.
 func mutateWatch(cmd *cobra.Command, fn func(*config.WatchModule) (string, error)) error {
 	p := newPrinter(cmd)
+	_, apply, err := resolveApplyFlags(cmd)
+	if err != nil {
+		return err
+	}
 	path := resolveConfigPath(cmd)
 	cfg, err := config.Load(path)
 	if err != nil {
 		return fmt.Errorf("watch: %w (run `abysslink init` first)", err)
 	}
-	msg, err := fn(&cfg.Modules.Watch)
+	desc, err := fn(&cfg.Modules.Watch)
 	if err != nil {
 		return err
 	}
@@ -179,10 +212,17 @@ func mutateWatch(cmd *cobra.Command, fn func(*config.WatchModule) (string, error
 	if len(w.Panes) > 0 || len(w.Files) > 0 || len(w.HTTP) > 0 {
 		cfg.Modules.Watch.Enabled = true
 	}
+
+	if !apply {
+		printerInfo(p, "[plan] would "+desc)
+		printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))
+		return nil
+	}
+
 	if err := config.Write(path, cfg); err != nil {
 		return fmt.Errorf("watch: write config: %w", err)
 	}
-	printerInfo(p, msg)
+	printerInfo(p, "Applied: "+desc)
 	printerInfo(p, styleMuted.Render("Restart the daemon to apply: abysslink daemon stop && abysslink daemon start"))
 	return nil
 }

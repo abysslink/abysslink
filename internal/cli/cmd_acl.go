@@ -100,6 +100,25 @@ func newACLPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			p := newPrinter(cmd)
+
+			// CLI-01: acl push mutates the tailnet ACL (or writes the generated
+			// policy file + clipboard + browser in manual mode). Dry-run is the
+			// default — without --apply print a [plan] preview and perform NO
+			// mutation and NO side effects (no policy-file write, no clipboard,
+			// no editor).
+			if !cc.apply {
+				a := cc.cfg.Tailnet.Admin
+				mode := "push via admin API"
+				if a.Tailnet == "" || a.OAuthClientID == "" || os.Getenv(oauthSecretEnv) == "" {
+					mode = "manual (write generated policy file, copy to clipboard, open admin editor)"
+				}
+				printerInfo(p, "[plan] would converge the tailnet ACL: tag owners, tag:mobile → tag:laptop grant (tcp/22 + tcp/2586 + udp/60000-61000), and the SSH check rule")
+				printerInfo(p, "[plan] mode: "+mode)
+				printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))
+				return nil
+			}
+
 			deps, err := buildDeps(ctx, cc)
 			if err != nil {
 				return fmt.Errorf("acl push: %w", err)
@@ -107,7 +126,7 @@ func newACLPushCmd() *cobra.Command {
 			if err := aclmod.New(deps).Apply(ctx); err != nil {
 				return fmt.Errorf("acl push: %w", err)
 			}
-			printerInfo(newPrinter(cmd), "ACL converged.")
+			printerInfo(p, "ACL converged.")
 			return nil
 		},
 	}
