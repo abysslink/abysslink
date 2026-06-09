@@ -143,7 +143,7 @@ The mesh-VPN model means **your phone and laptop talk directly to each other.** 
 
 ### Install script (recommended)
 
-Always verifies the SHA-256 checksum manifest; additionally verifies the cosign signature bundle when `cosign` is on your `PATH`.
+Installs `abysslink` and the `abysslinkd` daemon to `/usr/local/bin` (root) or `~/.local/bin` (non-root). Always verifies the SHA-256 checksum manifest; additionally verifies the cosign signature bundle when `cosign` is on your `PATH`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/scripts/install.sh | sh
@@ -168,14 +168,25 @@ inputs.abysslink.url = "github:abysslink/abysslink";
 
 ### Prebuilt binaries
 
-Download from [Releases](https://github.com/abysslink/abysslink/releases) and verify before use:
+Download a release tarball (`abysslink_<version>_<os>_<arch>.tar.gz`, containing both `abysslink` and `abysslinkd`) from [Releases](https://github.com/abysslink/abysslink/releases) and verify before use. Each release ships one signed checksum manifest — verify the cosign signature on the manifest, then your tarball's SHA-256 against it:
 
 ```bash
+VERSION=v3.0.0   # the release you downloaded
+
+# Download the checksum manifest and its cosign v3 bundle
+curl -fsSL "https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt"        -o checksums.txt
+curl -fsSL "https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt.bundle" -o checksums.txt.bundle
+
+# Verify the cosign signature (offline — the bundle embeds the cert chain + Rekor proof)
 cosign verify-blob \
-  --certificate-identity-regexp 'https://github.com/abysslink/abysslink' \
+  --bundle checksums.txt.bundle \
+  --offline \
+  --certificate-identity-regexp '^https://github\.com/abysslink/abysslink/\.github/workflows/release\.yml@refs/tags/.*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --bundle abysslink_linux_amd64.bundle \
-  abysslink_linux_amd64
+  checksums.txt
+
+# Verify your tarball's SHA-256 against the signed manifest
+grep "abysslink_${VERSION#v}_linux_amd64.tar.gz" checksums.txt | sha256sum --check
 ```
 
 ### From source
@@ -185,6 +196,8 @@ git clone https://github.com/abysslink/abysslink
 cd abysslink
 make build        # produces ./abysslink and ./abysslinkd (reproducible)
 ```
+
+> **Uninstalling:** remove the binaries with `rm ~/.local/bin/abysslink ~/.local/bin/abysslinkd` (or the `/usr/local/bin` equivalents). `abysslink uninstall` reverses every *system* change Abysslink made but does not delete the binaries themselves.
 
 ---
 

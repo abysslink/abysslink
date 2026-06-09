@@ -22,7 +22,7 @@
             # Set to null initially; update after first successful build
             # by running: nix build --print-out-paths 2>&1 | grep vendorHash
             vendorHash = null;
-            subPackages = [ "cmd/abysslink" ];
+            subPackages = [ "cmd/abysslink" "cmd/abysslinkd" ];
             ldflags = [
               "-s"
               "-w"
