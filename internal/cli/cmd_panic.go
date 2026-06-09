@@ -80,6 +80,27 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			p := newPrinter(cmd)
 			start := time.Now()
 
+			// CLI-05: resolve --rig / --all-rigs targeting up front. An unknown
+			// rig name is a hard error — never silently fall back to local panic.
+			rt, rigErr := resolveRigTargets(cmd, cc.cfg.Rigs)
+			if rigErr != nil {
+				return rigErr
+			}
+			strict, _ := cmd.Flags().GetBool("strict")
+
+			// --rig X: panic ONLY the named enrolled rig. The local machine is
+			// untouched — the user explicitly targeted a remote rig.
+			if rt.rigOnly {
+				banner := styleFatal.Render("PANIC — remote kill switch for rig " + rt.rigs[0].Name)
+				printerError(p, styleHeaderBox.Render(banner))
+				printerError(p, "")
+				if fanErr := panicRigs(ctx, cc, p, strict, rt.rigs); fanErr != nil {
+					return &exitError{code: exitCodeFatal}
+				}
+				printerError(p, styleMuted.Render(fmt.Sprintf("done in %.1fs", time.Since(start).Seconds())))
+				return nil
+			}
+
 			// Bold-red banner — "what panic does" for the user landing in emergency mode.
 			banner := styleFatal.Render("PANIC — Emergency kill switch executing NOW")
 			printerError(p, styleHeaderBox.Render(banner))
@@ -121,10 +142,8 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			// 10s per-rig timeout (SC-3 / D-FT-02). UNREACHABLE rigs are reported,
 			// not fatal, unless --strict is set. Executed AFTER the local panic
 			// steps so the local machine is secured first.
-			allRigs, _ := cmd.Flags().GetBool("all-rigs")
-			strict, _ := cmd.Flags().GetBool("strict")
-			if allRigs && len(cc.cfg.Rigs) > 0 {
-				fanErr := panicAllRigs(ctx, cc, p, strict)
+			if rt.fanOut && len(rt.rigs) > 0 {
+				fanErr := panicRigs(ctx, cc, p, strict, rt.rigs)
 				if fanErr != nil {
 					return &exitError{code: exitCodeFatal}
 				}
@@ -135,16 +154,24 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 	}
 }
 
-// panicAllRigs fans the `abysslink panic` command out to every enrolled rig with
-// a 10s per-rig timeout (SC-3). UNREACHABLE rigs are logged and reported as
-// per the best-effort contract; --strict maps to exit 1.
+// panicAllRigs is the historical all-enrolled-rigs entry point; it delegates to
+// panicRigs with the full enrolled rig list. Kept so existing callers/tests of
+// the --all-rigs path are unchanged.
 func panicAllRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool) error {
+	return panicRigs(ctx, cc, p, strict, cc.cfg.Rigs)
+}
+
+// panicRigs fans the `abysslink panic` command out to the targeted rigs (all
+// enrolled rigs under --all-rigs, a single rig under --rig, CLI-05) with a 10s
+// per-rig timeout (SC-3). UNREACHABLE rigs are logged and reported as per the
+// best-effort contract; --strict maps to exit 2 at the caller.
+func panicRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool, rigs []config.RigConfig) error {
 	const perRigPanicTimeout = 10 * time.Second
 
 	printerError(p, "")
-	printerError(p, styleBold.Render("Fleet panic — fanning out to enrolled rigs:"))
+	printerError(p, styleBold.Render("Fleet panic — fanning out to targeted rigs:"))
 
-	results, err := fleet.FanOut(ctx, cc.runner, cc.cfg.Rigs, perRigPanicTimeout, strict, []string{"panic"})
+	results, err := fleet.FanOut(ctx, cc.runner, rigs, perRigPanicTimeout, strict, []string{"panic"})
 	for _, r := range results {
 		if !r.Reachable {
 			panicStep(p, "rig "+r.Rig.Name+" panic", errPanicStepFailed{"UNREACHABLE"})
@@ -231,9 +258,15 @@ func revokePhoneDevicesWithStep(ctx context.Context, cc *cmdContext, p Printer, 
 
 // destroyLocalAPIKeyWithStep deletes the Anthropic API key from the local
 // keychain and emits a ✓/✕ step marker.
+//
+// CLI-19: when the dependency bundle cannot be built or no keychain backend is
+// available, the operator MUST be told the key was NOT destroyed — a silent
+// return would leave them believing the kill switch revoked it.
 func destroyLocalAPIKeyWithStep(ctx context.Context, cc *cmdContext, p Printer, logPanic func(string)) {
 	deps, err := buildDeps(ctx, cc)
 	if err != nil || deps.Keychain == nil {
+		panicStep(p, "destroy local API key",
+			errPanicStepFailed{"keychain unavailable — key NOT destroyed; revoke it in the Anthropic console (see manual steps)"})
 		return
 	}
 	if err := deps.Keychain.Delete(ctx, "abysslink", "anthropic-api-key"); err != nil {

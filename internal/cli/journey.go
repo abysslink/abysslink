@@ -41,6 +41,7 @@ import (
 	"github.com/charmbracelet/huh"
 	cterm "github.com/charmbracelet/x/term"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -166,7 +167,7 @@ func journeyStageAccount(jsonOut bool, runner shell.Runner, autoYes bool) func(c
 	return func(ctx context.Context, p Printer) error {
 		emitSecurityNote(p, jsonOut, "sso-hardening")   // §7 note 1
 		emitSecurityNote(p, jsonOut, "dry-run-default") // §7 note 2
-		if err := ensureTailscaleAccount(p, runner, autoYes); err != nil {
+		if err := ensureTailscaleAccount(ctx, p, runner, autoYes); err != nil {
 			return err
 		}
 		return tui.Pause(ctx, "Stage 1 complete — account ready", autoYes)
@@ -199,7 +200,7 @@ func journeyStageConverge(jsonOut bool, runner shell.Runner, autoYes bool) func(
 			"Converges your system to match abysslink.yaml.",
 			"Yes, run it", "No, I'll run it later",
 			"", // default failure message
-			"abysslink", "up", "--apply")
+			selfExecutable(), "up", "--apply")
 	}
 }
 
@@ -227,7 +228,7 @@ func journeyStageLock(jsonOut bool, cfg *config.Config, runner shell.Runner, aut
 			"Enables Tailnet Lock — disablement secrets printed ONCE.",
 			"Yes, run it", "No, I'll run it later",
 			"", // default failure message
-			"abysslink", "lock", "init", "--apply")
+			selfExecutable(), "lock", "init", "--apply")
 	}
 }
 
@@ -246,7 +247,7 @@ func journeyStageEnroll(jsonOut bool, runner shell.Runner, autoYes bool) func(ct
 			"Shows a QR code for the Tailscale app.",
 			"Yes, run it", "No, I'll run it later",
 			"", // default failure message
-			"abysslink", "enroll", "phone")
+			selfExecutable(), "enroll", "phone")
 	}
 }
 
@@ -264,7 +265,7 @@ func journeyStageVerify(jsonOut bool, runner shell.Runner, autoYes bool) func(ct
 			"Checks all modules for misconfigurations.",
 			"Yes, run it", "No, I'll run it later",
 			"", // default failure message
-			"abysslink", "doctor")
+			selfExecutable(), "doctor")
 	}
 }
 
@@ -285,7 +286,7 @@ func journeyStageACL(jsonOut bool, runner shell.Runner, autoYes bool) func(ctx c
 			"Pushes the abysslink ACL to your tailnet. Requires OAuth config.",
 			"Yes, push ACL", "No, I'll manage it manually",
 			"ACL push failed — manage manually at the URL above.",
-			"abysslink", "acl", "push", "--apply")
+			selfExecutable(), "acl", "push", "--apply")
 	}
 }
 
@@ -372,6 +373,8 @@ func runJourney(ctx context.Context, p Printer, stages []journeyStage, resumeFro
 // writeJourneyState persists the last completed stage to the state file.
 // SECURITY: The file contains only {"last_stage": N} — no secrets, keys,
 // or tokens. This is consistent with the "no secrets on disk" invariant (T-10-17).
+// CLI-15: the write routes through internal/audit (backup + audit-log entry)
+// per the CLAUDE.md mutation rule — never os.WriteFile directly. 0600 preserved.
 func writeJourneyState(stateFile string, stage int) error {
 	if err := os.MkdirAll(filepath.Dir(stateFile), 0o700); err != nil {
 		return err
@@ -380,7 +383,22 @@ func writeJourneyState(stateFile string, stage int) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(stateFile, data, 0o600)
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return err
+	}
+	return audit.New(logPath).WriteFile(stateFile, data, 0o600, false)
+}
+
+// selfExecutable returns the path of the running abysslink binary for
+// re-invoking child commands (CLI-25). os.Executable() makes `./abysslink
+// init` work without abysslink on PATH; the bare name is the PATH-lookup
+// fallback when resolution fails.
+func selfExecutable() string {
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		return exe
+	}
+	return "abysslink"
 }
 
 // readJourneyState reads the last completed stage from the state file.

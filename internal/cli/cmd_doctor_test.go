@@ -53,3 +53,51 @@ func TestRemoteSeverity(t *testing.T) {
 	assert.Equal(t, modules.SeverityWarning, remoteSeverity("unknown-severity"), "unknown string must degrade to SeverityWarning")
 	assert.Equal(t, modules.SeverityWarning, remoteSeverity(""), "empty string must degrade to SeverityWarning")
 }
+
+// ── CLI-06: doctor exit-code parity between JSON and human output ────────────
+
+// TestFindingsSeverityFlags verifies the shared severity predicate that both
+// the JSON and human doctor paths use to derive the exit code (CLI-06).
+func TestFindingsSeverityFlags(t *testing.T) {
+	cases := []struct {
+		name      string
+		findings  []modules.Finding
+		wantFatal bool
+		wantWarn  bool
+	}{
+		{"empty", nil, false, false},
+		{"all-ok", []modules.Finding{{Severity: modules.SeverityOK}}, false, false},
+		{"warn-only", []modules.Finding{{Severity: modules.SeverityOK}, {Severity: modules.SeverityWarning}}, false, true},
+		{"fatal-only", []modules.Finding{{Severity: modules.SeverityFatal}}, true, false},
+		{"fatal-and-warn", []modules.Finding{{Severity: modules.SeverityWarning}, {Severity: modules.SeverityFatal}}, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hasFatal, hasWarn := findingsSeverityFlags(tc.findings)
+			assert.Equal(t, tc.wantFatal, hasFatal, "hasFatal")
+			assert.Equal(t, tc.wantWarn, hasWarn, "hasWarn")
+		})
+	}
+}
+
+// TestDoctorExitErr verifies the single exit decision shared by the doctor
+// JSON and human paths: fatal→2, warn→1, clean→nil (CLI-06). Before this fix
+// the JSON branch always returned nil/exit 0 even with FATAL findings.
+func TestDoctorExitErr(t *testing.T) {
+	// Fatal wins: exit 2.
+	err := doctorExitErr(true, true)
+	var ee *exitError
+	if assert.ErrorAs(t, err, &ee, "fatal must map to an exitError") {
+		assert.Equal(t, exitCodeFatal, ee.ExitCode(), "fatal findings must exit 2")
+	}
+
+	// Warn only: exit 1.
+	err = doctorExitErr(false, true)
+	ee = nil
+	if assert.ErrorAs(t, err, &ee, "warn must map to an exitError") {
+		assert.Equal(t, exitCodeError, ee.ExitCode(), "warning findings must exit 1")
+	}
+
+	// Clean: nil (exit 0).
+	assert.NoError(t, doctorExitErr(false, false), "no findings must exit 0")
+}

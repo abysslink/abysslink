@@ -80,6 +80,33 @@ func (t *LiveTable) Done(err error) {
 	t.stop <- err
 }
 
+// Completed reports whether the table received its Done signal before the
+// Bubble Tea program exited. When the program returns and Completed() is
+// false, the user quit early (Ctrl-C/Esc) while the producer goroutine was
+// still running — callers must cancel the producer and treat the run as
+// aborted (CLI-11).
+func (t *LiveTable) Completed() bool {
+	return t.done
+}
+
+// Drain consumes any remaining queued events (and the eventual Done signal) in
+// a background goroutine so the producer can never block on SendRow/Done after
+// the UI has exited early. Call after the Bubble Tea program returns with
+// Completed()==false, alongside cancelling the producer's context. The drain
+// goroutine terminates when the producer's Done arrives.
+func (t *LiveTable) Drain() {
+	go func() {
+		for {
+			select {
+			case <-t.events:
+				// discard queued row events
+			case <-t.stop:
+				return // producer finished — nothing more can be sent
+			}
+		}
+	}()
+}
+
 // Init implements tea.Model.
 func (t *LiveTable) Init() tea.Cmd {
 	return tea.Batch(t.spinner.Tick, t.listenForRow())
