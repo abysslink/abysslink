@@ -13,15 +13,24 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         version = if self ? rev then self.shortRev else "dev";
+        # go.mod requires go >= 1.26.4; nixpkgs-unstable currently ships
+        # 1.26.3, so build the exact toolchain from the upstream source
+        # tarball. Drop this override once nixpkgs catches up.
+        go_1_26_4 = pkgs.go.overrideAttrs (old: {
+          version = "1.26.4";
+          src = pkgs.fetchurl {
+            url = "https://go.dev/dl/go1.26.4.src.tar.gz";
+            hash = "sha256-T2aKMvv8ETLmqIH7lowvHa2mMUkqM5IRc1+7JVpCYC0=";
+          };
+        });
+        buildGoModule = pkgs.buildGoModule.override { go = go_1_26_4; };
       in {
         packages = {
-          abysslink = pkgs.buildGoModule {
+          abysslink = buildGoModule {
             pname = "abysslink";
             inherit version;
             src = ./.;
-            # Set to null initially; update after first successful build
-            # by running: nix build --print-out-paths 2>&1 | grep vendorHash
-            vendorHash = null;
+            vendorHash = "sha256-g9CB7I4+bjErPg5pEvNJjlxcxoszguXU9+q/WPEPtTw=";
             subPackages = [ "cmd/abysslink" "cmd/abysslinkd" ];
             ldflags = [
               "-s"
