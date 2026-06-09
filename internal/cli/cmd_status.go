@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/abysslink/abysslink/internal/backend"
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
@@ -62,12 +63,16 @@ func newStatusCmd() *cobra.Command {
 			p := newPrinter(cmd)
 
 			// Read persistent fan-out flags (registered in Plan 03 / root.go).
-			allRigs, _ := cmd.Flags().GetBool("all-rigs")
 			strict, _ := cmd.Flags().GetBool("strict")
 
-			// --all-rigs branch: fan out to every enrolled rig, aggregate results.
-			if allRigs && len(cc.cfg.Rigs) > 0 {
-				return statusAllRigs(ctx, cc, p, strict)
+			// --rig X (single rig) / --all-rigs (every enrolled rig) fan-out
+			// branch: aggregate per-rig results (CLI-05).
+			rt, rigErr := resolveRigTargets(cmd, cc.cfg.Rigs)
+			if rigErr != nil {
+				return rigErr
+			}
+			if rt.fanOut && len(rt.rigs) > 0 {
+				return statusRigs(ctx, cc, p, strict, rt.rigs)
 			}
 
 			r := cc.runner
@@ -139,9 +144,15 @@ func newStatusCmd() *cobra.Command {
 // aggregates the results into a per-rig slice. Offline rigs appear as UNREACHABLE
 // rows (SC-2); --strict maps to exit 1 when any rig is offline (T-14-21).
 func statusAllRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool) error {
+	return statusRigs(ctx, cc, p, strict, cc.cfg.Rigs)
+}
+
+// statusRigs fans out `abysslink status --json` to the targeted rigs only
+// (every enrolled rig under --all-rigs, a single rig under --rig, CLI-05).
+func statusRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool, rigs []config.RigConfig) error {
 	const perRigTimeout = 10 * time.Second
 
-	results, fanErr := fleet.FanOut(ctx, cc.runner, cc.cfg.Rigs, perRigTimeout, strict, []string{"status", "--json"})
+	results, fanErr := fleet.FanOut(ctx, cc.runner, rigs, perRigTimeout, strict, []string{"status", "--json"})
 
 	var aggregate []statusReport
 	for _, r := range results {

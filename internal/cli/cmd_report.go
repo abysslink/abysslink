@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/modules"
@@ -121,9 +122,12 @@ func runReport(cmd *cobra.Command, _ []string) error {
 	p := newPrinter(cmd)
 
 	tailN, _ := cmd.Flags().GetInt("tail")
-	// --all-rigs and --strict are persistent root flags.
-	allRigs, _ := cmd.Flags().GetBool("all-rigs")
+	// --rig / --all-rigs and --strict are persistent root flags (CLI-05).
 	strict, _ := cmd.Flags().GetBool("strict")
+	rt, rigErr := resolveRigTargets(cmd, cc.cfg.Rigs)
+	if rigErr != nil {
+		return rigErr
+	}
 
 	findings, err := collectReportFindings(ctx, cc)
 	if err != nil {
@@ -133,8 +137,8 @@ func runReport(cmd *cobra.Command, _ []string) error {
 	entries := collectAuditTail(tailN)
 
 	var rigResults []rigReachability
-	if allRigs && len(cc.cfg.Rigs) > 0 {
-		rigResults = collectRigReachability(ctx, cc, strict)
+	if rt.fanOut && len(rt.rigs) > 0 {
+		rigResults = collectRigReachability(ctx, cc, strict, rt.rigs)
 	}
 
 	exitCode := reportExitCode(findings)
@@ -224,11 +228,12 @@ func collectAuditTail(tailN int) []audit.Entry {
 	return tailEntrySlice(entries, tailN)
 }
 
-// collectRigReachability fans out `status --json` to all enrolled rigs and
+// collectRigReachability fans out `status --json` to the targeted rigs (all
+// enrolled rigs under --all-rigs, a single rig under --rig, CLI-05) and
 // returns opaque per-rig reachability rows.
-func collectRigReachability(ctx context.Context, cc *cmdContext, strict bool) []rigReachability {
+func collectRigReachability(ctx context.Context, cc *cmdContext, strict bool, rigs []config.RigConfig) []rigReachability {
 	const perRigTimeout = 30 * time.Second
-	results, _ := fleet.FanOut(ctx, cc.runner, cc.cfg.Rigs, perRigTimeout, strict, []string{"status", "--json"})
+	results, _ := fleet.FanOut(ctx, cc.runner, rigs, perRigTimeout, strict, []string{"status", "--json"})
 	rows := make([]rigReachability, 0, len(results))
 	for _, res := range results {
 		rows = append(rows, newRigReachability(res.Rig.Name, res.Reachable))
