@@ -24,6 +24,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +33,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/abysslink/abysslink/internal/secrets"
 )
 
 const writeFilePathCeiling = 256 << 20 // 256 MiB — D-06 WR-02 streaming ceiling
@@ -137,9 +140,18 @@ type SignedAudit struct {
 // NewSigned returns a SignedAudit. If the HMAC key is absent from the keychain
 // it is auto-generated (32 random bytes, hex-encoded) and stored. Returns an
 // error when the keychain is unavailable — callers MUST fail closed (AUD-02).
+//
+// CORE-04: a new key is generated ONLY when the keychain definitively reports
+// the key absent (errors.Is(err, secrets.ErrNotFound)). Any other Get failure
+// (keychain locked, denied, dbus down) propagates as an error WITHOUT writing:
+// overwriting the existing key on a transient hiccup would permanently break
+// verification of the entire tamper-evident chain.
 func NewSigned(logPath string, kc KeychainStore) (*SignedAudit, error) {
 	ctx := context.Background()
 	if _, err := kc.Get(ctx, hmacKeyService, hmacKeyAccount); err != nil {
+		if !errors.Is(err, secrets.ErrNotFound) {
+			return nil, fmt.Errorf("audit: keychain unavailable, refusing to (re)generate hmac key (fail closed): %w", err)
+		}
 		key := make([]byte, hmacKeyBytes)
 		if _, rerr := io.ReadFull(rand.Reader, key); rerr != nil {
 			return nil, fmt.Errorf("audit: generate hmac key: %w", rerr)
@@ -176,6 +188,17 @@ func (a *SignedAudit) LogPath() string { return a.logPath }
 // interface omitting ctx for drop-in *Audit compatibility (WriteFile is a
 // convenience wrapper over Append, not a hot path; see interface.go).
 func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error {
+	// CORE-05: dry-run writes NOTHING — no .bak file, no chain entries, no
+	// anchor refresh, no keychain counter bump. Recording chain entries under
+	// dry-run would mutate disk and keychain state, violating the --dry-run
+	// contract; recording entries WITHOUT bumping the counter would desync
+	// counter-vs-entry-count and trip a false truncation alarm. So the signed
+	// path records nothing at all for a dry run (unlike the legacy unsigned
+	// *Audit, which appends a DryRun-tagged plain entry).
+	if dryRun {
+		return nil
+	}
+
 	ctx := context.Background()
 
 	// Check whether a pre-existing file must be backed up (before acquiring mu).
@@ -249,10 +272,6 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 		_ = a.kc.Delete(ctx, counterKeyService, counterKeyAccount)
 		slog.Warn("audit: keychain counter increment failed; counter key cleared to prevent false mismatch alarm",
 			"err", cerr, "log", a.logPath)
-	}
-
-	if dryRun {
-		return nil
 	}
 
 	// Physical write of the target, still under the flock. Use os.CreateTemp for a

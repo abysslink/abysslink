@@ -51,7 +51,8 @@ func (m *MockStore) Get(_ context.Context, service, account string) (string, err
 	defer m.mu.Unlock()
 	v, ok := m.entries[key(service, account)]
 	if !ok {
-		return "", fmt.Errorf("secret not found: service=%s account=%s", service, account)
+		// Wraps ErrNotFound so errors.Is matches, exactly like the real stores.
+		return "", fmt.Errorf("%w: service=%s account=%s", ErrNotFound, service, account)
 	}
 	return v, nil
 }

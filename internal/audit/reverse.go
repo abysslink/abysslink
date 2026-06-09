@@ -131,6 +131,33 @@ func atomicRestoreWrite(cleanDst string, content []byte) error {
 	return nil
 }
 
+// restoreChainVerified restores backupPath over dst ONLY if the backup's
+// content hash matches wantHash, the SHA-256 recorded in the signed chain
+// entry (CORE-06). The content is read once: the same bytes that pass the
+// hash check are the bytes written to dst, so there is no verify-then-reread
+// window for an attacker to swap the .bak. Path constraints mirror Restore
+// (absolute dst, same directory).
+func restoreChainVerified(dst, backupPath, wantHash string) error {
+	cleanDst := filepath.Clean(dst)
+	cleanBak := filepath.Clean(backupPath)
+
+	if !strings.HasPrefix(cleanDst, "/") {
+		return fmt.Errorf("audit: restore dst must be absolute, got %q", dst)
+	}
+	if filepath.Dir(cleanBak) != filepath.Dir(cleanDst) {
+		return fmt.Errorf("audit: backup %q and dst %q must be in the same directory", backupPath, dst)
+	}
+
+	content, err := os.ReadFile(cleanBak) //nolint:gosec // G304: cleanBak comes from a signed chain entry written by abysslink; content is hash-verified below
+	if err != nil {
+		return fmt.Errorf("audit: restore read backup %s: %w", cleanBak, err)
+	}
+	if HashOf(content) != wantHash {
+		return fmt.Errorf("audit: reverse refused: backup %q content does not match signed chain entry hash (backup modified or planted)", cleanBak)
+	}
+	return atomicRestoreWrite(cleanDst, content)
+}
+
 // RestoreGated is the AUD-01 chain-verified restore path. It refuses to write
 // backupPath over dst unless a signed chain entry exists matching backupPath +
 // sha256(content), or acceptUnverified is true.
@@ -194,16 +221,29 @@ func RestoreGated(ctx context.Context, dst, backupPath string, sa *SignedAudit, 
 
 // ReverseAction records what reversing a single mutated target did (or would do).
 type ReverseAction struct {
-	Target string
-	Action string // "restore" | "delete" | "skip"
-	Backup string // backup file used for a restore (empty otherwise)
-	Hash   string // SHA-256 of the file content after the action ("" if removed/absent)
-	Err    error  // non-nil if the action failed
+	Target    string
+	Action    string // "restore" | "delete" | "skip"
+	Backup    string // backup file used for a restore (empty otherwise)
+	ChainHash string // expected SHA-256 from the signed chain entry ("" when no chain entry — glob fallback)
+	Warning   string // non-empty when the backup was selected without chain attestation (CORE-06)
+	Hash      string // SHA-256 of the file content after the action ("" if removed/absent)
+	Err       error  // non-nil if the action failed
 }
+
+// globFallbackWarning marks a restore whose backup was selected by filesystem
+// glob because the audit log contains no signed backup entry for the target.
+const globFallbackWarning = "backup selected by filesystem glob (no signed chain entry for this target); content is NOT chain-verified"
 
 // PlanReverse computes how to undo every mutation in the audit log: a target
 // with a backup is restored to its earliest (pre-abysslink) content; a target
 // abysslink created (no backup) is deleted; an already-absent target is skipped.
+//
+// CORE-06 backup selection: signed chain entries (Op="backup") are the
+// authoritative source for which .bak to restore. An attacker-planted,
+// lexically-first .bak file must never win over a chain-attested one. The
+// filesystem glob is used ONLY when the chain has no backup entry for the
+// target (e.g. legacy unsigned logs); such actions carry a Warning and an
+// empty ChainHash so callers (and Reverse) know the content is unverified.
 func PlanReverse(logPath string) ([]ReverseAction, error) {
 	targets, err := MutatedTargets(logPath)
 	if err != nil {
@@ -212,12 +252,42 @@ func PlanReverse(logPath string) ([]ReverseAction, error) {
 
 	plan := make([]ReverseAction, 0, len(targets))
 	for _, t := range targets {
-		baks, _ := Backups(t)
+		// Chain-attested backups for this exact target. The ".bak." suffix in
+		// the prefix match prevents a sibling target like t+"2" from matching.
+		chainBaks, cerr := BackupsFromChain(logPath, t)
+		if cerr != nil {
+			return nil, cerr
+		}
+		var attested []Entry
+		for _, e := range chainBaks {
+			if !e.DryRun && strings.HasPrefix(e.Target, t+".bak.") {
+				attested = append(attested, e)
+			}
+		}
+
 		switch {
-		case len(baks) > 0:
-			plan = append(plan, ReverseAction{Target: t, Action: "restore", Backup: baks[0]})
+		case len(attested) > 0:
+			// Earliest chain-recorded backup = pre-abysslink content. The
+			// chain hash travels with the action so Reverse can refuse a
+			// tampered .bak (verifyBackupHash) before restoring.
+			plan = append(plan, ReverseAction{
+				Target:    t,
+				Action:    "restore",
+				Backup:    attested[0].Target,
+				ChainHash: attested[0].Hash,
+			})
 		default:
-			if _, statErr := os.Stat(t); statErr == nil {
+			baks, _ := Backups(t)
+			if len(baks) > 0 {
+				// CORE-06 fallback: no chain entry exists for this target —
+				// glob selection is the only option, flagged as unverified.
+				plan = append(plan, ReverseAction{
+					Target:  t,
+					Action:  "restore",
+					Backup:  baks[0],
+					Warning: globFallbackWarning,
+				})
+			} else if _, statErr := os.Stat(t); statErr == nil {
 				plan = append(plan, ReverseAction{Target: t, Action: "delete"})
 			} else {
 				plan = append(plan, ReverseAction{Target: t, Action: "skip"})
@@ -242,25 +312,7 @@ func Reverse(logPath string, dryRun bool) ([]ReverseAction, error) {
 		a := &plan[i]
 		switch a.Action {
 		case "restore":
-			if dryRun {
-				if content, rerr := os.ReadFile(a.Backup); rerr == nil { //nolint:gosec // G304: a.Backup is a path from a trusted audit-log entry written by abysslink, not user input
-					a.Hash = HashOf(content)
-				}
-				continue
-			}
-			if rerr := Restore(a.Target, a.Backup); rerr != nil {
-				a.Err = rerr
-				continue
-			}
-			if content, rerr := os.ReadFile(a.Target); rerr == nil { //nolint:gosec // G304: a.Target is a path from a trusted audit-log entry written by abysslink, not user input
-				a.Hash = HashOf(content)
-			}
-			// The original content is back in place; drop the redundant backups.
-			if baks, gerr := Backups(a.Target); gerr == nil {
-				for _, b := range baks {
-					_ = os.Remove(b)
-				}
-			}
+			reverseRestore(a, dryRun)
 		case "delete":
 			if dryRun {
 				continue
@@ -271,4 +323,42 @@ func Reverse(logPath string, dryRun bool) ([]ReverseAction, error) {
 		}
 	}
 	return plan, nil
+}
+
+// reverseRestore executes (or dry-runs) a single "restore" action in place,
+// recording the result hash and any error on a. Chain-attested backups
+// (a.ChainHash != "") are hash-verified before restoring (CORE-06).
+func reverseRestore(a *ReverseAction, dryRun bool) {
+	if dryRun {
+		if content, rerr := os.ReadFile(a.Backup); rerr == nil { //nolint:gosec // G304: a.Backup is a path from a trusted audit-log entry written by abysslink, not user input
+			a.Hash = HashOf(content)
+			// CORE-06: surface a chain-hash mismatch in the dry-run plan so
+			// the operator sees the refusal before a real run.
+			if a.ChainHash != "" && a.Hash != a.ChainHash {
+				a.Err = fmt.Errorf("audit: reverse refused: backup %q content does not match signed chain entry hash (backup modified or planted)", a.Backup)
+			}
+		}
+		return
+	}
+	// CORE-06: when the backup is chain-attested, verify its content hash
+	// against the signed chain entry in the same read that feeds the restore
+	// — a planted or modified .bak is refused.
+	if a.ChainHash != "" {
+		if rerr := restoreChainVerified(a.Target, a.Backup, a.ChainHash); rerr != nil {
+			a.Err = rerr
+			return
+		}
+	} else if rerr := Restore(a.Target, a.Backup); rerr != nil {
+		a.Err = rerr
+		return
+	}
+	if content, rerr := os.ReadFile(a.Target); rerr == nil { //nolint:gosec // G304: a.Target is a path from a trusted audit-log entry written by abysslink, not user input
+		a.Hash = HashOf(content)
+	}
+	// The original content is back in place; drop the redundant backups.
+	if baks, gerr := Backups(a.Target); gerr == nil {
+		for _, b := range baks {
+			_ = os.Remove(b)
+		}
+	}
 }
