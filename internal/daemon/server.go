@@ -122,14 +122,14 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.startWatchers(ctx)
 
-	// #nosec G118 -- graceful-shutdown goroutine: by the time it runs, ctx is
-	// already Done, so a fresh context.Background with a timeout is the correct
-	// context for srv.Shutdown (the request-scoped ctx is cancelled).
+	// Graceful-shutdown goroutine: by the time srv.Shutdown runs, ctx is
+	// already Done, so the drain needs a context detached from that
+	// cancellation (WithoutCancel keeps ctx values) plus its own timeout.
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
 		<-ctx.Done()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 		_ = os.Remove(s.socketPath)
