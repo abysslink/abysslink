@@ -49,6 +49,13 @@ type Deps struct {
 	// modules can trigger interactive pauses without violating the no-stdout-in-
 	// library-code rule. Nil means no-op (tests, non-interactive contexts).
 	Prompt func(ctx context.Context, msg string) error
+	// AcceptCheckPeriodExtension records that the user explicitly consented
+	// (via the --accept-checkperiod-extension flag) to raising the SSH re-auth
+	// interval above the immutable 12h security default. The acl module fails
+	// closed when mobile.ssh_check_period exceeds 12h and this is false, so
+	// repair / acl apply cannot silently push an extended checkPeriod into the
+	// tailnet ACL (NET-01).
+	AcceptCheckPeriodExtension bool
 }
 
 // MetricsRegistry returns d.Registry, or a NoopRegistry when the field is nil.

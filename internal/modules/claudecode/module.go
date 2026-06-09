@@ -546,9 +546,13 @@ func hookEntryDescriptor(eventKey string, entry interface{}) string {
 	return eventKey + ": abysslink notify"
 }
 
-// Verify re-runs Detect to confirm the hook is in place.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// Verify is a no-op for the claudecode module — all checks run in Detect.
+// Pitfall 4 (Doctor double-emission): do NOT call Detect here — runner.Doctor
+// calls both Detect and Verify, so re-running Detect would double-emit every
+// Detect finding per doctor pass (NET-18). Verify adds no new information
+// beyond Detect; returning nil avoids the duplication (mirrors ssh/ntfy).
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair re-runs Apply.

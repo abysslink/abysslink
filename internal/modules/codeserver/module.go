@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,12 +39,41 @@ const (
 	codeServerConfigPath = ".config/code-server/config.yaml"
 )
 
-// isBindAddrTailnetOnly returns true when addr is bound to a specific tailnet IP
-// (not empty, not 0.0.0.0, not 127.0.0.1).
+// isBindAddrTailnetOnly returns true when addr is bound to a specific
+// (non-wildcard, non-loopback) host — the only acceptable value is a tailnet
+// IP or MagicDNS name. It rejects:
+//   - empty addr
+//   - empty host (":8080" — IPv4 all-interfaces)
+//   - unspecified IPs ("0.0.0.0", "::", "[::]:8080", with or without port)
+//   - loopback IPs ("127.0.0.1", "::1") and the "localhost" hostname
+//
+// Parsing goes through net.SplitHostPort / net.ParseIP rather than string
+// prefixes so variants like "[::]:8080", bare "0.0.0.0", or "localhost:8080"
+// cannot slip through (NET-09; mirrors ntfy's hasWildcardListen intent).
 func isBindAddrTailnetOnly(addr string) bool {
-	return addr != "" &&
-		!strings.HasPrefix(addr, "0.0.0.0:") &&
-		!strings.HasPrefix(addr, "127.0.0.1:")
+	if addr == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port (e.g. bare "0.0.0.0", "::", "localhost") or malformed —
+		// evaluate the whole string as the host so wildcards without a port
+		// are still rejected. Strip IPv6 brackets ("[::]") so ParseIP sees
+		// the literal.
+		host = addr
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
+		}
+	}
+	if host == "" {
+		return false // ":8080" binds all interfaces
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return !ip.IsUnspecified() && !ip.IsLoopback()
+	}
+	// Non-IP hostname: reject the well-known loopback name; anything else
+	// (e.g. a MagicDNS name) is accepted as a specific host.
+	return !strings.EqualFold(host, "localhost")
 }
 
 // codeServerConfig represents the code-server config.yaml structure.
@@ -271,9 +301,13 @@ func (m *Module) ensurePassword(ctx context.Context) (string, error) {
 	return pw, nil
 }
 
-// Verify re-runs Detect to confirm code-server is correctly configured.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// Verify is a no-op for the codeserver module — all checks run in Detect.
+// Pitfall 4 (Doctor double-emission): do NOT call Detect here — runner.Doctor
+// calls both Detect and Verify, so re-running Detect would double-emit every
+// Detect finding per doctor pass (NET-18). Verify adds no new information
+// beyond Detect; returning nil avoids the duplication (mirrors ssh/ntfy).
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair re-runs Apply.
