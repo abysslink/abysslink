@@ -49,6 +49,15 @@ type Deps struct {
 	// modules can trigger interactive pauses without violating the no-stdout-in-
 	// library-code rule. Nil means no-op (tests, non-interactive contexts).
 	Prompt func(ctx context.Context, msg string) error
+	// DeferManualStep registers a manual step the user must complete (e.g.
+	// "paste the ACL into the admin editor and Save"). Modules MUST use this
+	// instead of running interactive prompts during Apply/Repair: module code
+	// may execute inside the CLI's live Bubble Tea table, and starting a second
+	// TUI (huh form via Prompt) on the same terminal races for stdin and
+	// corrupts terminal state (F-59). The CLI flushes deferred steps after its
+	// own TUI has fully closed. Nil means the embedder does not collect steps
+	// (tests, library use) — modules may then fall back to Prompt.
+	DeferManualStep func(step ManualStep)
 	// AcceptCheckPeriodExtension records that the user explicitly consented
 	// (via the --accept-checkperiod-extension flag) to raising the SSH re-auth
 	// interval above the immutable 12h security default. The acl module fails
@@ -56,6 +65,16 @@ type Deps struct {
 	// repair / acl apply cannot silently push an extended checkPeriod into the
 	// tailnet ACL (NET-01).
 	AcceptCheckPeriodExtension bool
+}
+
+// ManualStep is a user action a module could not complete automatically.
+// Modules register steps via Deps.DeferManualStep instead of prompting —
+// only the CLI may interact with the terminal, after any TUI has closed.
+type ManualStep struct {
+	Title   string // short heading, e.g. "ACL manual step"
+	Body    string // full instruction text shown to the user
+	URL     string // optional URL the CLI should offer to open
+	Confirm string // optional post-open confirmation prompt text
 }
 
 // MetricsRegistry returns d.Registry, or a NoopRegistry when the field is nil.

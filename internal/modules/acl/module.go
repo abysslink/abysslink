@@ -46,6 +46,13 @@ type Module struct {
 	bknd   backend.Client
 	audit  audit.AuditWriter
 	prompt func(ctx context.Context, msg string) error
+	// deferManualStep registers the manual paste-and-save step with the CLI,
+	// which replays it AFTER its own TUI (live apply table) has closed. When
+	// set, applyManual must never call prompt/openURL itself: running a huh
+	// form while the Bubble Tea live table owns the terminal races for stdin
+	// and corrupts terminal state (F-59). Nil only for tests/embedders that
+	// do not collect steps — then the legacy prompt+openURL fallback runs.
+	deferManualStep func(step modules.ManualStep)
 	// acceptCheckPeriodExt records explicit user consent (the
 	// --accept-checkperiod-extension flag) to raise the SSH re-auth interval
 	// above the immutable 12h security default. Threaded in via
@@ -61,6 +68,7 @@ func New(d modules.Deps) *Module {
 		bknd:                 d.Backend,
 		audit:                d.Audit,
 		prompt:               d.Prompt,
+		deferManualStep:      d.DeferManualStep,
 		acceptCheckPeriodExt: d.AcceptCheckPeriodExtension,
 	}
 }
@@ -232,6 +240,36 @@ func (m *Module) applyManual(ctx context.Context, aclMgr backend.ACLManager, own
 	notice += "     Press [Enter] to open the Tailscale ACL editor, then paste and Save.\n"
 	notice += "     URL: " + aclEditorURL + "\n"
 
+	const confirmMsg = "\n  ✦  Press [Enter] once you have pasted and SAVED the ACL in the Tailscale admin editor.\n"
+
+	// F-59: never run an interactive prompt from inside Apply — this code may
+	// execute while the CLI's live Bubble Tea table owns the terminal, and a
+	// concurrent huh form races for stdin (inverted arrow keys, prompt
+	// timeouts) and corrupts terminal state on exit. Defer the manual step to
+	// the CLI, which replays it (pause → open editor → confirm) after its own
+	// TUI has fully closed.
+	if m.deferManualStep != nil {
+		m.deferManualStep(modules.ManualStep{
+			Title:   "ACL manual step",
+			Body:    notice,
+			URL:     aclEditorURL,
+			Confirm: confirmMsg,
+		})
+		return nil
+	}
+
+	// Legacy fallback (DeferManualStep not wired — tests/embedders only):
+	// prompt + open the editor inline. Safe here because no CLI TUI is running.
+	m.runManualInteractionFallback(ctx, notice, confirmMsg)
+	return nil
+}
+
+// runManualInteractionFallback is the pre-F-59 inline interaction: pause on the
+// notice, open the admin editor, pause again until the user has pasted and
+// saved. Only reachable when Deps.DeferManualStep is nil (tests/embedders) —
+// the CLI always wires DeferManualStep so no second TUI ever runs while its
+// live table owns the terminal.
+func (m *Module) runManualInteractionFallback(ctx context.Context, notice, confirmMsg string) {
 	if m.prompt != nil {
 		if err := m.prompt(ctx, notice); err != nil {
 			slog.Warn("acl apply: prompt interrupted", "err", err)
@@ -246,12 +284,10 @@ func (m *Module) applyManual(ctx context.Context, aclMgr backend.ACLManager, own
 	// In non-interactive contexts (non-TTY, --yes), the prompt implementation
 	// returns nil immediately so this never blocks automated runs.
 	if m.prompt != nil {
-		if err := m.prompt(ctx, "\n  ✦  Press [Enter] once you have pasted and SAVED the ACL in the Tailscale admin editor.\n"); err != nil {
+		if err := m.prompt(ctx, confirmMsg); err != nil {
 			slog.Warn("acl apply: post-paste prompt interrupted", "err", err)
 		}
 	}
-
-	return nil
 }
 
 // Verify checks the live ACL still contains the required grant + SSH rule.
