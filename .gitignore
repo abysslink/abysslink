@@ -41,3 +41,6 @@ goreleaser/
 # Coverage
 coverage.out
 coverage.html
+
+# nix build output
+/result
