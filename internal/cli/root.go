@@ -89,7 +89,7 @@ Run 'abysslink <command> --help' for details on any command.`,
 	pf.BoolP("verbose", "v", false, "enable debug logging")
 	pf.Bool("explain", false, "show per-action rationale alongside each planned change")
 	// Fleet targeting flags (Phase 14, Plan 03): consumed by fan-out commands (Plan 05).
-	pf.String("rig", "", "target a single enrolled rig by name (doctor, notify, panic)")
+	pf.String("rig", "", "target a single enrolled rig by name (status, doctor, report, notify, panic)")
 	pf.Bool("all-rigs", false, "fan out to all enrolled rigs")
 	pf.Bool("strict", false, "fail (exit 2) if any rig is UNREACHABLE")
 
