@@ -102,6 +102,32 @@ func Pause(ctx context.Context, msg string, yes bool) error {
 	return nil
 }
 
+// PauseWithAction shows msg and lets the user either continue or trigger the
+// named action. Returns true when the action was chosen. Skips interaction
+// (returns false, nil) when yes is true or stdin is not a TTY, mirroring
+// Pause's short-circuit so automated runs never hang.
+func PauseWithAction(ctx context.Context, msg, actionLabel string, yes bool) (bool, error) {
+	if yes || !stdinIsTTY() {
+		return false, nil
+	}
+	var action bool
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewNote().Title(msg),
+			huh.NewSelect[bool]().
+				Options(
+					huh.NewOption("Continue", false),
+					huh.NewOption(actionLabel, true),
+				).
+				Value(&action),
+		),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		return false, err
+	}
+	return action, nil
+}
+
 // ConfirmTyped requires the user to type an exact phrase before proceeding.
 // If yes is true, it returns true immediately (--yes flag bypass). Otherwise
 // it prompts with an huh.NewInput, trims surrounding whitespace from the

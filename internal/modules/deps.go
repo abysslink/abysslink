@@ -75,6 +75,11 @@ type ManualStep struct {
 	Body    string // full instruction text shown to the user
 	URL     string // optional URL the CLI should offer to open
 	Confirm string // optional post-open confirmation prompt text
+	// Recopy, when non-nil, re-runs the step's copy-to-clipboard action.
+	// The CLI offers a "copy again" option in the manual-step prompt (F-60)
+	// so a user who overwrote the clipboard mid-flow can recover without
+	// restarting the command.
+	Recopy func(ctx context.Context) error
 }
 
 // MetricsRegistry returns d.Registry, or a NoopRegistry when the field is nil.

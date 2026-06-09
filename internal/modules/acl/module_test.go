@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -326,6 +327,91 @@ func TestApplyManual_DefersStep_ClipboardFailureVariant(t *testing.T) {
 	assert.Contains(t, s.Body, filepath.Join(".config", "abysslink", "generated", "acl.hujson"),
 		"fallback variant must name the generated policy path")
 	assert.Equal(t, aclEditorURL, s.URL)
+}
+
+// TestApplyManual_DeferredStepHasRecopy is the F-60 guard: the deferred manual
+// step must carry a Recopy action, and invoking it must exec the platform
+// clipboard tool again with the same ACL bytes — so a user who overwrote the
+// clipboard mid-flow can pick "Copy ACL to clipboard again" in the prompt.
+func TestApplyManual_DeferredStepHasRecopy(t *testing.T) {
+	// Script generously: initial copy takes 1 call (darwin: pbcopy) or 2
+	// (linux: wl-copy --version probe + copy); the Recopy invocation takes
+	// the same again. 4 scripted successes covers both platforms.
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+
+	var steps []modules.ManualStep
+	m, aclMgr := newManualTestModule(t, r, nil,
+		func(s modules.ManualStep) { steps = append(steps, s) },
+	)
+
+	require.NoError(t, m.applyManual(context.Background(), aclMgr, "owner@example.com", "testuser", "12h"))
+	require.Len(t, steps, 1)
+	require.NotNil(t, steps[0].Recopy, "deferred ACL step must carry a Recopy action (F-60)")
+
+	clipboardCalls := func() []shell.Call {
+		var out []shell.Call
+		for _, c := range r.RecordedCalls() {
+			switch c.Name {
+			case "pbcopy", "wl-copy", "xclip":
+				if c.Stdin != "" { // the copy itself, not the wl-copy --version probe
+					out = append(out, c)
+				}
+			}
+		}
+		return out
+	}
+
+	before := clipboardCalls()
+	require.Len(t, before, 1, "applyManual must perform exactly one initial clipboard copy")
+
+	require.NoError(t, steps[0].Recopy(context.Background()))
+
+	after := clipboardCalls()
+	require.Len(t, after, 2, "invoking Recopy must exec the clipboard tool again")
+	assert.Equal(t, before[0].Stdin, after[1].Stdin,
+		"Recopy must pipe the same desired ACL bytes to the clipboard tool")
+	assert.Contains(t, after[1].Stdin, "tag:mobile", "recopied payload must be the generated ACL")
+}
+
+// TestApplyManual_RecopySetEvenWhenInitialCopyFails: the paste-from-path
+// variant benefits most from Recopy — a later retry may succeed even though
+// the copy during applyManual failed.
+func TestApplyManual_RecopySetEvenWhenInitialCopyFails(t *testing.T) {
+	// Initial clipboard attempts all fail; the Recopy retry then succeeds.
+	// Call counts differ per platform: darwin issues 1 call per copy (pbcopy),
+	// linux issues 2 (wl-copy --version probe + copy), so script exactly.
+	var script []shell.Call
+	if runtime.GOOS == "darwin" {
+		script = []shell.Call{
+			{Err: assert.AnError},               // initial pbcopy fails
+			{Result: shell.Result{ExitCode: 0}}, // recopy pbcopy succeeds
+		}
+	} else {
+		script = []shell.Call{
+			{Err: assert.AnError},               // initial probe fails → xclip
+			{Err: assert.AnError},               // initial xclip fails
+			{Result: shell.Result{ExitCode: 0}}, // recopy probe succeeds → wl-copy
+			{Result: shell.Result{ExitCode: 0}}, // recopy wl-copy succeeds
+		}
+	}
+	r := shell.NewMockRunner(script...)
+
+	var steps []modules.ManualStep
+	m, aclMgr := newManualTestModule(t, r, nil,
+		func(s modules.ManualStep) { steps = append(steps, s) },
+	)
+
+	require.NoError(t, m.applyManual(context.Background(), aclMgr, "owner@example.com", "testuser", "12h"))
+	require.Len(t, steps, 1)
+	require.NotNil(t, steps[0].Recopy,
+		"Recopy must be set even when the initial copy failed (paste-from-path variant)")
+	require.NoError(t, steps[0].Recopy(context.Background()),
+		"a later Recopy retry must be able to succeed")
 }
 
 // TestEnforceCheckPeriodCeiling covers the NET-01 module-level gate that
