@@ -20,10 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -47,13 +49,66 @@ type NotifyRequest struct {
 // SocketPath returns the path to the abysslinkd Unix socket. It prefers
 // XDG_RUNTIME_DIR (Linux); on macOS, which has no such dir, it uses a private
 // per-user directory under the OS temp dir.
+//
+// NET-13: the fallback directory lives under the world-writable OS temp dir, so
+// a local attacker could pre-create it and own the socket dir (intercepting or
+// squatting the daemon socket). socketPath verifies the directory after
+// creation; on any verification failure SocketPath fails closed by returning ""
+// (callers cannot bind or dial an empty path) and logs the reason via slog.
 func SocketPath() string {
+	p, err := socketPath()
+	if err != nil {
+		slog.Error("daemon: socket directory verification failed; failing closed", "err", err)
+		return ""
+	}
+	return p
+}
+
+// socketPath resolves the socket path, verifying the macOS/no-XDG fallback
+// directory (create, then Lstat-verify: not a symlink, a directory, owned by
+// the current uid, mode 0700). The XDG_RUNTIME_DIR path is OS-managed and
+// already per-user 0700; it is used as-is.
+func socketPath() (string, error) {
 	base := os.Getenv("XDG_RUNTIME_DIR")
 	if base == "" {
 		base = filepath.Join(os.TempDir(), fmt.Sprintf("abysslink-%d", os.Getuid()))
-		_ = os.MkdirAll(base, 0o700)
+		if err := ensurePrivateDir(base); err != nil {
+			return "", err
+		}
 	}
-	return filepath.Join(base, "abysslinkd.sock")
+	return filepath.Join(base, "abysslinkd.sock"), nil
+}
+
+// ensurePrivateDir creates dir (0700) and fails closed unless it is a real
+// directory (not a symlink) owned by the current uid with mode exactly 0700
+// (NET-13). A pre-existing path that fails any check is a clear error — never
+// silently accepted.
+func ensurePrivateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("daemon: create socket dir %s: %w", dir, err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("daemon: lstat socket dir %s: %w", dir, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("daemon: socket dir %s is a symlink — refusing (possible local-attacker squat, NET-13)", dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("daemon: socket path %s exists but is not a directory — refusing (NET-13)", dir)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("daemon: cannot verify socket dir ownership on this platform — refusing (NET-13)")
+	}
+	if int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("daemon: socket dir %s is owned by uid %d, not current uid %d — refusing (possible local-attacker squat, NET-13)",
+			dir, st.Uid, os.Getuid())
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		return fmt.Errorf("daemon: socket dir %s has mode %04o, want 0700 — refusing (NET-13)", dir, perm)
+	}
+	return nil
 }
 
 // Client talks to a running abysslinkd over its Unix socket.

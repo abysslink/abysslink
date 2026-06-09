@@ -119,6 +119,18 @@ func digestTopic(cfg *config.Config) string {
 	return digestDefaultTopic
 }
 
+// digestHour returns the configured digest fire hour, defaulting to 08:00
+// when unset. Hour is a *int precisely so an explicit "hour: 0" (midnight) is
+// honored rather than falling back to the default (NET-16); nil means unset.
+// An out-of-range value (rejected by config.ValidateObservability, but
+// defensively re-checked here) also falls back to the default.
+func digestHour(cfg *config.Config) int {
+	if h := cfg.Observability.Digest.Hour; h != nil && *h >= 0 && *h <= 23 {
+		return *h
+	}
+	return 8
+}
+
 // sendDigest gathers the local posture by invoking the sibling abysslink binary
 // (`abysslink status --json`, NOT the daemon's own socket — OBS-08 / Pitfall 6),
 // builds an opaque per-rig payload, and delivers a summary via the Notifier on
@@ -185,10 +197,7 @@ func StartDigestScheduler(ctx context.Context, cfg *config.Config, notifier Noti
 		return
 	}
 
-	hour := 8
-	if cfg.Observability.Digest.Hour > 0 {
-		hour = cfg.Observability.Digest.Hour
-	}
+	hour := digestHour(cfg)
 
 	go func() {
 		timer := time.NewTimer(nextFireAt(hour, 0))

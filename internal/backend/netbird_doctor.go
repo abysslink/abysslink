@@ -391,7 +391,7 @@ func nbZitadelProbe(ctx context.Context, issuerBase string) DoctorFinding {
 	// No Authorization header — we rely on HTTP 401 from ZITADEL when default
 	// creds are absent, and HTTP 200 when they are still active.
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := backendHTTPClient.Do(req) // NET-06: shared 30s-timeout client, never DefaultClient
 	if err != nil {
 		return DoctorFinding{Module: mod, Check: check, Severity: DoctorWarning,
 			Message: fmt.Sprintf("nb-zitadel: probe request failed (server may be unreachable): %v", err),

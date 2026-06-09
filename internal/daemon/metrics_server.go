@@ -100,21 +100,31 @@ func StartMetricsServer(ctx context.Context, cfg *config.Config, reg metrics.Reg
 		}()
 		slog.Info("abysslinkd: metrics listening", "addr", addr)
 
-		// Best-effort probe loop: seed the OBS-05 metrics immediately and refresh
-		// them on every tick until shutdown.
+		// Probe loop: seed the live OBS-05 metrics immediately and refresh them
+		// on every tick until shutdown. Every exported value is REAL (NET-04):
+		// reachable comes from an actual backend tailnet-IP probe, last_seen is
+		// the timestamp of the last successful probe, and lock_status is read
+		// from config. The doctor-findings and cert-expiry series are OMITTED
+		// entirely — the daemon has no real doctor or certificate data, and
+		// honest absence beats a fabricated all-clear.
 		rigName := cfg.Tailnet.Hostname
 		lockEnabled := cfg.Tailnet.Lock.Enabled
-		updateOBS05 := func() {
-			RegisterOBS05Metrics(reg, rigName, true, 0, 0, lockEnabled, time.Time{}, time.Now())
+		var lastSeen time.Time
+		updateLive := func() {
+			reachable := probeReachable(ctx, b)
+			if reachable {
+				lastSeen = time.Now()
+			}
+			registerLiveOBS05Metrics(reg, rigName, reachable, lockEnabled, lastSeen)
 		}
-		updateOBS05()
+		updateLive()
 
 		ticker := time.NewTicker(metricsProbeInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				updateOBS05()
+				updateLive()
 			case <-ctx.Done():
 				shutCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
 				_ = srv.Shutdown(shutCtx)
@@ -292,10 +302,63 @@ func escapeHelp(v string) string {
 	return b.String()
 }
 
+// probeReachable reports whether the backend resolves a non-empty tailnet IP —
+// a REAL reachability signal for the OBS-05 gauges (NET-04), mirroring
+// Server.resolveReachable. It never propagates a panic (the backend localapi
+// probe can panic when tailscaled is absent); a recovered panic, an error, or
+// an empty IP all yield false (fail-honest, never a fabricated true).
+func probeReachable(ctx context.Context, b backend.Client) (reachable bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("abysslinkd: metrics: reachability probe panicked; reporting not-reachable", "recovered", r)
+			reachable = false
+		}
+	}()
+	ip, err := b.IP(ctx)
+	return err == nil && ip != ""
+}
+
+// registerLiveOBS05Metrics registers (or updates) ONLY the OBS-05 series the
+// daemon has real data for (NET-04):
+//
+//   - abysslink_rig_reachable: live backend tailnet-IP probe result
+//   - abysslink_lock_status: read from config (authoritative)
+//   - abysslink_last_seen_timestamp: timestamp of the last SUCCESSFUL probe;
+//     omitted entirely until a probe has succeeded
+//
+// abysslink_doctor_findings and abysslink_cert_expiry_seconds are deliberately
+// NOT registered here: the daemon cannot run the doctor families (they live in
+// internal/cli — importing them would form a cycle) and has no certificate
+// data. Exporting zeros would fabricate an all-clear security posture; honest
+// absence is the contract. Callers that DO have real doctor/cert data use
+// RegisterOBS05Metrics instead.
+func registerLiveOBS05Metrics(reg metrics.Registry, rigName string, reachable, lockEnabled bool, lastSeen time.Time) {
+	rig := metrics.OpaqueRigLabel(rigName)
+
+	reg.Gauge("abysslink_rig_reachable",
+		"1 if the rig is reachable via the tailnet, 0 otherwise",
+		map[string]string{"rig": rig}).Set(boolToFloat(reachable))
+
+	reg.Gauge("abysslink_lock_status",
+		"1 if tailnet lock is enabled, 0 otherwise",
+		nil).Set(boolToFloat(lockEnabled))
+
+	if !lastSeen.IsZero() {
+		reg.Gauge("abysslink_last_seen_timestamp",
+			"unix timestamp of last successful daemon probe",
+			map[string]string{"rig": rig}).Set(float64(lastSeen.Unix()))
+	}
+}
+
 // RegisterOBS05Metrics registers (or updates) the five OBS-05 named metrics in
 // reg from current daemon/probe state. The rig label is always the opaque
 // SHA-256 prefix (never the raw hostname). Counters are not used here — all five
 // are gauges reflecting point-in-time posture.
+//
+// NET-04: callers MUST pass real values only. The daemon's own metrics probe
+// loop does NOT use this function (it has no real doctor/cert data; see
+// registerLiveOBS05Metrics) — this full-schema variant is for callers that
+// genuinely have doctor finding counts and certificate expiry to export.
 func RegisterOBS05Metrics(
 	reg metrics.Registry,
 	rigName string,

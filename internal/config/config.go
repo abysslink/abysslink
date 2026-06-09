@@ -87,9 +87,14 @@ type ObservabilityMetrics struct {
 }
 
 // ObservabilityDigest configures the optional daily digest notification.
+//
+// Hour is a *int so the YAML zero value is distinguishable from an explicit
+// "hour: 0" (midnight): nil means "unset, use the 08:00 default", while a
+// non-nil 0 means midnight (NET-16). Valid range is 0–23, enforced by
+// ValidateObservability.
 type ObservabilityDigest struct {
 	Enabled   bool   `yaml:"enabled"`
-	Hour      int    `yaml:"hour,omitempty"`
+	Hour      *int   `yaml:"hour,omitempty"`
 	NtfyTopic string `yaml:"ntfy_topic,omitempty"`
 }
 
@@ -626,6 +631,11 @@ func validateIdentity(cfg *Config) error {
 func ValidateObservability(cfg *Config) error {
 	if addr := cfg.Observability.Metrics.BindAddr; addr != "" && IsUnspecifiedBindAddr(addr) {
 		return fmt.Errorf("config: observability.metrics.bind_addr %q must not be 0.0.0.0 or :: — metrics must bind to the tailnet IP only (OBS-03)", addr)
+	}
+	// NET-16: digest hour, when set, must be a wall-clock hour. nil means
+	// "unset" (the daemon defaults to 08:00); 0 means midnight and is valid.
+	if h := cfg.Observability.Digest.Hour; h != nil && (*h < 0 || *h > 23) {
+		return fmt.Errorf("config: observability.digest.hour %d must be between 0 and 23", *h)
 	}
 	return nil
 }
