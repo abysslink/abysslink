@@ -197,6 +197,56 @@ func TestRunner_Doctor(t *testing.T) {
 	assert.Len(t, findings, 4)
 }
 
+// TestRunner_ApplyAll_ErrorEmitsFatalFinding is the F-62 regression guard.
+// Pre-fix, a module Apply error made ApplyAll return a non-nil error while the
+// returned findings carried no SeverityFatal entry, so the CLI final summary
+// printed "0 errors" alongside a non-zero exit. ApplyAll must now append a
+// Fatal "apply-error" finding for the failing module, keep iterating over the
+// remaining modules, return the first error, and still deliver the ApplyErr on
+// the failing module's ModuleEvent.
+func TestRunner_ApplyAll_ErrorEmitsFatalFinding(t *testing.T) {
+	boom := fmt.Errorf("launchctl bootstrap failed")
+	bad := &fakeModule{name: "bad-mod", applyErr: boom}
+	good := &fakeModule{name: "good-mod"}
+
+	runner, err := modules.NewRunner([]modules.Module{bad, good}, minimalCfg())
+	require.NoError(t, err)
+
+	var events []modules.ModuleEvent
+	findings, applyErr := runner.ApplyAll(context.Background(), func(evt modules.ModuleEvent) {
+		events = append(events, evt)
+	})
+
+	// The first apply error is returned (wrapped with the module name).
+	require.Error(t, applyErr)
+	assert.ErrorIs(t, applyErr, boom)
+	assert.Contains(t, applyErr.Error(), "bad-mod")
+
+	// All modules are still attempted despite the error.
+	assert.Equal(t, 1, bad.applyCalls)
+	assert.Equal(t, 1, good.applyCalls)
+
+	// F-62: a Fatal apply-error finding for the failing module must be present
+	// so summary renderers count it as an error.
+	var fatal *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "apply-error" {
+			fatal = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, fatal, "ApplyAll must append a Fatal apply-error finding when a module's Apply fails (F-62)")
+	assert.Equal(t, "bad-mod", fatal.Module)
+	assert.Equal(t, modules.SeverityFatal, fatal.Severity)
+	assert.Equal(t, boom.Error(), fatal.Message)
+
+	// The ModuleEvent for the failing module still carries ApplyErr as before.
+	require.Len(t, events, 2)
+	assert.Equal(t, "bad-mod", events[0].Module)
+	assert.ErrorIs(t, events[0].ApplyErr, boom)
+	assert.NoError(t, events[1].ApplyErr)
+}
+
 // TestRunnerDoctor_NoDoubleEmit is the D-02 regression guard asserting that no
 // (Module, Check) pair appears more than once across a full runner.Doctor pass.
 //

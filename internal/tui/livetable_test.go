@@ -76,6 +76,28 @@ func TestNoInternalModulesImport(_ *testing.T) {
 	// Verified via: grep -r "internal/modules" internal/tui/ → should produce no output.
 }
 
+// TestLiveTable_InFlightLabel is the F-63 regression guard. Pre-fix, View()
+// hardcoded "scanning..." for the in-flight row, so the apply-phase live table
+// claimed to be scanning while it was mutating the system. NewLiveTable keeps
+// the default label; NewLiveTableWithLabel sets a phase-specific one; an empty
+// label falls back to the default. Once done, no in-flight label is rendered.
+func TestLiveTable_InFlightLabel(t *testing.T) {
+	t.Run("default is scanning", func(t *testing.T) {
+		m := tui.NewLiveTable()
+		assert.Contains(t, m.View(), "scanning...")
+	})
+	t.Run("custom label is rendered", func(t *testing.T) {
+		m := tui.NewLiveTableWithLabel("applying...")
+		out := m.View()
+		assert.Contains(t, out, "applying...")
+		assert.NotContains(t, out, "scanning...", "apply-phase table must not claim to be scanning (F-63)")
+	})
+	t.Run("empty label falls back to default", func(t *testing.T) {
+		m := tui.NewLiveTableWithLabel("")
+		assert.Contains(t, m.View(), "scanning...")
+	})
+}
+
 // TestLiveTable_Update_CtrlCQuits is the Phase 10 stdin-race regression guard.
 // Pre-fix, LiveTable.Update only handled tea.QuitMsg, so Ctrl-C in a running
 // tea program was silently dropped — the user could not abort the loader. The
