@@ -80,6 +80,14 @@ func newRepairCmd() *cobra.Command {
 			}
 
 			repairErrs := runModuleRepairs(ctx, p, mods, needsRepair, cc.dryRun)
+
+			// F-59: replay manual steps deferred during Repair (e.g. acl manual
+			// mode) after all repairs ran — even when some modules failed, the
+			// successfully-collected steps must still reach the user.
+			if err := flushManualSteps(ctx, cc, p); err != nil {
+				return fmt.Errorf("repair: manual steps: %w", err)
+			}
+
 			if len(repairErrs) > 0 {
 				return fmt.Errorf("repair: %d module(s) failed to repair", len(repairErrs))
 			}
