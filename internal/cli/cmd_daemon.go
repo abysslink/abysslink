@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/platform"
@@ -60,17 +61,30 @@ func newDaemonCmd() *cobra.Command {
 }
 
 // daemonLifecycleCmd builds a subcommand that resolves the platform and runs fn.
+// Lifecycle subcommands mutate service state (launchd/systemd), so the standard
+// [plan]/--apply gate applies (CLI-07): without --apply they print a preview and
+// touch nothing. Read-only subcommands (`daemon status`) are built separately
+// and stay ungated.
 func daemonLifecycleCmd(use, short string, fn func(context.Context, platform.Platform) error) *cobra.Command {
 	return &cobra.Command{
 		Use:     use,
-		Short:   short,
-		Example: "  # " + short + "\n  abysslink daemon " + use,
+		Short:   short + " (dry-run by default)",
+		Example: "  # Preview (dry-run — no changes)\n  abysslink daemon " + use + "\n\n  # " + short + "\n  abysslink daemon " + use + " --apply",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
 			if err != nil {
 				return err
 			}
+			p := newPrinter(cmd)
+
+			if !cc.apply {
+				printerInfo(p, fmt.Sprintf("[plan] would %s%s (service %s)",
+					strings.ToLower(short[:1]), short[1:], daemonLabel))
+				printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))
+				return nil
+			}
+
 			deps, err := buildDeps(ctx, cc)
 			if err != nil {
 				return fmt.Errorf("daemon %s: %w", use, err)
@@ -78,7 +92,7 @@ func daemonLifecycleCmd(use, short string, fn func(context.Context, platform.Pla
 			if err := fn(ctx, deps.Platform); err != nil {
 				return fmt.Errorf("daemon %s: %w", use, err)
 			}
-			printerInfo(newPrinter(cmd), "daemon "+use+": ok")
+			printerInfo(p, "daemon "+use+": ok")
 			return nil
 		},
 	}

@@ -26,7 +26,7 @@ import (
 func newEnableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "enable <module>",
-		Short: "Enable an optional module in abysslink.yaml",
+		Short: "Enable an optional module in abysslink.yaml (dry-run by default)",
 		Example: `  # Enable the Claude Code integration module
   abysslink enable claudecode --apply
 
@@ -38,9 +38,14 @@ func newEnableCmd() *cobra.Command {
 }
 
 // toggleModule sets a module's enabled flag in abysslink.yaml and persists it.
-// The user then runs `abysslink up --apply` to converge.
+// Dry-run is the default (CLI-02): without --apply it prints a [plan] preview
+// and writes nothing. The user then runs `abysslink up --apply` to converge.
 func toggleModule(cmd *cobra.Command, name string, enabled bool) error {
 	p := newPrinter(cmd)
+	_, apply, err := resolveApplyFlags(cmd)
+	if err != nil {
+		return err
+	}
 	path := resolveConfigPath(cmd)
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -49,15 +54,24 @@ func toggleModule(cmd *cobra.Command, name string, enabled bool) error {
 	if err := setModuleEnabled(cfg, name, enabled); err != nil {
 		return err
 	}
+
+	verb := "enable"
+	pastVerb := "enabled"
+	if !enabled {
+		verb = "disable"
+		pastVerb = "disabled"
+	}
+
+	if !apply {
+		printerInfo(p, fmt.Sprintf("[plan] would %s module %q in %s", verb, name, path))
+		printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))
+		return nil
+	}
+
 	if err := config.Write(path, cfg); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
-
-	verb := "enabled"
-	if !enabled {
-		verb = "disabled"
-	}
-	printerInfo(p, fmt.Sprintf("Module %q %s in %s.", name, verb, path))
+	printerInfo(p, fmt.Sprintf("Module %q %s in %s.", name, pastVerb, path))
 	printerInfo(p, styleMuted.Render("Run `abysslink up --apply` to converge."))
 	return nil
 }

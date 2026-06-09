@@ -191,7 +191,7 @@ func TestRigImport_Merge(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err := runRigImport(cfgPath, importPath, true, io.Discard)
+	err := runRigImport(cfgPath, importPath, true, nil, io.Discard)
 	require.NoError(t, err)
 
 	// Read back and verify.
@@ -221,7 +221,7 @@ func TestRigImport_DryRun(t *testing.T) {
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
 	var dryOut bytes.Buffer
-	err := runRigImport(cfgPath, importPath, false, &dryOut) // dry-run
+	err := runRigImport(cfgPath, importPath, false, nil, &dryOut) // dry-run
 	require.NoError(t, err)
 	assert.Contains(t, dryOut.String(), "[dry-run]", "dry-run output must go through io.Writer (WR-01)")
 
@@ -246,7 +246,7 @@ func TestRigImport_CollisionError(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err := runRigImport(cfgPath, importPath, true, io.Discard)
+	err := runRigImport(cfgPath, importPath, true, nil, io.Discard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "alpha", "error must identify the colliding rig name")
 }
@@ -275,7 +275,7 @@ func TestRigImport_NoOSWriteFile(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err = runRigImport(cfgPath, importPath, true, io.Discard)
+	err = runRigImport(cfgPath, importPath, true, nil, io.Discard)
 	require.NoError(t, err)
 }
 
@@ -296,6 +296,93 @@ func TestRigFlags_Registered(t *testing.T) {
 	strictFlag := pf.Lookup("strict")
 	require.NotNil(t, strictFlag, "--strict persistent flag must be registered")
 	assert.Equal(t, "bool", strictFlag.Value.Type())
+}
+
+// TestRigImport_Stdin asserts that `rig import -` reads the rigs doc from the
+// provided reader (CLI-26 — matches the `rig export | rig import -` pipeline
+// advertised in the export help text).
+func TestRigImport_Stdin(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfgWithRigs(t, dir)
+
+	importDoc := `rigs:
+  - name: stdin-rig
+    hostname: stdin.ts.net
+    ntfy_topic: abysslink-stdin-cafebabe
+    backend: tailscale
+`
+	err := runRigImport(cfgPath, "-", true, strings.NewReader(importDoc), io.Discard)
+	require.NoError(t, err)
+
+	cfg, err := config.Load(cfgPath)
+	require.NoError(t, err)
+	require.Len(t, cfg.Rigs, 3, "rig imported from stdin must be appended")
+	names := make([]string, 0, len(cfg.Rigs))
+	for _, r := range cfg.Rigs {
+		names = append(names, r.Name)
+	}
+	assert.Contains(t, names, "stdin-rig")
+}
+
+// TestRigImport_InvalidName asserts that imported rig names are validated
+// against rigNameRe (CLI-13, T-14-11) and nothing is written on violation.
+func TestRigImport_InvalidName(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfgWithRigs(t, dir)
+
+	badDocs := []string{
+		"rigs:\n  - name: My_Rig\n    hostname: ok.ts.net\n    backend: tailscale\n",
+		"rigs:\n  - name: UPPER\n    hostname: ok.ts.net\n    backend: tailscale\n",
+		"rigs:\n  - name: \"rig;evil\"\n    hostname: ok.ts.net\n    backend: tailscale\n",
+		"rigs:\n  - name: \"" + strings.Repeat("a", 64) + "\"\n    hostname: ok.ts.net\n    backend: tailscale\n",
+	}
+	for i, doc := range badDocs {
+		importPath := filepath.Join(dir, "bad-import.yaml")
+		require.NoError(t, os.WriteFile(importPath, []byte(doc), 0o600))
+
+		err := runRigImport(cfgPath, importPath, true, nil, io.Discard)
+		require.Error(t, err, "doc %d must be rejected", i)
+		assert.Contains(t, err.Error(), "invalid rig name", "doc %d", i)
+	}
+
+	// Nothing written.
+	cfg, err := config.Load(cfgPath)
+	require.NoError(t, err)
+	assert.Len(t, cfg.Rigs, 2, "invalid imports must not modify config")
+}
+
+// TestValidateImportRigs_NameRe is the unit-level coverage for the rigNameRe
+// enforcement documented on validateImportRigs (CLI-13).
+func TestValidateImportRigs_NameRe(t *testing.T) {
+	err := validateImportRigs(nil, []config.RigConfig{
+		{Name: "Bad Name", Hostname: "ok.ts.net"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid rig name")
+
+	require.NoError(t, validateImportRigs(nil, []config.RigConfig{
+		{Name: "good-name-1", Hostname: "ok.ts.net"},
+	}))
+}
+
+// TestRigLs_HonorsConfigFlag asserts that `rig ls --config <path>` reads the
+// given config instead of the default XDG location (CLI-12).
+func TestRigLs_HonorsConfigFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfgWithRigs(t, dir)
+	// Point XDG at an empty dir so the default path has no config: if rig ls
+	// ignored --config it would list zero rigs.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	root := buildRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"rig", "ls", "--config", cfgPath})
+	require.NoError(t, root.Execute())
+
+	assert.Contains(t, out.String(), "alpha", "rig ls must read the --config path")
+	assert.Contains(t, out.String(), "beta")
 }
 
 // TestRigLs_Empty asserts that `rig ls` on an empty config returns no error and

@@ -20,7 +20,7 @@ import "github.com/spf13/cobra"
 func newDisableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "disable <module>",
-		Short: "Disable a module in abysslink.yaml",
+		Short: "Disable a module in abysslink.yaml (dry-run by default)",
 		Example: `  # Disable a module (write to config — apply with abysslink up --apply)
   abysslink disable claudecode --apply`,
 		Args: cobra.ExactArgs(1),

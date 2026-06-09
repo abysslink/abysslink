@@ -87,7 +87,7 @@ func TestNetBirdPostureCreateCmd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cc := &cmdContext{cfg: netbirdCfg(t, srv.URL), runner: shell.NewMockRunner()}
+	cc := &cmdContext{cfg: netbirdCfg(t, srv.URL), runner: shell.NewMockRunner(), apply: true}
 	out := &bytes.Buffer{}
 	p := NewHumanPrinterTo(out, &bytes.Buffer{})
 
@@ -98,6 +98,49 @@ func TestNetBirdPostureCreateCmd(t *testing.T) {
 	assert.Contains(t, out.String(), "new1")
 }
 
+// TestNetBirdPostureCreateCmd_DryRunDefault asserts the CLI-08 gate: without
+// --apply, posture create sends NO request to the control plane and prints a
+// [plan] preview instead.
+func TestNetBirdPostureCreateCmd_DryRunDefault(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	cc := &cmdContext{cfg: netbirdCfg(t, srv.URL), runner: shell.NewMockRunner(), dryRun: true}
+	out := &bytes.Buffer{}
+	p := NewHumanPrinterTo(out, &bytes.Buffer{})
+
+	err := netbirdPostureCreateRunE(context.Background(), cc, p, "my-check", "a description", "")
+	require.NoError(t, err)
+	assert.Equal(t, 0, hits, "dry-run must not hit the control plane")
+	assert.Contains(t, out.String(), "[plan]", "dry-run must print a plan preview")
+	assert.Contains(t, out.String(), "my-check")
+}
+
+// TestNetBirdPostureDeleteCmd_DryRunDefault asserts the CLI-08 gate: without
+// --apply, posture delete sends NO request to the control plane.
+func TestNetBirdPostureDeleteCmd_DryRunDefault(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cc := &cmdContext{cfg: netbirdCfg(t, srv.URL), runner: shell.NewMockRunner(), dryRun: true}
+	out := &bytes.Buffer{}
+	p := NewHumanPrinterTo(out, &bytes.Buffer{})
+
+	err := netbirdPostureDeleteRunE(context.Background(), cc, p, "pc1")
+	require.NoError(t, err)
+	assert.Equal(t, 0, hits, "dry-run must not hit the control plane")
+	assert.Contains(t, out.String(), "[plan]", "dry-run must print a plan preview")
+	assert.Contains(t, out.String(), "pc1")
+}
+
 func TestNetBirdPostureDeleteCmd(t *testing.T) {
 	var deletedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +149,7 @@ func TestNetBirdPostureDeleteCmd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cc := &cmdContext{cfg: netbirdCfg(t, srv.URL), runner: shell.NewMockRunner()}
+	cc := &cmdContext{cfg: netbirdCfg(t, srv.URL), runner: shell.NewMockRunner(), apply: true}
 	out := &bytes.Buffer{}
 	p := NewHumanPrinterTo(out, &bytes.Buffer{})
 
