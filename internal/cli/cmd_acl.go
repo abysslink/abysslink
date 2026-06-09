@@ -126,6 +126,12 @@ func newACLPushCmd() *cobra.Command {
 			if err := aclmod.New(deps).Apply(ctx); err != nil {
 				return fmt.Errorf("acl push: %w", err)
 			}
+			// F-59: replay any manual step the acl module deferred (manual
+			// mode: paste into the admin editor). No TUI is running here, so
+			// the CLI safely owns the terminal for the pause/open/confirm flow.
+			if err := flushManualSteps(ctx, cc, p); err != nil {
+				return fmt.Errorf("acl push: manual steps: %w", err)
+			}
 			printerInfo(p, "ACL converged.")
 			return nil
 		},

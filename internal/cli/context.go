@@ -75,6 +75,13 @@ type cmdContext struct {
 	// modules.Deps so the acl module can enforce the 12h checkPeriod ceiling
 	// on every code path that pushes the ACL (repair, acl apply) — NET-01.
 	acceptCheckPeriodExt bool
+	// manualSteps collects modules.ManualStep values registered by modules via
+	// Deps.DeferManualStep during Apply/Repair. Modules must never prompt while
+	// the CLI's live table owns the terminal (F-59); instead the owning command
+	// calls flushManualSteps AFTER its TUI has closed to replay each step
+	// (pause → open URL → confirm). Pointer-to-slice so the buildDeps closure
+	// and flushManualSteps share the same backing storage.
+	manualSteps *[]modules.ManualStep
 }
 
 // backend constructs a backend.Client for this cmdContext. It is a convenience
@@ -147,6 +154,7 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 		verbose:              verbose,
 		explain:              explain,
 		acceptCheckPeriodExt: acceptCPExt,
+		manualSteps:          &[]modules.ManualStep{},
 	}, nil
 }
 
@@ -218,6 +226,12 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 		reg = metrics.NewMemRegistry()
 	}
 
+	// Lazy-init the manual-step collector for callers that construct cmdContext
+	// directly (tests) instead of via loadCmdContext.
+	if cc.manualSteps == nil {
+		cc.manualSteps = &[]modules.ManualStep{}
+	}
+
 	return modules.Deps{
 		Cfg:      cc.cfg,
 		Runner:   cc.runner,
@@ -237,6 +251,13 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 				return errMissingInput("yes")
 			}
 			return tui.Pause(ctx, msg, cc.yes)
+		},
+		// DeferManualStep collects manual steps for replay by flushManualSteps
+		// AFTER the owning command's TUI has closed — modules must never start
+		// a second TUI on the same terminal (F-59). Always set so every module
+		// takes the uniform defer path, never the inline prompt fallback.
+		DeferManualStep: func(s modules.ManualStep) {
+			*cc.manualSteps = append(*cc.manualSteps, s)
 		},
 	}, nil
 }

@@ -71,15 +71,7 @@ func newUpCmd() *cobra.Command {
 				return err
 			}
 
-			// Header.
-			if cc.dryRun {
-				header := styleBold.Render("abysslink up") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
-				printerInfo(p, styleHeaderBox.Render(header))
-			} else {
-				header := styleBold.Render("abysslink up") + "  " + styleSuccess.Render("✦  applying")
-				printerInfo(p, styleHeaderBox.Render(header))
-			}
-			printerInfo(p, "")
+			printUpHeader(p, cc.dryRun)
 
 			deps, err := buildDeps(ctx, cc)
 			if err != nil {
@@ -125,6 +117,14 @@ func newUpCmd() *cobra.Command {
 					return nil
 				}
 				printFinalSummary(p, actions, applyFindings, applyElapsed)
+
+				// F-59: replay manual steps modules deferred during Apply.
+				// MUST run only after the live apply table is fully closed —
+				// this is the single terminal owner now. Not reached on the
+				// abort path (returned above).
+				if flushErr := flushManualSteps(ctx, cc, p); flushErr != nil {
+					return fmt.Errorf("up: manual steps: %w", flushErr)
+				}
 			}
 
 			// Pass 3 — Next steps + success summary (always runs when not aborted).
@@ -147,6 +147,20 @@ func newUpCmd() *cobra.Command {
 	cmd.Flags().Bool("accept-no-sshcheck", false,
 		"Acknowledge SSHCheck degradation on NetBird backend (persisted to abysslink.yaml — only required once)")
 	return cmd
+}
+
+// printUpHeader renders the `abysslink up` header box: a preview-only warning
+// in dry-run mode, the "applying" banner otherwise. Extracted from newUpCmd to
+// keep its cyclomatic complexity below the gocyclo ceiling.
+func printUpHeader(p Printer, dryRun bool) {
+	if dryRun {
+		header := styleBold.Render("abysslink up") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
+		printerInfo(p, styleHeaderBox.Render(header))
+	} else {
+		header := styleBold.Render("abysslink up") + "  " + styleSuccess.Render("✦  applying")
+		printerInfo(p, styleHeaderBox.Render(header))
+	}
+	printerInfo(p, "")
 }
 
 // netbirdSSHCheckGate enforces D-04: on a NetBird backend, abysslink up --apply

@@ -230,6 +230,104 @@ func TestApplyManual_PausesBeforeAndAfterOpenURL(t *testing.T) {
 		"applyManual must call m.prompt at least twice: once before openURL (pre-open notice) and once after (post-paste confirmation); got %d", promptCount)
 }
 
+// newManualTestModule builds a Module wired for the applyManual path: temp HOME,
+// real audit writer, the provided MockRunner, and the given Prompt /
+// DeferManualStep hooks. Returns the module and the ACLManager handle.
+func newManualTestModule(t *testing.T, r shell.Runner, prompt func(context.Context, string) error, deferStep func(modules.ManualStep)) (*Module, backend.ACLManager) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfg := config.Defaults()
+	cfg.Identity.Email = "owner@example.com"
+	cfg.Identity.UnixUser = "testuser"
+	cfg.Mobile.SSHCheckPeriod = "12h"
+
+	bknd, err := backend.New(cfg, r)
+	require.NoError(t, err)
+	aclMgr, ok := bknd.(backend.ACLManager)
+	require.True(t, ok, "tailscale adapter must implement ACLManager")
+
+	m := New(modules.Deps{
+		Cfg:             cfg,
+		Runner:          r,
+		Backend:         bknd,
+		Audit:           audit.New(filepath.Join(dir, "audit.log")),
+		Prompt:          prompt,
+		DeferManualStep: deferStep,
+	})
+	return m, aclMgr
+}
+
+// TestApplyManual_DefersStepInsteadOfPrompting is the F-59 regression guard:
+// when DeferManualStep is wired (the CLI always wires it), applyManual must
+// NOT prompt and must NOT open the browser — a second TUI/interaction while
+// the CLI's live apply table owns the terminal races for stdin and corrupts
+// terminal state. Instead the module registers a ManualStep carrying the
+// notice text, the editor URL, and the post-paste confirmation, then returns.
+func TestApplyManual_DefersStepInsteadOfPrompting(t *testing.T) {
+	// Script generously: clipboard may take 1 call (darwin: pbcopy) or 2
+	// (linux: wl-copy --version probe + copy). openURL must NOT consume any.
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+
+	promptCalled := false
+	var steps []modules.ManualStep
+	m, aclMgr := newManualTestModule(t, r,
+		func(_ context.Context, _ string) error { promptCalled = true; return nil },
+		func(s modules.ManualStep) { steps = append(steps, s) },
+	)
+
+	err := m.applyManual(context.Background(), aclMgr, "owner@example.com", "testuser", "12h")
+	require.NoError(t, err)
+
+	assert.False(t, promptCalled,
+		"applyManual must never call m.prompt when DeferManualStep is wired (F-59)")
+	for _, c := range r.RecordedCalls() {
+		assert.NotContains(t, []string{"open", "xdg-open"}, c.Name,
+			"applyManual must not open the browser itself when DeferManualStep is wired (F-59)")
+	}
+
+	require.Len(t, steps, 1, "exactly one manual step must be registered")
+	s := steps[0]
+	assert.Equal(t, "ACL manual step", s.Title)
+	assert.Equal(t, aclEditorURL, s.URL)
+	assert.Contains(t, s.Body, "copied to your clipboard",
+		"clipboard-ok variant must say the ACL is on the clipboard")
+	assert.Contains(t, s.Body, aclEditorURL, "body must carry the editor URL for non-interactive replay")
+	assert.Contains(t, s.Confirm, "pasted and SAVED",
+		"confirm text must instruct the user to paste and save before continuing")
+}
+
+// TestApplyManual_DefersStep_ClipboardFailureVariant asserts the deferred step
+// carries the paste-from-path fallback text when the clipboard copy fails.
+func TestApplyManual_DefersStep_ClipboardFailureVariant(t *testing.T) {
+	// Every clipboard call fails (darwin: pbcopy; linux: probe + xclip).
+	clipErr := assert.AnError
+	r := shell.NewMockRunner(
+		shell.Call{Err: clipErr},
+		shell.Call{Err: clipErr},
+	)
+
+	var steps []modules.ManualStep
+	m, aclMgr := newManualTestModule(t, r, nil,
+		func(s modules.ManualStep) { steps = append(steps, s) },
+	)
+
+	err := m.applyManual(context.Background(), aclMgr, "owner@example.com", "testuser", "12h")
+	require.NoError(t, err, "clipboard failure is non-fatal; the step falls back to paste-from-path")
+
+	require.Len(t, steps, 1)
+	s := steps[0]
+	assert.NotContains(t, s.Body, "copied to your clipboard")
+	assert.Contains(t, s.Body, "Could not copy to clipboard — paste from: ")
+	assert.Contains(t, s.Body, filepath.Join(".config", "abysslink", "generated", "acl.hujson"),
+		"fallback variant must name the generated policy path")
+	assert.Equal(t, aclEditorURL, s.URL)
+}
+
 // TestEnforceCheckPeriodCeiling covers the NET-01 module-level gate that
 // mirrors checkPeriodGate in cmd_up.go: checkPeriod is settable down but never
 // up past 12h without explicit consent, and malformed values fail closed.
