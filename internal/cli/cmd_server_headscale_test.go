@@ -31,6 +31,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -675,7 +676,7 @@ func (m *mockKeychainStore) Set(_ context.Context, service, account, secret stri
 func (m *mockKeychainStore) Get(_ context.Context, service, account string) (string, error) {
 	v, ok := m.entries[service+"/"+account]
 	if !ok {
-		return "", fmt.Errorf("not found: %s/%s", service, account)
+		return "", fmt.Errorf("%w: %s/%s", secrets.ErrNotFound, service, account)
 	}
 	return v, nil
 }

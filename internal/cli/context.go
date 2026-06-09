@@ -78,11 +78,30 @@ func (cc *cmdContext) backend() (backend.Client, error) {
 	return backend.New(cc.cfg, cc.runner)
 }
 
+// resolveApplyFlags reads --dry-run/--apply from cmd and resolves the effective
+// mode. The combination --dry-run --apply is contradictory and rejected with a
+// clear error (CLI-09) so no command has to define its own precedence. When
+// neither flag is set, dry-run is the default (CLAUDE.md hard rule #7).
+func resolveApplyFlags(cmd *cobra.Command) (dryRun, apply bool, err error) {
+	dryRun, _ = cmd.Flags().GetBool("dry-run")
+	apply, _ = cmd.Flags().GetBool("apply")
+	if dryRun && apply {
+		return false, false, fmt.Errorf("--dry-run and --apply are mutually exclusive")
+	}
+	// Default: if neither --apply nor --dry-run is set, dry-run mode.
+	if !apply && !dryRun {
+		dryRun = true
+	}
+	return dryRun, apply, nil
+}
+
 // loadCmdContext loads config and resolves flags from the root command.
 func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 	configPath, _ := cmd.Flags().GetString("config")
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	apply, _ := cmd.Flags().GetBool("apply")
+	dryRun, apply, err := resolveApplyFlags(cmd)
+	if err != nil {
+		return nil, err
+	}
 	yes, _ := cmd.Flags().GetBool("yes")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	verbose, _ := cmd.Flags().GetBool("verbose")
@@ -108,11 +127,6 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 			return nil, fmt.Errorf("config: %w", err)
 		}
 		cfg = config.Defaults()
-	}
-
-	// Default: if neither --apply nor --dry-run is set, dry-run mode.
-	if !apply && !dryRun {
-		dryRun = true
 	}
 
 	return &cmdContext{

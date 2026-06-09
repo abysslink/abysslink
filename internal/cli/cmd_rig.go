@@ -76,7 +76,12 @@ func newRigLsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runRigLs(defaultConfigPath(), cc.jsonOut, cmd.OutOrStdout())
+			// CLI-12: honor --config like the sibling export/import subcommands.
+			cfgPath, _ := cmd.Flags().GetString("config")
+			if cfgPath == "" {
+				cfgPath = defaultConfigPath()
+			}
+			return runRigLs(cfgPath, cc.jsonOut, cmd.OutOrStdout())
 		},
 	}
 }
@@ -98,16 +103,21 @@ func newRigExportCmd() *cobra.Command {
 	}
 }
 
-// newRigImportCmd returns the `rig import <file>` subcommand.
+// newRigImportCmd returns the `rig import <file>` subcommand. "-" reads the
+// rigs: YAML doc from stdin (CLI-26 — matches the `rig export | rig import -`
+// pipeline in the export help text).
 func newRigImportCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "import <file>",
-		Short: "Merge a rigs: YAML doc into local config (--dry-run by default, --apply to write)",
+		Short: "Merge a rigs: YAML doc into local config (--dry-run by default, --apply to write; \"-\" reads stdin)",
 		Example: `  # Preview the merge
   abysslink rig import rigs.yaml
 
   # Apply the merge
-  abysslink rig import rigs.yaml --apply`,
+  abysslink rig import rigs.yaml --apply
+
+  # Read the rigs doc from stdin
+  abysslink rig export | abysslink rig import - --apply`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cc, err := loadCmdContext(cmd)
@@ -118,7 +128,7 @@ func newRigImportCmd() *cobra.Command {
 			if cfgPath == "" {
 				cfgPath = defaultConfigPath()
 			}
-			return runRigImport(cfgPath, args[0], cc.apply, cmd.OutOrStdout())
+			return runRigImport(cfgPath, args[0], cc.apply, cmd.InOrStdin(), cmd.OutOrStdout())
 		},
 	}
 }
@@ -231,6 +241,12 @@ func validateImportRigs(existing, incoming []config.RigConfig) error {
 		}
 	}
 	for _, inc := range incoming {
+		// CLI-13: imported rig names must satisfy the same charset/length rule as
+		// enrollRig (rigNameRe, T-14-11) — the name is used as a keychain service
+		// suffix, ntfy topic component, and SSH host token.
+		if !rigNameRe.MatchString(inc.Name) {
+			return fmt.Errorf("rig import: invalid rig name %q (must match ^[a-z0-9-]{1,63}$, T-14-11)", inc.Name)
+		}
 		if existingNames[inc.Name] {
 			return fmt.Errorf("rig import: name collision for rig %q — use a unique name or remove the existing entry first (D-NI-02)", inc.Name)
 		}
@@ -247,11 +263,23 @@ func validateImportRigs(existing, incoming []config.RigConfig) error {
 	return nil
 }
 
-func runRigImport(cfgPath, importPath string, apply bool, out io.Writer) error {
-	// Read import file.
-	data, err := os.ReadFile(importPath) //nolint:gosec // G304: importPath is an operator-supplied rig export file; read is intentional and the path is the documented CLI argument
-	if err != nil {
-		return fmt.Errorf("rig import: read %s: %w", importPath, err)
+func runRigImport(cfgPath, importPath string, apply bool, in io.Reader, out io.Writer) error {
+	// Read import file. "-" reads from in (stdin in production — CLI-26).
+	var data []byte
+	var err error
+	if importPath == "-" {
+		if in == nil {
+			return fmt.Errorf("rig import: no stdin available for \"-\"")
+		}
+		data, err = io.ReadAll(in)
+		if err != nil {
+			return fmt.Errorf("rig import: read stdin: %w", err)
+		}
+	} else {
+		data, err = os.ReadFile(importPath) //nolint:gosec // G304: importPath is an operator-supplied rig export file; read is intentional and the path is the documented CLI argument
+		if err != nil {
+			return fmt.Errorf("rig import: read %s: %w", importPath, err)
+		}
 	}
 
 	// Unmarshal with strict KnownFields (T-14-12: crafted import file guard).

@@ -353,3 +353,68 @@ func (s *spyACLManager) SetACL(_ context.Context, _ []byte, _ string) error {
 	s.setCalls++
 	return nil
 }
+
+// TestEnrollPhone_DryRunDefault asserts the CLI-30 gate: without --apply,
+// `enroll phone` prints a [plan] preview of the auth key that would be minted
+// and performs no mutation (no key mint, no runbook write, no pause).
+func TestEnrollPhone_DryRunDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "abysslink.yaml")
+	cfg := testCfgDefaults()
+	cfg.Version = 1
+	data, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, data, 0o600))
+
+	// No admin OAuth secret → preview must say manual key-creation instructions.
+	t.Setenv("ABYSSLINK_TS_OAUTH_SECRET", "")
+	// Sandbox HOME/state so a buggy runbook write would land in the temp dir.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	root := buildRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"enroll", "phone", "--config", cfgPath})
+
+	execErr := root.ExecuteContext(context.Background())
+	require.NoError(t, execErr)
+
+	output := out.String()
+	assert.Contains(t, output, "Dry-run mode", "dry-run banner must be printed")
+	assert.Contains(t, output, "[plan]", "dry-run must print a plan preview")
+	assert.Contains(t, output, "tag:", "preview must name the tag the key would carry")
+	assert.Contains(t, output, "--apply", "preview must point at --apply")
+	assert.Contains(t, output, "runbook", "preview must mention the runbook that would be written")
+
+	// No runbook may have been written anywhere under the sandboxed HOME.
+	matches, _ := filepath.Glob(filepath.Join(home, "Documents", "abysslink-runbook-*.md"))
+	assert.Empty(t, matches, "dry-run must not write a runbook")
+}
+
+// TestPrintQR_JSONMode asserts CLI-17: under --json the raw ANSI QR block is
+// suppressed and the payload is emitted as a structured JSON record instead.
+func TestPrintQR_JSONMode(t *testing.T) {
+	var jsonOut, rawOut bytes.Buffer
+	p := NewJSONPrinterTo(&jsonOut, &bytes.Buffer{})
+
+	printQR(p, &rawOut, true, "test-label", "https://example.com/payload")
+
+	assert.Empty(t, rawOut.String(), "JSON mode must not write raw ANSI QR output")
+	assert.NotContains(t, jsonOut.String(), "\x1b[", "JSON output must be ANSI-free")
+	assert.Contains(t, jsonOut.String(), `"qr":"test-label"`)
+	assert.Contains(t, jsonOut.String(), `"payload":"https://example.com/payload"`)
+}
+
+// TestPrintQR_HumanMode asserts that human mode renders the QR to the provided
+// writer (never os.Stdout directly — CLI-17).
+func TestPrintQR_HumanMode(t *testing.T) {
+	var humanOut, rawOut bytes.Buffer
+	p := NewHumanPrinterTo(&humanOut, &bytes.Buffer{})
+
+	printQR(p, &rawOut, false, "test-label", "https://example.com/payload")
+
+	assert.NotEmpty(t, rawOut.String(), "human mode must render the QR to the given writer")
+}
