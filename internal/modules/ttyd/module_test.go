@@ -163,3 +163,66 @@ func TestApply_BindsTailnetIP(t *testing.T) {
 	}
 	assert.True(t, hasIP, "service args must include the tailnet IP %q", tailnetIP)
 }
+
+// TestBindFindings is the NET-10 matrix: a running ttyd must be flagged when
+// its argv lacks an explicit -i (it binds 0.0.0.0 by default — the most
+// common insecure case the old substring grep missed) or when -i points at a
+// wildcard/loopback address. IPv6 literals must not false-positive on the
+// bare "::" substring.
+func TestBindFindings(t *testing.T) {
+	m := New(modules.Deps{Cfg: enabledCfg()})
+
+	cases := []struct {
+		name     string
+		pgrepOut string
+		want     int
+	}{
+		{"no -i flag (default 0.0.0.0 bind)", "1234 /usr/bin/ttyd -p 7681 bash", 1},
+		{"-i 0.0.0.0 wildcard", "1234 /usr/bin/ttyd -i 0.0.0.0 -p 7681 bash", 1},
+		{"-i :: IPv6 wildcard", "1234 ttyd -i :: bash", 1},
+		{"-i [::] bracketed wildcard", "1234 ttyd -i [::] bash", 1},
+		{"-i 127.0.0.1 loopback", "1234 ttyd -i 127.0.0.1 bash", 1},
+		{"-i ::1 IPv6 loopback", "1234 ttyd -i ::1 bash", 1},
+		{"-i localhost loopback name", "1234 ttyd -i localhost bash", 1},
+		{"--interface= wildcard", "1234 ttyd --interface=0.0.0.0 bash", 1},
+		{"-i flag with missing value", "1234 ttyd -i", 1},
+		{"tailnet IP is clean", "1234 ttyd -i 100.64.1.99 -p 7681 bash", 0},
+		{"IPv6 tailnet literal must not false-positive on ::", "1234 ttyd -i fd7a:115c:a1e0::1 bash", 0},
+		{"interface name accepted", "1234 ttyd -i tailscale0 bash", 0},
+		{"non-ttyd process ignored", "999 tail -f ttyd.log", 0},
+		{"two insecure processes → two findings", "1 ttyd bash\n2 ttyd -i 0.0.0.0 bash", 2},
+		{"empty output", "", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := m.bindFindings(tc.pgrepOut)
+			require.Len(t, findings, tc.want, "pgrep output: %q", tc.pgrepOut)
+			for _, f := range findings {
+				assert.Equal(t, "ttyd_bind_tailnet", f.Check)
+				assert.Equal(t, modules.SeverityWarning, f.Severity)
+			}
+		})
+	}
+}
+
+// TestTtydInterfaceArg covers the -i/--interface argv extraction forms.
+func TestTtydInterfaceArg(t *testing.T) {
+	cases := []struct {
+		args     []string
+		wantAddr string
+		wantHas  bool
+	}{
+		{[]string{"-i", "100.64.1.2", "bash"}, "100.64.1.2", true},
+		{[]string{"--interface", "100.64.1.2", "bash"}, "100.64.1.2", true},
+		{[]string{"--interface=100.64.1.2", "bash"}, "100.64.1.2", true},
+		{[]string{"-i=100.64.1.2", "bash"}, "100.64.1.2", true},
+		{[]string{"-i"}, "", true}, // present but valueless
+		{[]string{"-p", "7681", "bash"}, "", false},
+		{nil, "", false},
+	}
+	for _, tc := range cases {
+		addr, has := ttydInterfaceArg(tc.args)
+		assert.Equal(t, tc.wantAddr, addr, "args=%v", tc.args)
+		assert.Equal(t, tc.wantHas, has, "args=%v", tc.args)
+	}
+}

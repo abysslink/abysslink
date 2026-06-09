@@ -17,6 +17,8 @@ package ntfy
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -439,18 +441,9 @@ behind-proxy: false
 // container using `docker exec`. Password is read from keychain and piped via
 // stdin — never placed on argv.
 func (m *Module) ensureAdminUserDocker(ctx context.Context) error {
-	if m.keychain == nil {
-		return fmt.Errorf("no keychain backend to store the ntfy admin password")
-	}
-	pw, err := m.keychain.Get(ctx, keychainService, keychainAccount)
-	if err != nil || pw == "" {
-		pw, err = modules.GenPassword()
-		if err != nil {
-			return err
-		}
-		if err := m.keychain.Set(ctx, keychainService, keychainAccount, pw); err != nil {
-			return fmt.Errorf("store ntfy password: %w", err)
-		}
+	pw, err := m.getOrCreateAdminPassword(ctx)
+	if err != nil {
+		return err
 	}
 	res, err := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
 		"docker", "exec", "-i", dockerContainerName,
@@ -459,10 +452,56 @@ func (m *Module) ensureAdminUserDocker(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("docker exec ntfy user add: %w", err)
 	}
-	if res.ExitCode != 0 && !strings.Contains(res.Stdout+res.Stderr, "already exists") {
-		return fmt.Errorf("ntfy user add exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	if res.ExitCode != 0 {
+		if !strings.Contains(res.Stdout+res.Stderr, "already exists") {
+			return fmt.Errorf("ntfy user add exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+		// Admin already exists: force the server-side password to match the
+		// keychain so user.db and keychain cannot diverge (NET-12).
+		cres, cerr := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
+			"docker", "exec", "-i", dockerContainerName,
+			"ntfy", "user", "change-pass", "admin",
+		)
+		if cerr != nil {
+			return fmt.Errorf("docker exec ntfy user change-pass: %w", cerr)
+		}
+		if cres.ExitCode != 0 {
+			return fmt.Errorf("ntfy user change-pass exited %d: %s", cres.ExitCode, strings.TrimSpace(cres.Stderr))
+		}
 	}
 	return nil
+}
+
+// getOrCreateAdminPassword returns the ntfy admin password from the keychain.
+// Only a definitive miss (secrets.ErrNotFound, or a successful Get returning
+// an empty value) triggers generation of a fresh password. Any other Get
+// failure — keychain locked, backend missing, transient error — aborts:
+// generating and storing a NEW password while the ntfy user.db still holds
+// the old one would desync the two permanently, because `ntfy user add` on an
+// existing admin is tolerated as "already exists" and never updates the
+// server-side password (NET-12).
+func (m *Module) getOrCreateAdminPassword(ctx context.Context) (string, error) {
+	if m.keychain == nil {
+		return "", fmt.Errorf("no keychain backend to store the ntfy admin password")
+	}
+	pw, err := m.keychain.Get(ctx, keychainService, keychainAccount)
+	switch {
+	case err == nil && pw != "":
+		return pw, nil
+	case err == nil || errors.Is(err, secrets.ErrNotFound):
+		// Definitively absent — safe to generate and store a new password.
+		pw, err = modules.GenPassword()
+		if err != nil {
+			return "", err
+		}
+		if err := m.keychain.Set(ctx, keychainService, keychainAccount, pw); err != nil {
+			return "", fmt.Errorf("store ntfy password: %w", err)
+		}
+		return pw, nil
+	default:
+		return "", fmt.Errorf("ntfy: keychain unavailable — refusing to generate a new admin password "+
+			"(would desync the keychain and the ntfy user.db): %w", err)
+	}
 }
 
 // generateServerConfig returns the ntfy server.yml for native (non-Docker) installs.
@@ -479,18 +518,9 @@ behind-proxy: false
 
 // ensureAdminUser provisions the ntfy admin account for native installs.
 func (m *Module) ensureAdminUser(ctx context.Context) error {
-	if m.keychain == nil {
-		return fmt.Errorf("no keychain backend to store the ntfy admin password")
-	}
-	pw, err := m.keychain.Get(ctx, keychainService, keychainAccount)
-	if err != nil || pw == "" {
-		pw, err = modules.GenPassword()
-		if err != nil {
-			return err
-		}
-		if err := m.keychain.Set(ctx, keychainService, keychainAccount, pw); err != nil {
-			return fmt.Errorf("store ntfy password: %w", err)
-		}
+	pw, err := m.getOrCreateAdminPassword(ctx)
+	if err != nil {
+		return err
 	}
 	ntfyBin := m.ntfyBinPath()
 	res, err := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
@@ -498,8 +528,20 @@ func (m *Module) ensureAdminUser(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("ntfy user add: %w", err)
 	}
-	if res.ExitCode != 0 && !strings.Contains(res.Stdout+res.Stderr, "already exists") {
-		return fmt.Errorf("ntfy user add exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	if res.ExitCode != 0 {
+		if !strings.Contains(res.Stdout+res.Stderr, "already exists") {
+			return fmt.Errorf("ntfy user add exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+		// Admin already exists: force the server-side password to match the
+		// keychain so user.db and keychain cannot diverge (NET-12).
+		cres, cerr := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
+			ntfyBin, "user", "change-pass", "admin")
+		if cerr != nil {
+			return fmt.Errorf("ntfy user change-pass: %w", cerr)
+		}
+		if cres.ExitCode != 0 {
+			return fmt.Errorf("ntfy user change-pass exited %d: %s", cres.ExitCode, strings.TrimSpace(cres.Stderr))
+		}
 	}
 	return nil
 }
@@ -522,21 +564,23 @@ func (m *Module) getTailnetIP(ctx context.Context) (string, error) {
 
 // getTailnetHostname returns the MagicDNS hostname of this machine (e.g.
 // "vaultofmac.tailXXXX.ts.net"). Falls back to the tailnet IP if unavailable.
+//
+// The output is parsed with json.Unmarshal and only Self.DNSName is read —
+// string-matching the first "DNSName" line would return a Peer's hostname
+// whenever a Peer entry happens to precede Self in the JSON (NET-19).
 func (m *Module) getTailnetHostname(ctx context.Context) string {
 	res, err := m.runner.Run(ctx, "tailscale", "status", "--json")
 	if err != nil || res.ExitCode != 0 {
 		ip, _ := m.getTailnetIP(ctx)
 		return ip
 	}
-	// Extract Self.DNSName — trim trailing dot.
-	for _, line := range strings.Split(res.Stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, `"DNSName"`) {
-			parts := strings.SplitN(line, `"`, 4)
-			if len(parts) >= 4 {
-				return strings.TrimRight(parts[3], `".,`)
-			}
-		}
+	var status struct {
+		Self struct {
+			DNSName string `json:"DNSName"`
+		} `json:"Self"`
+	}
+	if jsonErr := json.Unmarshal([]byte(res.Stdout), &status); jsonErr == nil && status.Self.DNSName != "" {
+		return strings.TrimSuffix(status.Self.DNSName, ".")
 	}
 	ip, _ := m.getTailnetIP(ctx)
 	return ip

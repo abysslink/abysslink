@@ -71,9 +71,11 @@ func TestSshdRunningOK(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Modules.SSH.Mode = "tailscale"
 
-	// systemctl is-active sshd → "inactive"
+	// systemctl is-active sshd → "inactive", then the NET-08 fallback probes
+	// ssh.service (also inactive) before trusting the "off" verdict.
 	r := shell.NewMockRunner(
 		shell.Call{Result: shell.Result{Stdout: "inactive\n", ExitCode: 0}},
+		shell.Call{Result: shell.Result{Stdout: "inactive\n", ExitCode: 3}},
 	)
 	m := New(modules.Deps{Cfg: cfg, Runner: r})
 	findings := m.detectLinux(context.Background())
@@ -89,6 +91,62 @@ func TestSshdRunningOK(t *testing.T) {
 		t.Fatal("expected a finding with Check==\"sshd_running\" on clean path, got none")
 	}
 	require.Equal(t, modules.SeverityOK, found.Severity, "sshd correctly off: must emit SeverityOK for sshd_running")
+}
+
+// TestSshdRunningFallbackSSHUnit is the NET-08 regression test: on distros
+// that ship only ssh.service (Debian/Ubuntu), `systemctl is-active sshd`
+// returns a non-zero exit with "inactive"/"unknown" on stdout but WITHOUT an
+// exec error. detectLinux must still probe the ssh unit and flag the running
+// daemon — never report a false "OpenSSH daemon correctly off".
+func TestSshdRunningFallbackSSHUnit(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Mode = "tailscale"
+
+	r := shell.NewMockRunner(
+		// systemctl is-active sshd → "inactive", exit 3, NO exec error.
+		shell.Call{Result: shell.Result{Stdout: "inactive\n", ExitCode: 3}},
+		// fallback: systemctl is-active ssh → "active" (the daemon IS running).
+		shell.Call{Result: shell.Result{Stdout: "active\n", ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+	findings := m.detectLinux(context.Background())
+	require.True(t, r.Done(), "detectLinux must probe both sshd and ssh units")
+
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "sshd_running" {
+			found = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "expected a sshd_running finding when ssh.service is active")
+	assert.Equal(t, modules.SeverityWarning, found.Severity,
+		"a running ssh.service must be flagged, not reported as correctly off (NET-08)")
+}
+
+// TestSshdRunningFallbackBothInactive asserts the clean path on ssh.service-only
+// distros: both probes report inactive → SeverityOK.
+func TestSshdRunningFallbackBothInactive(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Mode = "tailscale"
+
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "unknown\n", ExitCode: 4}},
+		shell.Call{Result: shell.Result{Stdout: "inactive\n", ExitCode: 3}},
+	)
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+	findings := m.detectLinux(context.Background())
+	require.True(t, r.Done())
+
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "sshd_running" {
+			found = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, modules.SeverityOK, found.Severity, "both units inactive → OK")
 }
 
 // TestApply_SeverityOK_NoMutation asserts that Apply runs NO privileged mutation
@@ -117,15 +175,17 @@ func TestApply_SeverityOK_NoMutation(t *testing.T) {
 		assert.True(t, r.Done(), "Apply must not issue any runner calls beyond the Detect probe")
 
 	case "linux":
-		// Detect calls systemctl is-active sshd → "inactive" (sshd off = OK).
-		// Apply must consume only that one call and return nil — no sudo disable call.
+		// Detect calls systemctl is-active sshd → "inactive", then the NET-08
+		// fallback probes ssh.service (also inactive). Apply must consume only
+		// those two probes and return nil — no sudo disable call.
 		r := shell.NewMockRunner(
 			shell.Call{Result: shell.Result{Stdout: "inactive\n", ExitCode: 0}},
+			shell.Call{Result: shell.Result{Stdout: "inactive\n", ExitCode: 3}},
 		)
 		m := New(modules.Deps{Cfg: cfg, Runner: r})
 		err := m.Apply(context.Background())
 		assert.NoError(t, err, "Apply must not error when sshd is correctly off (SeverityOK path)")
-		assert.True(t, r.Done(), "Apply must not issue any runner calls beyond the Detect probe")
+		assert.True(t, r.Done(), "Apply must not issue any runner calls beyond the Detect probes")
 
 	default:
 		t.Skipf("TestApply_SeverityOK_NoMutation not applicable on %s", runtime.GOOS)

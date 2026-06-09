@@ -17,15 +17,18 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/modules"
@@ -81,22 +84,49 @@ type Module struct {
 	runner   shell.Runner
 	cfg      *config.Config
 	keychain secrets.KeychainStore
+	backend  backend.Client
 }
 
 // New returns a new Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, keychain: d.Keychain}
+	return &Module{runner: d.Runner, cfg: d.Cfg, keychain: d.Keychain, backend: d.Backend}
 }
 
-// baseURL returns the ntfy base URL, preferring the test-override var, then cfg, then the hardcoded default.
-func (m *Module) baseURL() string {
+// baseURL resolves the ntfy base URL. Resolution order:
+//  1. the test-override seam (ntfyBaseURL),
+//  2. the backend-resolved tailnet IP + configured port (NET-02: ntfy binds the
+//     tailnet IP only — native listen-http tailnetIP:port, docker
+//     -p tailnetIP:port:80 — so localhost POSTs fail under the documented
+//     secure binding),
+//  3. localhost + configured port, ONLY as a last resort when no tailnet IP is
+//     resolvable (backend down / not yet authenticated / nil in unit tests).
+func (m *Module) baseURL(ctx context.Context) string {
 	if ntfyBaseURL != "" {
 		return ntfyBaseURL
 	}
+	port := 2586
 	if m.cfg != nil {
-		return fmt.Sprintf("http://localhost:%d", m.cfg.Modules.Ntfy.ListenPort())
+		port = m.cfg.Modules.Ntfy.ListenPort()
 	}
-	return "http://localhost:2586"
+	if ip := m.tailnetIP(ctx); ip != "" {
+		return fmt.Sprintf("http://%s:%d", ip, port)
+	}
+	return fmt.Sprintf("http://localhost:%d", port)
+}
+
+// tailnetIP best-effort resolves this node's tailnet IP from the backend — the
+// same authoritative source the ntfy module uses to derive its bind address.
+// Returns "" when the backend is unavailable; the caller then falls back to
+// localhost (probe will fail honestly rather than panic).
+func (m *Module) tailnetIP(ctx context.Context) string {
+	if m.backend == nil {
+		return ""
+	}
+	ip, err := m.backend.IP(ctx)
+	if err != nil {
+		return ""
+	}
+	return ip
 }
 
 // Name returns the module name.
@@ -116,12 +146,13 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 
 	// Probe the ntfy health endpoint via the HealthProbe seam. Context is passed
 	// so the request is cancelled if the parent context times out or is cancelled.
-	if err := HealthProbe(ctx, m.baseURL()+ntfyHealthPath); err != nil {
+	base := m.baseURL(ctx)
+	if err := HealthProbe(ctx, base+ntfyHealthPath); err != nil {
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "ntfy_running",
 			Severity: modules.SeverityWarning,
-			Message:  fmt.Sprintf("ntfy service is not reachable at localhost:%d", m.cfg.Modules.Ntfy.ListenPort()),
+			Message:  fmt.Sprintf("ntfy service is not reachable at %s", base),
 		})
 		return findings, nil
 	}
@@ -196,7 +227,7 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
 		},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL()+ntfyHealthPath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL(ctx)+ntfyHealthPath, nil)
 	if err != nil {
 		return findings, fmt.Errorf("notify verify: build request: %w", err)
 	}
@@ -237,53 +268,105 @@ func (m *Module) Repair(ctx context.Context) error {
 	return m.Apply(ctx)
 }
 
+// SendOptions carries optional per-message ntfy delivery parameters (CLI-04).
+// The zero value means "no overrides" — identical behavior to the historical
+// two-argument Send.
+type SendOptions struct {
+	// Priority maps to the ntfy X-Priority header: 1-5 or the aliases
+	// min|low|default|high|max|urgent. Empty = omit the header (server default).
+	Priority string
+	// Tags maps to the ntfy X-Tags header (comma-separated). Empty = omit.
+	Tags string
+	// Topic overrides the config default_topic (URL path segment). Empty =
+	// use the configured default.
+	Topic string
+}
+
+// validTopicRe constrains a topic override to the ntfy topic charset so a
+// hostile value can never alter the request path ("../", query strings, etc.).
+var validTopicRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 // Send sends a notification via the configured ntfy backend.
 // It tries the abysslinkd Unix socket first (fast path, no process startup),
 // then falls back to a direct ntfy POST when the daemon is not running.
 func (m *Module) Send(ctx context.Context, title, body string) error {
+	return m.SendWithOptions(ctx, title, body, SendOptions{})
+}
+
+// SendWithOptions is Send with per-message delivery options (CLI-04).
+// When opts is the zero value the behavior is byte-identical to Send.
+func (m *Module) SendWithOptions(ctx context.Context, title, body string, opts SendOptions) error {
 	if !m.cfg.Modules.Notify.Enabled {
 		slog.Debug("notify.Send: module disabled, skipping")
 		return nil
 	}
 
-	// Fast path: hand off to a running abysslinkd over its Unix socket.
-	if err := daemon.NewClient().Send(ctx, daemon.NotifyRequest{
-		Title: title,
-		Body:  body,
-		Topic: m.cfg.Modules.Notify.DefaultTopic,
-	}); err == nil {
-		slog.Debug("notify.Send: delivered via abysslinkd socket")
-		return nil
+	// Fast path: hand off to a running abysslinkd over its Unix socket — but
+	// only when no per-message options are set. The daemon's delivery backend
+	// carries title+body only, so routing an option-bearing message through it
+	// would silently drop priority/tags/topic (the CLI-04 bug, relocated).
+	if opts == (SendOptions{}) {
+		if err := daemon.NewClient().Send(ctx, daemon.NotifyRequest{
+			Title: title,
+			Body:  body,
+			Topic: m.cfg.Modules.Notify.DefaultTopic,
+		}); err == nil {
+			slog.Debug("notify.Send: delivered via abysslinkd socket")
+			return nil
+		}
 	}
 
-	// Fall back to direct ntfy POST.
-	return m.SendDirect(ctx, title, body)
+	// Fall back to direct ntfy POST (always used when options are present).
+	return m.SendDirectWithOptions(ctx, title, body, opts)
 }
 
 // SendDirect sends a notification directly to the ntfy HTTP API, bypassing the
 // daemon socket. The daemon itself uses this as its delivery backend (calling
 // the socket-aware Send from inside the daemon would loop).
 func (m *Module) SendDirect(ctx context.Context, title, body string) error {
-	topic := m.cfg.Modules.Notify.DefaultTopic
+	return m.SendDirectWithOptions(ctx, title, body, SendOptions{})
+}
+
+// SendDirectWithOptions is SendDirect with per-message delivery options
+// (priority, tags, topic override — CLI-04). ntfy semantics: X-Priority and
+// X-Tags headers; the topic is the URL path segment.
+func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, opts SendOptions) error {
+	topic := opts.Topic
+	if topic == "" {
+		topic = m.cfg.Modules.Notify.DefaultTopic
+	}
 	if topic == "" {
 		topic = "rig"
 	}
+	if !validTopicRe.MatchString(topic) {
+		return fmt.Errorf("notify send: invalid topic %q: only [A-Za-z0-9_-] (max 64 chars) allowed", topic)
+	}
 
-	url := fmt.Sprintf("%s/%s", m.baseURL(), topic)
+	url := fmt.Sprintf("%s/%s", m.baseURL(ctx), topic)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("notify send: create request: %w", err)
 	}
 	req.Header.Set("X-Title", title)
 	req.Header.Set("Content-Type", "text/plain")
+	if opts.Priority != "" {
+		req.Header.Set("X-Priority", opts.Priority)
+	}
+	if opts.Tags != "" {
+		req.Header.Set("X-Tags", opts.Tags)
+	}
 
 	// Attach basic auth from keychain if credentials are configured.
 	if m.keychain != nil {
-		password, err := m.keychain.Get(ctx, keychainService, keychainAccount)
-		if err == nil && password != "" {
+		password, kerr := m.keychain.Get(ctx, keychainService, keychainAccount)
+		switch {
+		case kerr == nil && password != "":
 			req.SetBasicAuth("admin", password)
+		case kerr != nil && !errors.Is(kerr, secrets.ErrNotFound):
+			// A genuine keychain failure (locked, backend error) is worth a log
+			// line; absence of credentials is the normal unauthenticated path.
+			slog.Warn("notify send: keychain read failed; sending without auth", "err", kerr)
 		}
-		// If credentials are not found, proceed without auth.
 	}
 
 	client := &http.Client{Timeout: httpTimeout}

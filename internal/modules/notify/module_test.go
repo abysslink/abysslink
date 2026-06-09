@@ -73,3 +73,79 @@ func TestSendDirect_NonOKStatus_Error(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "401")
 }
+
+// ── CLI-04: SendDirectWithOptions threads priority / tags / topic ────────────
+
+// TestSendDirectWithOptions_HeadersAndTopic verifies that priority and tags
+// become the ntfy X-Priority / X-Tags headers and that the topic override
+// replaces the configured default topic in the URL path.
+func TestSendDirectWithOptions_HeadersAndTopic(t *testing.T) {
+	var gotPath, gotPriority, gotTags string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotPriority = r.Header.Get("X-Priority")
+		gotTags = r.Header.Get("X-Tags")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := ntfyBaseURL
+	ntfyBaseURL = srv.URL
+	defer func() { ntfyBaseURL = old }()
+
+	cfg := config.Defaults()
+	cfg.Modules.Notify.Enabled = true
+	cfg.Modules.Notify.DefaultTopic = "alerts"
+	m := New(modules.Deps{Cfg: cfg, Runner: shell.NewMockRunner()})
+
+	err := m.SendDirectWithOptions(context.Background(), "t", "b", SendOptions{
+		Priority: "high",
+		Tags:     "warning",
+		Topic:    "ops",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/ops", gotPath, "--topic must override the configured default topic")
+	assert.Equal(t, "high", gotPriority, "--priority must be sent as X-Priority")
+	assert.Equal(t, "warning", gotTags, "--tag must be sent as X-Tags")
+}
+
+// TestSendDirectWithOptions_ZeroValueBackCompat verifies that zero options
+// behave exactly like the historical SendDirect: default topic, no
+// X-Priority/X-Tags headers.
+func TestSendDirectWithOptions_ZeroValueBackCompat(t *testing.T) {
+	var gotPath, gotPriority, gotTags string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotPriority = r.Header.Get("X-Priority")
+		gotTags = r.Header.Get("X-Tags")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := ntfyBaseURL
+	ntfyBaseURL = srv.URL
+	defer func() { ntfyBaseURL = old }()
+
+	cfg := config.Defaults()
+	cfg.Modules.Notify.Enabled = true
+	cfg.Modules.Notify.DefaultTopic = "alerts"
+	m := New(modules.Deps{Cfg: cfg, Runner: shell.NewMockRunner()})
+
+	require.NoError(t, m.SendDirectWithOptions(context.Background(), "t", "b", SendOptions{}))
+	assert.Equal(t, "/alerts", gotPath, "zero options must use the configured default topic")
+	assert.Empty(t, gotPriority, "zero options must not set X-Priority")
+	assert.Empty(t, gotTags, "zero options must not set X-Tags")
+}
+
+// TestSendDirectWithOptions_InvalidTopicRejected verifies that a topic override
+// outside the ntfy topic charset is refused before any request is built (the
+// override is a URL path segment — it must never alter the request path).
+func TestSendDirectWithOptions_InvalidTopicRejected(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Modules.Notify.Enabled = true
+	m := New(modules.Deps{Cfg: cfg, Runner: shell.NewMockRunner()})
+
+	err := m.SendDirectWithOptions(context.Background(), "t", "b", SendOptions{Topic: "../evil"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid topic")
+}
