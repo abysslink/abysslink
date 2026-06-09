@@ -55,11 +55,27 @@ type LiveTable struct {
 	done    bool
 	events  chan RowEvent
 	stop    chan error
+	label   string // in-flight row label, e.g. "scanning..." or "applying..."
 }
 
-// NewLiveTable returns a new LiveTable model. Call EventCh() to send events
-// and Stop() to signal completion.
+// defaultInFlightLabel is the label shown next to the spinner for the
+// in-flight row when no phase-specific label was provided.
+const defaultInFlightLabel = "scanning..."
+
+// NewLiveTable returns a new LiveTable model with the default in-flight label
+// ("scanning..."). Call SendRow() to send events and Done() to signal completion.
 func NewLiveTable() *LiveTable {
+	return NewLiveTableWithLabel(defaultInFlightLabel)
+}
+
+// NewLiveTableWithLabel returns a new LiveTable model whose in-flight row shows
+// the given label next to the spinner (F-63: the apply phase passes
+// "applying..." so the table no longer claims to be scanning while it mutates
+// the system). An empty label falls back to the default.
+func NewLiveTableWithLabel(label string) *LiveTable {
+	if label == "" {
+		label = defaultInFlightLabel
+	}
 	s := spinner.New()
 	s.Spinner = spinner.MiniDot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -67,6 +83,7 @@ func NewLiveTable() *LiveTable {
 		spinner: s,
 		events:  make(chan RowEvent, 64),
 		stop:    make(chan error, 1),
+		label:   label,
 	}
 }
 
@@ -167,7 +184,9 @@ func (t *LiveTable) View() string {
 	if !t.done {
 		sb.WriteString("  ")
 		sb.WriteString(t.spinner.View())
-		sb.WriteString("  scanning...\n")
+		sb.WriteString("  ")
+		sb.WriteString(t.label)
+		sb.WriteByte('\n')
 	}
 	return sb.String()
 }

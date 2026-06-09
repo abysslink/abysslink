@@ -256,6 +256,15 @@ func (r *Runner) ApplyAll(ctx context.Context, progress ProgressFunc) ([]Finding
 			if firstApplyErr == nil {
 				firstApplyErr = fmt.Errorf("module %s apply: %w", m.Name(), applyErr)
 			}
+			// F-62: surface the apply error as a Fatal finding so summary
+			// renderers that count SeverityFatal (e.g. the CLI final summary)
+			// report a non-zero error count consistent with the non-zero exit.
+			allFindings = append(allFindings, Finding{
+				Module:   m.Name(),
+				Check:    "apply-error",
+				Severity: SeverityFatal,
+				Message:  applyErr.Error(),
+			})
 		} else {
 			log.Info("applied successfully")
 		}

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -238,6 +239,13 @@ func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modu
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// F-64: buffer slog output while the tea program owns the terminal; flush
+	// to stderr after the table is closed and the worker has finished (every
+	// return path below first receives from resultCh, so the deferred restore
+	// runs strictly after both).
+	restoreLogs := captureSlog(os.Stderr)
+	defer restoreLogs()
+
 	table := tui.NewLiveTable()
 	resultCh := make(chan struct {
 		actions  []modules.Action
@@ -402,7 +410,15 @@ func runApplyAnimated(ctx context.Context, r *modules.Runner) ([]modules.Finding
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	table := tui.NewLiveTable()
+	// F-64: same slog capture contract as runScanAnimated — swap before the
+	// ApplyAll worker goroutine starts, restore (and flush to stderr) only
+	// after the table closed and the worker finished (resultCh received on
+	// every return path).
+	restoreLogs := captureSlog(os.Stderr)
+	defer restoreLogs()
+
+	// F-63: the apply-phase table must say "applying...", not "scanning...".
+	table := tui.NewLiveTableWithLabel("applying...")
 	resultCh := make(chan struct {
 		findings []modules.Finding
 		err      error

@@ -63,15 +63,32 @@ func TestModule_Detect_macOS(t *testing.T) {
 	assert.Contains(t, findings[0].Message, "Linux kernel")
 }
 
-// TestModule_Apply_macOS verifies Apply returns ErrNotSupported on darwin and
-// never panics.
+// TestModule_Apply_macOS verifies Apply is a graceful no-op (nil error) on
+// darwin instead of returning ErrNotSupported (F-61): a hard error here
+// aborted `abysslink up --apply` fatally on every Mac with sandbox enabled.
+// Plan must also have planned no action on this platform.
 func TestModule_Apply_macOS(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		t.Skip("Apply succeeds (or BestEffort no-ops) on Linux; this test asserts the non-Linux stub path")
 	}
 	m := New(modules.Deps{Cfg: enabledCfg(), Runner: shell.NewMockRunner()})
+
+	actions, planErr := m.Plan(context.Background(), false)
+	require.NoError(t, planErr)
+	assert.Empty(t, actions, "no Landlock action may be planned on a platform that cannot apply it (F-61)")
+
 	err := m.Apply(context.Background())
-	assert.ErrorIs(t, err, ErrNotSupported)
+	assert.NoError(t, err, "Apply must skip gracefully (nil) on unsupported platforms, not fail the entire up run (F-61)")
+}
+
+// TestErrNotSupported_StillExported verifies the stub applyLandlockProfile
+// still returns the exported ErrNotSupported for callers that bypass the
+// Apply gate (the sentinel remains part of the package API after F-61).
+func TestErrNotSupported_StillExported(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("stub applyLandlockProfile exists only on non-Linux builds")
+	}
+	assert.ErrorIs(t, applyLandlockProfile(context.Background()), ErrNotSupported)
 }
 
 // TestIsLandlockSupported_Stub verifies the build-tag-polymorphic
@@ -94,8 +111,13 @@ func TestPlan_Disabled_Nil(t *testing.T) {
 	assert.Nil(t, actions)
 }
 
-// TestPlan_Enabled_ReturnsAction verifies Plan returns the single Landlock action.
+// TestPlan_Enabled_ReturnsAction verifies Plan returns the single Landlock
+// action when Landlock is actually supported. On platforms without Landlock,
+// Plan returns nil (F-61) — that path is covered by TestModule_Apply_macOS.
 func TestPlan_Enabled_ReturnsAction(t *testing.T) {
+	if !isLandlockSupported() {
+		t.Skip("Landlock unsupported on this platform; Plan correctly returns nil actions (F-61)")
+	}
 	m := New(modules.Deps{Cfg: enabledCfg(), Runner: shell.NewMockRunner()})
 	actions, err := m.Plan(context.Background(), false)
 	require.NoError(t, err)

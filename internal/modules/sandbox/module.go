@@ -90,9 +90,16 @@ func (m *Module) Detect(_ context.Context) ([]modules.Finding, error) {
 }
 
 // Plan reports the single sandbox action: apply Landlock process isolation.
-// Returns nil when the module is disabled.
+// Returns nil when the module is disabled, or when Landlock is not supported
+// on this platform (F-61): Detect already emits the WARN finding, so planning
+// an action that Apply could never execute would abort `up --apply` fatally on
+// every non-Linux host with sandbox enabled. Mirrors the ntfy skip pattern.
 func (m *Module) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
 	if !m.cfg.Modules.Sandbox.Enabled {
+		return nil, nil
+	}
+	if !isLandlockSupported() {
+		slog.Debug("sandbox plan skipped (Landlock not supported on this platform)")
 		return nil, nil
 	}
 	return []modules.Action{{
@@ -102,9 +109,15 @@ func (m *Module) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
 	}}, nil
 }
 
-// Apply applies the Landlock profile on Linux; on every other platform it
-// returns ErrNotSupported (Landlock is a Linux-only kernel feature).
+// Apply applies the Landlock profile on Linux. On platforms without Landlock
+// support it logs a WARN and returns nil (graceful skip, F-61) — the gate runs
+// BEFORE applyLandlockProfile, whose non-Linux stub still returns
+// ErrNotSupported for callers that bypass the gate.
 func (m *Module) Apply(ctx context.Context) error {
+	if !isLandlockSupported() {
+		slog.Warn("sandbox apply skipped (Landlock not supported on this platform)")
+		return nil
+	}
 	return applyLandlockProfile(ctx)
 }
 
