@@ -15,13 +15,28 @@ Get Abysslink running in five minutes on macOS or Linux.
 curl -fsSL https://abysslink.dev/install.sh | sh
 ```
 
-The installer downloads the binary, verifies its SHA-256 checksum, optionally verifies the cosign signature if `cosign` is available, and installs to `~/.local/bin/` (non-root) or `/usr/local/bin/` (root).
+The installer downloads the release tarball, verifies its SHA-256 against the signed checksum manifest, verifies the cosign signature bundle when `cosign` is available, and installs both `abysslink` and the `abysslinkd` daemon to `/usr/local/bin/` (when run as root) or `~/.local/bin/` (otherwise).
+
+Two environment knobs:
+
+```sh
+# Pin a specific release instead of the latest
+curl -fsSL https://abysslink.dev/install.sh | ABYSSLINK_VERSION=v3.0.0 sh
+
+# Fail closed when cosign is not installed (instead of warning and continuing)
+curl -fsSL https://abysslink.dev/install.sh | ABYSSLINK_REQUIRE_COSIGN=1 sh
+```
 
 Or build from source:
 
 ```sh
 go install github.com/abysslink/abysslink/cmd/abysslink@latest
+go install github.com/abysslink/abysslink/cmd/abysslinkd@latest   # daemon — needed for watchers & notify
 ```
+
+> `go install` builds report their version as `dev (unknown)`, so
+> `abysslink upgrade --check` and `abysslink verify` won't work on them.
+> Use the installer or a release tarball for signed, upgradable binaries.
 
 > Package-manager installs (`brew install abysslink/tap/abysslink`, `apt`, `dnf`)
 > are **planned** but not yet published. Use the installer or `go install` for now.
