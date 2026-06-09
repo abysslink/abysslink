@@ -161,6 +161,12 @@ func passKey(service, account string) string {
 // pass insert reads from stdin when not in batch mode; providing two identical
 // lines satisfies the confirmation prompt.
 func (s *LinuxStore) passSet(ctx context.Context, service, account, secret string) error {
+	// pass insert reads value + confirmation as two stdin lines, so a newline
+	// inside the secret desyncs the confirmation and truncates the stored
+	// value (same class as CORE-01 on darwin). The error never echoes the value.
+	if strings.ContainsAny(secret, "\n\r") {
+		return fmt.Errorf("secrets(linux/pass): secret contains a newline; refusing to compose pass insert stdin")
+	}
 	// pass insert -f (force, no TTY required) reads password + confirmation from stdin.
 	stdin := secret + "\n" + secret + "\n"
 	res, err := s.runner.RunWithStdin(ctx, strings.NewReader(stdin),
