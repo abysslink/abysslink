@@ -118,7 +118,7 @@ func TestNotifyAllRigs_Headers(t *testing.T) {
 		{Name: rigB, NtfyTopic: topicB},
 	}
 
-	err = sendNotifyAllRigs(context.Background(), rigs, kc, title, msgBody)
+	err = sendNotifyAllRigs(context.Background(), rigs, kc, title, msgBody, rigNotifyOpts{})
 	require.NoError(t, err)
 
 	require.Len(t, received, 2, "one POST per rig")
@@ -207,7 +207,7 @@ func TestNotifyAllRigs_UnsignedWhenNoKey(t *testing.T) {
 	kc := newNotifyTestKeychain()
 	rigs := []config.RigConfig{{Name: rigName, NtfyTopic: topic}}
 
-	err := sendNotifyAllRigs(context.Background(), rigs, kc, "title", "body")
+	err := sendNotifyAllRigs(context.Background(), rigs, kc, "title", "body", rigNotifyOpts{})
 	// Error is acceptable (signing failed) but the function must not panic.
 	// With the "skip signing, send unsigned" strategy, err should be nil.
 	assert.NoError(t, err, "sendNotifyAllRigs must not crash when a rig has no signing key")
@@ -243,7 +243,7 @@ func TestNotifyAllRigs_PerRigTopic(t *testing.T) {
 		{Name: "tau", NtfyTopic: "topic-tau"},
 	}
 
-	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, "t", "m"))
+	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, "t", "m", rigNotifyOpts{}))
 
 	// Each topic path must be hit exactly once by its own rig.
 	for _, rig := range rigs {
@@ -288,7 +288,7 @@ func TestNotifyAllRigs_HMACCanonicalString(t *testing.T) {
 
 	// Capture a known timestamp by recording before/after the call.
 	before := strconv.FormatInt(time.Now().Unix(), 10)
-	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, titleStr, msgStr))
+	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, titleStr, msgStr, rigNotifyOpts{}))
 	after := strconv.FormatInt(time.Now().Unix(), 10)
 
 	require.Len(t, received, 1)
@@ -310,4 +310,92 @@ func TestNotifyAllRigs_HMACCanonicalString(t *testing.T) {
 	// Tampering the title alone must fail (WR-02 coverage).
 	assert.False(t, fleet.VerifyRigMessage(key, rigName, ts, "tampered title", msgStr, sig),
 		"VerifyRigMessage must return false when title is tampered (WR-02)")
+}
+
+// ── CLI-04 / CLI-14 / NET-02: option threading + base URL resolution ─────────
+
+// TestNotifyAllRigs_PriorityAndTagsHeaders verifies that --priority/--tag are
+// threaded into the per-rig fan-out POSTs as X-Priority / X-Tags (CLI-04 —
+// previously the flags were declared but silently dropped).
+func TestNotifyAllRigs_PriorityAndTagsHeaders(t *testing.T) {
+	var mu sync.Mutex
+	var received []capturedRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		received = append(received, capturedRequest{path: r.URL.Path, hdr: r.Header.Clone()})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := notifyCmdBaseURL
+	notifyCmdBaseURL = srv.URL
+	defer func() { notifyCmdBaseURL = old }()
+
+	kc := newNotifyTestKeychain()
+	rigs := []config.RigConfig{{Name: "opts-rig", NtfyTopic: "topic-opts"}}
+
+	err := sendNotifyAllRigs(context.Background(), rigs, kc, "t", "m",
+		rigNotifyOpts{priority: "urgent", tags: "warning,skull"})
+	require.NoError(t, err)
+	require.Len(t, received, 1)
+	assert.Equal(t, "urgent", received[0].hdr.Get("X-Priority"), "--priority must reach ntfy as X-Priority")
+	assert.Equal(t, "warning,skull", received[0].hdr.Get("X-Tags"), "--tag must reach ntfy as X-Tags")
+}
+
+// TestNotifyAllRigs_NoOptionsOmitsHeaders verifies backward compatibility:
+// when the flags are unset, no X-Priority/X-Tags headers are added.
+func TestNotifyAllRigs_NoOptionsOmitsHeaders(t *testing.T) {
+	var mu sync.Mutex
+	var received []capturedRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		received = append(received, capturedRequest{path: r.URL.Path, hdr: r.Header.Clone()})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := notifyCmdBaseURL
+	notifyCmdBaseURL = srv.URL
+	defer func() { notifyCmdBaseURL = old }()
+
+	kc := newNotifyTestKeychain()
+	rigs := []config.RigConfig{{Name: "plain-rig", NtfyTopic: "topic-plain"}}
+
+	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, "t", "m", rigNotifyOpts{}))
+	require.Len(t, received, 1)
+	assert.Empty(t, received[0].hdr.Get("X-Priority"), "unset --priority must not emit X-Priority")
+	assert.Empty(t, received[0].hdr.Get("X-Tags"), "unset --tag must not emit X-Tags")
+}
+
+// TestNotifyAllRigs_BaseURLFromOpts verifies the CLI-14 resolution order: with
+// the test seam empty, the caller-resolved base URL (config port + tailnet IP)
+// is used instead of the hardcoded http://localhost:2586.
+func TestNotifyAllRigs_BaseURLFromOpts(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Seam deliberately EMPTY — opts.baseURL must be honored.
+	old := notifyCmdBaseURL
+	notifyCmdBaseURL = ""
+	defer func() { notifyCmdBaseURL = old }()
+
+	kc := newNotifyTestKeychain()
+	rigs := []config.RigConfig{{Name: "url-rig", NtfyTopic: "topic-url"}}
+
+	err := sendNotifyAllRigs(context.Background(), rigs, kc, "t", "m",
+		rigNotifyOpts{baseURL: srv.URL})
+	require.NoError(t, err)
+	assert.Equal(t, 1, hits, "POST must target the caller-resolved base URL, not localhost:2586")
 }

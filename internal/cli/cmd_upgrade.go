@@ -26,7 +26,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -169,8 +168,9 @@ func applyUpgrade(ctx context.Context, p Printer, runner shell.Runner, tag strin
 }
 
 // checkCosignInstalled returns an error with install guidance if cosign is absent.
+// Uses shell.LookPath (CLI-16) — never os/exec outside internal/shell.
 func checkCosignInstalled() error {
-	if _, err := exec.LookPath("cosign"); err != nil {
+	if !shell.LookPath("cosign") {
 		return fmt.Errorf("upgrade: cosign not found — install it first:\n" +
 			"  https://docs.sigstore.dev/cosign/system_config/installation/\n" +
 			"  brew install cosign   (macOS)\n" +

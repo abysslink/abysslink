@@ -481,6 +481,21 @@ func doctorSeverityCounts(findings []modules.Finding) string {
 	)
 }
 
+// findingsSeverityFlags reports whether any finding is fatal and whether any
+// is a warning. Shared by the JSON and human output paths so both derive the
+// process exit code from the same predicate (CLI-06).
+func findingsSeverityFlags(findings []modules.Finding) (hasFatal, hasWarn bool) {
+	for _, f := range findings {
+		switch f.Severity {
+		case modules.SeverityFatal:
+			hasFatal = true
+		case modules.SeverityWarning:
+			hasWarn = true
+		}
+	}
+	return hasFatal, hasWarn
+}
+
 // doctorHumanOutput renders findings grouped by module and prints them via p.
 // Returns (hasFatal, hasWarn).
 func doctorHumanOutput(p Printer, findings []modules.Finding) (hasFatal, hasWarn bool) {
@@ -565,27 +580,43 @@ Exit codes:
 				return fmt.Errorf("doctor: %w", err)
 			}
 
+			// Resolve fleet targeting: --rig X (single rig, remote-only) or
+			// --all-rigs (local + every enrolled rig) (CLI-05).
+			rt, rigErr := resolveRigTargets(cmd, cc.cfg.Rigs)
+			if rigErr != nil {
+				return rigErr
+			}
+
 			// All local finding families run in their canonical order via the
 			// shared collector — the SAME single source of truth the abysslinkd
 			// web-UI dashboard uses (CollectDoctorFindings, B3). Keeping the
 			// ordering in one place stops the CLI and the dashboard from drifting.
-			findings := collectDoctorFindings(ctx, cc, deps)
+			// Skipped under --rig: the user asked for that rig's posture only.
+			var findings []modules.Finding
+			if !rt.rigOnly {
+				findings = collectDoctorFindings(ctx, cc, deps)
+			}
 
-			// --all-rigs: fan-out doctor --json to all enrolled rigs and merge findings.
-			allRigsFlag, _ := cmd.Flags().GetBool("all-rigs")
+			// --rig / --all-rigs: fan-out doctor --json to the targeted rigs and
+			// merge findings.
 			strictFlag, _ := cmd.Flags().GetBool("strict")
-			if allRigsFlag && len(cc.cfg.Rigs) > 0 {
+			if rt.fanOut && len(rt.rigs) > 0 {
 				var fanErr error
-				findings, fanErr = appendAllRigsFindings(ctx, cc, findings, strictFlag)
+				findings, fanErr = appendRigsFindings(ctx, cc, findings, strictFlag, rt.rigs)
 				if fanErr != nil && strictFlag {
 					return &exitError{code: exitCodeFatal}
 				}
 			}
 
+			// CLI-06: exit codes must be identical in JSON and human mode —
+			// compute severity flags BEFORE branching on output format so
+			// `--json doctor` carries the same 0/1/2 contract documented in help.
+			hasFatal, hasWarn := findingsSeverityFlags(findings)
+
 			// --json: emit structured ANSI-free records.
 			if cc.jsonOut {
 				p.PrintJSON(buildDoctorFindings(findings))
-				return nil
+				return doctorExitErr(hasFatal, hasWarn)
 			}
 
 			if len(findings) == 0 {
@@ -594,27 +625,38 @@ Exit codes:
 				return nil
 			}
 
-			hasFatal, hasWarn := doctorHumanOutput(p, findings)
+			doctorHumanOutput(p, findings)
 
 			printerInfo(p, styleMuted.Render("  "+strings.Repeat("─", 50)))
 			printerInfo(p, doctorSeverityCounts(findings))
 			printerInfo(p, "")
 
-			if hasFatal {
+			switch {
+			case hasFatal:
 				printerInfo(p, "  "+iconFatalStr()+"  "+styleFatal.Render("FATAL  Fatal issues found — system is not safe."))
 				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair --apply  to auto-fix what can be fixed."))
 				printerInfo(p, "")
-				return &exitError{code: exitCodeFatal}
-			}
-			if hasWarn {
+			case hasWarn:
 				printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("WARN  Warnings found — review the issues above."))
 				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair --apply  to auto-fix what can be fixed."))
 				printerInfo(p, "")
-				return &exitError{code: exitCodeError}
 			}
-			return nil
+			return doctorExitErr(hasFatal, hasWarn)
 		},
 	}
+}
+
+// doctorExitErr maps the severity flags to the documented doctor exit-code
+// contract (0 OK / 1 warn / 2 fatal). It is the SINGLE exit decision shared by
+// the JSON and human output paths (CLI-06) — they can never drift apart.
+func doctorExitErr(hasFatal, hasWarn bool) error {
+	if hasFatal {
+		return &exitError{code: exitCodeFatal}
+	}
+	if hasWarn {
+		return &exitError{code: exitCodeError}
+	}
+	return nil
 }
 
 // appendBackendAndFleetFindings combines the headscale, netbird, and fleet
@@ -677,12 +719,13 @@ func appendFleetFindings(ctx context.Context, cc *cmdContext, kc fleetKeychain, 
 	return findings
 }
 
-// appendAllRigsFindings fans out `abysslink doctor --json` to all enrolled rigs,
+// appendRigsFindings fans out `abysslink doctor --json` to the targeted rigs
+// (all enrolled rigs under --all-rigs, a single rig under --rig, CLI-05),
 // decodes the results, and merges them into findings with rig-prefixed Module names.
 // UNREACHABLE rigs surface as findings; error is non-nil only under --strict.
-func appendAllRigsFindings(ctx context.Context, cc *cmdContext, findings []modules.Finding, strict bool) ([]modules.Finding, error) {
+func appendRigsFindings(ctx context.Context, cc *cmdContext, findings []modules.Finding, strict bool, rigs []config.RigConfig) ([]modules.Finding, error) {
 	const perRigTimeout = 30 * time.Second
-	results, fanErr := fleet.FanOut(ctx, cc.runner, cc.cfg.Rigs, perRigTimeout, strict, []string{"doctor", "--json"})
+	results, fanErr := fleet.FanOut(ctx, cc.runner, rigs, perRigTimeout, strict, []string{"doctor", "--json"})
 	for _, res := range results {
 		if !res.Reachable {
 			sev := modules.SeverityWarning

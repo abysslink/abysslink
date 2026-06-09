@@ -70,6 +70,11 @@ type cmdContext struct {
 	jsonOut bool
 	verbose bool
 	explain bool // gates per-action rationale rendering (--explain flag)
+	// acceptCheckPeriodExt mirrors the --accept-checkperiod-extension flag
+	// (defined on `up` only; false everywhere else). Threaded into
+	// modules.Deps so the acl module can enforce the 12h checkPeriod ceiling
+	// on every code path that pushes the ACL (repair, acl apply) — NET-01.
+	acceptCheckPeriodExt bool
 }
 
 // backend constructs a backend.Client for this cmdContext. It is a convenience
@@ -106,6 +111,9 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	explain, _ := cmd.Flags().GetBool("explain")
+	// Defined on `up` only; GetBool returns false for commands that do not
+	// register the flag, so repair / acl apply never get implicit consent.
+	acceptCPExt, _ := cmd.Flags().GetBool("accept-checkperiod-extension")
 
 	// Default to WARN so internal slog.Info/Debug noise is hidden.
 	// --verbose drops to Debug for troubleshooting.
@@ -130,14 +138,15 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 	}
 
 	return &cmdContext{
-		cfg:     cfg,
-		runner:  newRunner(),
-		dryRun:  dryRun,
-		apply:   apply,
-		yes:     yes,
-		jsonOut: jsonOut,
-		verbose: verbose,
-		explain: explain,
+		cfg:                  cfg,
+		runner:               newRunner(),
+		dryRun:               dryRun,
+		apply:                apply,
+		yes:                  yes,
+		jsonOut:              jsonOut,
+		verbose:              verbose,
+		explain:              explain,
+		acceptCheckPeriodExt: acceptCPExt,
 	}, nil
 }
 
@@ -217,6 +226,9 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 		Keychain: kc,
 		Audit:    auditWriter,
 		Registry: reg,
+		// Explicit user consent to extend the SSH checkPeriod beyond 12h —
+		// enforced inside the acl module on every ACL push path (NET-01).
+		AcceptCheckPeriodExtension: cc.acceptCheckPeriodExt,
 		// Prompt routes module prompts through the interactive gate + tui.Pause:
 		// never raw stdout (which would corrupt --json) and never a bare stdin
 		// read (which would block in non-TTY/CI/--json contexts). CR-01 / T-10-16.

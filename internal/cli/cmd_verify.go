@@ -113,8 +113,14 @@ func runVerify(ctx context.Context, p Printer, runner shell.Runner, opts verifyO
 		ver = strings.TrimPrefix(version, "v")
 	}
 
-	checksumName := fmt.Sprintf("abysslink_%s_checksums.txt", ver)
-	baseURL := fmt.Sprintf("https://github.com/%s/releases/download/v%s", upgradeRepo, ver)
+	// CLI-28: a dev/unknown build has no published release artifacts — without
+	// this gate the command would try to download abysslink_dev_checksums.txt
+	// and fail with an opaque HTTP error. Short-circuit with clear guidance
+	// unless the user supplied a local --bundle to verify against.
+	if (ver == "dev" || ver == "unknown") && opts.bundleOverride == "" {
+		return fmt.Errorf("verify: this is a development build (version %q) with no published release artifacts to verify; "+
+			"pass --version vX.Y.Z to verify a specific release, or --bundle <path> to verify a local cosign bundle", ver)
+	}
 
 	tmpDir, err := os.MkdirTemp("", "abysslink-verify-*")
 	if err != nil {
@@ -122,29 +128,9 @@ func runVerify(ctx context.Context, p Printer, runner shell.Runner, opts verifyO
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	// Resolve the checksum artifact: download it unless a local bundle override
-	// is supplied alongside a co-located checksums file.
-	checksumPath := filepath.Join(tmpDir, checksumName)
-	bundlePath := opts.bundleOverride
-
-	if bundlePath == "" {
-		// Auto-download bundle + checksums for the target version.
-		bundlePath = filepath.Join(tmpDir, checksumName+".bundle")
-		if err := downloadFile(ctx, baseURL+"/"+checksumName, checksumPath); err != nil {
-			return fmt.Errorf("verify: download checksums: %w", err)
-		}
-		if err := downloadFile(ctx, baseURL+"/"+checksumName+".bundle", bundlePath); err != nil {
-			return fmt.Errorf("verify: download bundle: %w", err)
-		}
-	} else {
-		// A local bundle was supplied. Use a sibling checksums file if present,
-		// otherwise download just the checksums to verify against the bundle.
-		sibling := filepath.Join(filepath.Dir(bundlePath), checksumName)
-		if _, statErr := os.Stat(sibling); statErr == nil {
-			checksumPath = sibling
-		} else if err := downloadFile(ctx, baseURL+"/"+checksumName, checksumPath); err != nil {
-			return fmt.Errorf("verify: download checksums: %w", err)
-		}
+	checksumPath, bundlePath, err := resolveVerifyArtifacts(ctx, tmpDir, ver, opts.bundleOverride)
+	if err != nil {
+		return err
 	}
 
 	// Verify the cosign v3 bundle offline.
@@ -182,6 +168,41 @@ func runVerify(ctx context.Context, p Printer, runner shell.Runner, opts verifyO
 		return &exitError{code: exitCodeError}
 	}
 	return nil
+}
+
+// resolveVerifyArtifacts resolves the checksum + bundle file paths for the
+// target version: both are downloaded unless a local bundle override is
+// supplied, in which case a co-located checksums file is preferred and only
+// the checksums are downloaded when absent. Extracted from runVerify to keep
+// it under the gocyclo threshold.
+func resolveVerifyArtifacts(ctx context.Context, tmpDir, ver, bundleOverride string) (checksumPath, bundlePath string, err error) {
+	checksumName := fmt.Sprintf("abysslink_%s_checksums.txt", ver)
+	baseURL := fmt.Sprintf("https://github.com/%s/releases/download/v%s", upgradeRepo, ver)
+
+	checksumPath = filepath.Join(tmpDir, checksumName)
+	bundlePath = bundleOverride
+
+	if bundlePath == "" {
+		// Auto-download bundle + checksums for the target version.
+		bundlePath = filepath.Join(tmpDir, checksumName+".bundle")
+		if err := downloadFile(ctx, baseURL+"/"+checksumName, checksumPath); err != nil {
+			return "", "", fmt.Errorf("verify: download checksums: %w", err)
+		}
+		if err := downloadFile(ctx, baseURL+"/"+checksumName+".bundle", bundlePath); err != nil {
+			return "", "", fmt.Errorf("verify: download bundle: %w", err)
+		}
+		return checksumPath, bundlePath, nil
+	}
+
+	// A local bundle was supplied. Use a sibling checksums file if present,
+	// otherwise download just the checksums to verify against the bundle.
+	sibling := filepath.Join(filepath.Dir(bundlePath), checksumName)
+	if _, statErr := os.Stat(sibling); statErr == nil {
+		checksumPath = sibling
+	} else if err := downloadFile(ctx, baseURL+"/"+checksumName, checksumPath); err != nil {
+		return "", "", fmt.Errorf("verify: download checksums: %w", err)
+	}
+	return checksumPath, bundlePath, nil
 }
 
 // emitVerifyHuman prints a human-readable verification summary.

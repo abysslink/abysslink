@@ -34,7 +34,7 @@ func TestEnsureTailscaleAccount_HeadlessReturnsNil(t *testing.T) {
 	p := &testPrinter{out: &buf}
 
 	runner := shell.NewMockRunner()
-	err := ensureTailscaleAccount(p, runner, true)
+	err := ensureTailscaleAccount(context.Background(), p, runner, true)
 	require.NoError(t, err)
 
 	// Verify the informational signup-URL note is still printed in headless mode
@@ -54,7 +54,7 @@ func TestEnsureTailscaleAccount_NonTTYStdinReturnsNil(t *testing.T) {
 	runner := shell.NewMockRunner()
 
 	// stdinIsTTY() returns false under go test (no TTY attached)
-	err := ensureTailscaleAccount(p, runner, false)
+	err := ensureTailscaleAccount(context.Background(), p, runner, false)
 	require.NoError(t, err)
 }
 
@@ -162,7 +162,7 @@ func TestOpenURL_NoOpenerError(t *testing.T) {
 	// Zero scripted calls — any subprocess invocation returns an error from MockRunner.
 	runner := shell.NewMockRunner()
 
-	err := openURL(runner, "https://example.com")
+	err := openURL(context.Background(), runner, "https://example.com")
 	require.Error(t, err, "openURL must return an error when opener absent or run fails")
 
 	// On platforms where neither open nor xdg-open is on PATH, the error must

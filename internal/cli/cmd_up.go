@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -66,7 +67,7 @@ func newUpCmd() *cobra.Command {
 			// D-04 gate: NetBird backend requires explicit --accept-no-sshcheck
 			// acknowledgment before apply proceeds. Prevents silent degradation of
 			// the immutable 12h checkPeriod enforcement floor (SC-1 / PR-C).
-			if err := netbirdSSHCheckGate(ctx, cmd, cc); err != nil {
+			if err := netbirdSSHCheckGate(ctx, cmd, cc, p); err != nil {
 				return err
 			}
 
@@ -93,6 +94,12 @@ func newUpCmd() *cobra.Command {
 			// Pass 1 — Scan phase (always runs).
 			actions, findings, planErr := runScan(ctx, p, r, mods, cc)
 			if planErr != nil {
+				if errors.Is(planErr, errUserAborted) {
+					// CLI-11: Ctrl-C/Esc during the live scan table — stop cleanly,
+					// run no confirm/apply gates, mirror the ConfirmBlast decline path.
+					printerInfo(p, "  Aborted.")
+					return nil
+				}
 				return fmt.Errorf("up: %w", planErr)
 			}
 
@@ -146,20 +153,24 @@ func newUpCmd() *cobra.Command {
 // must not proceed unless the user has acknowledged the SSHCheck degradation.
 // If --accept-no-sshcheck is set and not yet persisted, it is written to the config.
 // If AcceptNoSSHCheck is already true in the config, the gate passes silently.
-// The gate is a no-op for non-netbird backends and for dry-run (scan-only) runs.
-func netbirdSSHCheckGate(ctx context.Context, cmd *cobra.Command, cc *cmdContext) error {
+// The gate is a no-op for non-netbird backends; on dry-run (scan-only) runs it
+// emits the WARN non-blocking (CLI-21).
+func netbirdSSHCheckGate(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer) error {
 	// Gate only applies to the netbird backend in apply mode.
 	if cc.cfg.Backend.Type != "netbird" {
-		return nil
-	}
-	// Dry-run (scan only) does not mutate the system; the gate is informational only.
-	// We still emit the WARN so the user is aware, but do not block.
-	if cc.dryRun {
 		return nil
 	}
 
 	// Already acknowledged in a previous run — no friction needed.
 	if cc.cfg.Server.NetBird.AcceptNoSSHCheck {
+		return nil
+	}
+
+	// Dry-run (scan only) does not mutate the system; the gate is informational only.
+	// We still emit the WARN so the user is aware, but do not block (CLI-21).
+	if cc.dryRun {
+		printerInfo(p, styleWarn.Render(warnSSHCheckText))
+		printerInfo(p, styleMuted.Render(warnSetupKeyText))
 		return nil
 	}
 
@@ -198,8 +209,21 @@ func runScan(ctx context.Context, p Printer, r *modules.Runner, mods []modules.M
 	})
 }
 
+// errUserAborted signals that the user quit the live table (Ctrl-C/Esc) before
+// the worker finished. The command must treat this as an abort: cancel the
+// worker, run no further confirm/apply gates (CLI-11).
+var errUserAborted = errors.New("aborted by user")
+
 // runScanAnimated drives a live tui.LiveTable for the scan phase.
+//
+// CLI-11: the PlanAll worker runs under a cancelable child context. When the
+// Bubble Tea program exits BEFORE the worker signalled Done (user pressed
+// Ctrl-C/Esc), the worker context is cancelled, the table is drained so the
+// worker can never block on SendRow, and errUserAborted is returned.
 func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modules.Module) ([]modules.Action, []modules.Finding, error) {
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	table := tui.NewLiveTable()
 	resultCh := make(chan struct {
 		actions  []modules.Action
@@ -208,7 +232,7 @@ func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modu
 	}, 1)
 
 	go func() {
-		actions, findings, err := r.PlanAll(ctx, func(evt modules.ModuleEvent) {
+		actions, findings, err := r.PlanAll(workerCtx, func(evt modules.ModuleEvent) {
 			table.SendRow(tui.RowEvent{
 				Module:  evt.Module,
 				Index:   evt.Index,
@@ -225,8 +249,17 @@ func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modu
 		}{actions, findings, err}
 	}()
 
-	if _, err := runTableProgram(table); err != nil {
-		return nil, nil, err
+	final, err := runTableProgram(table)
+	if err != nil || !final.Completed() {
+		// UI exited before the worker finished (program error or user abort):
+		// cancel the worker and drain its remaining events so it cannot block.
+		cancel()
+		table.Drain()
+		<-resultCh // wait for the (now-cancelled) worker to wind down
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, errUserAborted
 	}
 
 	res := <-resultCh
@@ -329,6 +362,12 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	animate := applyAnimationEnabled(cc.jsonOut, sudoLines, interactiveLines)
 	if animate {
 		applyFindings, applyErr := runApplyAnimated(ctx, r)
+		if errors.Is(applyErr, errUserAborted) {
+			// CLI-11: Ctrl-C/Esc during the live apply table — treat exactly like
+			// a declined ConfirmBlast: print "Aborted." and skip all further output.
+			printerInfo(p, "  Aborted.")
+			return nil, 0, true, nil
+		}
 		return applyFindings, 0, false, applyErr
 	}
 
@@ -341,7 +380,14 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 }
 
 // runApplyAnimated drives a live tui.LiveTable for the apply phase.
+//
+// CLI-11: same cancel-on-early-quit contract as runScanAnimated — when the UI
+// exits before ApplyAll signalled Done, the worker context is cancelled and
+// errUserAborted is returned so the command stops without further gates.
 func runApplyAnimated(ctx context.Context, r *modules.Runner) ([]modules.Finding, error) {
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	table := tui.NewLiveTable()
 	resultCh := make(chan struct {
 		findings []modules.Finding
@@ -349,7 +395,7 @@ func runApplyAnimated(ctx context.Context, r *modules.Runner) ([]modules.Finding
 	}, 1)
 
 	go func() {
-		findings, err := r.ApplyAll(ctx, func(evt modules.ModuleEvent) {
+		findings, err := r.ApplyAll(workerCtx, func(evt modules.ModuleEvent) {
 			table.SendRow(tui.RowEvent{
 				Module:   evt.Module,
 				Index:    evt.Index,
@@ -367,8 +413,15 @@ func runApplyAnimated(ctx context.Context, r *modules.Runner) ([]modules.Finding
 		}{findings, err}
 	}()
 
-	if _, err := runTableProgram(table); err != nil {
-		return nil, err
+	final, err := runTableProgram(table)
+	if err != nil || !final.Completed() {
+		cancel()
+		table.Drain()
+		<-resultCh // wait for the (now-cancelled) worker to wind down
+		if err != nil {
+			return nil, err
+		}
+		return nil, errUserAborted
 	}
 
 	res := <-resultCh
@@ -426,7 +479,9 @@ func printSudoNotice(p Printer, actions []modules.Action) {
 // Consolidated into one function to keep newUpCmd's cyclomatic complexity below 15.
 func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []modules.Finding) error {
 	// Gate 1: tailscaled must be reachable — everything depends on it.
-	if err := requireTailscaleDaemon(p); err != nil {
+	// CLI-10: thread the signal-cancellable command context and the injected
+	// runner (test seam) instead of context.Background() + a fresh ExecRunner.
+	if err := requireTailscaleDaemon(cmd.Context(), p, cc.runner); err != nil {
 		return err
 	}
 	// Gate 2: SSH re-auth interval may not be raised above 12h without consent.
@@ -458,10 +513,9 @@ func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []mo
 // If the daemon is down it starts it automatically (same as `abysslink init` does)
 // and polls up to 15 s. The tailscale module's Apply handles `tailscale up`
 // (browser auth) interactively — this function only starts the daemon socket.
-func requireTailscaleDaemon(p Printer) error {
-	ctx := context.Background()
-	runner := &shell.ExecRunner{}
-
+// ctx and runner are injected (CLI-10): the caller's signal-cancellable context
+// propagates and tests can substitute a MockRunner.
+func requireTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner) error {
 	if res, err := runner.Run(ctx, "tailscale", "status"); err == nil && res.ExitCode == 0 {
 		return nil // already running
 	}

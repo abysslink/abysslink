@@ -65,6 +65,8 @@ func newUninstallCmd() *cobra.Command {
 				printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))
 				if purge {
 					printerInfo(p, styleMuted.Render("--purge would also remove ~/.config/abysslink and the state dir (audit log + backups)."))
+				} else {
+					printerInfo(p, styleMuted.Render("~/.config/abysslink and the state dir (audit log + backups) would be kept. Use --purge to remove them."))
 				}
 				return nil
 			}
@@ -138,10 +140,16 @@ func printReverseManifest(p Printer, manifest []audit.ReverseAction) int {
 	return failures
 }
 
-// removeAbysslinkDirs removes the config dir (always) and, when purge is set,
-// the state dir (audit log + backups). Returns the number of failures.
+// removeAbysslinkDirs removes the config dir and the state dir (audit log +
+// backups) — but ONLY when purge is set (CLI-18): the --purge help and dry-run
+// text promise that purge controls directory removal, so a plain --apply keeps
+// both ~/.config/abysslink and the state dir. Returns the number of failures.
 func removeAbysslinkDirs(p Printer, purge bool) int {
 	failures := 0
+	if !purge {
+		printerInfo(p, styleMuted.Render("  Kept ~/.config/abysslink and the state dir (audit log + backups) for forensics. Use --purge to remove them."))
+		return failures
+	}
 	if cfgDir := abysslinkConfigDir(); cfgDir != "" {
 		if err := os.RemoveAll(cfgDir); err != nil {
 			printerError(p, fmt.Sprintf("  could not remove %s: %v", cfgDir, err))
@@ -149,10 +157,6 @@ func removeAbysslinkDirs(p Printer, purge bool) int {
 		} else {
 			printerInfo(p, "  removed "+cfgDir)
 		}
-	}
-	if !purge {
-		printerInfo(p, styleMuted.Render("  Kept the state dir (audit log + backups) for forensics. Use --purge to remove it."))
-		return failures
 	}
 	if stateDir := abysslinkStateDir(); stateDir != "" {
 		if err := os.RemoveAll(stateDir); err != nil {
