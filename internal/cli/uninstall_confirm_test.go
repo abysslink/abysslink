@@ -18,6 +18,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -157,4 +159,57 @@ func TestUninstallCmd_ContainsTypedConfirmCall(t *testing.T) {
 	ok, _, err := uninstallConfirmSeq(ctx, p, nil, false, false)
 	require.NoError(t, err)
 	assert.False(t, ok, "non-interactive uninstall without --yes must not proceed")
+}
+
+// ── CLI-18: --purge controls directory removal ────────────────────────────────
+
+// TestRemoveAbysslinkDirs_NoPurgeKeepsConfigDir verifies the CLI-18 fix:
+// uninstall --apply WITHOUT --purge must keep ~/.config/abysslink (and the
+// state dir), matching what the --purge help text and dry-run output promise.
+func TestRemoveAbysslinkDirs_NoPurgeKeepsConfigDir(t *testing.T) {
+	cfgBase := t.TempDir()
+	stateBase := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgBase)
+	t.Setenv("XDG_STATE_HOME", stateBase)
+
+	cfgDir := abysslinkConfigDir()
+	stateDir := abysslinkStateDir()
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	require.NoError(t, os.MkdirAll(stateDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "abysslink.yaml"), []byte("x"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "audit.log"), []byte("y"), 0o600))
+
+	var out bytes.Buffer
+	p := NewHumanPrinterTo(&out, &out)
+
+	failures := removeAbysslinkDirs(p, false /* purge */)
+	assert.Zero(t, failures)
+
+	assert.DirExists(t, cfgDir, "config dir must be KEPT without --purge (CLI-18)")
+	assert.DirExists(t, stateDir, "state dir must be KEPT without --purge")
+	assert.Contains(t, out.String(), "Kept", "output must tell the user the dirs were kept")
+	assert.Contains(t, out.String(), "--purge", "output must point at --purge for full removal")
+}
+
+// TestRemoveAbysslinkDirs_PurgeRemovesBothDirs verifies that --purge removes
+// both the config dir and the state dir (audit log + backups).
+func TestRemoveAbysslinkDirs_PurgeRemovesBothDirs(t *testing.T) {
+	cfgBase := t.TempDir()
+	stateBase := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgBase)
+	t.Setenv("XDG_STATE_HOME", stateBase)
+
+	cfgDir := abysslinkConfigDir()
+	stateDir := abysslinkStateDir()
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	require.NoError(t, os.MkdirAll(stateDir, 0o700))
+
+	var out bytes.Buffer
+	p := NewHumanPrinterTo(&out, &out)
+
+	failures := removeAbysslinkDirs(p, true /* purge */)
+	assert.Zero(t, failures)
+
+	assert.NoDirExists(t, cfgDir, "config dir must be removed with --purge")
+	assert.NoDirExists(t, stateDir, "state dir must be removed with --purge")
 }

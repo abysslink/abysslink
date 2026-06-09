@@ -18,8 +18,6 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,11 +29,11 @@ func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs",
 		Short: "Show the abysslink audit log, filtered by age and module",
-		Example: `  # Show the full audit log
+		Example: `  # Show mutations from the last 24 hours (default)
   abysslink logs
 
-  # Show mutations from the last 24 hours
-  abysslink logs --since 24h
+  # Show the FULL audit log (no age filter)
+  abysslink logs --since 0
 
   # Filter by module
   abysslink logs --module tailscale`,
@@ -47,11 +45,21 @@ func newLogsCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("logs: invalid --since duration %q: %w", sinceStr, err)
 			}
-			cutoff := time.Now().Add(-since)
+			// --since 0 (or negative) disables the age filter: zero cutoff means
+			// no entry is ever excluded (CLI-22 — the "full audit log" path).
+			var cutoff time.Time
+			if since > 0 {
+				cutoff = time.Now().Add(-since)
+			}
 			moduleFilter, _ := c.Flags().GetString("module")
 			jsonOut, _ := c.Flags().GetBool("json")
 
-			auditPath := filepath.Join(xdgStateHome(), "abysslink", "audit.log")
+			// CLI-22: resolve via audit.DefaultLogPath() — the single source of
+			// truth for the log location — instead of hand-building the path.
+			auditPath, err := audit.DefaultLogPath()
+			if err != nil {
+				return fmt.Errorf("logs: %w", err)
+			}
 			entries, err := audit.ReadLog(auditPath)
 			if err != nil {
 				return fmt.Errorf("logs: %w", err)
@@ -89,16 +97,7 @@ func newLogsCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().String("since", "24h", "Show entries newer than this duration (e.g. 1h, 24h)")
+	cmd.Flags().String("since", "24h", "Show entries newer than this duration (e.g. 1h, 24h); 0 shows the full log")
 	cmd.Flags().String("module", "", "Only show entries whose op or target contains this string")
 	return cmd
-}
-
-// xdgStateHome returns $XDG_STATE_HOME or ~/.local/state.
-func xdgStateHome() string {
-	if s := os.Getenv("XDG_STATE_HOME"); s != "" {
-		return s
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "state")
 }

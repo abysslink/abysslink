@@ -63,8 +63,8 @@ var styleNameCol = lipgloss.NewStyle().Width(nameColW)
 func newInitCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Interactive bootstrap — generates abysslink.yaml and guides the full 7-stage setup",
-		Example: `  # Interactive wizard — creates abysslink.yaml and runs the 7-stage journey
+		Short: "Interactive bootstrap — generates abysslink.yaml and guides the full 8-stage setup",
+		Example: `  # Interactive wizard — creates abysslink.yaml and runs the 8-stage journey
   abysslink init
 
   # Non-interactive (CI / scripted) — accept all defaults
@@ -132,7 +132,7 @@ func newInitCmd() *cobra.Command {
 			printerInfo(p, fmt.Sprintf("  %s  Config written to %s", iconDoneStr(), styleCode.Render(configPath)))
 			printerInfo(p, "")
 
-			// Journey orchestration: run the 7-stage guided flow.
+			// Journey orchestration: run the 8-stage guided flow.
 			stateDir := abysslinkStateDir()
 			stateFile := stateDir + "/" + journeyStageFile
 			resumeFrom := 0
@@ -166,8 +166,9 @@ func newInitCmd() *cobra.Command {
 // If the user doesn't have an account yet, we show the signup URL and wait.
 // When headless is true (--yes flag or non-TTY stdin), the function prints the
 // informational signup-URL note and returns nil immediately — no huh, no /dev/tty.
-// runner is used to open the browser URL if the user requests it.
-func ensureTailscaleAccount(p Printer, runner shell.Runner, headless bool) error {
+// runner is used to open the browser URL if the user requests it; ctx propagates
+// cancellation into that exec (CLI-10).
+func ensureTailscaleAccount(ctx context.Context, p Printer, runner shell.Runner, headless bool) error {
 	const signupURL = "https://login.tailscale.com/start"
 
 	printerInfo(p, "  "+styleBold.Render("Tailscale account"))
@@ -199,7 +200,7 @@ func ensureTailscaleAccount(p Printer, runner shell.Runner, headless bool) error
 	}
 
 	if !hasAccount {
-		if err := openURL(runner, signupURL); err != nil {
+		if err := openURL(ctx, runner, signupURL); err != nil {
 			printerInfo(p, "  "+iconWarnStr()+"  Could not open browser — visit manually:")
 			printerInfo(p, "  "+styleCode.Render(signupURL))
 		} else {
@@ -228,9 +229,9 @@ func ensureTailscaleAccount(p Printer, runner shell.Runner, headless bool) error
 // openURL opens url in the system browser. Returns an error if no browser opener
 // is found on PATH or if the opener exits non-zero.
 // runner is used for the actual exec so tests can inject a mock (shell.LookPath is
-// a PATH probe that does not go through the runner).
-func openURL(runner shell.Runner, url string) error {
-	ctx := context.Background()
+// a PATH probe that does not go through the runner). ctx is the caller's
+// cancellable context (CLI-10 — never context.Background()).
+func openURL(ctx context.Context, runner shell.Runner, url string) error {
 	switch {
 	case shell.LookPath("open"):
 		res, err := runner.Run(ctx, "open", url) // macOS

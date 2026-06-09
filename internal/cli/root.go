@@ -18,10 +18,13 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -86,9 +89,9 @@ Run 'abysslink <command> --help' for details on any command.`,
 	pf.BoolP("verbose", "v", false, "enable debug logging")
 	pf.Bool("explain", false, "show per-action rationale alongside each planned change")
 	// Fleet targeting flags (Phase 14, Plan 03): consumed by fan-out commands (Plan 05).
-	pf.String("rig", "", "target a single enrolled rig by name")
+	pf.String("rig", "", "target a single enrolled rig by name (doctor, notify, panic)")
 	pf.Bool("all-rigs", false, "fan out to all enrolled rigs")
-	pf.Bool("strict", false, "fail (exit 1) if any rig is UNREACHABLE")
+	pf.Bool("strict", false, "fail (exit 2) if any rig is UNREACHABLE")
 
 	// Register all subcommands with groups.
 	setupCmds := []*cobra.Command{
@@ -150,6 +153,50 @@ Run 'abysslink <command> --help' for details on any command.`,
 	}
 
 	return root
+}
+
+// rigTargets is the resolved fleet-targeting selection from the persistent
+// --rig / --all-rigs flags (CLI-05).
+type rigTargets struct {
+	rigs    []config.RigConfig // rigs to fan out to (nil when local-only)
+	fanOut  bool               // true when --rig or --all-rigs requested remote execution
+	rigOnly bool               // true when --rig was used: execute ONLY on the named rig, skip local
+}
+
+// resolveRigTargets resolves the persistent --rig / --all-rigs flags against
+// the enrolled rig list (CLI-05). Semantics:
+//   - --rig X:     fan out to ONLY the enrolled rig named X (error when X is
+//     not enrolled or no rigs are enrolled); local execution is skipped.
+//   - --all-rigs:  fan out to every enrolled rig (existing behavior).
+//   - neither:     local-only execution (fanOut=false).
+//   - both:        rejected — mutually exclusive.
+func resolveRigTargets(cmd *cobra.Command, enrolled []config.RigConfig) (rigTargets, error) {
+	rigName, _ := cmd.Flags().GetString("rig")
+	allRigs, _ := cmd.Flags().GetBool("all-rigs")
+
+	if rigName != "" && allRigs {
+		return rigTargets{}, fmt.Errorf("--rig and --all-rigs are mutually exclusive")
+	}
+	if rigName == "" {
+		if allRigs {
+			return rigTargets{rigs: enrolled, fanOut: true}, nil
+		}
+		return rigTargets{}, nil
+	}
+
+	for _, r := range enrolled {
+		if r.Name == rigName {
+			return rigTargets{rigs: []config.RigConfig{r}, fanOut: true, rigOnly: true}, nil
+		}
+	}
+	if len(enrolled) == 0 {
+		return rigTargets{}, fmt.Errorf("--rig %q: no rigs are enrolled (enroll one with `abysslink rig add`)", rigName)
+	}
+	names := make([]string, 0, len(enrolled))
+	for _, r := range enrolled {
+		names = append(names, r.Name)
+	}
+	return rigTargets{}, fmt.Errorf("--rig %q: unknown rig; enrolled rigs: %s", rigName, strings.Join(names, ", "))
 }
 
 func defaultConfigPath() string {

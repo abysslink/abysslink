@@ -16,11 +16,15 @@
 package cli
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestPanicNoConfirmCall verifies that the panic command does NOT call Confirm,
@@ -90,5 +94,34 @@ func assertExamplesRecursive(t *testing.T, cmd *cobra.Command) {
 			assert.NotEmpty(t, sub.Example,
 				"command %q must have a non-empty Example field", sub.Use)
 		}
+	}
+}
+
+// TestPanicRigFlag_UnknownRigErrors verifies CLI-05: `panic --rig <unknown>`
+// must return a hard error and NEVER fall back to silently running the LOCAL
+// panic sequence (no `tailscale down`, no device revocation, no key destroy).
+func TestPanicRigFlag_UnknownRigErrors(t *testing.T) {
+	// Inject a mock runner so no real command could ever run, and so we can
+	// assert that the local panic steps were never attempted.
+	mock := shell.NewMockRunner()
+	origNewRunner := newRunner
+	newRunner = func() shell.Runner { return mock }
+	t.Cleanup(func() { newRunner = origNewRunner })
+
+	root := buildRootCmd()
+	var out strings.Builder
+	root.SetOut(&out)
+	root.SetErr(&out)
+	// Default config has no enrolled rigs — "laptop" is unknown.
+	root.SetArgs([]string{"panic", "--rig", "laptop", "--config", filepath.Join(t.TempDir(), "absent.yaml")})
+
+	err := root.ExecuteContext(context.Background())
+	require.Error(t, err, "panic --rig <unknown> must error, not run local panic")
+	assert.Contains(t, err.Error(), `"laptop"`)
+
+	// The local disconnect step must never have run.
+	for _, call := range mock.RecordedCalls() {
+		assert.NotEqual(t, "tailscale", call.Name,
+			"local panic steps must not run when --rig targeting fails: %v", call)
 	}
 }

@@ -105,11 +105,13 @@ func runModuleRepairs(ctx context.Context, p Printer, mods []modules.Module, nee
 			continue
 		}
 
-		printerInfo(p, fmt.Sprintf("  Repairing module: %s", modName))
+		// Dry-run prints ONLY the [plan] line — "Repairing module:" would
+		// falsely imply a mutation is happening (CLI-29).
 		if dryRun {
 			printerInfo(p, fmt.Sprintf("  [plan] would repair: %s", modName))
 			continue
 		}
+		printerInfo(p, fmt.Sprintf("  Repairing module: %s", modName))
 		if repErr := m.Repair(ctx); repErr != nil {
 			printerError(p, fmt.Sprintf("  repair [%s]: %v", modName, repErr))
 			repairErrs = append(repairErrs, repErr)
