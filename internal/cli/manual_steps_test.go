@@ -18,6 +18,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -102,6 +103,112 @@ func TestFlushManualSteps_EmptyAndNilAreNoOps(t *testing.T) {
 	cc := &cmdContext{manualSteps: &empty, yes: true}
 	require.NoError(t, flushManualSteps(context.Background(), cc, p))
 	assert.Empty(t, out.String())
+}
+
+// TestFlushManualSteps_NonInteractiveIgnoresRecopy is the F-60 non-interactive
+// guard: under --yes (or no TTY) the flush must print the body and finish
+// without ever invoking the step's Recopy action and without blocking.
+func TestFlushManualSteps_NonInteractiveIgnoresRecopy(t *testing.T) {
+	recopyCalls := 0
+	steps := []modules.ManualStep{{
+		Title:   "ACL manual step",
+		Body:    "paste the ACL",
+		Confirm: "press enter once saved",
+		Recopy:  func(context.Context) error { recopyCalls++; return nil },
+	}}
+	cc := &cmdContext{
+		cfg:         config.Defaults(),
+		runner:      shell.NewMockRunner(), // zero scripted calls: any exec would error
+		yes:         true,
+		manualSteps: &steps,
+	}
+
+	var out, errBuf bytes.Buffer
+	p := NewHumanPrinterTo(&out, &errBuf)
+
+	done := make(chan error, 1)
+	go func() { done <- flushManualSteps(context.Background(), cc, p) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("flushManualSteps blocked in a non-interactive context with a Recopy step")
+	}
+
+	assert.Zero(t, recopyCalls, "non-interactive flush must never invoke Recopy")
+	assert.Contains(t, out.String(), "paste the ACL")
+}
+
+// TestRunStepInteraction_NoRecopyUsesPause: steps without a Recopy action keep
+// the plain Pause path (which short-circuits in a non-TTY test environment).
+func TestRunStepInteraction_NoRecopyUsesPause(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := NewHumanPrinterTo(&out, &errBuf)
+
+	pauseFn := func(context.Context, string, string, bool) (bool, error) {
+		t.Fatal("pause seam must not be used when Recopy is nil")
+		return false, nil
+	}
+	require.NoError(t, runStepInteraction(context.Background(), "msg", nil, false, p, pauseFn))
+	assert.Empty(t, out.String())
+}
+
+// TestRunStepInteraction_RecopyLoop exercises the F-60 loop: each time the
+// user picks the recopy action the closure runs and the prompt re-shows;
+// picking Continue exits the loop.
+func TestRunStepInteraction_RecopyLoop(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := NewHumanPrinterTo(&out, &errBuf)
+
+	pauseCalls := 0
+	pauseFn := func(_ context.Context, msg, label string, yes bool) (bool, error) {
+		pauseCalls++
+		assert.Equal(t, "msg", msg)
+		assert.Equal(t, "Copy ACL to clipboard again", label)
+		assert.False(t, yes)
+		return pauseCalls <= 2, nil // recopy twice, then Continue
+	}
+	recopyCalls := 0
+	recopy := func(context.Context) error { recopyCalls++; return nil }
+
+	require.NoError(t, runStepInteraction(context.Background(), "msg", recopy, false, p, pauseFn))
+	assert.Equal(t, 3, pauseCalls, "prompt must re-show after each recopy")
+	assert.Equal(t, 2, recopyCalls, "recopy must run once per action selection")
+	assert.Contains(t, out.String(), "copied to clipboard")
+	assert.Empty(t, errBuf.String())
+}
+
+// TestRunStepInteraction_RecopyFailureWarnsAndContinues: a failing recopy is
+// non-fatal — the loop surfaces a warning and re-shows the prompt.
+func TestRunStepInteraction_RecopyFailureWarnsAndContinues(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := NewHumanPrinterTo(&out, &errBuf)
+
+	pauseCalls := 0
+	pauseFn := func(context.Context, string, string, bool) (bool, error) {
+		pauseCalls++
+		return pauseCalls == 1, nil // one recopy attempt, then Continue
+	}
+	recopy := func(context.Context) error { return errors.New("pbcopy missing") }
+
+	require.NoError(t, runStepInteraction(context.Background(), "msg", recopy, false, p, pauseFn))
+	assert.Contains(t, errBuf.String(), "copy failed: pbcopy missing")
+	assert.NotContains(t, out.String(), "copied to clipboard")
+}
+
+// TestRunStepInteraction_PauseErrorPropagates: a prompt error (e.g. context
+// cancellation mid-form) is returned to the caller, which decides whether it
+// is fatal (ctx.Err) or a warning.
+func TestRunStepInteraction_PauseErrorPropagates(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := NewHumanPrinterTo(&out, &errBuf)
+
+	wantErr := errors.New("prompt interrupted")
+	pauseFn := func(context.Context, string, string, bool) (bool, error) { return false, wantErr }
+	recopy := func(context.Context) error { return nil }
+
+	err := runStepInteraction(context.Background(), "msg", recopy, false, p, pauseFn)
+	require.ErrorIs(t, err, wantErr)
 }
 
 // TestBuildDeps_WiresDeferManualStep asserts the uniform path: buildDeps always

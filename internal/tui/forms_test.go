@@ -71,6 +71,22 @@ func TestPause_NonTTY(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// PauseWithAction with yes=true skips interaction and reports "no action".
+func TestPauseWithAction_YesFlag(t *testing.T) {
+	action, err := tui.PauseWithAction(context.Background(), "msg", "Copy again", true)
+	require.NoError(t, err)
+	assert.False(t, action, "yes short-circuit must report Continue (no action)")
+}
+
+// PauseWithAction with a non-TTY stdin and yes=false also skips interaction:
+// in a test runner stdin is not a TTY, so this validates the non-TTY
+// short-circuit never hangs and never reports the action as chosen.
+func TestPauseWithAction_NonTTY(t *testing.T) {
+	action, err := tui.PauseWithAction(context.Background(), "msg", "Copy again", false)
+	require.NoError(t, err)
+	assert.False(t, action, "non-TTY short-circuit must report Continue (no action)")
+}
+
 // ConfirmTyped with yes=true returns true without prompting.
 func TestConfirmTyped_YesFlag(t *testing.T) {
 	ok, err := tui.ConfirmTyped(context.Background(), "Type UNINSTALL to confirm", "UNINSTALL", true)

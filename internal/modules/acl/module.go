@@ -249,11 +249,20 @@ func (m *Module) applyManual(ctx context.Context, aclMgr backend.ACLManager, own
 	// the CLI, which replays it (pause → open editor → confirm) after its own
 	// TUI has fully closed.
 	if m.deferManualStep != nil {
+		// Capture the desired ACL bytes so the CLI can re-copy them on demand
+		// (F-60: "Copy ACL to clipboard again"). Set regardless of whether the
+		// initial copy succeeded — the paste-from-path variant benefits most,
+		// since a later retry may succeed (e.g. clipboard tool became available
+		// or the user freed the clipboard).
+		recopyData := append([]byte(nil), desired...)
 		m.deferManualStep(modules.ManualStep{
 			Title:   "ACL manual step",
 			Body:    notice,
 			URL:     aclEditorURL,
 			Confirm: confirmMsg,
+			Recopy: func(ctx context.Context) error {
+				return m.copyToClipboard(ctx, recopyData)
+			},
 		})
 		return nil
 	}
