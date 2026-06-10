@@ -190,7 +190,11 @@ func (d *dispatcher) dispatch(ctx context.Context, msg notifyv2.Message, origin 
 	now := d.now()
 	// Track the highest epoch seen; pruneLocked uses this to delete dead-epoch
 	// keys (RESEARCH Pitfall 5 — tmux restart clears old suppression state).
-	if msg.Session.Epoch > d.maxEpoch {
+	// Only heuristic/bridge dispatches may advance maxEpoch — the registry is
+	// the sole authority on tmux server generations; POST bodies are not. A
+	// client-controlled epoch advancing maxEpoch would let one forged huge
+	// value disable cooldown suppression daemon-wide until restart (WR-01).
+	if origin == originHeuristic && msg.Session.Epoch > d.maxEpoch {
 		d.maxEpoch = msg.Session.Epoch
 	}
 	d.pruneLocked(now)
@@ -286,11 +290,7 @@ func (d *dispatcher) enqueueRetry(note notifyv2.RenderedNote) {
 	defer d.mu.Unlock()
 	now := d.now()
 	if len(d.retry) >= retryDepth {
-		// NET-11 voice: the drop is logged, never silent. Metadata only — no
-		// note content in the log line.
-		slog.Warn("daemon: retry queue full — dropping oldest entry",
-			"depth", retryDepth, "dropped_age", now.Sub(d.retry[0].firstTried).String())
-		d.retry = d.retry[1:]
+		d.dropOldestLocked()
 	}
 	d.retry = append(d.retry, retryEntry{
 		note:       note,
@@ -298,6 +298,23 @@ func (d *dispatcher) enqueueRetry(note notifyv2.RenderedNote) {
 		firstTried: now,
 		nextTry:    now.Add(d.retryBase),
 	})
+}
+
+// dropOldestLocked removes the entry with the earliest firstTried (D-28
+// drop-oldest). Re-queued failures land at the back of the slice, so index 0
+// is not necessarily the oldest — scan by firstTried. NET-11 voice: the drop
+// is logged, never silent; metadata only, no note content in the log line.
+// Caller holds d.mu and guarantees len(d.retry) > 0.
+func (d *dispatcher) dropOldestLocked() {
+	oldest := 0
+	for i, e := range d.retry {
+		if e.firstTried.Before(d.retry[oldest].firstTried) {
+			oldest = i
+		}
+	}
+	slog.Warn("daemon: retry queue full — dropping oldest entry",
+		"depth", retryDepth, "dropped_age", d.now().Sub(d.retry[oldest].firstTried).String())
+	d.retry = append(d.retry[:oldest], d.retry[oldest+1:]...)
 }
 
 // run is the retry-queue loop: a real ticker at retryBase (tests shorten it)
@@ -336,25 +353,35 @@ func (d *dispatcher) processRetries(ctx context.Context) {
 	d.retry = keep
 	d.mu.Unlock()
 
+	var failed []retryEntry
 	for _, e := range due {
 		if err := d.notifier.SendNote(ctx, e.note); err == nil {
 			continue
 		}
 		e.attempts++
-		// Double the base interval per attempt, capped at retryMaxBackoff
-		// (attempts is bounded by retryMaxAttempts, so this loop is tiny).
-		backoff := d.retryBase
-		for i := 0; i < e.attempts && backoff < retryMaxBackoff; i++ {
-			backoff *= 2
-		}
-		if backoff > retryMaxBackoff {
+		// Double per attempt from the base (5s, 10s, 20s, 40s, 60s cap);
+		// attempts is bounded by retryMaxAttempts so the shift cannot
+		// overflow.
+		backoff := d.retryBase << (e.attempts - 1)
+		if backoff > retryMaxBackoff || backoff <= 0 {
 			backoff = retryMaxBackoff
 		}
 		e.nextTry = d.now().Add(backoff)
-		d.mu.Lock()
-		d.retry = append(d.retry, e)
-		d.mu.Unlock()
+		failed = append(failed, e)
 	}
+	if len(failed) == 0 {
+		return
+	}
+	// Re-insert all failures in one locked section with the D-28 depth bound
+	// re-enforced: concurrent enqueueRetry calls may have refilled the queue
+	// while the sends ran unlocked, so per-entry unbounded appends could
+	// exceed retryDepth (WR-02).
+	d.mu.Lock()
+	d.retry = append(d.retry, failed...)
+	for len(d.retry) > retryDepth {
+		d.dropOldestLocked()
+	}
+	d.mu.Unlock()
 }
 
 // paneStats reports the suppression count and latest cooldown-until across

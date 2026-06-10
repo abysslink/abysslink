@@ -18,6 +18,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -277,7 +278,10 @@ func TestDispatch_RetryQueueOverflowDropsOldest(t *testing.T) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	assert.Len(t, d.retry, retryDepth, "queue must stay bounded at depth %d", retryDepth)
-	assert.Contains(t, d.retry[0].note.Body, "epoch 2", "the OLDEST entry (epoch 1) must have been dropped")
+	// Anchored: a bare Contains("epoch 2") would also match epochs 20-29
+	// (IN-06), false-passing a regression that drops more than one entry.
+	assert.Regexp(t, `epoch 2$`, d.retry[0].note.Body, "the OLDEST entry (epoch 1) must have been dropped")
+	assert.NotRegexp(t, `epoch 1$`, d.retry[0].note.Body)
 }
 
 // TestDispatch_RetryQueueDropsExpired (D-28): entries older than the max age
@@ -467,4 +471,79 @@ func TestNewDispatcher_CooldownConfig(t *testing.T) {
 
 	d = newDispatcher(&captureNotifier{}, nil)
 	assert.Equal(t, defaultCooldown, d.cooldownDur, "nil config must fall back to the 300s default")
+}
+
+// TestDispatch_ExplicitEpochCannotPoisonMaxEpoch (WR-01): Session.Epoch on an
+// explicit POST is client-controlled and unbounded; it must never advance
+// maxEpoch, or one forged huge value would make pruneLocked delete every real
+// cooldown key on every dispatch — permanently disabling D-08 suppression and
+// zeroing D-15 stats until daemon restart.
+func TestDispatch_ExplicitEpochCannotPoisonMaxEpoch(t *testing.T) {
+	d, n, _ := newTestDispatcher(t)
+	ctx := context.Background()
+
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+	require.Equal(t, 1, n.count())
+
+	forged := dispatchMsg(notifyv2.KindNeedsInput, "%9", math.MaxUint64)
+	require.NoError(t, d.dispatch(ctx, forged, originExplicit, notifyv2.RenderOpts{}))
+	require.Equal(t, 2, n.count(), "explicit asserts always deliver (D-10)")
+
+	// The heuristic repeat at the REAL epoch must still be suppressed: the
+	// forged explicit epoch must not have pruned its live cooldown key.
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+	assert.Equal(t, 2, n.count(), "cooldown must survive a forged explicit epoch (WR-01)")
+
+	suppressed, _ := d.paneStats(1, "%3")
+	assert.Equal(t, 1, suppressed, "D-15 stats must survive a forged explicit epoch")
+	d.mu.Lock()
+	assert.Equal(t, uint64(1), d.maxEpoch, "maxEpoch advances only from heuristic dispatches")
+	d.mu.Unlock()
+}
+
+// TestDispatch_RequeueRespectsDepthAndDropsTrueOldest (WR-02/D-28): failed
+// retries re-enter the queue inside the depth bound in one locked section,
+// and overflow drops the entry with the earliest firstTried — re-appends put
+// old entries at the back of the slice, so index 0 is not the oldest.
+func TestDispatch_RequeueRespectsDepthAndDropsTrueOldest(t *testing.T) {
+	d, n, clk := newTestDispatcher(t)
+	ctx := context.Background()
+	n.setErr(errors.New("ntfy unreachable"))
+
+	// Fill the queue to capacity in REVERSED age order: index 0 newest
+	// (firstTried latest), the true oldest at the end.
+	base := clk.Now()
+	d.mu.Lock()
+	for i := range retryDepth {
+		d.retry = append(d.retry, retryEntry{
+			note:       notifyv2.RenderedNote{Title: "queued"},
+			attempts:   1,
+			firstTried: base.Add(time.Duration(retryDepth-i) * time.Second),
+			nextTry:    base,
+		})
+	}
+	d.mu.Unlock()
+
+	// All entries are due and all sends fail: the re-queue must come back at
+	// exactly retryDepth, never beyond it.
+	d.processRetries(ctx)
+	d.mu.Lock()
+	require.Len(t, d.retry, retryDepth, "re-queue must respect the D-28 depth bound")
+	d.mu.Unlock()
+
+	// Overflow now: the drop must remove the earliest firstTried (base+1s),
+	// not whatever happens to sit at index 0.
+	clk.Advance(time.Hour)
+	d.enqueueRetry(notifyv2.RenderedNote{Title: "newest"})
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	require.Len(t, d.retry, retryDepth)
+	oldest := d.retry[0].firstTried
+	for _, e := range d.retry {
+		if e.firstTried.Before(oldest) {
+			oldest = e.firstTried
+		}
+	}
+	assert.Equal(t, base.Add(2*time.Second), oldest,
+		"the TRUE oldest entry (earliest firstTried) must be dropped, not index 0")
 }
