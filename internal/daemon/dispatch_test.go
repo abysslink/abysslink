@@ -368,6 +368,95 @@ func TestDispatch_ClickURLDefault(t *testing.T) {
 	assert.Equal(t, "ssh://other@rig-2", n.all()[1].Click, "a caller-resolved Click must pass through")
 }
 
+// TestDispatch_PruneExpiredCooldown (WR-04): after the cooldown window
+// expires, the next dispatch triggers pruneLocked which deletes the expired
+// keys from both cooldown and suppressed maps.
+func TestDispatch_PruneExpiredCooldown(t *testing.T) {
+	d, _, clk := newTestDispatcher(t)
+	ctx := context.Background()
+
+	expiredKey := cooldownKey{epoch: 1, pane: "%3", kind: notifyv2.KindNeedsInput}
+
+	// First dispatch: creates a cooldown entry.
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+	// Second dispatch within window: suppressed, increments suppressed counter.
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+
+	d.mu.Lock()
+	assert.Len(t, d.cooldown, 1, "one cooldown entry must exist after first dispatch")
+	assert.Len(t, d.suppressed, 1, "one suppressed entry must exist after second dispatch")
+	d.mu.Unlock()
+
+	// Advance clock past the cooldown window.
+	clk.Advance(d.cooldownDur + time.Second)
+
+	// Any new dispatch triggers pruneLocked, which deletes expired entries.
+	// Note: this dispatch itself creates a new cooldown entry for %9, so we
+	// assert the OLD key is gone, not that the map is empty.
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindCommandDone, "%9", 1), originHeuristic, notifyv2.RenderOpts{}))
+
+	d.mu.Lock()
+	_, hasExpired := d.cooldown[expiredKey]
+	_, hasExpiredSup := d.suppressed[expiredKey]
+	d.mu.Unlock()
+	assert.False(t, hasExpired, "expired cooldown key must be pruned")
+	assert.False(t, hasExpiredSup, "suppressed entry must be pruned when its cooldown expires")
+}
+
+// TestDispatch_PruneDeadEpochEntries (WR-04): when a new epoch is seen, all
+// entries from prior epochs are deleted from both maps — even if their until
+// timestamp is still in the future (tmux restarted: old panes are dead).
+func TestDispatch_PruneDeadEpochEntries(t *testing.T) {
+	d, _, clk := newTestDispatcher(t)
+	ctx := context.Background()
+
+	// Epoch 1: create a cooldown + suppressed entry.
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+
+	d.mu.Lock()
+	assert.Len(t, d.cooldown, 1, "one epoch-1 cooldown entry")
+	assert.Len(t, d.suppressed, 1, "one epoch-1 suppressed entry")
+	d.mu.Unlock()
+
+	// The cooldown is NOT expired yet (advance only a fraction of the window).
+	clk.Advance(10 * time.Second)
+
+	// Epoch 2 dispatch: triggers pruneLocked which deletes epoch-1 entries.
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%7", 2), originHeuristic, notifyv2.RenderOpts{}))
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Epoch-1 key must be gone even though its until is still in the future.
+	for k := range d.cooldown {
+		assert.Equal(t, uint64(2), k.epoch, "only epoch-2 keys must remain in cooldown")
+	}
+	for k := range d.suppressed {
+		assert.Equal(t, uint64(2), k.epoch, "only epoch-2 keys must remain in suppressed")
+	}
+}
+
+// TestDispatch_PaneStatsSkipsExpiredCooldown (D-15 honesty): paneStats must
+// return zero suppressed_count and a zero cooldown_until for a pane whose
+// cooldown window has expired — even when no dispatch has triggered pruning.
+func TestDispatch_PaneStatsSkipsExpiredCooldown(t *testing.T) {
+	d, _, clk := newTestDispatcher(t)
+	ctx := context.Background()
+
+	// Create a cooldown + suppressed entry.
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+
+	// Advance past the cooldown window WITHOUT triggering another dispatch.
+	clk.Advance(d.cooldownDur + time.Second)
+
+	// paneStats must skip the expired entry: honest reporting requires that
+	// past-cooldown entries are not counted (D-15 cooldown_until honesty).
+	suppressed, until := d.paneStats(1, "%3")
+	assert.Equal(t, 0, suppressed, "paneStats must return 0 suppressed for an expired cooldown")
+	assert.True(t, until.IsZero(), "paneStats must return zero cooldown_until for an expired cooldown")
+}
+
 // TestNewDispatcher_CooldownConfig: session_registry.cooldown_secs overrides
 // the compiled-in 300s default (zero means default).
 func TestNewDispatcher_CooldownConfig(t *testing.T) {

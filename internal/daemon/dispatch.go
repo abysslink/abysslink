@@ -93,6 +93,7 @@ type dispatcher struct {
 	mu            sync.Mutex
 	cooldown      map[cooldownKey]time.Time // suppression-until per key
 	suppressed    map[cooldownKey]int       // D-15 suppression counters
+	maxEpoch      uint64                    // highest epoch seen; used by pruneLocked to delete dead-epoch keys
 	tokens        float64
 	lastRefill    time.Time
 	floodNotified bool
@@ -147,6 +148,35 @@ func composeClickURL(host string) string {
 	return "ssh://" + host
 }
 
+// pruneLocked removes expired and dead-epoch entries from the cooldown and
+// suppressed maps (WR-04 fix). Caller must hold d.mu.
+//
+// Two pruning rules (D-13: state is memory-only, never persisted):
+//  1. Expired: any key whose until is not after now is deleted — the window
+//     is over, reporting it would violate D-15 honesty.
+//  2. Dead epoch: any key whose epoch is below d.maxEpoch is deleted — the
+//     tmux server restarted and that epoch's panes no longer exist (RESEARCH
+//     Pitfall 5). This complements the epoch-keyed design: new dispatches for
+//     the new epoch use different keys, so dead-epoch keys never self-expire.
+//
+// After deleting expired/dead-epoch cooldown entries, any suppressed key that
+// no longer has a live cooldown entry is also deleted: suppressed counters only
+// accumulate under a live cooldown, so an absent cooldown key means the window
+// is over and the count is stale.
+func (d *dispatcher) pruneLocked(now time.Time) {
+	for k, until := range d.cooldown {
+		if !until.After(now) || k.epoch < d.maxEpoch {
+			delete(d.cooldown, k)
+		}
+	}
+	// Remove orphaned suppressed counters (no live cooldown entry).
+	for k := range d.suppressed {
+		if _, live := d.cooldown[k]; !live {
+			delete(d.suppressed, k)
+		}
+	}
+}
+
 // dispatch applies the policy chain to msg and delivers the rendered note.
 // Suppression and ceiling drops are success (nil), not errors — the only
 // error path is the single policy-side Validate gate.
@@ -158,6 +188,12 @@ func (d *dispatcher) dispatch(ctx context.Context, msg notifyv2.Message, origin 
 
 	d.mu.Lock()
 	now := d.now()
+	// Track the highest epoch seen; pruneLocked uses this to delete dead-epoch
+	// keys (RESEARCH Pitfall 5 — tmux restart clears old suppression state).
+	if msg.Session.Epoch > d.maxEpoch {
+		d.maxEpoch = msg.Session.Epoch
+	}
+	d.pruneLocked(now)
 	key := cooldownKey{epoch: msg.Session.Epoch, pane: msg.Session.Pane, kind: msg.Kind}
 
 	// (2) Cooldown: only heuristic-originated, never approval_request
@@ -323,16 +359,23 @@ func (d *dispatcher) processRetries(ctx context.Context) {
 
 // paneStats reports the suppression count and latest cooldown-until across
 // kinds for (epoch, pane) — the D-15 accessor consumed by /sessions (27-07).
+// It calls pruneLocked first so /sessions reads are honest even when no
+// dispatch traffic has occurred since the window expired (D-15 honesty).
+// Past-cooldown entries are additionally skipped in the loop for defence in
+// depth: a key that survives pruning (e.g. future maxEpoch advances) whose
+// until has already passed must never inflate the reported cooldown_until.
 func (d *dispatcher) paneStats(epoch uint64, pane string) (suppressed int, cooldownUntil time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	now := d.now()
+	d.pruneLocked(now)
 	for k, n := range d.suppressed {
 		if k.epoch == epoch && k.pane == pane {
 			suppressed += n
 		}
 	}
 	for k, until := range d.cooldown {
-		if k.epoch == epoch && k.pane == pane && until.After(cooldownUntil) {
+		if k.epoch == epoch && k.pane == pane && until.After(now) && until.After(cooldownUntil) {
 			cooldownUntil = until
 		}
 	}
