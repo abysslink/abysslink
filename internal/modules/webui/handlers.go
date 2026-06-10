@@ -528,7 +528,7 @@ func (h *Handlers) handleNotify(w http.ResponseWriter, r *http.Request) {
 // request is same-origin (gated by CrossOriginProtection). Full dispatch is deferred to
 // Phase 20+; for now it acknowledges the request without sending.
 func (h *Handlers) handleNotifyPost(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setDynamicHTMLHeaders(w)
 	w.WriteHeader(http.StatusNotImplemented)
 	_, _ = w.Write([]byte("notify dispatch is not implemented in this phase"))
 }

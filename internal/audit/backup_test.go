@@ -77,6 +77,19 @@ func TestBackupWithChain_AppendsChainEntry(t *testing.T) {
 	assert.Equal(t, hex.EncodeToString(expectedHash[:]), e.Hash)
 }
 
+// keySetFailStore is an empty keychain whose Set always fails: the HMAC key is
+// definitively absent (Get wraps ErrNotFound via the embedded MockStore) but
+// lazy first-use key generation cannot store it, so any signed Append fails
+// closed. Used to drive BackupWithChain's rollback path now that key creation
+// is lazy (R2-12) — simply deleting the key would just trigger regeneration.
+type keySetFailStore struct {
+	*secrets.MockStore
+}
+
+func (s keySetFailStore) Set(context.Context, string, string, string) error {
+	return errors.New("simulated keychain write failure")
+}
+
 // TestBackupWithChain_RollbackOnAppendFail verifies that if the chain Append
 // fails, BackupWithChain removes the .bak file (rollback) and returns an error.
 func TestBackupWithChain_RollbackOnAppendFail(t *testing.T) {
@@ -85,15 +98,10 @@ func TestBackupWithChain_RollbackOnAppendFail(t *testing.T) {
 	src := filepath.Join(dir, "config.yaml")
 	require.NoError(t, os.WriteFile(src, []byte("data"), 0o600))
 
-	// Use a failing mock SignedAudit by providing a keychain that has no HMAC key.
-	// NewSigned will auto-generate a key, but then we delete it so Append fails.
 	logPath := filepath.Join(dir, "audit.log")
-	kc := secrets.NewMockStore()
+	kc := keySetFailStore{secrets.NewMockStore()}
 	sa, err := audit.NewSigned(logPath, kc)
-	require.NoError(t, err)
-
-	// Delete the HMAC key so Append will fail (cannot compute HMAC).
-	require.NoError(t, kc.Delete(context.Background(), "abysslink", "audit-hmac"))
+	require.NoError(t, err, "construction succeeds — key generation is lazy (R2-12)")
 
 	bakPath, backupErr := audit.BackupWithChain(context.Background(), src, sa)
 	assert.Error(t, backupErr, "BackupWithChain must return an error when Append fails")

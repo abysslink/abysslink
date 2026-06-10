@@ -73,6 +73,23 @@ type capturedRequest struct {
 	hdr  http.Header
 }
 
+// storeRigKey generates and stores an HMAC signing key for rigName, returning
+// the hex key. The fan-out SKIPS rigs without a key (T-14-17/18), so every
+// test that expects a delivered POST must enroll a key first.
+func storeRigKey(t *testing.T, kc *notifyTestKeychain, rigName string) string {
+	t.Helper()
+	key, err := fleet.GenerateSigningKey()
+	require.NoError(t, err)
+	require.NoError(t, kc.Set(context.Background(), fleet.RigService(rigName), "hmac-signing-key", key))
+	return key
+}
+
+// discardPrinter returns a Printer that swallows all output (for fan-out tests
+// that do not assert on the printed warnings).
+func discardPrinter() Printer {
+	return NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{})
+}
+
 // TestNotifyAllRigs_Headers verifies that sendNotifyAllRigs sends a POST per rig,
 // each request carrying the three HMAC rig-identity headers with correct values
 // (SC-5, D-NI-03, T-14-17 / T-14-20). Also asserts per-rig topic isolation
@@ -123,7 +140,7 @@ func TestNotifyAllRigs_Headers(t *testing.T) {
 		{Name: rigB, NtfyTopic: topicB},
 	}
 
-	err = sendNotifyAllRigs(context.Background(), rigs, kc, title, msgBody, rigNotifyOpts{})
+	err = sendNotifyAllRigs(context.Background(), discardPrinter(), rigs, kc, title, msgBody, rigNotifyOpts{})
 	require.NoError(t, err)
 
 	require.Len(t, received, 2, "one POST per rig")
@@ -185,10 +202,11 @@ func TestNotifyAllRigs_Headers(t *testing.T) {
 	assert.NotEqual(t, reqA.path, reqB.path, "each rig must POST to its own distinct topic path")
 }
 
-// TestNotifyAllRigs_UnsignedWhenNoKey verifies that a rig without an enrolled
-// signing key still receives the notification (unsigned) instead of crashing.
-// The X-Abysslink-Rig header must still be set; X-Abysslink-Rig-Sig may be absent.
-func TestNotifyAllRigs_UnsignedWhenNoKey(t *testing.T) {
+// TestNotifyAllRigs_SkippedWhenNoKey verifies that a rig without an enrolled
+// signing key is SKIPPED with a printed warning — never sent unsigned. Sending
+// unsigned would be a silent signature-stripping downgrade (T-14-17/T-14-18):
+// a verifier tolerating absent signatures could then be fed forged messages.
+func TestNotifyAllRigs_SkippedWhenNoKey(t *testing.T) {
 	var mu sync.Mutex
 	var received []capturedRequest
 
@@ -213,15 +231,117 @@ func TestNotifyAllRigs_UnsignedWhenNoKey(t *testing.T) {
 	kc := newNotifyTestKeychain()
 	rigs := []config.RigConfig{{Name: rigName, NtfyTopic: topic}}
 
-	err := sendNotifyAllRigs(context.Background(), rigs, kc, "title", "body", rigNotifyOpts{})
-	// Error is acceptable (signing failed) but the function must not panic.
-	// With the "skip signing, send unsigned" strategy, err should be nil.
-	assert.NoError(t, err, "sendNotifyAllRigs must not crash when a rig has no signing key")
+	var outBuf, errBuf bytes.Buffer
+	p := NewHumanPrinterTo(&outBuf, &errBuf)
+	err := sendNotifyAllRigs(context.Background(), p, rigs, kc, "title", "body", rigNotifyOpts{})
+	// A skip is not a failure: the warning is the signal, the exit stays clean.
+	assert.NoError(t, err, "a skipped rig must not fail the whole fan-out")
 
-	// The POST must still have been sent (unsigned notification delivered).
-	require.Len(t, received, 1, "notification must be sent even without a signing key")
-	assert.Equal(t, rigName, received[0].hdr.Get("X-Abysslink-Rig"))
-	// X-Abysslink-Rig-Sig may be absent (unsigned) — that's acceptable.
+	// NOTHING may have been sent — no unsigned downgrade POST.
+	assert.Empty(t, received, "a rig without a signing key must be skipped, never sent unsigned")
+
+	// The skip must be VISIBLE (printed warning on stderr, not just slog).
+	assert.Contains(t, errBuf.String(), rigName, "the warning must name the skipped rig")
+	assert.Contains(t, errBuf.String(), "no HMAC signing key", "the warning must explain why the rig was skipped")
+	assert.Contains(t, errBuf.String(), "enroll rig", "the warning must point at re-enrollment")
+}
+
+// TestNotifyAllRigs_SkipDoesNotBlockSiblings: in a mixed fleet (one rig with a
+// key, one without) the keyed rig is still notified and the keyless one skipped.
+func TestNotifyAllRigs_SkipDoesNotBlockSiblings(t *testing.T) {
+	var mu sync.Mutex
+	var received []capturedRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		received = append(received, capturedRequest{path: r.URL.Path, hdr: r.Header.Clone()})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := notifyCmdBaseURL
+	notifyCmdBaseURL = srv.URL
+	defer func() { notifyCmdBaseURL = old }()
+
+	kc := newNotifyTestKeychain()
+	storeRigKey(t, kc, "keyed-rig")
+	rigs := []config.RigConfig{
+		{Name: "keyed-rig", NtfyTopic: "topic-keyed"},
+		{Name: "keyless-rig", NtfyTopic: "topic-keyless"},
+	}
+
+	err := sendNotifyAllRigs(context.Background(), discardPrinter(), rigs, kc, "t", "m", rigNotifyOpts{})
+	require.NoError(t, err)
+
+	require.Len(t, received, 1, "only the keyed rig may receive a POST")
+	assert.Equal(t, "/topic-keyed", received[0].path)
+	assert.NotEmpty(t, received[0].hdr.Get("X-Abysslink-Rig-Sig"), "the delivered POST must be signed")
+}
+
+// TestNotifyAllRigs_BasicAuthFromKeychain (NET-02): the abysslink-managed ntfy
+// server is deny-all, so fan-out POSTs must carry the admin basic auth from the
+// keychain (service "abysslink", account "ntfy-password") — without it every
+// fleet notify 403s.
+func TestNotifyAllRigs_BasicAuthFromKeychain(t *testing.T) {
+	var mu sync.Mutex
+	var received []capturedRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		received = append(received, capturedRequest{path: r.URL.Path, hdr: r.Header.Clone()})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := notifyCmdBaseURL
+	notifyCmdBaseURL = srv.URL
+	defer func() { notifyCmdBaseURL = old }()
+
+	kc := newNotifyTestKeychain()
+	storeRigKey(t, kc, "auth-rig")
+	require.NoError(t, kc.Set(context.Background(), "abysslink", "ntfy-password", "s3cret"))
+
+	rigs := []config.RigConfig{{Name: "auth-rig", NtfyTopic: "topic-auth"}}
+	require.NoError(t, sendNotifyAllRigs(context.Background(), discardPrinter(), rigs, kc, "t", "m", rigNotifyOpts{}))
+
+	require.Len(t, received, 1)
+	authHdr := received[0].hdr.Get("Authorization")
+	require.NotEmpty(t, authHdr, "fan-out POST must carry Authorization (deny-all ntfy server)")
+	// Decode and verify it is admin:<password> basic auth.
+	req := &http.Request{Header: received[0].hdr}
+	user, pass, ok := req.BasicAuth()
+	require.True(t, ok, "Authorization header must be HTTP basic auth")
+	assert.Equal(t, "admin", user)
+	assert.Equal(t, "s3cret", pass)
+}
+
+// TestNotifyAllRigs_NoAuthWhenNoCredential: with no ntfy-password in the
+// keychain the POST goes out without Authorization (anonymous ntfy.sh path).
+func TestNotifyAllRigs_NoAuthWhenNoCredential(t *testing.T) {
+	var mu sync.Mutex
+	var received []capturedRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		received = append(received, capturedRequest{path: r.URL.Path, hdr: r.Header.Clone()})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := notifyCmdBaseURL
+	notifyCmdBaseURL = srv.URL
+	defer func() { notifyCmdBaseURL = old }()
+
+	kc := newNotifyTestKeychain()
+	storeRigKey(t, kc, "anon-rig")
+	rigs := []config.RigConfig{{Name: "anon-rig", NtfyTopic: "topic-anon"}}
+
+	require.NoError(t, sendNotifyAllRigs(context.Background(), discardPrinter(), rigs, kc, "t", "m", rigNotifyOpts{}))
+	require.Len(t, received, 1)
+	assert.Empty(t, received[0].hdr.Get("Authorization"), "no credential → no Authorization header")
 }
 
 // TestNotifyAllRigs_PerRigTopic asserts that Rig A's POST path is strictly
@@ -248,8 +368,11 @@ func TestNotifyAllRigs_PerRigTopic(t *testing.T) {
 		{Name: "sigma", NtfyTopic: "topic-sigma"},
 		{Name: "tau", NtfyTopic: "topic-tau"},
 	}
+	for _, r := range rigs {
+		storeRigKey(t, kc, r.Name)
+	}
 
-	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, "t", "m", rigNotifyOpts{}))
+	require.NoError(t, sendNotifyAllRigs(context.Background(), discardPrinter(), rigs, kc, "t", "m", rigNotifyOpts{}))
 
 	// Each topic path must be hit exactly once by its own rig.
 	for _, rig := range rigs {
@@ -294,7 +417,7 @@ func TestNotifyAllRigs_HMACCanonicalString(t *testing.T) {
 
 	// Capture a known timestamp by recording before/after the call.
 	before := strconv.FormatInt(time.Now().Unix(), 10)
-	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, titleStr, msgStr, rigNotifyOpts{}))
+	require.NoError(t, sendNotifyAllRigs(context.Background(), discardPrinter(), rigs, kc, titleStr, msgStr, rigNotifyOpts{}))
 	after := strconv.FormatInt(time.Now().Unix(), 10)
 
 	require.Len(t, received, 1)
@@ -340,9 +463,10 @@ func TestNotifyAllRigs_PriorityAndTagsHeaders(t *testing.T) {
 	defer func() { notifyCmdBaseURL = old }()
 
 	kc := newNotifyTestKeychain()
+	storeRigKey(t, kc, "opts-rig")
 	rigs := []config.RigConfig{{Name: "opts-rig", NtfyTopic: "topic-opts"}}
 
-	err := sendNotifyAllRigs(context.Background(), rigs, kc, "t", "m",
+	err := sendNotifyAllRigs(context.Background(), discardPrinter(), rigs, kc, "t", "m",
 		rigNotifyOpts{priority: "urgent", tags: "warning,skull"})
 	require.NoError(t, err)
 	require.Len(t, received, 1)
@@ -369,9 +493,10 @@ func TestNotifyAllRigs_NoOptionsOmitsHeaders(t *testing.T) {
 	defer func() { notifyCmdBaseURL = old }()
 
 	kc := newNotifyTestKeychain()
+	storeRigKey(t, kc, "plain-rig")
 	rigs := []config.RigConfig{{Name: "plain-rig", NtfyTopic: "topic-plain"}}
 
-	require.NoError(t, sendNotifyAllRigs(context.Background(), rigs, kc, "t", "m", rigNotifyOpts{}))
+	require.NoError(t, sendNotifyAllRigs(context.Background(), discardPrinter(), rigs, kc, "t", "m", rigNotifyOpts{}))
 	require.Len(t, received, 1)
 	assert.Empty(t, received[0].hdr.Get("X-Priority"), "unset --priority must not emit X-Priority")
 	assert.Empty(t, received[0].hdr.Get("X-Tags"), "unset --tag must not emit X-Tags")
@@ -398,9 +523,10 @@ func TestNotifyAllRigs_BaseURLFromOpts(t *testing.T) {
 	defer func() { notifyCmdBaseURL = old }()
 
 	kc := newNotifyTestKeychain()
+	storeRigKey(t, kc, "url-rig")
 	rigs := []config.RigConfig{{Name: "url-rig", NtfyTopic: "topic-url"}}
 
-	err := sendNotifyAllRigs(context.Background(), rigs, kc, "t", "m",
+	err := sendNotifyAllRigs(context.Background(), discardPrinter(), rigs, kc, "t", "m",
 		rigNotifyOpts{baseURL: srv.URL})
 	require.NoError(t, err)
 	assert.Equal(t, 1, hits, "POST must target the caller-resolved base URL, not localhost:2586")

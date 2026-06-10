@@ -25,8 +25,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/spf13/cobra"
 )
 
@@ -90,15 +92,8 @@ func newRotateAnthropicCmd() *cobra.Command {
 			// Rig-scoped migrated copies (enroll rig copies the v1 entry into
 			// fleet.RigService(name)) must be rotated too — otherwise the old,
 			// still-valid key survives under every rig service.
-			for _, rig := range cc.cfg.Rigs {
-				svc := fleet.RigService(rig.Name)
-				if _, getErr := deps.Keychain.Get(ctx, svc, "anthropic-api-key"); getErr != nil {
-					continue // never migrated for this rig — nothing to update
-				}
-				if setErr := deps.Keychain.Set(ctx, svc, "anthropic-api-key", newKey); setErr != nil {
-					return fmt.Errorf("rotate anthropic-key: update rig-scoped copy for %q: %w", rig.Name, setErr)
-				}
-				printerInfo(p, styleMuted.Render("Updated rig-scoped key copy: "+rig.Name))
+			if err := updateRigScopedAnthropicKeys(ctx, deps.Keychain, cc.cfg.Rigs, p, newKey); err != nil {
+				return err
 			}
 			printerInfo(p, styleSuccess.Render("New Anthropic key verified and stored in the keychain."))
 			printerInfo(p, styleMuted.Render("Now REVOKE the old key in the console tab that just opened."))
@@ -158,6 +153,24 @@ func newRotateNtfyCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// updateRigScopedAnthropicKeys writes newKey over every rig-scoped
+// anthropic-api-key copy that exists (created by enroll rig's keychain
+// migration). Rigs that were never migrated are skipped. Extracted for unit
+// testability with a mock keychain.
+func updateRigScopedAnthropicKeys(ctx context.Context, kc secrets.KeychainStore, rigs []config.RigConfig, p Printer, newKey string) error {
+	for _, rig := range rigs {
+		svc := fleet.RigService(rig.Name)
+		if _, getErr := kc.Get(ctx, svc, "anthropic-api-key"); getErr != nil {
+			continue // never migrated for this rig — nothing to update
+		}
+		if setErr := kc.Set(ctx, svc, "anthropic-api-key", newKey); setErr != nil {
+			return fmt.Errorf("rotate anthropic-key: update rig-scoped copy for %q: %w", rig.Name, setErr)
+		}
+		printerInfo(p, styleMuted.Render("Updated rig-scoped key copy: "+rig.Name))
+	}
+	return nil
 }
 
 // verifyAnthropicKey makes a 1-token ping to confirm the key authenticates.

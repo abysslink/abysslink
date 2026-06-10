@@ -96,13 +96,7 @@ func newUpCmd() *cobra.Command {
 				return fmt.Errorf("up: %w", planErr)
 			}
 
-			printPlanDetail(p, actions, findings, cc.dryRun, cc.explain)
-
-			// --json: emit one structured record per planned action so dry-run
-			// plans are scriptable (E1) — prose {"msg": …} lines are not.
-			if cc.jsonOut {
-				p.PrintJSON(buildPlanRecords(actions))
-			}
+			printUpPlan(p, actions, findings, cc)
 
 			// All fail-closed gates in one block to keep cyclomatic complexity low.
 			if !cc.dryRun {
@@ -118,14 +112,15 @@ func newUpCmd() *cobra.Command {
 			var applyErr error
 			if !cc.dryRun {
 				var aborted bool
-				applyFindings, aborted, applyErr = runUpApplyPhase(ctx, cmd, p, r, actions, cc)
+				var infraErr error
+				applyFindings, aborted, applyErr, infraErr = runUpApplyPhase(ctx, cmd, p, r, actions, cc)
 				if aborted {
 					// User explicitly declined ConfirmBlast — "Aborted." already
 					// printed inside the apply phase. Skip all further output.
 					return nil
 				}
-				if applyErr != nil && errors.As(applyErr, new(*exitError)) {
-					return applyErr
+				if infraErr != nil {
+					return infraErr
 				}
 			}
 
@@ -149,6 +144,50 @@ func newUpCmd() *cobra.Command {
 	cmd.Flags().Bool("accept-no-sshcheck", false,
 		"Acknowledge SSHCheck degradation on NetBird backend (persisted to abysslink.yaml — only required once)")
 	return cmd
+}
+
+// printUpPlan renders the human plan detail and, under --json, additionally
+// emits one structured record per planned action so dry-run plans are
+// scriptable (E1) — the prose {"msg": …} lines are not machine-parseable.
+func printUpPlan(p Printer, actions []modules.Action, findings []modules.Finding, cc *cmdContext) {
+	printPlanDetail(p, actions, findings, cc.dryRun, cc.explain)
+	if cc.jsonOut {
+		p.PrintJSON(buildPlanRecords(actions))
+	}
+}
+
+// runUpApplyPhase runs the post-gate apply phase: ConfirmBlast + ApplyAll
+// (runApply), deferred NetBird consent persistence (I1), the honest final
+// summary (U7), and the F-59 manual-step replay. Extracted from the RunE to
+// keep its gocyclo below the ceiling.
+//
+// Returns:
+//   - aborted: the user declined ConfirmBlast or quit the live table — the
+//     caller stops with no further output.
+//   - applyErr: a module apply failure; the caller still prints next steps and
+//     then surfaces it.
+//   - infraErr: a consent-persist or manual-step failure to return immediately.
+func runUpApplyPhase(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Runner, actions []modules.Action, cc *cmdContext) (findings []modules.Finding, aborted bool, applyErr error, infraErr error) {
+	findings, elapsed, aborted, applyErr := runApply(ctx, cmd, p, r, actions, cc)
+	if aborted {
+		return nil, true, nil, nil
+	}
+
+	// I1: persist the NetBird --accept-no-sshcheck consent only AFTER the
+	// user confirmed the blast prompt — never before.
+	if perr := persistNetbirdConsent(cmd, cc); perr != nil {
+		return findings, false, applyErr, perr
+	}
+
+	printFinalSummary(p, actions, findings, elapsed, applyErr)
+
+	// F-59: replay manual steps modules deferred during Apply. MUST run only
+	// after the live apply table is fully closed — this is the single
+	// terminal owner now. Not reached on the abort path (returned above).
+	if flushErr := flushManualSteps(ctx, cc, p); flushErr != nil {
+		return findings, false, applyErr, fmt.Errorf("up: manual steps: %w", flushErr)
+	}
+	return findings, false, applyErr, nil
 }
 
 // printUpHeader renders the `abysslink up` header box: a preview-only warning

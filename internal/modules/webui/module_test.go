@@ -20,6 +20,7 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -811,3 +812,125 @@ func TestDoctorFuncAdapterRendersFinding(t *testing.T) {
 
 // compile-time assertion that the module satisfies the Module interface.
 var _ modules.Module = (*Module)(nil)
+
+// TestApply_SurfacesBindErrorSynchronously is the W9 regression test: a bind
+// failure (port in use, TLS listen error, unresolvable tailnet IP) must be
+// returned from Apply itself — not slog'd from a goroutine while Apply
+// reports success.
+func TestApply_SurfacesBindErrorSynchronously(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.WebUI.Enabled = true
+	cfg.Backend.Type = "tailscale"
+
+	m := New(modules.Deps{Cfg: cfg})
+	bindErr := fmt.Errorf("webui: tls listen 100.64.0.7:8443: address already in use")
+	m.bind = func(_ context.Context) (net.Listener, *local.Client, error) {
+		return nil, nil, bindErr
+	}
+
+	err := m.Apply(context.Background())
+	require.Error(t, err, "Apply must fail when the listener cannot bind")
+	assert.ErrorIs(t, err, bindErr)
+
+	// A failed Apply must not leave the module in the "running" state: a
+	// retry must reach the bind seam again, not ErrAlreadyApplied.
+	err = m.Apply(context.Background())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrAlreadyApplied, "failed bind must not mark the server as running")
+}
+
+// TestApply_BindThenServe: with a successful synchronous bind, Apply returns
+// nil, a second Apply reports ErrAlreadyApplied, and Stop releases the
+// listener so Apply can run again.
+func TestApply_BindThenServe(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.WebUI.Enabled = true
+	cfg.Backend.Type = "tailscale"
+
+	m := New(modules.Deps{Cfg: cfg})
+	m.bind = func(_ context.Context) (net.Listener, *local.Client, error) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, nil, err
+		}
+		return ln, &local.Client{}, nil
+	}
+
+	require.NoError(t, m.Apply(context.Background()), "Apply must succeed when the bind succeeds")
+	assert.ErrorIs(t, m.Apply(context.Background()), ErrAlreadyApplied)
+
+	m.Stop()
+	m.Stop() // idempotent
+
+	require.NoError(t, m.Apply(context.Background()), "Apply must be restartable after Stop")
+	m.Stop()
+}
+
+// TestBindWebUIListener_PortInUse: the production bind path must return the
+// tls.Listen failure synchronously when the resolved address is occupied.
+func TestBindWebUIListener_PortInUse(t *testing.T) {
+	// Occupy an ephemeral loopback port.
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = occupied.Close() }()
+	_, portStr, err := net.SplitHostPort(occupied.Addr().String())
+	require.NoError(t, err)
+
+	cfg := config.Defaults()
+	cfg.WebUI.Enabled = true
+	cfg.Backend.Type = "tailscale"
+	cfg.WebUI.BindAddr = "127.0.0.1:" + portStr
+
+	var lc local.Client
+	_, err = bindWebUIListener(context.Background(), cfg, &lc, stubTailnetResolver{ip: "127.0.0.1"})
+	require.Error(t, err, "tls listen on an occupied port must fail synchronously")
+	assert.Contains(t, err.Error(), "tls listen")
+}
+
+// TestBindWebUIListener_FailClosedNoTailnetIP: an unresolvable tailnet IP must
+// be a synchronous error (never a wildcard bind, WEB-02).
+func TestBindWebUIListener_FailClosedNoTailnetIP(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.WebUI.Enabled = true
+	cfg.Backend.Type = "tailscale"
+
+	var lc local.Client
+	_, err := bindWebUIListener(context.Background(), cfg, &lc, stubTailnetResolver{ip: ""})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WEB-02")
+}
+
+// TestDynamicViewsCacheControlNoStore: every dynamically rendered view carries
+// `Cache-Control: no-store` — the HTML is live security-posture data (doctor
+// findings, audit trail) that must never be cached by a browser or proxy.
+func TestDynamicViewsCacheControlNoStore(t *testing.T) {
+	h := newTestHandlers(t)
+	routes := []struct {
+		name    string
+		handler http.HandlerFunc
+		path    string
+	}{
+		{"status", h.handleRoot, "/"},
+		{"status-fragment", h.handleStatusFragment, "/status-fragment"},
+		{"doctor", h.handleDoctor, "/doctor"},
+		{"audit", h.handleAudit, "/audit"},
+		{"notify", h.handleNotify, "/notify"},
+	}
+	for _, rt := range routes {
+		t.Run(rt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, rt.path, nil)
+			req.RemoteAddr = "100.64.0.5:40000"
+			rec := httptest.NewRecorder()
+			rt.handler(rec, req)
+			assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"),
+				"%s view must not be cacheable", rt.name)
+		})
+	}
+
+	// The error path must not be cacheable either.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "100.64.0.5:40000"
+	rec := httptest.NewRecorder()
+	h.renderError(rec, req, http.StatusNotFound, "Not found", "no such page")
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+}

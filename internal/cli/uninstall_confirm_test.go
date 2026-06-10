@@ -28,10 +28,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUninstallConfirmSeq_NonMatchingPhrase asserts that when the user types
-// a non-matching phrase the confirm sequence returns (false, false, nil) and
-// audit.Reverse should NOT be called.
-func TestUninstallConfirmSeq_NonMatchingPhrase(t *testing.T) {
+// TestUninstallConfirmSeq_NonInteractiveErrors asserts that a non-interactive
+// invocation (no TTY, no --yes) aborts with errMissingInput so the process
+// exits NON-ZERO — a piped/CI `uninstall --apply` must be able to tell the
+// operation did not happen (U8: non-interactive aborts must not exit 0).
+func TestUninstallConfirmSeq_NonInteractiveErrors(t *testing.T) {
 	ctx := context.Background()
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
@@ -40,11 +41,11 @@ func TestUninstallConfirmSeq_NonMatchingPhrase(t *testing.T) {
 		{Action: "restore", Target: "/tmp/test-file"},
 	}
 
-	// With a non-matching typed input (empty in non-TTY context), the confirm
-	// must return (ok=false, purgeOK=false, nil).
+	// Tests run without a TTY, so this exercises the non-interactive branch.
 	ok, purgeOK, err := uninstallConfirmSeq(ctx, p, plan, false, false)
-	require.NoError(t, err)
-	assert.False(t, ok, "non-matching phrase must return ok=false")
+	require.Error(t, err, "non-interactive without --yes must return an error (exit non-zero)")
+	assert.Contains(t, err.Error(), "--yes", "the error must name the flag that supplies the missing input")
+	assert.False(t, ok, "ok must be false when aborting")
 	assert.False(t, purgeOK, "purgeOK must be false when ok=false")
 }
 
@@ -155,9 +156,10 @@ func TestUninstallCmd_ContainsTypedConfirmCall(t *testing.T) {
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
 
-	// Non-TTY + no --yes → ok=false → Reverse should not be called.
+	// Non-TTY + no --yes → errMissingInput → Reverse must not be called and the
+	// command exits non-zero (U8).
 	ok, _, err := uninstallConfirmSeq(ctx, p, nil, false, false)
-	require.NoError(t, err)
+	require.Error(t, err, "non-interactive uninstall without --yes must error")
 	assert.False(t, ok, "non-interactive uninstall without --yes must not proceed")
 }
 

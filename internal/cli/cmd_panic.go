@@ -274,7 +274,14 @@ func destroyLocalAPIKeyWithStep(ctx context.Context, cc *cmdContext, p Printer, 
 			errPanicStepFailed{"keychain unavailable — key NOT destroyed; revoke it in the Anthropic console (see manual steps)"})
 		return
 	}
-	if err := deps.Keychain.Delete(ctx, "abysslink", "anthropic-api-key"); err != nil {
+	destroyAPIKeysFromKeychain(ctx, deps.Keychain, cc.cfg.Rigs, p, logPanic)
+}
+
+// destroyAPIKeysFromKeychain deletes the v1 Anthropic API key AND every
+// rig-scoped migrated copy. Extracted from destroyLocalAPIKeyWithStep so the
+// rig-iteration logic is unit-testable with a mock keychain.
+func destroyAPIKeysFromKeychain(ctx context.Context, kc secrets.KeychainStore, rigs []config.RigConfig, p Printer, logPanic func(string)) {
+	if err := kc.Delete(ctx, "abysslink", "anthropic-api-key"); err != nil {
 		panicStep(p, "destroy local API key", errPanicStepFailed{err.Error()})
 	} else {
 		panicStep(p, "deleted local Anthropic API key from keychain", nil)
@@ -283,9 +290,9 @@ func destroyLocalAPIKeyWithStep(ctx context.Context, cc *cmdContext, p Printer, 
 
 	// Rig-scoped migrated copies (enroll rig --apply copies the v1 entries into
 	// fleet.RigService(name) — those must die with the kill switch too).
-	for _, rig := range cc.cfg.Rigs {
+	for _, rig := range rigs {
 		svc := fleet.RigService(rig.Name)
-		if delErr := deps.Keychain.Delete(ctx, svc, "anthropic-api-key"); delErr != nil {
+		if delErr := kc.Delete(ctx, svc, "anthropic-api-key"); delErr != nil {
 			if errors.Is(delErr, secrets.ErrNotFound) {
 				continue // never migrated — nothing to destroy
 			}

@@ -144,11 +144,13 @@ func (s *counterFailStore) wasDeleteCalledFor(service, account string) bool {
 	return s.deleteCalledFor[service+"\x00"+account]
 }
 
-// TestAppend_IncrementCounterFailure_DeletesCounterKey is the AUD-02 RED test:
+// TestAppend_IncrementCounterFailure_KeepsCounterKey covers the R2-I2 fix:
 // when IncrementCounter fails (Set on the counter key returns an error), Append
-// must DELETE the counter key so the next ReadCounter returns found=false and
-// verifyCounter reports CounterStatus="unknown" instead of "mismatch".
-func TestAppend_IncrementCounterFailure_DeletesCounterKey(t *testing.T) {
+// must succeed (fail-soft) but must NOT delete the counter key — deleting it
+// handed an attacker who can wedge keychain writes a way to erase the
+// tail-truncation signal. The stale (lagging) counter degrades honestly to
+// CounterStatus="unknown" on the next Verify, never to a false "mismatch".
+func TestAppend_IncrementCounterFailure_KeepsCounterKey(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")
 	kc := newCounterFailStore(t)
@@ -157,13 +159,20 @@ func TestAppend_IncrementCounterFailure_DeletesCounterKey(t *testing.T) {
 	require.NoError(t, err)
 
 	// Append should succeed despite the counter-increment failure (fail-soft
-	// contract: only WriteAnchor is fatal).
+	// contract: only the anchor write is fatal).
 	ctx := context.Background()
 	appendErr := sa.Append(ctx, SignInput{Title: "write", DiffHash: sha256.Sum256([]byte("x"))}, "/etc/a", false)
 	require.NoError(t, appendErr, "Append must succeed even when IncrementCounter fails")
 
-	// AUD-02 fix: the counter key must have been deleted so the next Verify
-	// reports CounterStatus="unknown" (found=false), not "mismatch".
-	assert.True(t, kc.wasDeleteCalledFor(counterKeyService, counterKeyAccount),
-		"Append must delete the counter key when IncrementCounter fails to prevent a false mismatch")
+	// R2-I2: the counter key must NOT be deleted on a transient Set failure.
+	assert.False(t, kc.wasDeleteCalledFor(counterKeyService, counterKeyAccount),
+		"Append must NOT delete the counter key when IncrementCounter fails (attacker-erasable truncation signal)")
+
+	// The lagging/absent counter degrades to "unknown", never "mismatch".
+	res, verr := Verify(ctx, logPath, kc)
+	require.NoError(t, verr)
+	assert.True(t, res.OK, "chain must verify")
+	assert.Equal(t, "unknown", res.CounterStatus,
+		"counter-increment failure must degrade to unknown, not a false mismatch")
+	assert.False(t, res.TruncationDetected)
 }

@@ -558,6 +558,13 @@ func (a *SignedAudit) WriteFilePath(ctx context.Context, src, dst string, perm o
 	if err != nil {
 		return fmt.Errorf("audit: WriteFilePath open src %s: %w", src, err)
 	}
+	// Fast-fail on an obviously oversized src before staging anything to disk;
+	// the N+1 sentinel below remains the authoritative check (a src can grow
+	// between this Stat and the copy).
+	if sfi, serr := srcFile.Stat(); serr == nil && sfi.Size() > writeFilePathCeiling {
+		_ = srcFile.Close()
+		return fmt.Errorf("audit: WriteFilePath: src %s exceeds 256 MiB ceiling", src)
+	}
 	tmpFile, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.abysslink.tmp")
 	if err != nil {
 		_ = srcFile.Close()

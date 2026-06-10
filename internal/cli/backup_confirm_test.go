@@ -117,12 +117,15 @@ func TestBackupRestoreDeclined_FileUnchanged(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte(origContent), 0o600))
 	require.NoError(t, os.WriteFile(backup, []byte(backupContent), 0o600))
 
-	// Direct call to confirmRestore which should return false in non-TTY context.
+	// Direct call to confirmRestore: in a non-TTY context it must decline AND
+	// surface errMissingInput so the command exits non-zero (U8 — a piped/CI
+	// restore must be able to tell the operation did not happen).
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
 
 	ok, err := confirmRestore(context.Background(), p, target, backup, "20260101T000000.000000000Z", false /*yes*/)
-	require.NoError(t, err)
+	require.Error(t, err, "non-interactive without --yes must return errMissingInput")
+	assert.Contains(t, err.Error(), "--yes", "the error must name the flag that supplies the missing input")
 	assert.False(t, ok, "non-interactive without --yes must decline and return false")
 
 	// File must be unchanged.

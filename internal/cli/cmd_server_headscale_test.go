@@ -54,7 +54,7 @@ func TestServerHeadscaleInitTLSGateRejects(t *testing.T) {
 
 	cc := &cmdContext{cfg: cfg, runner: mr, dryRun: false, apply: true}
 
-	err := headscaleInitRunE(context.Background(), cfg, cc, mr)
+	err := headscaleInitRunE(context.Background(), cfg, cc, mr, NewHumanPrinterTo(&strings.Builder{}, &strings.Builder{}))
 	require.Error(t, err, "init must return error when TLS cert is missing")
 	assert.Contains(t, strings.ToLower(err.Error()), "tls", "error must mention tls gate")
 	// Verify no runner calls were made (no download started).
@@ -72,7 +72,7 @@ func TestServerHeadscaleInitTLSGateRejectsACMEMissingHostname(t *testing.T) {
 
 	cc := &cmdContext{cfg: cfg, runner: mr, dryRun: false, apply: true}
 
-	err := headscaleInitRunE(context.Background(), cfg, cc, mr)
+	err := headscaleInitRunE(context.Background(), cfg, cc, mr, NewHumanPrinterTo(&strings.Builder{}, &strings.Builder{}))
 	require.Error(t, err, "init must return error when ACME hostname is empty")
 	assert.Contains(t, strings.ToLower(err.Error()), "tls", "error must mention tls")
 	assert.True(t, mr.Done(), "runner must not be called before TLS gate rejects")
@@ -94,7 +94,7 @@ func TestServerHeadscaleInitDryRunMutatesNothing(t *testing.T) {
 	// 1. Call ValidateHeadscaleTLS (TLS gate — ACME+hostname passes)
 	// 2. Log the plan
 	// 3. Return nil without any runner calls (no download)
-	err := headscaleInitRunE(context.Background(), cfg, cc, mr)
+	err := headscaleInitRunE(context.Background(), cfg, cc, mr, NewHumanPrinterTo(&strings.Builder{}, &strings.Builder{}))
 	require.NoError(t, err, "init --dry-run must succeed with valid TLS config")
 	// No runner calls should have been made for downloads/binary writes.
 	assert.True(t, mr.Done(), "dry-run must not invoke runner for mutations")
@@ -117,7 +117,7 @@ func TestServerHeadscaleUpgradeRefusesDowngrade(t *testing.T) {
 		runner: mr,
 		apply:  true,
 		dryRun: false,
-	}, mr, "v0.25.0")
+	}, mr, "v0.25.0", NewHumanPrinterTo(&strings.Builder{}, &strings.Builder{}))
 
 	require.Error(t, err, "upgrade must refuse downgrade")
 	assert.Contains(t, strings.ToLower(err.Error()), "downgrade",

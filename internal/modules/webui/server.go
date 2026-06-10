@@ -175,6 +175,10 @@ func WithDoctorProvider(fn DoctorFunc) Option {
 	return func(o *serverOptions) { o.doctor = fn }
 }
 
+// StartWebUIServer binds the TLS listener (bindWebUIListener, WEB-02/WEB-03)
+// and serves the dashboard (serveWebUI) until ctx is cancelled. See the
+// package-level documentation above for the middleware chain, the nil-ring
+// behavior, and the provider options.
 func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingBuffer, opts ...Option) error {
 	var lc local.Client // zero value uses the platform-default tailscaled socket
 	ln, err := bindWebUIListener(ctx, cfg, &lc, localTailnetResolver{lc: &lc})
@@ -267,7 +271,7 @@ func serveWebUI(ctx context.Context, cfg *config.Config, lc *local.Client, ln ne
 	handlers.Register(mux)
 	webHandler := buildWebHandler(mux)
 	readOnly := readOnlyMiddleware(&cfg.WebUI, webHandler)
-	outer := whoIsMiddleware(&lc, readOnly)
+	outer := whoIsMiddleware(lc, readOnly)
 
 	srv := &http.Server{
 		Handler:           outer,

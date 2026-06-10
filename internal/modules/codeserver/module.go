@@ -384,10 +384,10 @@ func verifyArgon2id(phc, pw string) bool {
 		return false
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil || len(want) == 0 {
-		return false
+	if err != nil || len(want) == 0 || len(want) > 1024 {
+		return false // bound the key length so the int→uint32 conversion is safe
 	}
-	got := argon2.IDKey([]byte(pw), salt, time, mem, threads, uint32(len(want)))
+	got := argon2.IDKey([]byte(pw), salt, time, mem, threads, uint32(len(want))) // #nosec G115 -- len(want) bounded to <=1024 above
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 

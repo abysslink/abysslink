@@ -61,6 +61,12 @@ func TestNewSigned_AutoGeneratesKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, sa)
 
+	// R2-12 lazy creation: the key is generated on the FIRST MUTATING append,
+	// not at construction (read paths must never write to the keychain).
+	require.NoError(t, sa.Append(context.Background(), audit.SignInput{
+		Title: "write", DiffHash: sha256.Sum256([]byte("x")),
+	}, "/etc/a", false))
+
 	// Key should now exist and be a 32-byte hex value.
 	hexKey, gerr := kc.Get(context.Background(), "abysslink", testHMACAccount)
 	require.NoError(t, gerr)

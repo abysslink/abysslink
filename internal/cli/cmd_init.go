@@ -834,8 +834,12 @@ func initHostnameFromFlags(cmd *cobra.Command) string {
 	return h
 }
 
-// runInitForm runs the interactive questionnaire and returns the resulting Config.
-func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
+// initFormPrefill builds the initFormResult defaults: module toggles, email
+// from --email/ABYSSLINK_EMAIL, and the hostname pre-fill sanitized to the
+// lowercase DNS-safe set config.Load enforces — never a default the loader
+// rejects (C1). Under autoYes it applies the headless fail-fast guards (C2):
+// no config that config.Load would reject is ever produced.
+func initFormPrefill(cmd *cobra.Command, autoYes bool) (initFormResult, error) {
 	r := initFormResult{
 		enableSSH:   true,
 		enableTmux:  true,
@@ -845,8 +849,6 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 		backendType: "tailscale", // default — changed to "headscale" or "netbird" when user selects it
 	}
 	r.email = initEmailFromFlags(cmd)
-	// Pre-fill from the OS hostname, sanitized to the lowercase DNS-safe set
-	// config.Load enforces — never offer a default the loader rejects (C1).
 	if h := initHostnameFromFlags(cmd); h != "" {
 		r.hostname = sanitizeHostname(h)
 	} else {
@@ -854,18 +856,25 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 		r.hostname = sanitizeHostname(osHost)
 	}
 
-	// Headless (--yes) fail-fast guards (C1/C2): never proceed toward writing
-	// a config that config.Load would reject.
 	if autoYes {
 		if r.email == "" {
-			return nil, fmt.Errorf("init --yes: an account email is required in non-interactive mode — pass --email <addr> or set ABYSSLINK_EMAIL (a config without identity.email cannot be loaded)")
+			return r, fmt.Errorf("init --yes: an account email is required in non-interactive mode — pass --email <addr> or set ABYSSLINK_EMAIL (a config without identity.email cannot be loaded)")
 		}
 		if err := validateInitHostname(r.hostname); err != nil {
-			return nil, fmt.Errorf("init --yes: cannot derive a valid rig hostname from the OS (%v) — pass --hostname <name>", err)
+			return r, fmt.Errorf("init --yes: cannot derive a valid rig hostname from the OS (%v) — pass --hostname <name>", err)
 		}
 	}
 	if r.email != "" && !strings.Contains(r.email, "@") {
-		return nil, fmt.Errorf("init: email %q is not a valid email address", r.email)
+		return r, fmt.Errorf("init: email %q is not a valid email address", r.email)
+	}
+	return r, nil
+}
+
+// runInitForm runs the interactive questionnaire and returns the resulting Config.
+func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
+	r, err := initFormPrefill(cmd, autoYes)
+	if err != nil {
+		return nil, err
 	}
 
 	if !autoYes {

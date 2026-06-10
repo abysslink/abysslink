@@ -19,7 +19,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -155,28 +154,6 @@ func TestIncrementCounter_Existing(t *testing.T) {
 
 // ─── AUD-02: Append anchor-every-entry / anchor-fail-aborts / Verify tri-state ─
 
-// errAfterNStore wraps MockStore and makes kc.Get fail after N successful calls.
-// Used to simulate a keychain becoming unavailable after SignedAudit construction.
-type errAfterNStore struct {
-	inner    *secrets.MockStore
-	limit    int
-	getCalls int
-}
-
-func (e *errAfterNStore) Set(ctx context.Context, service, account, secret string) error {
-	return e.inner.Set(ctx, service, account, secret)
-}
-func (e *errAfterNStore) Get(ctx context.Context, service, account string) (string, error) {
-	e.getCalls++
-	if e.getCalls > e.limit {
-		return "", fmt.Errorf("keychain unavailable (simulated)")
-	}
-	return e.inner.Get(ctx, service, account)
-}
-func (e *errAfterNStore) Delete(ctx context.Context, service, account string) error {
-	return e.inner.Delete(ctx, service, account)
-}
-
 // TestAppend_AnchorEveryEntry: WriteAnchor is called after EVERY Append call
 // (not every 100). After two Appends the anchor file must exist and record
 // entry_count=2.
@@ -210,22 +187,32 @@ func TestAppend_AnchorEveryEntry(t *testing.T) {
 	assert.Equal(t, int64(2), a2.EntryCount, "anchor entry_count must be 2 after second Append")
 }
 
-// TestAppend_FailsOnAnchorWriteError: when WriteAnchor fails (keychain becomes
-// unavailable after construction), Append must return an error containing
-// "anchor write failed (mutation aborted)" and WriteFile must NOT write the
-// physical file.
+// TestAppend_FailsOnAnchorWriteError: when the anchor cannot be written, the
+// mutation must abort — WriteFile returns an error containing "anchor write
+// failed (mutation aborted)" and must NOT write the physical file.
+//
+// Since R2-12 the HMAC key is cached in memory, so a keychain outage can no
+// longer fail the anchor write; the failure is modelled at the filesystem
+// level instead (the log directory becomes unwritable, so the anchor's temp
+// file cannot be created — appends to the EXISTING log file still succeed).
 func TestAppend_FailsOnAnchorWriteError(t *testing.T) {
 	dir := t.TempDir()
-	inner := seededStore(t)
-	// Allow exactly 2 Get calls: one for NewSigned (key existence check) and
-	// one for Append's hmacKey call. The third Get (inside WriteAnchor's
-	// fetchHMACKey) will fail, triggering anchor write failure.
-	kc := &errAfterNStore{inner: inner, limit: 2}
-	logPath := filepath.Join(dir, "audit.log")
+	logDir := filepath.Join(dir, "state")
+	require.NoError(t, os.Mkdir(logDir, 0o700))
+	kc := seededStore(t)
+	logPath := filepath.Join(logDir, "audit.log")
 	sa, err := audit.NewSigned(logPath, kc)
 	require.NoError(t, err)
 
-	targetFile := filepath.Join(dir, "target.txt")
+	// Prime: one successful append creates the log, the lock file and the anchor.
+	writeSomeEntries(t, sa, 1)
+
+	// Make the log directory unwritable: the next anchor refresh cannot create
+	// its temp file, while the JSONL append (existing 0600 file) still works.
+	require.NoError(t, os.Chmod(logDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(logDir, 0o700) })
+
+	targetFile := filepath.Join(dir, "target.txt") // separate, writable dir
 	werr := sa.WriteFile(targetFile, []byte("content"), 0o600, false)
 	require.Error(t, werr, "WriteFile must fail when anchor write fails")
 	assert.Contains(t, werr.Error(), "anchor write failed (mutation aborted)")

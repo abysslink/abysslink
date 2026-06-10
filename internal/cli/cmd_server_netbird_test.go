@@ -131,7 +131,7 @@ func TestServerNetBirdInitDryRun(t *testing.T) {
 	_ = p
 	cc := &cmdContext{cfg: cfg, runner: runner, dryRun: true, apply: false}
 
-	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "")
+	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "", NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{}))
 	require.NoError(t, err)
 }
 
@@ -148,7 +148,7 @@ func TestServerNetBirdInitLinuxMissingBinaryPath(t *testing.T) {
 	runner := shell.NewMockRunner()
 	cc := &cmdContext{cfg: cfg, runner: runner, dryRun: false, apply: true}
 
-	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "")
+	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "", NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{}))
 	require.Error(t, err)
 	errMsg := err.Error()
 	assert.Contains(t, errMsg, "--binary-path required on Linux")
@@ -172,7 +172,7 @@ func TestServerNetBirdInitLinuxVersionBelowFloor(t *testing.T) {
 	)
 	cc := &cmdContext{cfg: cfg, runner: runner, dryRun: false, apply: true}
 
-	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "/path/to/old-netbird-server")
+	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "/path/to/old-netbird-server", NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{}))
 	require.Error(t, err)
 	errMsg := err.Error()
 	assert.Contains(t, errMsg, "below minimum floor")
@@ -268,6 +268,8 @@ func TestServerNetBirdStatusSSHCheckWarn(t *testing.T) {
 		)
 	} else {
 		runner = shell.NewMockRunner(
+			// docker info (detectContainerRuntime — no longer hardcoded docker)
+			shell.Call{Result: shell.Result{Stdout: "", ExitCode: 0}},
 			// docker ps
 			shell.Call{Result: shell.Result{Stdout: "", ExitCode: 0}},
 		)
