@@ -83,6 +83,10 @@ func (h *hostnameDispatchRunner) RunWithEnv(_ context.Context, _ map[string]stri
 	return h.Run(context.Background(), "", args...)
 }
 
+func (h *hostnameDispatchRunner) RunStream(_ context.Context, _ string, _ ...string) (*shell.Stream, error) {
+	return nil, errors.New("runstream: not supported by this fake")
+}
+
 // TestFanOut_UnreachableContinues verifies SC-2: one offline rig does not abort
 // the others. The command returns 3 results with rig[1] UNREACHABLE, but no error.
 func TestFanOut_UnreachableContinues(t *testing.T) {
@@ -149,6 +153,10 @@ func (b *blockingRunner) RunInteractive(ctx context.Context, _ string, _ ...stri
 
 func (b *blockingRunner) RunWithEnv(ctx context.Context, _ map[string]string, name string, args ...string) (shell.Result, error) {
 	return b.Run(ctx, name, args...)
+}
+
+func (b *blockingRunner) RunStream(_ context.Context, _ string, _ ...string) (*shell.Stream, error) {
+	return nil, errors.New("runstream: not supported by this fake")
 }
 
 // TestFanOut_PerRigTimeout verifies that a blocking rig is cancelled by the

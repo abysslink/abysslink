@@ -47,4 +47,9 @@ type Runner interface {
 	// tools that need environment overrides (e.g. GIT_TERMINAL_PROMPT=0) to
 	// prevent interactive credential prompts.
 	RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (Result, error)
+	// RunStream executes name with args and returns a Stream handle over the
+	// process's stdout, one bounded line at a time. Use this for long-lived
+	// line-oriented protocols such as tmux control mode. The returned Stream
+	// is one process lifetime; callers own reconnect (D-34).
+	RunStream(ctx context.Context, name string, args ...string) (*Stream, error)
 }

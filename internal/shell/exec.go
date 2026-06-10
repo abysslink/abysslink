@@ -176,3 +176,13 @@ func LookPath(binary string) bool {
 	_, err := exec.LookPath(binary)
 	return err == nil
 }
+
+// ResolvePath resolves name to an absolute binary path via exec.LookPath.
+// It is a package-level function, not a Runner method, because it is a
+// filesystem probe rather than a subprocess execution. It exists so that
+// internal/gate (plan 27-04) can resolve binary paths for the D-39 closure
+// hash without importing os/exec — the CLAUDE.md hard rule reserves os/exec
+// for internal/shell alone.
+func ResolvePath(name string) (string, error) {
+	return exec.LookPath(name)
+}

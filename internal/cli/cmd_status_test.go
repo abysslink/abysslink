@@ -72,6 +72,10 @@ func (h *statusHostnameRunner) RunWithEnv(_ context.Context, _ map[string]string
 	return h.Run(context.Background(), "", args...)
 }
 
+func (h *statusHostnameRunner) RunStream(_ context.Context, _ string, _ ...string) (*shell.Stream, error) {
+	return nil, errors.New("runstream: not supported by this fake")
+}
+
 // onlineStatusJSON returns the JSON that a real `abysslink status --json` would
 // emit for an online rig.
 func onlineStatusJSON(t *testing.T, rigName string) string {
