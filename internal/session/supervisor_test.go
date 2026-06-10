@@ -75,6 +75,21 @@ func (s *sleepRecorder) sleep(_ context.Context, d time.Duration) {
 	}
 }
 
+// stepClock returns an injected clock advancing one second per read, so the
+// WR-03 attach-lifetime check sees every mock attach as durable
+// (>= backoffBase) and the supervisor re-attaches without sleeping —
+// restart tests stay instant.
+func stepClock() func() time.Time {
+	var mu sync.Mutex
+	t0 := time.Unix(1700000000, 0)
+	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		t0 = t0.Add(time.Second)
+		return t0
+	}
+}
+
 func (s *sleepRecorder) recorded() ([]time.Duration, []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -223,6 +238,7 @@ func TestSupervisorRestartEpochBumpAndDebounce(t *testing.T) {
 	m.AddStream(loadFixture(t, "attach-basic.transcript"))
 
 	r := New(m, config.Defaults())
+	r.now = stepClock() // WR-03: mock attaches must count as durable
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r.sleep = func(ctx context.Context, _ time.Duration) { <-ctx.Done() }
@@ -272,6 +288,7 @@ func TestSupervisorBackoffResetAfterSuccess(t *testing.T) {
 	m.AddStream(writeTranscript(t, "<< %begin 1700000000 1 0\n<< %end 1700000000 1 0\n"))
 
 	r := New(m, config.Defaults())
+	r.now = stepClock() // WR-03: mock attaches must count as durable
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rec := &sleepRecorder{cancelAfter: 2, cancel: cancel, r: r}
@@ -378,6 +395,7 @@ func TestRestartLostEmission(t *testing.T) {
 	m.AddStream(loadFixture(t, "attach-basic.transcript"))
 
 	r := New(m, config.Defaults())
+	r.now = stepClock() // WR-03: mock attaches must count as durable
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r.sleep = func(ctx context.Context, _ time.Duration) { <-ctx.Done() }
@@ -424,6 +442,7 @@ func TestRestartLostCleanRestartSilent(t *testing.T) {
 	m.AddStream(loadFixture(t, "attach-basic.transcript"))
 
 	r := New(m, config.Defaults())
+	r.now = stepClock() // WR-03: mock attaches must count as durable
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r.sleep = func(ctx context.Context, _ time.Duration) { <-ctx.Done() }
@@ -620,4 +639,46 @@ func TestSupervisorBackoffCap(t *testing.T) {
 		16 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second,
 	}
 	assert.Equal(t, want, durations, "exponential backoff must cap at 30s (T-27-11)")
+}
+
+// TestSupervisorGreetingThenInstantExitBacksOff (WR-03): a server that emits
+// the %begin greeting then immediately dies (crash-looping tmux under a
+// process supervisor, scripted kill-server) must still back off — a proven
+// attach that does not outlive backoffBase keeps doubling the delay instead
+// of spinning sleeplessly through gate→attach→poll cycles (T-27-11).
+func TestSupervisorGreetingThenInstantExitBacksOff(t *testing.T) {
+	paneA := paneLine("$1", "@1", "%1", "0", "1", "1", "zsh", "work", "editor") + "\n"
+	m := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate 1
+		shell.Call{Result: shell.Result{Stdout: paneA}},         // poll 1
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate 2
+		shell.Call{Result: shell.Result{Stdout: paneA}},         // poll 2
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate 3
+		shell.Call{Result: shell.Result{Stdout: paneA}},         // poll 3
+	)
+	for range 3 {
+		m.AddStream(writeTranscript(t,
+			"<< %begin 1700000000 1 0\n<< %end 1700000000 1 0\n<< %exit\n"))
+	}
+
+	r := New(m, config.Defaults())
+	// Fixed clock: every proven attach appears to die instantly (< backoffBase).
+	fixed := time.Unix(1700000000, 0)
+	r.now = func() time.Time { return fixed }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &sleepRecorder{cancelAfter: 3, cancel: cancel, r: r}
+	r.sleep = rec.sleep
+
+	done := runSupervisor(ctx, r)
+	waitDone(t, done)
+
+	durations, statuses := rec.recorded()
+	require.Len(t, durations, 3, "supervisor must sleep once per instantly-dead proven attach")
+	assert.Equal(t, []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}, durations,
+		"backoff must double when a proven attach dies before outliving backoffBase (WR-03)")
+	for i, st := range statuses {
+		assert.Equal(t, StatusUnavailable, st,
+			"status at sleep %d must be honest (not a stale 'ok') once the attach is over (D-26)", i)
+	}
 }

@@ -64,6 +64,10 @@ func (r *Registry) Run(ctx context.Context) error {
 	// first-ever attach: nothing can have been lost) from "a previous epoch
 	// existed" (a restart that may have killed needs_input panes — D-29).
 	baselined := false
+	// degraded gates transition-edge logging for the steady no-server state:
+	// the first failed attach warns, repeats demote to Debug so an idle rig
+	// without tmux does not Warn every backoff cycle forever (IN-04).
+	degraded := false
 	for ctx.Err() == nil {
 		if !r.versionGate(ctx) {
 			r.sleep(ctx, backoff)
@@ -102,16 +106,33 @@ func (r *Registry) Run(ctx context.Context) error {
 		// backoff, set StatusUnavailable, never touch epoch or pane state.
 		if !r.awaitAttach(ctx, stream, p) {
 			exitErr := stream.Close()
-			slog.Warn("session: attach exited before greeting — no server?", "err", exitErr)
+			// Daemon shutdown racing an attach is not a tmux failure: skip
+			// the spurious "no server?" warn and status downgrade (IN-03);
+			// the loop condition exits.
+			if ctx.Err() != nil {
+				continue
+			}
+			if degraded {
+				slog.Debug("session: attach exited before greeting — still no server", "err", exitErr)
+			} else {
+				slog.Warn("session: attach exited before greeting — no server?", "err", exitErr)
+				degraded = true
+			}
 			r.setStatus(StatusUnavailable)
 			r.sleep(ctx, backoff)
 			backoff = min(backoff*2, backoffMax)
 			continue
 		}
 
-		// Attach is PROVEN: the greeting was observed. Only now reset
-		// backoff and perform success bookkeeping.
-		backoff = backoffBase
+		// Attach is PROVEN: the greeting was observed. Note: backoff is NOT
+		// reset here — only after the attach proves durable (see the
+		// lifetime check after consume returns) so a server that greets and
+		// instantly dies still backs off (WR-03, T-27-11).
+		attachedAt := r.now()
+		if degraded {
+			slog.Info("session: tmux server available — control-mode attach proven")
+			degraded = false
+		}
 		// D-29: capture the pre-disconnect needs_input set BEFORE the epoch
 		// bump — these panes died with the old server and keep their
 		// last-known identity and OLD epoch on the emitted transitions.
@@ -145,6 +166,21 @@ func (r *Registry) Run(ctx context.Context) error {
 		<-hdone
 		if cerr := stream.Close(); cerr != nil {
 			slog.Debug("session: control stream closed", "err", cerr)
+		}
+		// The attach is over: stop advertising "ok" while the next attach
+		// attempt is in flight — awaitAttach has no timeout, so a stale "ok"
+		// could otherwise persist indefinitely (IN-04, D-26 honesty).
+		r.setStatus(StatusUnavailable)
+		// WR-03: reset backoff only when the attach outlived the base delay.
+		// A server that emits the greeting then immediately dies (crash-loop
+		// under a process supervisor, scripted kill-server) must keep backing
+		// off — otherwise each cycle spawns two processes, bumps the epoch,
+		// and re-emits RestartLost sleeplessly (T-27-11).
+		if r.now().Sub(attachedAt) >= backoffBase {
+			backoff = backoffBase
+		} else {
+			r.sleep(ctx, backoff)
+			backoff = min(backoff*2, backoffMax)
 		}
 	}
 	return nil
