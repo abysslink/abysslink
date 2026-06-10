@@ -59,7 +59,11 @@ type Module interface {
 	// Deps returns the module names this module depends on (must be applied first).
 	Deps() []string
 	// Detect inspects the current system state and returns findings.
-	// All findings are returned, even if the module is disabled.
+	// Most modules return nil findings when they are disabled in config
+	// (doctor reports only what the user opted into); modules whose checks
+	// are not gated by their own config section (e.g. claudecode's keychain
+	// probe, lock's tailnet-wide state) may still emit findings while
+	// disabled. Detect must never mutate system state either way.
 	Detect(ctx context.Context) ([]Finding, error)
 	// Plan computes the actions needed to reach the desired state.
 	// If the module is disabled, Plan returns an empty slice.

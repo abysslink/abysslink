@@ -109,11 +109,17 @@ func (m *Module) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
 	}}, nil
 }
 
-// Apply applies the Landlock profile on Linux. On platforms without Landlock
-// support it logs a WARN and returns nil (graceful skip, F-61) — the gate runs
-// BEFORE applyLandlockProfile, whose non-Linux stub still returns
-// ErrNotSupported for callers that bypass the gate.
+// Apply applies the Landlock profile on Linux. It is a no-op when the module
+// is disabled in config — Runner.ApplyAll invokes Apply on every module, so an
+// ungated Apply would run even when the user disabled the sandbox (C2). On
+// platforms without Landlock support it logs a WARN and returns nil (graceful
+// skip, F-61) — the gate runs BEFORE applyLandlockProfile, whose non-Linux stub
+// still returns ErrNotSupported for callers that bypass the gate.
 func (m *Module) Apply(ctx context.Context) error {
+	if !m.cfg.Modules.Sandbox.Enabled {
+		slog.Debug("sandbox module disabled, skipping apply")
+		return nil
+	}
 	if !isLandlockSupported() {
 		slog.Warn("sandbox apply skipped (Landlock not supported on this platform)")
 		return nil
