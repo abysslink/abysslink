@@ -16,7 +16,9 @@
 package notify
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +34,7 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 )
@@ -337,6 +340,95 @@ func (m *Module) SendWithOptions(ctx context.Context, title, body string, opts S
 
 	// Fall back to direct ntfy POST (always used when options are present).
 	return m.SendDirectWithOptions(ctx, title, body, opts)
+}
+
+// errDaemonUnreachable marks the daemon-socket transport failure that triggers
+// the validated direct-render fallback in SendMessage. A reachable daemon that
+// REJECTS a message (non-2xx) is deliberately not this error — rejections
+// surface to the caller (no silent drop, no policy bypass via fallback).
+var errDaemonUnreachable = errors.New("notify v2: daemon unreachable")
+
+// SendMessage delivers a v2 notifyv2.Message. It prefers the abysslinkd
+// socket — the daemon owns policy (cooldown/flood ceiling), registry
+// display-name enrichment, and click composition — and falls back to a
+// validated direct render + ntfy POST only when the daemon is unreachable, so
+// notifications survive a dead daemon (BACK-05).
+//
+// Fallback invariants: msg.Validate() runs client-side too (the no-bypass
+// D-17 gate), the rendered note is delivered to the same per-rig topic as
+// every other send (D-20), and Click stays empty — the daemon owns click
+// composition (D-16).
+func (m *Module) SendMessage(ctx context.Context, msg notifyv2.Message) error {
+	if !m.cfg.Modules.Notify.Enabled {
+		slog.Debug("notify.SendMessage: module disabled, skipping")
+		return nil
+	}
+
+	body, err := json.Marshal(msg) // the wire struct's JSON tags are the contract
+	if err != nil {
+		return fmt.Errorf("notify v2: marshal message: %w", err)
+	}
+
+	err = postV2ToDaemon(ctx, body)
+	switch {
+	case err == nil:
+		slog.Debug("notify.SendMessage: delivered via abysslinkd socket", "msg_id", msg.MsgID)
+		return nil
+	case !errors.Is(err, errDaemonUnreachable):
+		// The daemon is up and rejected the message (e.g. 422 from Validate).
+		// Surface it — falling back would bypass daemon policy and hide the bug.
+		return err
+	}
+
+	// Daemon unreachable: validated direct-render fallback.
+	if verr := msg.Validate(); verr != nil {
+		return fmt.Errorf("notify v2 fallback: %w", verr)
+	}
+	note := notifyv2.Render(msg, notifyv2.RenderOpts{})
+	return m.SendDirectWithOptions(ctx, note.Title, note.Body, SendOptions{
+		Priority: note.Priority,
+		Tags:     note.Tags,
+		// Click deliberately empty: the daemon owns click composition (D-16).
+	})
+}
+
+// postV2ToDaemon POSTs raw v2 JSON to the daemon socket /notify — the same
+// socket fast path Send uses (daemon.SocketPath + a unix-dialing transport).
+// Transport-level failures (no socket path, dial refused) return an error
+// wrapping errDaemonUnreachable — the same condition under which Send's v1
+// fast path falls through to direct delivery. An HTTP-level non-2xx is a
+// daemon rejection carrying the response body text.
+func postV2ToDaemon(ctx context.Context, body []byte) error {
+	sp := daemon.SocketPath()
+	if sp == "" {
+		return fmt.Errorf("%w: no socket path", errDaemonUnreachable)
+	}
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sp)
+			},
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/notify", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("notify v2: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errDaemonUnreachable, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("notify v2: daemon rejected message: HTTP %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 // SendDirect sends a notification directly to the ntfy HTTP API, bypassing the
