@@ -43,11 +43,21 @@ const (
 // Run is the registry supervisor loop (D-34: the registry owns reconnect;
 // RunStream is one process lifetime). Each cycle: version gate, attach via
 // the plain runner's RunStream with the structural no-output client flag,
+// await the %begin protocol greeting (the PROVEN-attach gate — CR-01/D-26),
 // epoch bump + immediate full poll, then consume control-mode notifications
 // (which only ever schedule debounced re-polls) until the stream ends. Every
 // failure mode degrades to an honest status string and a capped backoff —
-// the daemon is never hostage to tmux (D-26/D-27). Run returns nil after ctx
-// is cancelled, leaving no goroutines behind.
+// the daemon is never hostage to tmux (D-26/D-27/D-34). Run returns nil
+// after ctx is cancelled, leaving no goroutines behind.
+//
+// An attach is PROVEN only when the tmux control-mode %begin greeting is
+// observed on the stream (awaitAttach true). A started-then-exited attach
+// (tmux installed, no server running — the dominant failure mode at boot under
+// config.Defaults() since SessionRegistry.Enabled is true) does NOT reach the
+// success bookkeeping: backoff is kept, StatusUnavailable is set, and neither
+// the epoch nor the needs_input state is touched. This prevents the fabricated
+// StatusOK, sleepless hot loop, and per-spin RestartLost flood documented in
+// CR-01. See D-26 (honest degraded status) and D-29 (RestartLost iff lost).
 func (r *Registry) Run(ctx context.Context) error {
 	backoff := backoffBase
 	// baselined is the watch.go idiom distinguishing "no baseline yet" (the
@@ -67,15 +77,40 @@ func (r *Registry) Run(ctx context.Context) error {
 		// T-27-10) — it is not parsed-and-dropped.
 		stream, err := r.plain.RunStream(ctx, "tmux", "-CC", "-u", "attach-session", "-f", "no-output")
 		if err != nil {
-			// Attach failure modes (no server, no sessions, ...) are
-			// treated uniformly and never string-matched for control
-			// flow (Pitfall 3).
+			// RunStream errors only when the process cannot start (e.g.
+			// tmux binary missing/not-executable). Started-then-exited
+			// attaches (no server running) do NOT error here — they are
+			// caught by the greeting gate below (CR-01).
 			r.setStatus(StatusUnavailable)
 			r.sleep(ctx, backoff)
 			backoff = min(backoff*2, backoffMax)
 			continue
 		}
 
+		// Per attach cycle the parser is created here and shared between
+		// awaitAttach (which consumes lines up to and including %begin)
+		// and consume (which continues from the established block state).
+		// This ensures the %begin inBlock flag is visible to consume's
+		// subsequent %end feed — they see the same state machine.
+		p := &parser{}
+
+		// PROVEN-attach gate (CR-01/D-26/D-34): an attach is only
+		// considered successful when the tmux control-mode protocol
+		// greeting (%begin) is observed on the stream. A client that
+		// starts and exits before the greeting — the state of every rig at
+		// boot with no tmux server running — takes the failure path: keep
+		// backoff, set StatusUnavailable, never touch epoch or pane state.
+		if !r.awaitAttach(ctx, stream, p) {
+			exitErr := stream.Close()
+			slog.Warn("session: attach exited before greeting — no server?", "err", exitErr)
+			r.setStatus(StatusUnavailable)
+			r.sleep(ctx, backoff)
+			backoff = min(backoff*2, backoffMax)
+			continue
+		}
+
+		// Attach is PROVEN: the greeting was observed. Only now reset
+		// backoff and perform success bookkeeping.
 		backoff = backoffBase
 		// D-29: capture the pre-disconnect needs_input set BEFORE the epoch
 		// bump — these panes died with the old server and keep their
@@ -105,7 +140,7 @@ func (r *Registry) Run(ctx context.Context) error {
 			r.runHeuristic(hctx)
 		}()
 
-		r.consume(ctx, stream)
+		r.consume(ctx, stream, p)
 		hcancel()
 		<-hdone
 		if cerr := stream.Close(); cerr != nil {
@@ -113,6 +148,34 @@ func (r *Registry) Run(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// awaitAttach reads lines from the stream until the %begin greeting is
+// observed (eventBlockBegin) — proof that the tmux control-mode attach
+// succeeded and the server is live (CR-01/D-26). Returns true when the
+// greeting is seen; false when the channel closes before the greeting (the
+// process exited without a server — the dominant boot-time failure mode) or
+// ctx is cancelled. Truncated lines are debug-logged per consume's convention.
+// No extra timeout is applied: channel close (process exit) and ctx cancel
+// (daemon shutdown) are the only exits — D-34/T-27-06.
+func (r *Registry) awaitAttach(ctx context.Context, stream *shell.Stream, p *parser) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case ln, ok := <-stream.Lines():
+			if !ok {
+				return false // process exited before greeting
+			}
+			if ln.Truncated {
+				slog.Debug("session: over-cap control-mode line truncated (await greeting)")
+			}
+			ev := p.feed(ln.Text)
+			if ev.kind == eventBlockBegin {
+				return true // %begin received — attach proven
+			}
+		}
+	}
 }
 
 // lostNeedsInput snapshots the panes that are needs_input right now as
@@ -173,13 +236,15 @@ func (r *Registry) pollPanes(ctx context.Context) {
 }
 
 // consume drains the control-mode line channel, feeding each line to the
-// protocol parser. Structural notifications schedule a debounced re-poll on
-// THIS goroutine (single writer); %exit or channel close returns, handing
-// reconnect back to Run. The stdin writer exists on the stream for protocol
-// generality (D-33) but this phase sends no control-mode commands —
-// list-panes rides separate Runner.Run calls (Pattern 2).
-func (r *Registry) consume(ctx context.Context, stream *shell.Stream) {
-	p := &parser{}
+// protocol parser p (created in Run and already advanced past the %begin
+// greeting by awaitAttach — sharing the parser preserves the inBlock state
+// so the %end that closes the greeting block is classified correctly).
+// Structural notifications schedule a debounced re-poll on THIS goroutine
+// (single writer); %exit or channel close returns, handing reconnect back to
+// Run. The stdin writer exists on the stream for protocol generality (D-33)
+// but this phase sends no control-mode commands — list-panes rides separate
+// Runner.Run calls (Pattern 2).
+func (r *Registry) consume(ctx context.Context, stream *shell.Stream, p *parser) {
 	var debounce *time.Timer
 	var debounceC <-chan time.Time
 	defer func() {

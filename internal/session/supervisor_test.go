@@ -475,6 +475,126 @@ func TestRestartLostFirstAttachSilent(t *testing.T) {
 	waitDone(t, done)
 }
 
+// TestSupervisorAttachExitsBeforeGreeting (CR-01 cold-boot case): when tmux
+// is installed (version gate passes) but no server is running, the tmux client
+// process starts and exits immediately with a non-zero code — before emitting
+// the %begin greeting. The supervisor must treat this as a FAILED attach:
+// backoff keeps doubling from backoffBase, status stays StatusUnavailable
+// ("tmux: unavailable"), the epoch never climbs, no RestartLost is emitted,
+// and no list-panes call is ever made (pollPanes must not run on an unproven
+// attach). Fixes D-26 honest-status contract and BACK-03 backoff clause.
+func TestSupervisorAttachExitsBeforeGreeting(t *testing.T) {
+	m := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate 1
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate 2
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate 3
+	)
+	// Three attach attempts: each transcript closes immediately with exit 1
+	// (no server running — the boot-time default config state).
+	for range 3 {
+		m.AddStream(writeTranscript(t, "@exit 1\n"))
+	}
+
+	r := New(m, config.Defaults())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &sleepRecorder{cancelAfter: 3, cancel: cancel, r: r}
+	r.sleep = rec.sleep
+
+	done := runSupervisor(ctx, r)
+	waitDone(t, done)
+
+	durations, statuses := rec.recorded()
+
+	// Backoff must be kept and doubled (never reset on unproven attach).
+	require.Len(t, durations, 3, "supervisor must sleep once per failed attach cycle")
+	assert.Equal(t, []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}, durations,
+		"backoff must double from backoffBase on each unproven attach (D-26, BACK-03)")
+
+	// Status must never be fabricated to "ok" — must stay "tmux: unavailable".
+	require.Len(t, statuses, 3)
+	for i, st := range statuses {
+		assert.Equal(t, StatusUnavailable, st,
+			"status at sleep %d must be %q, not 'ok' (D-26 honest-status contract violated)", i, StatusUnavailable)
+	}
+
+	// Epoch must never climb on an unproven attach.
+	assert.Equal(t, uint64(0), r.Snapshot().Epoch,
+		"epoch must stay 0 — no successful attach was proven")
+
+	// No RestartLost must be emitted (stale pane state must not flood phone).
+	assert.Empty(t, r.events, "no transitions must be emitted for unproven attaches")
+
+	// pollPanes (list-panes) must never be called — no proven attach.
+	for _, argv := range m.RunCalls() {
+		if len(argv) > 1 {
+			assert.NotEqual(t, "list-panes", argv[1],
+				"list-panes must never be called when no attach is proven")
+		}
+	}
+}
+
+// TestSupervisorFailedReattachNoRestartLost (CR-01 flood case): after a
+// proven first attach (pane %3 marked needs_input then server dies via %exit),
+// two failed re-attaches (started-then-exited without greeting) must NOT emit
+// TransitionRestartLost — stale pane state alone is not sufficient to emit;
+// a proven re-attach is required. Epoch must stay at 1; backoff must apply.
+func TestSupervisorFailedReattachNoRestartLost(t *testing.T) {
+	paneA := paneLine("$1", "@1", "%3", "0", "1", "1", "claude", "work", "editor") + "\n"
+	m := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate for attach 1
+		shell.Call{Result: shell.Result{Stdout: paneA}},         // initial poll, epoch 1
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate for re-attach 1
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate for re-attach 2
+	)
+	// First attach: proven (has greeting + %exit), second/third: not proven (@exit 1).
+	m.AddStream(writeTranscript(t,
+		"<< %begin 1700000000 1 0\n<< %end 1700000000 1 0\n@delay 400ms\n<< %exit\n"))
+	m.AddStream(writeTranscript(t, "@exit 1\n"))
+	m.AddStream(writeTranscript(t, "@exit 1\n"))
+
+	r := New(m, config.Defaults())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &sleepRecorder{cancelAfter: 2, cancel: cancel, r: r}
+	r.sleep = rec.sleep
+
+	done := runSupervisor(ctx, r)
+
+	// Wait for the first proven attach to succeed.
+	require.Eventually(t, func() bool {
+		s := r.Snapshot()
+		return s.Epoch == 1 && s.Status == StatusOK && len(s.Sessions) == 1
+	}, 3*time.Second, 10*time.Millisecond, "first proven attach must succeed (epoch 1, status ok)")
+
+	// Mark the pane needs_input (as the heuristic would after detecting idle
+	// at a prompt) so lostNeedsInput would find it on re-attach.
+	markNeedsInput(t, r, "%3")
+
+	// Allow the sleepRecorder to collect 2 failed re-attach backoffs.
+	waitDone(t, done)
+
+	// No RestartLost must be emitted: a pane was needs_input at server death
+	// but neither re-attach was proven — the flood path must be closed.
+	assert.Empty(t, r.events,
+		"no TransitionRestartLost must be emitted when re-attach is not proven")
+
+	// Epoch must stay at 1 — no proven re-attach bumped it.
+	assert.Equal(t, uint64(1), r.Snapshot().Epoch,
+		"epoch must stay at 1 — no proven re-attach occurred")
+
+	// Backoff must apply on failed re-attaches (backoff was reset after the
+	// proven first attach, so we expect [1s, 2s] from the two failures).
+	durations, statuses := rec.recorded()
+	require.Len(t, durations, 2)
+	assert.Equal(t, []time.Duration{1 * time.Second, 2 * time.Second}, durations,
+		"backoff must double from backoffBase on each unproven re-attach")
+	for i, st := range statuses {
+		assert.Equal(t, StatusUnavailable, st,
+			"status at sleep %d must be %q after an unproven re-attach", i, StatusUnavailable)
+	}
+}
+
 // TestSupervisorBackoffCap: repeated failures double the delay and cap at
 // 30s — asserted via the injected sleep, no real waiting (Pitfall 9).
 func TestSupervisorBackoffCap(t *testing.T) {
