@@ -94,8 +94,13 @@ func LoadTranscript(path string) (*Transcript, error) {
 			if aerr != nil {
 				return nil, fmt.Errorf("shell: transcript %s: line %d: bad @exit: %w", path, lineNo, aerr)
 			}
+			// Last directive wins: @exit 0 clears an earlier non-zero
+			// disposition so a fixture author appending an override gets
+			// predictable behavior (IN-01).
 			if code != 0 {
 				t.exitErr = fmt.Errorf("shell: mock stream: exit status %d", code)
+			} else {
+				t.exitErr = nil
 			}
 		default:
 			return nil, fmt.Errorf("shell: transcript %s: line %d: unknown directive %q", path, lineNo, trimmed)
@@ -157,6 +162,10 @@ func (m *MockRunner) RunStream(ctx context.Context, name string, args ...string)
 	playCtx, cancel := context.WithCancel(ctx)
 	lines := make(chan Line, streamChanDepth)
 	done := make(chan struct{})
+	// killed records playback being cancelled before all steps were emitted
+	// (Close/kill mid-playback or ctx cancellation). Written strictly before
+	// close(done) and read strictly after <-done, so a plain bool is safe.
+	var killed bool
 	go func() {
 		defer close(done)
 		defer close(lines)
@@ -167,12 +176,14 @@ func (m *MockRunner) RunStream(ctx context.Context, name string, args ...string)
 				case <-timer.C:
 				case <-playCtx.Done():
 					timer.Stop()
+					killed = true
 					return
 				}
 			}
 			select {
 			case lines <- Line{Text: st.line}:
 			case <-playCtx.Done():
+				killed = true
 				return
 			}
 		}
@@ -189,6 +200,11 @@ func (m *MockRunner) RunStream(ctx context.Context, name string, args ...string)
 		waitFn: func() error {
 			<-done
 			cancel()
+			// Mirror ExecRunner fidelity: a process killed mid-run reports
+			// the kill, not the scripted end-of-playback disposition (IN-02).
+			if killed && exitErr == nil {
+				return fmt.Errorf("shell: mock stream: signal: killed")
+			}
 			return exitErr
 		},
 	}, nil

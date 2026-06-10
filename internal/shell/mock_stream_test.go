@@ -126,6 +126,10 @@ func TestMockRunStreamStdinRecording(t *testing.T) {
 	assert.Contains(t, err.Error(), "list-panes -a", "mismatch error must name the expected write")
 	assert.Contains(t, err.Error(), "kill-server", "mismatch error must name the actual write")
 
+	// Drain playback to completion so Close reflects the scripted
+	// end-of-playback disposition, not a mid-playback kill (IN-02).
+	for range s.Lines() {
+	}
 	require.NoError(t, s.Close())
 }
 
@@ -242,6 +246,28 @@ func TestMockRunStreamCloseMidPlayback(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "first", ln.Text)
 
-	require.NoError(t, s.Close())
+	// A kill mid-playback mirrors ExecRunner's disposition: the real runner
+	// reports "signal: killed" from cmd.Wait, never the scripted exit (IN-02).
+	err = s.Close()
+	require.Error(t, err, "Close mid-playback must report the kill, not nil")
+	assert.Contains(t, err.Error(), "signal: killed")
 	requireClosed(t, s.Lines(), 2*time.Second)
+}
+
+// TestLoadTranscriptExitLastWins (IN-01): the last @exit directive wins —
+// @exit 0 clears an earlier non-zero disposition, and a later non-zero
+// overrides an earlier zero.
+func TestLoadTranscriptExitLastWins(t *testing.T) {
+	write := func(content string) *Transcript {
+		path := filepath.Join(t.TempDir(), "t.transcript")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		tr, err := LoadTranscript(path)
+		require.NoError(t, err)
+		return tr
+	}
+
+	assert.NoError(t, write("@exit 1\n@exit 0\n").ExitErr(),
+		"@exit 0 must clear an earlier non-zero disposition")
+	assert.Error(t, write("@exit 0\n@exit 1\n").ExitErr(),
+		"a later non-zero @exit must override an earlier zero")
 }
