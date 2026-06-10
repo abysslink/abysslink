@@ -18,6 +18,7 @@ package acl
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -115,13 +116,17 @@ type mockACLBackend struct {
 	backend.Client
 	aclMgr backend.ACLManager
 	raw    []byte
+	setACL []byte // captures the last SetACL payload
 }
 
 func (m *mockACLBackend) GetACL(_ context.Context) ([]byte, string, error) {
 	return m.raw, `"test-etag"`, nil
 }
 
-func (m *mockACLBackend) SetACL(_ context.Context, _ []byte, _ string) error { return nil }
+func (m *mockACLBackend) SetACL(_ context.Context, acl []byte, _ string) error {
+	m.setACL = append([]byte(nil), acl...)
+	return nil
+}
 
 func (m *mockACLBackend) NewACLEditor(raw []byte) (backend.ACLEditor, error) {
 	return m.aclMgr.NewACLEditor(raw)
@@ -412,6 +417,186 @@ func TestApplyManual_RecopySetEvenWhenInitialCopyFails(t *testing.T) {
 		"Recopy must be set even when the initial copy failed (paste-from-path variant)")
 	require.NoError(t, steps[0].Recopy(context.Background()),
 		"a later Recopy retry must be able to succeed")
+}
+
+// TestApplyAdmin_PreservesUnmanagedACLSections is the module-level guard for
+// the CRITICAL round-trip bug: `acl push --apply` against a tailnet whose
+// live policy carries acls/groups/hosts/tests/autoApprovers must push a
+// document that still contains every one of those sections — the old editor
+// silently deleted everything it did not model.
+func TestApplyAdmin_PreservesUnmanagedACLSections(t *testing.T) {
+	t.Setenv("ABYSSLINK_TS_OAUTH_SECRET", "test-secret")
+
+	cfg := config.Defaults()
+	cfg.Identity.Email = "owner@example.com"
+	cfg.Identity.UnixUser = "alice"
+	cfg.Mobile.SSHCheckPeriod = "12h"
+	cfg.Tailnet.Admin.Tailnet = "example.com"
+	cfg.Tailnet.Admin.OAuthClientID = "client-id"
+
+	r := shell.NewMockRunner()
+	realBknd, err := backend.New(cfg, r)
+	require.NoError(t, err)
+	realACLMgr, ok := realBknd.(backend.ACLManager)
+	require.True(t, ok)
+
+	// Live policy with unmanaged sections and WITHOUT the abysslink grant —
+	// so applyAdmin must edit and push.
+	live := []byte(`{
+		// HuJSON comment in the live tailnet policy
+		"acls": [{"action": "accept", "src": ["*"], "dst": ["*:*"]}],
+		"groups": {"group:eng": ["a@example.com"]},
+		"hosts": {"webserver": "100.64.0.10"},
+		"tests": [{"src": "a@example.com", "accept": ["webserver:443"]}],
+		"autoApprovers": {"routes": {"10.0.0.0/24": ["tag:router"]}},
+	}`)
+	mock := &mockACLBackend{Client: realBknd, aclMgr: realACLMgr, raw: live}
+
+	m := New(modules.Deps{Cfg: cfg, Runner: r, Backend: mock})
+	require.NoError(t, m.Apply(context.Background()))
+
+	require.NotEmpty(t, mock.setACL, "applyAdmin must push the edited ACL")
+	var got map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(mock.setACL, &got))
+	for _, key := range []string{"acls", "groups", "hosts", "tests", "autoApprovers"} {
+		assert.Contains(t, got, key, "unmanaged section %q must survive the push", key)
+	}
+	out := string(mock.setACL)
+	assert.Contains(t, out, "tag:mobile", "the abysslink edits must be present too")
+	assert.Contains(t, out, "udp:60000-61000")
+}
+
+// TestApplyManual_CustomCheckPeriodApplied: the success path — a custom (lower)
+// checkPeriod is reflected in the generated/copied ACL and no fallback warning
+// is surfaced.
+func TestApplyManual_CustomCheckPeriodApplied(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+
+	var steps []modules.ManualStep
+	m, aclMgr := newManualTestModule(t, r, nil,
+		func(s modules.ManualStep) { steps = append(steps, s) },
+	)
+
+	require.NoError(t, m.applyManual(context.Background(), aclMgr, "owner@example.com", "testuser", "6h"))
+	require.Len(t, steps, 1)
+	assert.NotContains(t, steps[0].Body, "WARNING",
+		"no fallback warning when the custom checkPeriod is applied successfully")
+
+	var copied string
+	for _, c := range r.RecordedCalls() {
+		switch c.Name {
+		case "pbcopy", "wl-copy", "xclip":
+			if c.Stdin != "" {
+				copied = c.Stdin
+			}
+		}
+	}
+	require.NotEmpty(t, copied, "the generated ACL must be piped to the clipboard tool")
+	assert.Contains(t, copied, `"6h"`, "the generated ACL must carry the configured checkPeriod")
+}
+
+// failingEditorACLMgr wraps a real ACLManager but fails NewACLEditor — used to
+// force applyManual's custom-checkPeriod fallback path.
+type failingEditorACLMgr struct {
+	backend.ACLManager
+}
+
+func (f *failingEditorACLMgr) NewACLEditor(_ []byte) (backend.ACLEditor, error) {
+	return nil, assert.AnError
+}
+
+// TestApplyManual_CheckPeriodFallbackSurfaced: when the custom checkPeriod
+// cannot be applied, manual mode falls back to the 12h default — safe, but
+// it must be surfaced to the user in the manual-step notice, never silently
+// swallowed (review finding W9).
+func TestApplyManual_CheckPeriodFallbackSurfaced(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+
+	var steps []modules.ManualStep
+	m, realMgr := newManualTestModule(t, r, nil,
+		func(s modules.ManualStep) { steps = append(steps, s) },
+	)
+	aclMgr := &failingEditorACLMgr{ACLManager: realMgr}
+
+	require.NoError(t, m.applyManual(context.Background(), aclMgr, "owner@example.com", "testuser", "6h"),
+		"fallback to the 12h default is non-fatal")
+
+	require.Len(t, steps, 1)
+	assert.Contains(t, steps[0].Body, "WARNING", "the fallback must be surfaced in the manual-step notice")
+	assert.Contains(t, steps[0].Body, "6h", "the notice must name the configured period that was dropped")
+	assert.Contains(t, steps[0].Body, "12h default", "the notice must say what the generated ACL uses instead")
+
+	var copied string
+	for _, c := range r.RecordedCalls() {
+		switch c.Name {
+		case "pbcopy", "wl-copy", "xclip":
+			if c.Stdin != "" {
+				copied = c.Stdin
+			}
+		}
+	}
+	require.NotEmpty(t, copied)
+	assert.Contains(t, copied, `"12h"`, "the generated ACL falls back to the 12h default")
+	assert.NotContains(t, copied, `"6h"`, "the configured period was not applied")
+}
+
+// TestVerify_CheckPeriodCeilingWarning aligns Verify with Apply's NET-01 gate:
+// a >12h checkPeriod without --accept-checkperiod-extension must surface a
+// WARN finding from Verify (Apply refuses outright; Verify previously blessed
+// the extended period silently in its drift baseline).
+func TestVerify_CheckPeriodCeilingWarning(t *testing.T) {
+	t.Setenv("ABYSSLINK_TS_OAUTH_SECRET", "test-secret")
+
+	cfg := config.Defaults()
+	cfg.Identity.Email = "owner@example.com"
+	cfg.Identity.UnixUser = "alice"
+	cfg.Mobile.SSHCheckPeriod = "24h" // above the immutable 12h default
+	cfg.Tailnet.Admin.Tailnet = "example.com"
+	cfg.Tailnet.Admin.OAuthClientID = "client-id"
+
+	r := shell.NewMockRunner()
+	realBknd, err := backend.New(cfg, r)
+	require.NoError(t, err)
+	realACLMgr, ok := realBknd.(backend.ACLManager)
+	require.True(t, ok)
+
+	// Build a live ACL already converged at 24h so the drift check itself is OK.
+	editor, err := realACLMgr.NewACLEditor(realACLMgr.DefaultACL(cfg.Identity.Email, cfg.Identity.UnixUser))
+	require.NoError(t, err)
+	require.NoError(t, editor.EnsureSSHRule(cfg.Identity.Email, cfg.Identity.UnixUser, "24h"))
+	mock := &mockACLBackend{Client: realBknd, aclMgr: realACLMgr, raw: editor.Bytes()}
+
+	findCheck := func(findings []modules.Finding, check string) *modules.Finding {
+		for i := range findings {
+			if findings[i].Check == check {
+				return &findings[i]
+			}
+		}
+		return nil
+	}
+
+	// Without consent: a checkperiod_ceiling WARN must be emitted.
+	m := New(modules.Deps{Cfg: cfg, Runner: r, Backend: mock})
+	findings, err := m.Verify(context.Background())
+	require.NoError(t, err)
+	ceiling := findCheck(findings, "checkperiod_ceiling")
+	require.NotNil(t, ceiling, "Verify must surface the >12h checkPeriod without consent")
+	assert.Equal(t, modules.SeverityWarning, ceiling.Severity)
+	assert.Contains(t, ceiling.Message, "12h")
+	assert.NotNil(t, findCheck(findings, "acl_drift"), "the drift check must still run")
+
+	// With explicit consent threaded in: no ceiling finding.
+	m2 := New(modules.Deps{Cfg: cfg, Runner: r, Backend: mock, AcceptCheckPeriodExtension: true})
+	findings2, err := m2.Verify(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, findCheck(findings2, "checkperiod_ceiling"),
+		"no ceiling warning when the user explicitly consented")
 }
 
 // TestEnforceCheckPeriodCeiling covers the NET-01 module-level gate that
