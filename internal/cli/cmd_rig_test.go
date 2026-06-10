@@ -405,3 +405,57 @@ func TestRigLs_Empty(t *testing.T) {
 	// Should not panic or error; output can be empty or contain a "no rigs" notice.
 	_ = output
 }
+
+// TestRigImport_InFileDuplicateRejected covers W8: two rigs sharing a name
+// WITHIN one import batch must be rejected — validateImportRigs previously
+// only checked incoming names against pre-existing rigs.
+func TestRigImport_InFileDuplicateRejected(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfgWithRigs(t, dir)
+
+	importPath := filepath.Join(dir, "import.yaml")
+	importDoc := `rigs:
+  - name: twin
+    hostname: twin-one.ts.net
+    ntfy_topic: abysslink-twin-11111111
+    backend: tailscale
+  - name: twin
+    hostname: twin-two.ts.net
+    ntfy_topic: abysslink-twin-22222222
+    backend: tailscale
+`
+	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
+
+	err := runRigImport(cfgPath, importPath, true, nil, io.Discard)
+	require.Error(t, err, "in-file duplicate rig names must be rejected")
+	assert.Contains(t, err.Error(), "twin", "error must identify the duplicated name")
+
+	// Nothing may have been written.
+	cfg, err := config.Load(cfgPath)
+	require.NoError(t, err)
+	assert.Len(t, cfg.Rigs, 2, "config must be unchanged after a rejected import")
+}
+
+// TestRigImport_ApplyPrintsConfirmation covers U6: a successful `rig import
+// --apply` must confirm what it imported (and point at the enroll step for the
+// signing-key half) instead of succeeding silently.
+func TestRigImport_ApplyPrintsConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfgWithRigs(t, dir)
+
+	importPath := filepath.Join(dir, "import.yaml")
+	importDoc := `rigs:
+  - name: gamma
+    hostname: gamma.ts.net
+    ntfy_topic: abysslink-gamma-deadbeef
+    backend: netbird
+`
+	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
+
+	var out bytes.Buffer
+	require.NoError(t, runRigImport(cfgPath, importPath, true, nil, &out))
+
+	assert.Contains(t, out.String(), `Imported rig "gamma"`, "apply must confirm each imported rig")
+	assert.Contains(t, out.String(), "1 rig(s)", "apply must summarise the import")
+	assert.Contains(t, out.String(), "enroll rig", "apply must point at the keychain/signing-key step")
+}

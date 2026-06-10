@@ -107,6 +107,16 @@ func WriteAnchorLocked(ctx context.Context, logPath string, kc KeychainStore) er
 		return fmt.Errorf("audit: acquire process lock: %w", err)
 	}
 	defer releaseAuditLock(lockFD)
+	// R2-12: HMAC-key creation is lazy (first mutating Append). Before any
+	// signed entry exists there is no key — and nothing to anchor — so the
+	// standalone refresh is a silent no-op rather than an hourly error. Any
+	// OTHER key-fetch failure (keychain locked/unavailable) still propagates.
+	if _, kerr := fetchHMACKey(ctx, kc); kerr != nil {
+		if errors.Is(kerr, secrets.ErrNotFound) {
+			return nil
+		}
+		return kerr
+	}
 	return WriteAnchor(ctx, logPath, kc)
 }
 

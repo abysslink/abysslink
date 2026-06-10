@@ -23,6 +23,8 @@ import (
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/fleet"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -133,4 +135,93 @@ func TestPanicRigFlag_UnknownRigErrors(t *testing.T) {
 		assert.NotEqual(t, "tailscale", call.Name,
 			"local panic steps must not run when --rig targeting fails: %v", call)
 	}
+}
+
+// strictDeleteKeychain wraps secrets.MockStore with a Delete that fails with
+// secrets.ErrNotFound for absent entries, matching the real OS stores so the
+// skip-on-not-found path in destroyAPIKeysFromKeychain is exercised.
+type strictDeleteKeychain struct {
+	*secrets.MockStore
+}
+
+func (s *strictDeleteKeychain) Delete(ctx context.Context, service, account string) error {
+	if _, err := s.Get(ctx, service, account); err != nil {
+		return err // wraps secrets.ErrNotFound
+	}
+	return s.MockStore.Delete(ctx, service, account)
+}
+
+// TestPanicDestroysRigScopedAPIKeys covers W7: the kill switch must destroy the
+// rig-scoped Anthropic API key copies created by `enroll rig`'s keychain
+// migration, not only the v1 entry — otherwise live keys survive the panic.
+func TestPanicDestroysRigScopedAPIKeys(t *testing.T) {
+	ctx := context.Background()
+	kc := &strictDeleteKeychain{MockStore: secrets.NewMockStore()}
+
+	// v1 entry + two rig-scoped migrated copies; a third rig was never migrated.
+	require.NoError(t, kc.Set(ctx, "abysslink", "anthropic-api-key", "sk-v1"))
+	require.NoError(t, kc.Set(ctx, fleet.RigService("alpha"), "anthropic-api-key", "sk-alpha"))
+	require.NoError(t, kc.Set(ctx, fleet.RigService("beta"), "anthropic-api-key", "sk-beta"))
+
+	rigs := []config.RigConfig{
+		{Name: "alpha", NtfyTopic: "t-a"},
+		{Name: "beta", NtfyTopic: "t-b"},
+		{Name: "never-migrated", NtfyTopic: "t-n"},
+	}
+
+	var out strings.Builder
+	p := NewHumanPrinterTo(&out, &out)
+	logged := []string{}
+	destroyAPIKeysFromKeychain(ctx, kc, rigs, p, func(action string) { logged = append(logged, action) })
+
+	// v1 entry destroyed.
+	_, err := kc.Get(ctx, "abysslink", "anthropic-api-key")
+	require.Error(t, err, "v1 anthropic-api-key must be deleted")
+
+	// Rig-scoped copies destroyed.
+	_, err = kc.Get(ctx, fleet.RigService("alpha"), "anthropic-api-key")
+	require.Error(t, err, "rig-scoped key for alpha must be deleted")
+	_, err = kc.Get(ctx, fleet.RigService("beta"), "anthropic-api-key")
+	require.Error(t, err, "rig-scoped key for beta must be deleted")
+
+	// Never-migrated rig: skipped silently (no scary ✕ marker for it).
+	assert.NotContains(t, out.String(), "never-migrated",
+		"a rig that never had a migrated key must be skipped silently")
+
+	// Audit actions recorded for the v1 + 2 rig-scoped deletions.
+	assert.Contains(t, logged, "destroy_local_api_key")
+	count := 0
+	for _, a := range logged {
+		if a == "destroy_rig_api_key" {
+			count++
+		}
+	}
+	assert.Equal(t, 2, count, "one destroy_rig_api_key audit action per migrated rig")
+}
+
+// TestRotateUpdatesRigScopedAPIKeys covers the rotate half of W7: rotating the
+// Anthropic key must update every rig-scoped migrated copy, leaving none with
+// the stale-but-valid old key. Rigs never migrated stay untouched.
+func TestRotateUpdatesRigScopedAPIKeys(t *testing.T) {
+	ctx := context.Background()
+	kc := secrets.NewMockStore()
+
+	require.NoError(t, kc.Set(ctx, fleet.RigService("alpha"), "anthropic-api-key", "sk-old"))
+	rigs := []config.RigConfig{
+		{Name: "alpha", NtfyTopic: "t-a"},
+		{Name: "never-migrated", NtfyTopic: "t-n"},
+	}
+
+	var out strings.Builder
+	p := NewHumanPrinterTo(&out, &out)
+	require.NoError(t, updateRigScopedAnthropicKeys(ctx, kc, rigs, p, "sk-new"))
+
+	got, err := kc.Get(ctx, fleet.RigService("alpha"), "anthropic-api-key")
+	require.NoError(t, err)
+	assert.Equal(t, "sk-new", got, "rig-scoped copy must carry the rotated key")
+
+	_, err = kc.Get(ctx, fleet.RigService("never-migrated"), "anthropic-api-key")
+	require.Error(t, err, "a rig that was never migrated must not gain a key copy")
+
+	assert.Contains(t, out.String(), "alpha", "the updated rig must be reported")
 }

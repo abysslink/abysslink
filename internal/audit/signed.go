@@ -551,44 +551,15 @@ func (a *SignedAudit) WriteFilePath(ctx context.Context, src, dst string, perm o
 		entryCount++
 	}
 
-	// Stream src → temp while hashing the same bytes. LimitReader is given
-	// ceiling+1 so a src that grew past the ceiling is DETECTED (n > ceiling)
-	// instead of silently truncated at the boundary (R2-W1 item 4).
-	srcFile, err := os.Open(src) //nolint:gosec // G304: src is a caller-supplied binary path; callers in internal/cli supply installer-derived paths, not user-controlled paths
+	// Stage src beside dst, hashing the same bytes that land in the temp file.
+	tmpFile, diffHash, err := stageSrcForWrite(src, dst)
 	if err != nil {
-		return fmt.Errorf("audit: WriteFilePath open src %s: %w", src, err)
-	}
-	// Fast-fail on an obviously oversized src before staging anything to disk;
-	// the N+1 sentinel below remains the authoritative check (a src can grow
-	// between this Stat and the copy).
-	if sfi, serr := srcFile.Stat(); serr == nil && sfi.Size() > writeFilePathCeiling {
-		_ = srcFile.Close()
-		return fmt.Errorf("audit: WriteFilePath: src %s exceeds 256 MiB ceiling", src)
-	}
-	tmpFile, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.abysslink.tmp")
-	if err != nil {
-		_ = srcFile.Close()
-		return fmt.Errorf("audit: WriteFilePath create temp for %s: %w", dst, err)
+		return err
 	}
 	tmp := tmpFile.Name()
-	hasher := sha256.New()
-	n, cerr := io.Copy(tmpFile, io.TeeReader(io.LimitReader(srcFile, writeFilePathCeiling+1), hasher))
-	_ = srcFile.Close()
-	if cerr != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("audit: WriteFilePath copy to temp: %w", cerr)
-	}
-	if n > writeFilePathCeiling {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("audit: WriteFilePath: src %s exceeds 256 MiB ceiling", src)
-	}
 
 	// Record the write-intent entry BEFORE the rename (the actual mutation),
 	// using the hash of exactly the bytes staged in the temp file.
-	var diffHash [32]byte
-	copy(diffHash[:], hasher.Sum(nil))
 	if aerr := a.appendNoRefresh(ctx, SignInput{Title: "write", DiffHash: diffHash}, dst, false); aerr != nil {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmp)
@@ -609,6 +580,47 @@ func (a *SignedAudit) WriteFilePath(ctx context.Context, src, dst string, perm o
 
 	// Physical install: fsync, chmod, rename, dir-sync via the shared helper.
 	return finalizeTemp(tmpFile, dst, perm)
+}
+
+// stageSrcForWrite streams src into a unique temp file in dst's directory
+// while hashing the SAME bytes (io.TeeReader — no hash-then-reopen TOCTOU,
+// R2-W1). The LimitReader is given ceiling+1 so a src that grew past the
+// ceiling is DETECTED (n > ceiling) rather than silently truncated at the
+// boundary. On success the open temp file and the staged-content hash are
+// returned; the caller owns finalize/cleanup.
+func stageSrcForWrite(src, dst string) (*os.File, [32]byte, error) {
+	var diffHash [32]byte
+	srcFile, err := os.Open(src) //nolint:gosec // G304: src is a caller-supplied binary path; callers in internal/cli supply installer-derived paths, not user-controlled paths
+	if err != nil {
+		return nil, diffHash, fmt.Errorf("audit: WriteFilePath open src %s: %w", src, err)
+	}
+	// Fast-fail on an obviously oversized src before staging anything to disk;
+	// the N+1 sentinel below remains the authoritative check (a src can grow
+	// between this Stat and the copy).
+	if sfi, serr := srcFile.Stat(); serr == nil && sfi.Size() > writeFilePathCeiling {
+		_ = srcFile.Close()
+		return nil, diffHash, fmt.Errorf("audit: WriteFilePath: src %s exceeds 256 MiB ceiling", src)
+	}
+	tmpFile, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.abysslink.tmp")
+	if err != nil {
+		_ = srcFile.Close()
+		return nil, diffHash, fmt.Errorf("audit: WriteFilePath create temp for %s: %w", dst, err)
+	}
+	hasher := sha256.New()
+	n, cerr := io.Copy(tmpFile, io.TeeReader(io.LimitReader(srcFile, writeFilePathCeiling+1), hasher))
+	_ = srcFile.Close()
+	if cerr != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+		return nil, diffHash, fmt.Errorf("audit: WriteFilePath copy to temp: %w", cerr)
+	}
+	if n > writeFilePathCeiling {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+		return nil, diffHash, fmt.Errorf("audit: WriteFilePath: src %s exceeds 256 MiB ceiling", src)
+	}
+	copy(diffHash[:], hasher.Sum(nil))
+	return tmpFile, diffHash, nil
 }
 
 // fetchHMACKey fetches and hex-decodes the stored HMAC key. It is a

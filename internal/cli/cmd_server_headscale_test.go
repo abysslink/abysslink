@@ -682,3 +682,69 @@ func (m *mockKeychainStore) Delete(_ context.Context, service, account string) e
 	delete(m.entries, service+"/"+account)
 	return nil
 }
+
+// TestInstallHeadscaleLinux_DryRunRunsNoSystemctl covers W5: under dryRun the
+// systemctl daemon-reload/enable/start mutations must NOT run (the unit write
+// already honored dryRun; the service start did not).
+func TestInstallHeadscaleLinux_DryRunRunsNoSystemctl(t *testing.T) {
+	mr := shell.NewMockRunner() // zero scripted calls — any call fails the assertion below
+	var out strings.Builder
+	p := NewHumanPrinterTo(&out, &out)
+
+	err := installHeadscaleLinux(context.Background(), mr, p,
+		"/usr/local/bin/headscale", "/etc/headscale/config.yaml", true /*dryRun*/)
+	require.NoError(t, err, "dry-run install must succeed without mutating")
+
+	assert.Empty(t, mr.RecordedCalls(), "dry-run must not invoke systemctl")
+	assert.Contains(t, out.String(), "[plan]", "dry-run must print a plan preview")
+	assert.Contains(t, out.String(), "systemctl", "the plan must name the gated systemctl steps")
+}
+
+// TestHeadscaleUpgradeDryRunPrintsPlan covers W6: `server headscale upgrade`
+// in dry-run mode must print a visible [plan] preview — slog alone is hidden
+// at the default level, leaving the user with silence + exit 0.
+func TestHeadscaleUpgradeDryRunPrintsPlan(t *testing.T) {
+	mr := shell.NewMockRunner(shell.Call{
+		Result: shell.Result{Stdout: "headscale version v0.27.0\n", ExitCode: 0},
+	})
+	cfg := config.Defaults()
+	cfg.Server.Headscale.BinaryPath = "/usr/local/bin/headscale"
+
+	var out strings.Builder
+	p := NewHumanPrinterTo(&out, &out)
+	err := headscaleUpgradeRunE(context.Background(), cfg, &cmdContext{
+		cfg:    cfg,
+		runner: mr,
+		dryRun: true,
+	}, mr, "v0.28.0", p)
+	require.NoError(t, err)
+
+	assert.Contains(t, out.String(), "[plan]", "dry-run upgrade must print a visible plan")
+	assert.Contains(t, out.String(), "v0.27.0", "the plan must show the installed version")
+	assert.Contains(t, out.String(), "v0.28.0", "the plan must show the target version")
+	assert.Contains(t, out.String(), "--apply", "the plan must point at --apply")
+}
+
+// TestMintPreAuthKeyNotEphemeral covers W14: the pre-auth key must be minted
+// with ephemeral:false — Headscale deletes nodes joined with an ephemeral key
+// as soon as they go offline, and phones/laptops go offline routinely. D-11
+// requires only the explicit expiry.
+func TestMintPreAuthKeyNotEphemeral(t *testing.T) {
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"preAuthKey": map[string]any{"key": "k123"},
+		})
+	}))
+	defer srv.Close()
+
+	_, err := mintPreAuthKey(context.Background(), srv.URL, "apikey", "abysslink", time.Hour)
+	require.NoError(t, err)
+
+	require.Contains(t, captured, "ephemeral")
+	assert.Equal(t, false, captured["ephemeral"],
+		"pre-auth key must NOT be ephemeral (nodes would vanish when they go offline)")
+	assert.Contains(t, captured, "expiration", "the explicit D-11 expiry must remain")
+}

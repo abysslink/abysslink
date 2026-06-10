@@ -73,3 +73,34 @@ func TestDaemonLifecycle_DryRunDefault(t *testing.T) {
 		assert.Contains(t, out.String(), "--apply", "daemon %s preview must point at --apply", tc.sub)
 	}
 }
+
+// TestDaemonServiceSpec_RequiresResolvableBinary covers the service-spec
+// hardening: when abysslinkd is neither next to the running binary nor on
+// PATH, daemonServiceSpec must FAIL with a clear error instead of registering
+// a bare "abysslinkd" argv (PATH resolution at launchd/systemd start time is a
+// hijack/footgun surface).
+func TestDaemonServiceSpec_RequiresResolvableBinary(t *testing.T) {
+	// Empty PATH: nothing can resolve.
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	_, err := daemonServiceSpec()
+	require.Error(t, err, "an unresolvable abysslinkd must be an error, not a deferred PATH lookup")
+	assert.Contains(t, err.Error(), "abysslinkd")
+}
+
+// TestDaemonServiceSpec_AbsolutePathFromPATH asserts the spec carries the
+// RESOLVED absolute path when abysslinkd is found on PATH.
+func TestDaemonServiceSpec_AbsolutePathFromPATH(t *testing.T) {
+	binDir := t.TempDir()
+	fake := filepath.Join(binDir, "abysslinkd")
+	require.NoError(t, os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755)) //nolint:gosec // executable test stub
+	t.Setenv("PATH", binDir)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	spec, err := daemonServiceSpec()
+	require.NoError(t, err)
+	require.NotEmpty(t, spec.Args)
+	assert.True(t, filepath.IsAbs(spec.Args[0]), "the service argv must be an absolute path, got %q", spec.Args[0])
+	assert.Equal(t, fake, spec.Args[0])
+}

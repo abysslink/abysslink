@@ -42,11 +42,12 @@ const (
 	upgradeRepo           = "abysslink/abysslink"
 	upgradeOIDCIssuer     = "https://token.actions.githubusercontent.com"
 	upgradeIdentityRegexp = `^https://github\.com/abysslink/abysslink/\.github/workflows/release\.yml@refs/tags/.*$`
-
-	// upgradeArtifactCeiling bounds downloaded/extracted release artifacts
-	// (200 MiB). Reads use an N+1 sentinel — never a silent truncation.
-	upgradeArtifactCeiling int64 = 200 << 20
 )
+
+// upgradeArtifactCeiling bounds downloaded/extracted release artifacts
+// (200 MiB). Reads use an N+1 sentinel — never a silent truncation. Declared
+// as a var so tests can exercise the overflow path with a small ceiling.
+var upgradeArtifactCeiling int64 = 200 << 20 //nolint:gochecknoglobals // test seam for the overflow-sentinel path; production value is constant
 
 // upgradeExitUpdateAvailable is the `upgrade --check` exit code signalling that
 // a newer release exists (convention: softwareupdate / gh-style distinct code

@@ -150,3 +150,42 @@ func TestWatchList_MissingConfig_Degrades(t *testing.T) {
 	require.NoError(t, err, "watch list must not hard-fail on a missing config")
 	assert.Contains(t, out, "No watchers configured.")
 }
+
+// TestWatchAdd_DuplicatePaneRejected asserts that adding a pane watcher that is
+// already configured errors instead of registering a duplicate (which would
+// fire duplicate notifications for every event).
+func TestWatchAdd_DuplicatePaneRejected(t *testing.T) {
+	cfgPath := writeWatchCfg(t, "dev")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	_, err := runWatch(t, "add", "--pane", "dev", "--config", cfgPath, "--apply")
+	require.Error(t, err, "duplicate pane watcher must be rejected")
+	assert.Contains(t, err.Error(), "already configured")
+
+	cfg, err := config.Load(cfgPath)
+	require.NoError(t, err)
+	count := 0
+	for _, pn := range cfg.Modules.Watch.Panes {
+		if pn == "dev" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "the pane must not be registered twice")
+}
+
+// TestWatchRemove_LastWatcherDisablesModule asserts that removing the LAST
+// watcher flips watch.enabled back to false — a lingering enabled:true with
+// zero watchers is a config lie.
+func TestWatchRemove_LastWatcherDisablesModule(t *testing.T) {
+	cfgPath := writeWatchCfg(t, "dev")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	_, err := runWatch(t, "remove", "--pane", "dev", "--config", cfgPath, "--apply")
+	require.NoError(t, err)
+
+	cfg, err := config.Load(cfgPath)
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Modules.Watch.Panes)
+	assert.False(t, cfg.Modules.Watch.Enabled,
+		"removing the last watcher must set watch.enabled to false")
+}

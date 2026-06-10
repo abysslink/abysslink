@@ -130,11 +130,13 @@ func TestAuditDoctor_ForgedAnchorFatal(t *testing.T) {
 	logPath := filepath.Join(dir, "audit.log")
 	kc := secrets.NewMockStore()
 
-	// Build a real signed log + anchor first.
+	// Build a real signed log + anchor first. dryRun must be false: since
+	// CORE-08, dry-run writes append nothing and never generate the HMAC key,
+	// so a dry-run-only setup leaves no key for WriteAnchor to sign with.
 	sa, err := audit.NewSigned(logPath, kc)
 	require.NoError(t, err)
 	for i := 0; i < 3; i++ {
-		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, true))
+		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, false))
 	}
 	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
 
@@ -164,7 +166,8 @@ func TestAuditDoctor_ValidAnchorNoFinding(t *testing.T) {
 	sa, err := audit.NewSigned(logPath, kc)
 	require.NoError(t, err)
 	for i := 0; i < 3; i++ {
-		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, true))
+		// dryRun=false: see TestAuditDoctor_ForgedAnchorFatal (CORE-08).
+		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, false))
 	}
 	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
 

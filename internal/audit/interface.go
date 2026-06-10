@@ -36,9 +36,10 @@ type AuditWriter interface {
 	// WriteFile records the intended mutation in the audit log (recording only
 	// the SHA-256 of content, never the content itself), then writes content to
 	// path atomically. When dryRun is true no file is written or backed up:
-	// *Audit appends a DryRun-tagged plain entry, while *SignedAudit records
-	// nothing at all (CORE-05 — chain entries would mutate disk/keychain state,
-	// which the --dry-run contract forbids).
+	// *Audit appends a DryRun-tagged entry (chain-aware — signed when the log
+	// carries an active chain, R2-C1), while *SignedAudit records nothing at
+	// all (CORE-05 — chain entries would mutate disk/keychain state, which the
+	// --dry-run contract forbids).
 	WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error
 }
 

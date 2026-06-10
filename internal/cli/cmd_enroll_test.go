@@ -189,6 +189,100 @@ func TestEnrollRig_Migration(t *testing.T) {
 	}
 }
 
+// TestEnrollRig_DuplicateNameGuardBeforeKeyWrite covers the CR-02 critical:
+// re-enrolling an existing rig name must fail BEFORE the new HMAC key is
+// generated and stored — the old flow silently overwrote the existing rig's
+// signing key in the keychain before the duplicate guard fired.
+func TestEnrollRig_DuplicateNameGuardBeforeKeyWrite(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "abysslink.yaml")
+	cfg := testCfgDefaults()
+	cfg.Version = 1
+	cfg.Rigs = []config.RigConfig{
+		{Name: "laptop", Hostname: "laptop.ts.net", NtfyTopic: "abysslink-laptop-a1b2c3d4", Backend: "tailscale"},
+	}
+	data, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, data, 0o600))
+
+	kc := newMockKeychain()
+	// The existing rig's signing key, enrolled earlier.
+	rigSvc := fleet.RigService("laptop")
+	require.NoError(t, kc.Set(context.Background(), rigSvc, "hmac-signing-key", "original-key"))
+
+	err = enrollRig(context.Background(), enrollRigOpts{
+		name:     "laptop", // duplicate!
+		cfgPath:  cfgPath,
+		keychain: kc,
+		apply:    true,
+	})
+	require.Error(t, err, "duplicate-name enrollment must fail")
+	assert.Contains(t, err.Error(), "already enrolled")
+
+	// CR-02: the existing rig's HMAC key must be UNTOUCHED.
+	got, getErr := kc.Get(context.Background(), rigSvc, "hmac-signing-key")
+	require.NoError(t, getErr)
+	assert.Equal(t, "original-key", got,
+		"the existing rig's HMAC signing key must not be overwritten before the duplicate guard fires")
+}
+
+// TestEnrollRig_TopicSuffixEntropy asserts the derived ntfy topic carries a
+// 16-byte (32 hex char) random suffix — against ntfy.sh the topic IS the
+// credential, and the old 4-byte suffix (2^32) was brute-forceable.
+func TestEnrollRig_TopicSuffixEntropy(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "abysslink.yaml")
+	cfg := testCfgDefaults()
+	cfg.Version = 1
+	data, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, data, 0o600))
+
+	kc := newMockKeychain()
+	require.NoError(t, enrollRig(context.Background(), enrollRigOpts{
+		name:     "entropy-rig",
+		cfgPath:  cfgPath,
+		keychain: kc,
+		apply:    true,
+	}))
+
+	cfg2, loadErr := config.Load(cfgPath)
+	require.NoError(t, loadErr)
+	require.Len(t, cfg2.Rigs, 1)
+	topic := cfg2.Rigs[0].NtfyTopic
+	const prefix = "abysslink-entropy-rig-"
+	require.True(t, strings.HasPrefix(topic, prefix), "topic %q must carry the rig-name prefix", topic)
+	suffix := strings.TrimPrefix(topic, prefix)
+	assert.Len(t, suffix, 32, "topic suffix must be 16 random bytes = 32 hex chars")
+}
+
+// TestEnrollRig_TopicCollisionErrorNamesNoGhostFlag asserts the collision error
+// does not reference the nonexistent --ntfy-topic flag (U4).
+func TestEnrollRig_TopicCollisionErrorNamesNoGhostFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "abysslink.yaml")
+	cfg := testCfgDefaults()
+	cfg.Version = 1
+	existingTopic := "abysslink-laptop-a1b2c3d4"
+	cfg.Rigs = []config.RigConfig{
+		{Name: "laptop", Hostname: "laptop.ts.net", NtfyTopic: existingTopic, Backend: "tailscale"},
+	}
+	data, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, data, 0o600))
+
+	err = enrollRig(context.Background(), enrollRigOpts{
+		name:          "laptop2",
+		cfgPath:       cfgPath,
+		keychain:      newMockKeychain(),
+		apply:         true,
+		overrideTopic: existingTopic,
+	})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "--ntfy-topic",
+		"the error must not suggest a flag that does not exist")
+}
+
 // TestEnrollRig_HMACKey asserts that enroll --apply generates a 64-char-hex HMAC key,
 // stores it at (RigService(name), "hmac-signing-key"), and the key is NOT written into
 // the yaml body (T-14-09, D-KN-01).

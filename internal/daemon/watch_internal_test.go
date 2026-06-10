@@ -74,6 +74,71 @@ func TestScanFileFrom_NotifiesOnMatchAndTracksOffset(t *testing.T) {
 	assert.Len(t, rn.msgs, 1)
 }
 
+// TestScanFileFrom_PartialFinalLineNoDuplicates is the R2-W6 regression: a
+// final line WITHOUT a trailing newline (a writer caught mid-append) must not
+// advance the offset past the file size. The old `len(line)+1` accounting
+// overshot by one byte, so the next poll saw info.Size() < offset, diagnosed a
+// rotation, reset to 0 and re-notified EVERY matching line on EVERY poll until
+// a newline landed.
+func TestScanFileFrom_PartialFinalLineNoDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "partial.log")
+	// One complete matching line, then a partially-written matching line.
+	require.NoError(t, os.WriteFile(path, []byte("step 1 FAILED\nstep 2 FAIL"), 0o600))
+
+	rn := &recordingNotifier{}
+	s := &Server{notifier: rn}
+	re := regexp.MustCompile("FAILED")
+
+	// First poll: only the COMPLETE line is consumed and notified; the offset
+	// stops at the line boundary (never past the file size).
+	off := s.scanFileFrom(context.Background(), path, 0, re, "partial")
+	require.Len(t, rn.msgs, 1)
+	assert.Equal(t, "step 1 FAILED", rn.msgs[0])
+	assert.Equal(t, int64(len("step 1 FAILED\n")), off,
+		"offset must stop at the last complete line boundary")
+
+	// Second poll with no new data: no rotation false-positive, no duplicates.
+	off2 := s.scanFileFrom(context.Background(), path, off, re, "partial")
+	assert.Equal(t, off, off2)
+	assert.Len(t, rn.msgs, 1, "an unterminated final line must not cause duplicate notifications")
+
+	// The writer finishes the line: it is delivered exactly once.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, _ = f.WriteString("ED\n")
+	_ = f.Close()
+
+	off3 := s.scanFileFrom(context.Background(), path, off2, re, "partial")
+	require.Len(t, rn.msgs, 2)
+	assert.Equal(t, "step 2 FAILED", rn.msgs[1])
+	assert.Equal(t, int64(len("step 1 FAILED\nstep 2 FAILED\n")), off3)
+}
+
+// TestScanFileFrom_CRLFLinesStayInSync: CRLF-terminated files must neither
+// desync the offset nor leak the \r into the notification body (R2-W6).
+func TestScanFileFrom_CRLFLinesStayInSync(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "crlf.log")
+	content := "one FAILED\r\nplain line\r\ntwo FAILED\r\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	rn := &recordingNotifier{}
+	s := &Server{notifier: rn}
+	re := regexp.MustCompile("FAILED")
+
+	off := s.scanFileFrom(context.Background(), path, 0, re, "crlf")
+	require.Len(t, rn.msgs, 2)
+	assert.Equal(t, "one FAILED", rn.msgs[0], "the \\r must be stripped from the body")
+	assert.Equal(t, "two FAILED", rn.msgs[1])
+	assert.Equal(t, int64(len(content)), off, "CRLF terminators must be fully accounted for in the offset")
+
+	// Re-scan: offset is exact, so nothing is re-notified.
+	off2 := s.scanFileFrom(context.Background(), path, off, re, "crlf")
+	assert.Equal(t, off, off2)
+	assert.Len(t, rn.msgs, 2)
+}
+
 func TestScanFileFrom_MissingFileIsNoop(t *testing.T) {
 	rn := &recordingNotifier{}
 	s := &Server{notifier: rn}

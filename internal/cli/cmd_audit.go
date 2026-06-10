@@ -257,21 +257,9 @@ func runAuditAggregate(ctx context.Context, cc *cmdContext, p Printer, logPath s
 	// CounterStatus "unknown") so the final exit code can never roll back to 0
 	// purely on the strength of the findings (WR-02/AUD-02: a skipped HMAC or
 	// tail-truncation check is not a clean result).
-	degradedCode := exitCodeOK
-	if err := runAuditVerify(ctx, verifyP, logPath, kc); err != nil {
-		var ee *exitError
-		switch {
-		case errors.As(err, &ee) && ee.ExitCode() == exitCodeFatal:
-			return err // CHAIN BROKEN — propagate exit 2 immediately.
-		case errors.As(err, &ee):
-			degradedCode = ee.ExitCode()
-		default:
-			// Parse/IO failure in the verify step: still a degraded posture.
-			degradedCode = exitCodeError
-		}
-		// A non-fatal chain result does not abort the aggregate — the posture
-		// findings still matter. Fall through; the roll-up takes max(degraded,
-		// findings).
+	degradedCode, fatalErr := auditVerifyStepCode(ctx, verifyP, logPath, kc)
+	if fatalErr != nil {
+		return fatalErr // CHAIN BROKEN — propagate exit 2 immediately.
 	}
 
 	// 2. Obtain deps with graceful degradation (mirrors cmd_doctor.go).
@@ -314,6 +302,28 @@ func maxExitCode(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// auditVerifyStepCode runs the chain-verify step for the aggregate and maps
+// its outcome: a FATAL chain break is returned as fatalErr (the aggregate
+// aborts with exit 2 immediately); any non-fatal degradation (kc==nil walk,
+// CounterStatus "unknown", parse/IO failure) is returned as a degraded exit
+// code that the aggregate roll-up must never undercut (WR-02/AUD-02).
+func auditVerifyStepCode(ctx context.Context, p Printer, logPath string, kc audit.KeychainStore) (degraded int, fatalErr error) {
+	err := runAuditVerify(ctx, p, logPath, kc)
+	if err == nil {
+		return exitCodeOK, nil
+	}
+	var ee *exitError
+	switch {
+	case errors.As(err, &ee) && ee.ExitCode() == exitCodeFatal:
+		return exitCodeFatal, err
+	case errors.As(err, &ee):
+		return ee.ExitCode(), nil
+	default:
+		// Parse/IO failure in the verify step: still a degraded posture.
+		return exitCodeError, nil
+	}
 }
 
 // collectAggregateFindings runs every doctor finding source exactly once and
