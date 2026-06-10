@@ -137,6 +137,69 @@ func TestSendDirectWithOptions_ZeroValueBackCompat(t *testing.T) {
 	assert.Empty(t, gotTags, "zero options must not set X-Tags")
 }
 
+// TestSendDirectWithOptions_ClickHeader verifies that SendOptions.Click becomes
+// the ntfy X-Click header (D-16: tap-to-open ssh:// deep link) and that an
+// empty Click sets no header at all.
+func TestSendDirectWithOptions_ClickHeader(t *testing.T) {
+	var gotClick string
+	var clickPresent bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotClick = r.Header.Get("X-Click")
+		_, clickPresent = r.Header["X-Click"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := ntfyBaseURL
+	ntfyBaseURL = srv.URL
+	defer func() { ntfyBaseURL = old }()
+
+	cfg := config.Defaults()
+	cfg.Modules.Notify.Enabled = true
+	cfg.Modules.Notify.DefaultTopic = "alerts"
+	m := New(modules.Deps{Cfg: cfg, Runner: shell.NewMockRunner()})
+
+	err := m.SendDirectWithOptions(context.Background(), "t", "b", SendOptions{
+		Click: "ssh://mo@rig-1",
+	})
+	require.NoError(t, err)
+	assert.True(t, clickPresent, "non-empty Click must set the X-Click header")
+	assert.Equal(t, "ssh://mo@rig-1", gotClick, "X-Click must carry the exact configured value")
+
+	// Empty Click → no X-Click header.
+	require.NoError(t, m.SendDirectWithOptions(context.Background(), "t", "b", SendOptions{}))
+	assert.False(t, clickPresent, "empty Click must not set X-Click")
+}
+
+// TestSendWithOptions_ZeroValueGuardStillComparable verifies that adding the
+// Click string field keeps SendOptions comparable so the zero-options fast-path
+// guard in SendWithOptions (opts == SendOptions{}) still compiles and works.
+func TestSendWithOptions_ZeroValueGuardStillComparable(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := ntfyBaseURL
+	ntfyBaseURL = srv.URL
+	defer func() { ntfyBaseURL = old }()
+
+	cfg := config.Defaults()
+	cfg.Modules.Notify.Enabled = true
+	cfg.Modules.Notify.DefaultTopic = "alerts"
+	m := New(modules.Deps{Cfg: cfg, Runner: shell.NewMockRunner()})
+
+	// Compile-level: the struct must stay comparable for the fast-path guard.
+	assert.True(t, SendOptions{} == SendOptions{}) //nolint:gocritic // gocritic: deliberate comparability assertion
+
+	// Behavioral: zero options still deliver via the direct fallback to the
+	// configured default topic (no daemon is listening in tests).
+	require.NoError(t, m.SendWithOptions(context.Background(), "t", "b", SendOptions{}))
+	assert.Equal(t, "/alerts", gotPath)
+}
+
 // TestSendDirectWithOptions_InvalidTopicRejected verifies that a topic override
 // outside the ntfy topic charset is refused before any request is built (the
 // override is a URL path segment — it must never alter the request path).

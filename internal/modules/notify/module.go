@@ -280,6 +280,9 @@ type SendOptions struct {
 	// Topic overrides the config default_topic (URL path segment). Empty =
 	// use the configured default.
 	Topic string
+	// Click maps to the ntfy X-Click header; opens the URL on tap; empty =
+	// omit the header (D-16: the dispatcher composes an ssh:// deep link).
+	Click string
 }
 
 // validTopicRe constrains a topic override to the ntfy topic charset so a
