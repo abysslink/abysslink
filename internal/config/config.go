@@ -570,20 +570,16 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("config: claudecode.notify_on.stop_after %q must be at least 30s to avoid chatty notifications", cfg.ClaudeCode.NotifyOn.StopAfter)
 		}
 	}
-	if err := validateBackend(cfg); err != nil {
-		return err
-	}
-	if err := ValidateObservability(cfg); err != nil {
-		return err
-	}
-	if err := ValidateWebUI(cfg); err != nil {
-		return err
-	}
-	if err := validateWatchPanes(cfg); err != nil {
-		return err
-	}
-	if err := validateSessionRegistry(cfg); err != nil {
-		return err
+	for _, validate := range []func(*Config) error{
+		validateBackend,
+		ValidateObservability,
+		ValidateWebUI,
+		validateWatchPanes,
+		validateSessionRegistry,
+	} {
+		if err := validate(cfg); err != nil {
+			return err
+		}
 	}
 	return nil
 }

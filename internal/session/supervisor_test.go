@@ -193,10 +193,16 @@ func TestSupervisorAttachSnapshot(t *testing.T) {
 	cancel()
 	waitDone(t, done)
 
-	// Goroutine hygiene: Run's return leaves nothing behind.
-	require.Eventually(t, func() bool {
-		return runtime.NumGoroutine() <= baseline
-	}, 2*time.Second, 10*time.Millisecond, "no goroutines may outlive Run")
+	// Goroutine hygiene: Run's return leaves nothing behind. Polled on the
+	// test goroutine itself (the stream_test idiom) — an Eventually-spawned
+	// condition goroutine would inflate the count it is measuring.
+	for i := 0; i < 100; i++ {
+		if runtime.NumGoroutine() <= baseline {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	assert.LessOrEqual(t, runtime.NumGoroutine(), baseline, "no goroutines may outlive Run")
 }
 
 // TestSupervisorRestartEpochBumpAndDebounce: the restart transcript ends

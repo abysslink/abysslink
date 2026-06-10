@@ -110,6 +110,8 @@ type Snapshot struct {
 }
 
 // SessionState is one tmux session in a Snapshot.
+//
+//nolint:revive // revive: SessionState is the published plan-27-03 channel/snapshot contract name consumed by plans 27-06/27-07; session.State is reserved for the SPEC §3.2 pane-state enum
 type SessionState struct {
 	ID       string
 	Name     string
@@ -227,10 +229,8 @@ func (r *Registry) Snapshot() Snapshot {
 	windows := make(map[winKey]*WindowState)
 
 	for _, p := range r.panes {
-		s, ok := sessions[p.sessionID]
-		if !ok {
-			s = &SessionState{ID: p.sessionID, Name: p.sessionName, Attached: p.attached}
-			sessions[p.sessionID] = s
+		if _, ok := sessions[p.sessionID]; !ok {
+			sessions[p.sessionID] = &SessionState{ID: p.sessionID, Name: p.sessionName, Attached: p.attached}
 		}
 		wk := winKey{p.sessionID, p.windowID}
 		w, ok := windows[wk]
