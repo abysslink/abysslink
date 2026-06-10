@@ -446,3 +446,64 @@ func TestValidateServerURLHostname(t *testing.T) {
 		})
 	}
 }
+
+// TestSessionRegistryConfigRoundTrip verifies that a YAML document with a
+// session_registry: section (Phase 27, BACK-03, D-01/D-05/D-07/D-08) loads,
+// validates, and exposes every knob.
+func TestSessionRegistryConfigRoundTrip(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.yaml")
+	require.NoError(t, err)
+	doc := string(base) + `
+session_registry:
+  enabled: true
+  ignore_sessions:
+    - logs
+  idle_secs: 12
+  poll_active_secs: 3
+  poll_idle_secs: 20
+  prompt_regex: "READY\\$$"
+  cooldown_secs: 120
+`
+	dir := t.TempDir()
+	p := filepath.Join(dir, "session.yaml")
+	require.NoError(t, os.WriteFile(p, []byte(doc), 0o600))
+
+	cfg, err := config.Load(p)
+	require.NoError(t, err)
+	assert.True(t, cfg.SessionRegistry.Enabled)
+	assert.Equal(t, []string{"logs"}, cfg.SessionRegistry.IgnoreSessions)
+	assert.Equal(t, 12, cfg.SessionRegistry.IdleSecs)
+	assert.Equal(t, 3, cfg.SessionRegistry.PollActiveSecs)
+	assert.Equal(t, 20, cfg.SessionRegistry.PollIdleSecs)
+	assert.Equal(t, `READY\$$`, cfg.SessionRegistry.PromptRegex)
+	assert.Equal(t, 120, cfg.SessionRegistry.CooldownSecs)
+}
+
+// TestSessionRegistryConfigInvalidPromptRegex verifies that an uncompilable
+// prompt_regex is rejected with an error naming the field (T-27-12: user
+// regex is compiled with regexp.Compile, never MustCompile).
+func TestSessionRegistryConfigInvalidPromptRegex(t *testing.T) {
+	cfg := validBackendBaseConfig()
+	cfg.SessionRegistry.PromptRegex = "(["
+	err := config.Validate(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session_registry.prompt_regex")
+}
+
+// TestSessionRegistryConfigZeroValueValid verifies zero-value-means-default
+// semantics: an all-zero SessionRegistry passes validation (compiled-in
+// defaults apply downstream in the registry/daemon accessors).
+func TestSessionRegistryConfigZeroValueValid(t *testing.T) {
+	cfg := validBackendBaseConfig()
+	cfg.SessionRegistry = config.SessionRegistry{}
+	require.NoError(t, config.Validate(cfg))
+}
+
+// TestSessionRegistryConfigDefaultEnabled verifies the registry defaults ON
+// (the Watch defaults pattern — observe-only, no destructive surface).
+func TestSessionRegistryConfigDefaultEnabled(t *testing.T) {
+	cfg := config.Defaults()
+	assert.True(t, cfg.SessionRegistry.Enabled)
+	assert.Zero(t, cfg.SessionRegistry.IdleSecs, "timing knobs default to zero = compiled-in default")
+	assert.Zero(t, cfg.SessionRegistry.CooldownSecs)
+}
