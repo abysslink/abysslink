@@ -17,11 +17,13 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +32,7 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
 	notifymod "github.com/abysslink/abysslink/internal/modules/notify"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -48,24 +51,56 @@ var validNotifyPriorities = map[string]bool{ //nolint:gochecknoglobals // gochec
 	"max": true, "urgent": true, "1": true, "2": true, "3": true, "4": true, "5": true,
 }
 
+// validNotifyKinds is the closed v2 kind enum accepted by --kind (D-30). The
+// five values mirror notifyv2's Kind constants; an empty flag means auto
+// (needs_input when the v2 path engages).
+var validNotifyKinds = map[string]bool{ //nolint:gochecknoglobals // gochecknoglobals: immutable lookup table
+	"needs_input": true, "command_done": true, "approval_request": true,
+	"watch_fired": true, "agent_stopped": true,
+}
+
+// notifyPaneRe pins pane IDs (--pane and $TMUX_PANE) to the literal tmux %N
+// form so a stale or forged value can never ride into the wire (T-27-31:
+// routing metadata, format-validated, never a capability).
+var notifyPaneRe = regexp.MustCompile(`^%\d+$`) //nolint:gochecknoglobals // gochecknoglobals: compiled-once validation regex
+
+// notifySendMessage and notifySendV1 are test seams over the module send
+// paths so the D-31 selection matrix is assertable without a daemon or
+// network (mirrors the notifyCmdBaseURL seam idiom above).
+var notifySendMessage = func(ctx context.Context, nm *notifymod.Module, msg notifyv2.Message) error { //nolint:gochecknoglobals // gochecknoglobals: package-level var is a test/injection seam; intentional
+	return nm.SendMessage(ctx, msg)
+}
+
+var notifySendV1 = func(ctx context.Context, nm *notifymod.Module, title, body string, opts notifymod.SendOptions) error { //nolint:gochecknoglobals // gochecknoglobals: package-level var is a test/injection seam; intentional
+	return nm.SendWithOptions(ctx, title, body, opts)
+}
+
 func newNotifyCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "notify [title] [body]",
+		Use:   "notify [title] [body] | notify [flags] -- <command> [args...]",
 		Short: "Send a notification via the ntfy backend or wrap a command",
-		Example: `  # Send a simple notification
+		Example: `  # Send a simple notification (inside tmux the pane is autodetected — v2)
   abysslink notify "Build done" "CI passed"
 
   # Send a notification with body from stdin
   echo "output" | abysslink notify "Script done" --stdin
 
   # Urgent notification with a tag, to a non-default topic
-  abysslink notify "Disk full" "/ at 98%" --priority urgent --tag warning --topic ops`,
+  abysslink notify "Disk full" "/ at 98%" --priority urgent --tag warning --topic ops
+
+  # Session-typed v2 notification with an explicit kind
+  abysslink notify "review the diff" --kind approval_request
+
+  # Wrap a command: run it, notify "done ✓" / "failed ✗", exit with ITS code
+  abysslink notify -- make build`,
 	}
 
 	cmd.Flags().Bool("stdin", false, "Read notification body from stdin")
 	cmd.Flags().String("priority", "default", "Notification priority: min|low|default|high|max (urgent = max)")
 	cmd.Flags().String("tag", "", "User-supplied label (ntfy X-Tags; comma-separate for multiple)")
 	cmd.Flags().String("topic", "", "Routing key (default from config)")
+	cmd.Flags().String("kind", "", "v2 notification kind: needs_input|command_done|approval_request|watch_fired|agent_stopped (forces v2)")
+	cmd.Flags().String("pane", "", "tmux pane ID (%N form) for session routing; forces v2 (default: autodetect from $TMUX_PANE)")
 
 	cmd.RunE = func(c *cobra.Command, args []string) error {
 		ctx := c.Context()
@@ -80,39 +115,37 @@ func newNotifyCmd() *cobra.Command {
 		}
 		nm := notifymod.New(deps)
 
-		readStdin, _ := c.Flags().GetBool("stdin")
-
-		// CLI-04: read and validate the delivery option flags, then thread them
-		// through the notify module — declared flags must never be silently dropped.
-		priority, _ := c.Flags().GetString("priority")
-		if !c.Flags().Changed("priority") {
-			priority = "" // flag left at default — let ntfy apply its server-side default
+		// CLI-04: read and validate ALL flags up front — declared flags must
+		// never be silently dropped, and an invalid --kind/--pane is rejected
+		// before anything is sent (D-30).
+		f, err := parseNotifyFlags(c)
+		if err != nil {
+			return err
 		}
-		if !validNotifyPriorities[priority] {
-			return fmt.Errorf("notify: invalid --priority %q (use min|low|default|high|max|urgent or 1-5)", priority)
-		}
-		tag, _ := c.Flags().GetString("tag")
-		topicFlag, _ := c.Flags().GetString("topic")
 
-		var title, message string
-		if readStdin {
-			body, readErr := io.ReadAll(os.Stdin)
-			if readErr != nil {
-				return fmt.Errorf("notify: read stdin: %w", readErr)
+		// D-32: wrap mode — everything after `--` is exec'd with inherited
+		// stdio; the CLI exits with the wrapped command's own exit code.
+		if dashAt := c.ArgsLenAtDash(); dashAt >= 0 {
+			wrapped := args[dashAt:]
+			if werr := validateNotifyWrapFlags(f, wrapped); werr != nil {
+				return werr
 			}
-			title = "notification"
-			if len(args) > 0 {
-				title = args[0]
-			}
-			message = strings.TrimSpace(string(body))
-		} else if len(args) >= 2 {
-			title = args[0]
-			message = args[1]
-		} else if len(args) == 1 {
-			title = args[0]
-			message = ""
-		} else {
-			return fmt.Errorf("notify: provide title and body, or use --stdin for body from stdin")
+			return runNotifyWrap(ctx, cc, nm, newPrinter(c), wrapped, resolveNotifyPane(f.pane))
+		}
+
+		// D-31: a body cannot ride v2 (content rides the v1 path until the
+		// Phase 28 fetched body) — combining them is an explicit error.
+		hasBody := f.stdin || len(args) >= 2
+		if f.forceV2 && hasBody {
+			return fmt.Errorf("notify: --kind/--pane select the v2 path, which carries no body (content rides the v1 path until Phase 28) — drop the body or the v2 flags")
+		}
+		if f.forceV2 && (f.priority != "" || f.tag != "" || f.topic != "") {
+			return fmt.Errorf("notify: --priority/--tag/--topic are v1 delivery options and cannot be combined with --kind/--pane (v2 derives priority and tags from the kind)")
+		}
+
+		title, message, err := parseNotifyArgs(args, f.stdin)
+		if err != nil {
+			return err
 		}
 
 		// --rig / --all-rigs branch: send per-rig HMAC-signed notifications
@@ -122,26 +155,228 @@ func newNotifyCmd() *cobra.Command {
 			return rigErr
 		}
 		if rt.fanOut && len(rt.rigs) > 0 {
-			if topicFlag != "" {
+			if f.forceV2 {
+				return fmt.Errorf("notify: --kind/--pane cannot be combined with --rig/--all-rigs — v2 rides the local daemon socket only")
+			}
+			if f.topic != "" {
 				// CR-04 / T-14-14: each rig has its own isolated topic; a manual
 				// override would break per-rig isolation.
 				return fmt.Errorf("notify: --topic cannot be combined with --rig/--all-rigs — each rig has its own isolated topic")
 			}
 			return sendNotifyAllRigs(ctx, rt.rigs, deps.Keychain, title, message, rigNotifyOpts{
 				baseURL:  resolveFleetNtfyBaseURL(ctx, cc, deps.Backend),
-				priority: priority,
-				tags:     tag,
+				priority: f.priority,
+				tags:     f.tag,
 			})
 		}
 
-		return nm.SendWithOptions(ctx, title, message, notifymod.SendOptions{
-			Priority: priority,
-			Tags:     tag,
-			Topic:    topicFlag,
+		// D-31 version selection: v2 inside tmux / on explicit flags, v1
+		// everywhere else — existing scripts keep working unchanged.
+		if useNotifyV2(f, hasBody) {
+			return sendNotifyV2(ctx, nm, f, title)
+		}
+
+		return notifySendV1(ctx, nm, title, message, notifymod.SendOptions{
+			Priority: f.priority,
+			Tags:     f.tag,
+			Topic:    f.topic,
 		})
 	}
 
 	return cmd
+}
+
+// notifyFlags carries the parsed and validated notify flag set.
+type notifyFlags struct {
+	stdin    bool
+	priority string // "" = unset (server default)
+	tag      string
+	topic    string
+	kind     string // "" = auto (needs_input when v2 engages)
+	pane     string // validated %N form, "" = autodetect
+	forceV2  bool   // --kind or --pane explicitly set (D-31)
+}
+
+// parseNotifyFlags reads and validates every notify flag. Invalid values are
+// descriptive errors raised before anything is sent.
+func parseNotifyFlags(c *cobra.Command) (notifyFlags, error) {
+	var f notifyFlags
+	f.stdin, _ = c.Flags().GetBool("stdin")
+
+	f.priority, _ = c.Flags().GetString("priority")
+	if !c.Flags().Changed("priority") {
+		f.priority = "" // flag left at default — let ntfy apply its server-side default
+	}
+	if !validNotifyPriorities[f.priority] {
+		return f, fmt.Errorf("notify: invalid --priority %q (use min|low|default|high|max|urgent or 1-5)", f.priority)
+	}
+	f.tag, _ = c.Flags().GetString("tag")
+	f.topic, _ = c.Flags().GetString("topic")
+
+	f.kind, _ = c.Flags().GetString("kind")
+	if f.kind != "" && !validNotifyKinds[f.kind] {
+		return f, fmt.Errorf("notify: invalid --kind %q (use needs_input|command_done|approval_request|watch_fired|agent_stopped)", f.kind)
+	}
+	f.pane, _ = c.Flags().GetString("pane")
+	if f.pane != "" && !notifyPaneRe.MatchString(f.pane) {
+		return f, fmt.Errorf(`notify: invalid --pane %q: pane IDs must match ^%%\d+$ (tmux %%N form)`, f.pane)
+	}
+	f.forceV2 = c.Flags().Changed("kind") || c.Flags().Changed("pane")
+	return f, nil
+}
+
+// parseNotifyArgs resolves title/message exactly as the historical v1 parse —
+// byte-identical outputs for every pre-existing invocation shape.
+func parseNotifyArgs(args []string, readStdin bool) (title, message string, err error) {
+	switch {
+	case readStdin:
+		body, readErr := io.ReadAll(os.Stdin)
+		if readErr != nil {
+			return "", "", fmt.Errorf("notify: read stdin: %w", readErr)
+		}
+		title = "notification"
+		if len(args) > 0 {
+			title = args[0]
+		}
+		message = strings.TrimSpace(string(body))
+	case len(args) >= 2:
+		title, message = args[0], args[1]
+	case len(args) == 1:
+		title = args[0]
+	default:
+		return "", "", fmt.Errorf("notify: provide title and body, or use --stdin for body from stdin")
+	}
+	return title, message, nil
+}
+
+// useNotifyV2 implements the locked D-31 selection rule: explicit
+// --kind/--pane forces v2 (callers combining them with a body or v1 delivery
+// flags were already rejected); a body or any v1-only delivery flag keeps v1
+// (never silently drop options — the CLI-04 lesson); otherwise auto — inside
+// tmux (TMUX_PANE set, even if malformed) v2, outside v1.
+func useNotifyV2(f notifyFlags, hasBody bool) bool {
+	if f.forceV2 {
+		return true
+	}
+	if hasBody || f.priority != "" || f.tag != "" || f.topic != "" {
+		return false
+	}
+	return os.Getenv("TMUX_PANE") != ""
+}
+
+// sendNotifyV2 builds and sends the v2 Message for the non-wrap path. Session
+// and window IDs are unknown CLI-side — the daemon registry enriches display
+// names at render time; a pane alone is valid routing identity.
+func sendNotifyV2(ctx context.Context, nm *notifymod.Module, f notifyFlags, title string) error {
+	kind := notifyv2.KindNeedsInput
+	if f.kind != "" {
+		kind = notifyv2.Kind(f.kind)
+	}
+	msg := notifyv2.Message{
+		V:       2,
+		MsgID:   notifyv2.NewMsgID(),
+		Kind:    kind,
+		Host:    shortNotifyHostname(),
+		Session: notifyv2.SessionRef{Pane: resolveNotifyPane(f.pane)},
+		Title:   title,
+	}
+	if err := notifySendMessage(ctx, nm, msg); err != nil {
+		return fmt.Errorf("notify: %w", err)
+	}
+	return nil
+}
+
+// validateNotifyWrapFlags rejects flag combinations wrap mode cannot honor.
+func validateNotifyWrapFlags(f notifyFlags, wrapped []string) error {
+	if len(wrapped) == 0 {
+		return fmt.Errorf("notify: wrap mode needs a command after -- (e.g. abysslink notify -- make build)")
+	}
+	if f.stdin {
+		return fmt.Errorf("notify: --stdin cannot be combined with wrap mode (the wrapped command owns stdin)")
+	}
+	if f.kind != "" && f.kind != string(notifyv2.KindCommandDone) {
+		return fmt.Errorf("notify: wrap mode always sends kind command_done — drop --kind %q", f.kind)
+	}
+	if f.priority != "" || f.tag != "" || f.topic != "" {
+		return fmt.Errorf("notify: --priority/--tag/--topic are v1 delivery options and cannot be combined with wrap mode (D-32 derives priority from the outcome)")
+	}
+	return nil
+}
+
+// runNotifyWrap implements D-32: exec the wrapped argv with inherited stdio
+// via the (gated) Runner, send a v2 command_done whose title word reports the
+// outcome ("done ✓" / "failed ✗" at high priority), and exit with the wrapped
+// command's OWN exit code. A notification failure prints a warning and never
+// alters that code (T-27-34: automation built on wrap sees true outcomes).
+// Numeric exit code and duration are deliberately deferred to the Phase 28
+// fetched body.
+func runNotifyWrap(ctx context.Context, cc *cmdContext, nm *notifymod.Module, p Printer, argv []string, pane string) error {
+	runErr := cc.runner.RunInteractive(ctx, argv[0], argv[1:]...)
+
+	exitCode := 0
+	if runErr != nil {
+		var ec interface{ ExitCode() int }
+		if !errors.As(runErr, &ec) {
+			// The command never ran (e.g. binary not found): there is no exit
+			// code to report — surface the exec error itself (exit 1).
+			return fmt.Errorf("notify wrap: %w", runErr)
+		}
+		exitCode = ec.ExitCode()
+	}
+
+	msg := notifyv2.Message{
+		V:       2,
+		MsgID:   notifyv2.NewMsgID(),
+		Kind:    notifyv2.KindCommandDone,
+		Host:    shortNotifyHostname(),
+		Session: notifyv2.SessionRef{Pane: pane},
+		Title:   "done ✓", // D-32: the title word drives tag/priority
+	}
+	if exitCode != 0 {
+		msg.Title = "failed ✗"
+		msg.Priority = "high"
+	}
+	if serr := notifySendMessage(ctx, nm, msg); serr != nil {
+		// Warning only — the wrapped command's exit code is the truth.
+		p.Error(fmt.Sprintf("notify wrap: notification failed: %v", serr))
+	}
+
+	if exitCode != 0 {
+		return &exitError{code: exitCode}
+	}
+	return nil
+}
+
+// resolveNotifyPane resolves the v2 pane ID: an explicit --pane wins; else a
+// well-formed $TMUX_PANE; else empty. A malformed env value is dropped with a
+// debug log, never an error — a notification must not fail on stale tmux
+// metadata (Pitfall 8, D-26 spirit).
+func resolveNotifyPane(paneFlag string) string {
+	if paneFlag != "" {
+		return paneFlag // already validated against notifyPaneRe by parseNotifyFlags
+	}
+	env := os.Getenv("TMUX_PANE")
+	if env == "" {
+		return ""
+	}
+	if !notifyPaneRe.MatchString(env) {
+		slog.Debug("notify: ignoring malformed TMUX_PANE", "value", env)
+		return ""
+	}
+	return env
+}
+
+// shortNotifyHostname returns the short host name for Message.Host (the
+// daemon enriches an empty host server-side, but the CLI knows its own).
+func shortNotifyHostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	if i := strings.IndexByte(h, '.'); i > 0 {
+		h = h[:i]
+	}
+	return h
 }
 
 // rigNotifyOpts carries the resolved delivery options for the per-rig fan-out.
