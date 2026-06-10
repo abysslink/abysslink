@@ -352,7 +352,9 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	if len(sudoLines) > 0 {
 		sb.WriteString("sudo required for:\n")
 		for _, l := range sudoLines {
-			sb.WriteString("  " + l + "\n")
+			sb.WriteString("  ")
+			sb.WriteString(l)
+			sb.WriteString("\n")
 		}
 	}
 	summary := strings.TrimRight(sb.String(), "\n")
@@ -767,14 +769,19 @@ func printNextSteps(p Printer, findings []modules.Finding, cfg *config.Config) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleBold.Render("Next steps") + "\n\n")
+	sb.WriteString(styleBold.Render("Next steps"))
+	sb.WriteString("\n\n")
 	for i, s := range steps {
-		sb.WriteString(s.title + "\n\n")
+		sb.WriteString(s.title)
+		sb.WriteString("\n\n")
 		for _, l := range s.lines {
-			sb.WriteString(l + "\n")
+			sb.WriteString(l)
+			sb.WriteString("\n")
 		}
 		if i < len(steps)-1 {
-			sb.WriteString("\n" + styleMuted.Render(strings.Repeat("─", 48)) + "\n\n")
+			sb.WriteString("\n")
+			sb.WriteString(styleMuted.Render(strings.Repeat("─", 48)))
+			sb.WriteString("\n\n")
 		}
 	}
 
@@ -794,19 +801,27 @@ func printSuccessSummary(p Printer, cfg *config.Config) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleSuccess.Render("✓  Your rig is ready") + "\n\n")
-	sb.WriteString(styleBold.Render("Connect from your phone:") + "\n")
+	sb.WriteString(styleSuccess.Render("✓  Your rig is ready"))
+	sb.WriteString("\n\n")
+	sb.WriteString(styleBold.Render("Connect from your phone:"))
+	sb.WriteString("\n")
 
-	if cfg.Modules.Mosh.Enabled && cfg.Modules.Tmux.Enabled {
-		sb.WriteString("  " + styleCode.Render(fmt.Sprintf("mosh %s -- tmux new -A -s main", hostname)) + "\n")
-	} else if cfg.Modules.Tmux.Enabled {
-		sb.WriteString("  " + styleCode.Render(fmt.Sprintf("ssh %s -t tmux new -A -s main", hostname)) + "\n")
-	} else {
-		sb.WriteString("  " + styleCode.Render(fmt.Sprintf("ssh %s", hostname)) + "\n")
+	var connect string
+	switch {
+	case cfg.Modules.Mosh.Enabled && cfg.Modules.Tmux.Enabled:
+		connect = fmt.Sprintf("mosh %s -- tmux new -A -s main", hostname)
+	case cfg.Modules.Tmux.Enabled:
+		connect = fmt.Sprintf("ssh %s -t tmux new -A -s main", hostname)
+	default:
+		connect = fmt.Sprintf("ssh %s", hostname)
 	}
+	sb.WriteString("  ")
+	sb.WriteString(styleCode.Render(connect))
+	sb.WriteString("\n")
 
-	sb.WriteString("\n" + styleMuted.Render("Next: pair your phone →  ") +
-		styleCode.Render("abysslink enroll phone"))
+	sb.WriteString("\n")
+	sb.WriteString(styleMuted.Render("Next: pair your phone →  "))
+	sb.WriteString(styleCode.Render("abysslink enroll phone"))
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

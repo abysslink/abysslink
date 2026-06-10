@@ -531,7 +531,7 @@ func TestTransitionChannelBoundDrop(t *testing.T) {
 	h := captureWarns(t)
 	r := newTestRegistry()
 	r.syncPanes([]string{paneLine("$1", "@1", "%1", "0", "1", "1", "claude", "work", "editor")})
-	for i := 0; i < eventsChanDepth; i++ {
+	for range eventsChanDepth {
 		r.emit(Transition{Type: TransitionCleared, PaneID: "%9"})
 	}
 

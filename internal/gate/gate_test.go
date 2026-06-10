@@ -176,14 +176,12 @@ func TestGated_CounterConcurrent(t *testing.T) {
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < perGoroutine; j++ {
+	for range goroutines {
+		wg.Go(func() {
+			for range perGoroutine {
 				_, _ = g.Run(ctx, "true")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

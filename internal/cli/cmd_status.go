@@ -298,13 +298,20 @@ func printStatusPanel(p Printer, rep statusReport) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleBold.Render("Abysslink Status") + "\n\n")
-	sb.WriteString(statusRow("Tailscale", hostnameLabel, isOK(rep.Tailscale)) + "\n")
-	sb.WriteString(statusRow("Tailscale SSH", rep.TailscaleSSH, isOK(rep.TailscaleSSH)) + "\n")
-	sb.WriteString(statusRow("Tailnet Lock", rep.TailnetLock, isOK(rep.TailnetLock)) + "\n")
-	sb.WriteString(statusRow("ntfy", rep.Ntfy, isOK(rep.Ntfy)) + "\n")
-	sb.WriteString(statusRow("Disk Encryption", rep.DiskEncrypt, isOK(rep.DiskEncrypt)) + "\n")
-	sb.WriteString("\n" + styleMuted.Render(rep.Timestamp))
+	sb.WriteString(styleBold.Render("Abysslink Status"))
+	sb.WriteString("\n\n")
+	for _, row := range []string{
+		statusRow("Tailscale", hostnameLabel, isOK(rep.Tailscale)),
+		statusRow("Tailscale SSH", rep.TailscaleSSH, isOK(rep.TailscaleSSH)),
+		statusRow("Tailnet Lock", rep.TailnetLock, isOK(rep.TailnetLock)),
+		statusRow("ntfy", rep.Ntfy, isOK(rep.Ntfy)),
+		statusRow("Disk Encryption", rep.DiskEncrypt, isOK(rep.DiskEncrypt)),
+	} {
+		sb.WriteString(row)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(styleMuted.Render(rep.Timestamp))
 
 	printerInfo(p, styleStatusBox.Render(strings.TrimRight(sb.String(), "\n")))
 	printerInfo(p, "")

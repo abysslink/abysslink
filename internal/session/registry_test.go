@@ -185,7 +185,7 @@ func TestRegistryEventsBoundedDrop(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < eventsChanDepth+5; i++ {
+		for range eventsChanDepth + 5 {
 			r.emit(Transition{Type: TransitionNeedsInput, PaneID: "%1", Epoch: 1})
 		}
 	}()
@@ -200,6 +200,59 @@ func TestRegistryEventsBoundedDrop(t *testing.T) {
 	assert.Equal(t, TransitionNeedsInput, tr.Type)
 	assert.Equal(t, "%1", tr.PaneID)
 	assert.Equal(t, uint64(1), tr.Epoch)
+}
+
+// TestRegistryEmitOrderMatchesStateOrder is the regression for the emit
+// ordering race: needs_input is mutated from two goroutines (the heuristic's
+// set/clear and consume's debounced syncPanes attach-clear), and emission
+// used to happen AFTER r.mu was released — the Events channel could then
+// deliver a Cleared BEFORE the NeedsInput it logically followed, wedging a
+// last-event-wins consumer on needs_input. Emission now happens under r.mu,
+// so the edge-triggered alternation (false→true→false→…) must appear on the
+// channel as a strict NeedsInput/Cleared alternation. The original race's
+// reorder window (between Unlock and the channel send) is not schedulable
+// deterministically from a test, so this is a -race stress test of the
+// ordering invariant instead: a regression shows up as two consecutive
+// events of the same type.
+func TestRegistryEmitOrderMatchesStateOrder(t *testing.T) {
+	const iterations = 2000
+	r := newTestRegistry()
+	// Replace the bounded channel with one that cannot drop: a drop would
+	// break the alternation invariant for reasons unrelated to ordering.
+	r.events = make(chan Transition, 4*iterations)
+	r.syncPanes([]string{paneLine("$1", "@1", "%1", "0", "1", "1", "claude", "work", "editor")})
+
+	// Heuristic-side writer: repeated edge-triggered sets.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range iterations {
+			r.setNeedsInput("%1")
+		}
+	}()
+	// Consume-side writer: alternating session_attached counts so every
+	// 1→2 poll performs the D-04 attach-clear when the pane is needs_input.
+	for range iterations {
+		r.syncPanes([]string{paneLine("$1", "@1", "%1", "0", "1", "2", "claude", "work", "editor")})
+		r.syncPanes([]string{paneLine("$1", "@1", "%1", "0", "1", "1", "claude", "work", "editor")})
+	}
+	<-done
+
+	want := TransitionNeedsInput // the first edge is always false→true
+	for {
+		select {
+		case tr := <-r.events:
+			require.Equal(t, want, tr.Type,
+				"Events order must match state-change order: a Cleared may never precede the NeedsInput it follows")
+			if want == TransitionNeedsInput {
+				want = TransitionCleared
+			} else {
+				want = TransitionNeedsInput
+			}
+		default:
+			return
+		}
+	}
 }
 
 func TestRegistryTransitionTypesStable(t *testing.T) {

@@ -68,12 +68,26 @@ const (
 	originHeuristic
 )
 
+// cooldownRef ties a queued retry entry back to the cooldown window its
+// dispatch armed. The cooldown is armed BEFORE delivery succeeds; if every
+// retry exhausts, the window must be released (releaseCooldownLocked) or
+// heuristic repeats stay suppressed for the full — possibly user-configured,
+// hours-long — window with nothing ever delivered (silent notification loss).
+type cooldownRef struct {
+	armed bool
+	key   cooldownKey
+	until time.Time // the exact window armed; release only if still current
+}
+
 // retryEntry is one queued re-delivery attempt (D-28).
 type retryEntry struct {
 	note       notifyv2.RenderedNote
 	attempts   int
 	firstTried time.Time
 	nextTry    time.Time
+	// cooldown is the window the originating dispatch armed (zero when the
+	// dispatch armed none); released when this entry is finally dropped.
+	cooldown cooldownRef
 }
 
 // dispatcher enforces the v2 delivery policy: per-(epoch,pane,kind) cooldown
@@ -228,8 +242,13 @@ func (d *dispatcher) dispatch(ctx context.Context, msg notifyv2.Message, origin 
 		return nil
 	}
 	d.tokens--
+	var cd cooldownRef
 	if cooldownApplies {
-		d.cooldown[key] = now.Add(d.cooldownDur)
+		until := now.Add(d.cooldownDur)
+		d.cooldown[key] = until
+		// Remember the armed window: if delivery fails and every retry
+		// exhausts, the drop releases it so repeats are not silently lost.
+		cd = cooldownRef{armed: true, key: key, until: until}
 	}
 	d.mu.Unlock()
 
@@ -242,7 +261,7 @@ func (d *dispatcher) dispatch(ctx context.Context, msg notifyv2.Message, origin 
 	// (5) Deliver; failures enter the bounded retry queue (D-28).
 	if err := d.notifier.SendNote(ctx, note); err != nil {
 		slog.Warn("daemon: v2 delivery failed; queued for retry", "err", err)
-		d.enqueueRetry(note)
+		d.enqueueRetry(note, cd)
 		return nil
 	}
 
@@ -284,8 +303,10 @@ func (d *dispatcher) sendFloodMeta(ctx context.Context) {
 }
 
 // enqueueRetry appends note to the bounded retry queue, dropping the oldest
-// entry with a warning when the queue is full (D-28).
-func (d *dispatcher) enqueueRetry(note notifyv2.RenderedNote) {
+// entry with a warning when the queue is full (D-28). cd is the cooldown
+// window the originating dispatch armed (zero when none); it is released when
+// the entry is finally dropped.
+func (d *dispatcher) enqueueRetry(note notifyv2.RenderedNote, cd cooldownRef) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.now()
@@ -297,7 +318,26 @@ func (d *dispatcher) enqueueRetry(note notifyv2.RenderedNote) {
 		attempts:   1,
 		firstTried: now,
 		nextTry:    now.Add(d.retryBase),
+		cooldown:   cd,
 	})
+}
+
+// releaseCooldownLocked deletes the cooldown window a finally-dropped retry
+// entry armed — but only if the map still holds that exact window (a newer
+// dispatch may have re-armed the key). Without the release, a delivery that
+// failed every retry would keep heuristic repeats suppressed for the rest of
+// the window: silent notification loss when cooldown_secs exceeds the 5-minute
+// retry age. The suppressed counter goes with it — counting suppressions
+// against a window that delivered nothing would violate D-15 honesty.
+// Caller holds d.mu.
+func (d *dispatcher) releaseCooldownLocked(e retryEntry) {
+	if !e.cooldown.armed {
+		return
+	}
+	if until, ok := d.cooldown[e.cooldown.key]; ok && until.Equal(e.cooldown.until) {
+		delete(d.cooldown, e.cooldown.key)
+		delete(d.suppressed, e.cooldown.key)
+	}
 }
 
 // dropOldestLocked removes the entry with the earliest firstTried (D-28
@@ -314,6 +354,9 @@ func (d *dispatcher) dropOldestLocked() {
 	}
 	slog.Warn("daemon: retry queue full — dropping oldest entry",
 		"depth", retryDepth, "dropped_age", d.now().Sub(d.retry[oldest].firstTried).String())
+	// An overflow drop is final too: release the window it armed so repeats
+	// for that (epoch,pane,kind) are not suppressed with nothing delivered.
+	d.releaseCooldownLocked(d.retry[oldest])
 	d.retry = append(d.retry[:oldest], d.retry[oldest+1:]...)
 }
 
@@ -344,6 +387,9 @@ func (d *dispatcher) processRetries(ctx context.Context) {
 		case now.Sub(e.firstTried) > retryMaxAge || e.attempts >= retryMaxAttempts:
 			slog.Warn("daemon: retry entry dropped",
 				"attempts", e.attempts, "age", now.Sub(e.firstTried).String())
+			// Final drop: release the cooldown window the original dispatch
+			// armed so the next heuristic repeat can deliver (no silent loss).
+			d.releaseCooldownLocked(e)
 		case !e.nextTry.After(now):
 			due = append(due, e)
 		default:

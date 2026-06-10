@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -39,12 +40,14 @@ const (
 	streamChanDepth = 256
 )
 
-// streamLogger is the logger used by RunStream's stderr drain (D-37). nil
-// means slog.Default(), resolved at stream start so tests can inject a
-// capturing handler.
+// streamLogger is the logger used by RunStream's stderr drain (D-37). A nil
+// (unset) pointer means slog.Default(), resolved at stream start so tests
+// can inject a capturing handler. It is an atomic.Pointer because a test may
+// swap it while another stream is starting — an unsynchronized read would be
+// a race-detector hazard.
 //
 //nolint:gochecknoglobals // gochecknoglobals: package-level var is a test/injection seam for the stderr drain logger; intentional
-var streamLogger *slog.Logger
+var streamLogger atomic.Pointer[slog.Logger]
 
 // Line is one stdout line from a streaming process. Truncated is true when
 // the per-line cap was hit and the remainder of the line discarded (D-36).
@@ -129,7 +132,7 @@ func (r *ExecRunner) RunStream(ctx context.Context, name string, args ...string)
 		return nil, err
 	}
 
-	logger := streamLogger
+	logger := streamLogger.Load()
 	if logger == nil {
 		logger = slog.Default()
 	}

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"regexp"
@@ -328,17 +329,29 @@ func (m *Module) SendWithOptions(ctx context.Context, title, body string, opts S
 	// carries title+body only, so routing an option-bearing message through it
 	// would silently drop priority/tags/topic (the CLI-04 bug, relocated).
 	if opts == (SendOptions{}) {
-		if err := daemon.NewClient().Send(ctx, daemon.NotifyRequest{
+		dc := daemon.NewClient()
+		err := dc.Send(ctx, daemon.NotifyRequest{
 			Title: title,
 			Body:  body,
 			Topic: m.cfg.Modules.Notify.DefaultTopic,
-		}); err == nil {
+		})
+		// One-shot client: drop the keep-alive unix conn so long-lived
+		// consumers do not leak a conn + readLoop/writeLoop pair per send.
+		dc.CloseIdleConnections()
+		switch {
+		case err == nil:
 			slog.Debug("notify.Send: delivered via abysslinkd socket")
 			return nil
+		case !errors.Is(err, daemon.ErrUnreachable):
+			// The daemon is up and REJECTED the request (e.g. its policy said
+			// no). Surface it — a direct fallback here would bypass daemon
+			// policy, mirroring the v2 SendMessage contract.
+			return err
 		}
 	}
 
-	// Fall back to direct ntfy POST (always used when options are present).
+	// Fall back to direct ntfy POST (used when options are present or the
+	// daemon is unreachable at the transport level).
 	return m.SendDirectWithOptions(ctx, title, body, opts)
 }
 

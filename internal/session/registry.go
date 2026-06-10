@@ -150,12 +150,15 @@ type paneRecord struct {
 	alternateOn bool
 	consumer    string
 
-	// Heuristic fields (written by the plan-27-06 poll-tick engine):
-	// preserved across syncs within the same epoch, cleared by an epoch
-	// bump (Pitfall 5). lastHash/idleSince are the watchPane content-hash
-	// idle state; they live on the record (under r.mu) so the D-04
-	// attach-clear in syncPanes can restart the idle window of a
-	// just-cleared pane.
+	// Heuristic fields: preserved across syncs within the same epoch,
+	// cleared by an epoch bump (Pitfall 5). lastHash/idleSince are the
+	// watchPane content-hash idle state. TWO goroutines write these fields,
+	// both under r.mu: the plan-27-06 heuristic goroutine (pollTick →
+	// setNeedsInput/clearNeedsInput/evalPane) and the consume goroutine,
+	// whose debounced syncPanes performs the D-04 attach-clear
+	// (needsInput/needsInputSince/idleSince). r.mu — not any single-writer
+	// discipline — is what makes the mutation safe; the matching emit
+	// ordering contract (see emit) keeps the Events order coherent.
 	needsInput      bool
 	needsInputSince time.Time
 	lastHash        string
@@ -234,6 +237,16 @@ func (r *Registry) Events() <-chan Transition { return r.events }
 // emit delivers t on the bounded Events channel, dropping with a warning
 // when the consumer is slow (T-27-11). Emission is wired by plan 27-06; the
 // helper fixes the drop semantics now so the channel contract is stable.
+//
+// Ordering contract: every caller that emits as a consequence of a
+// needs_input state change MUST call emit while still holding r.mu, so the
+// channel delivery order always matches the state-change order. Two writer
+// goroutines exist (the heuristic's set/clear and consume's syncPanes
+// attach-clear); emitting after unlock would let a Cleared overtake the
+// NeedsInput it logically follows, wedging a last-event-wins consumer on
+// needs_input. Holding the mutex across emit is safe because emit can never
+// block: the send is a select with a default that drops (the only other
+// work, the drop warning, is a bounded slog call).
 func (r *Registry) emit(t Transition) {
 	select {
 	case r.events <- t:
@@ -266,33 +279,33 @@ func transitionFrom(tt TransitionType, p *paneRecord, epoch uint64) Transition {
 // requirement plus the downstream 27-05 cooldown, T-27-24).
 func (r *Registry) setNeedsInput(paneID string) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	p, ok := r.panes[paneID]
 	if !ok || p.needsInput {
-		r.mu.Unlock()
 		return
 	}
 	p.needsInput = true
 	p.needsInputSince = r.now()
-	t := transitionFrom(TransitionNeedsInput, p, r.epoch)
-	r.mu.Unlock()
-	r.emit(t)
+	// Emitted under r.mu so channel order matches state-change order (see
+	// the emit ordering contract); emit never blocks.
+	r.emit(transitionFrom(TransitionNeedsInput, p, r.epoch))
 }
 
 // clearNeedsInput clears a pane's needs_input state, recording why (output /
 // attach). Only the true→false edge emits TransitionCleared.
 func (r *Registry) clearNeedsInput(paneID, reason string) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	p, ok := r.panes[paneID]
 	if !ok || !p.needsInput {
-		r.mu.Unlock()
 		return
 	}
 	p.needsInput = false
 	p.needsInputSince = time.Time{}
-	t := transitionFrom(TransitionCleared, p, r.epoch)
-	r.mu.Unlock()
 	slog.Debug("session: needs_input cleared", "pane", paneID, "reason", reason)
-	r.emit(t)
+	// Emitted under r.mu so channel order matches state-change order (see
+	// the emit ordering contract); emit never blocks.
+	r.emit(transitionFrom(TransitionCleared, p, r.epoch))
 }
 
 // Snapshot returns a deep copy of the registry state: sessions, windows, and
@@ -356,12 +369,15 @@ func (r *Registry) Snapshot() Snapshot {
 // previous same-epoch poll clears needs_input for all its panes — a client
 // attaching means eyes on the session. Each clear restarts the pane's idle
 // window so the next heuristic tick does not instantly re-set a pane that is
-// still sitting at the same prompt. Cleared transitions are emitted after the
-// lock is released (emit never blocks regardless, T-27-11).
+// still sitting at the same prompt. Cleared transitions are emitted while
+// r.mu is still held (the emit ordering contract — emit never blocks,
+// T-27-11) so a concurrent heuristic set/clear cannot reorder them on the
+// Events channel.
 func (r *Registry) syncPanes(lines []string) {
 	var cleared []Transition
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	// Previous per-session attached counts, same epoch only — counts from a
 	// dead server must never seed the comparison.
 	prevAttached := make(map[string]int)
@@ -398,7 +414,6 @@ func (r *Registry) syncPanes(lines []string) {
 		rec.idleSince = r.now()
 		cleared = append(cleared, transitionFrom(TransitionCleared, rec, r.epoch))
 	}
-	r.mu.Unlock()
 
 	sort.Slice(cleared, func(i, j int) bool { return idNum(cleared[i].PaneID) < idNum(cleared[j].PaneID) })
 	for _, t := range cleared {

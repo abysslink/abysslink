@@ -124,6 +124,10 @@ func parseTmuxVersion(output string) (int, int, error) {
 		return 0, 0, fmt.Errorf("unexpected format: %q", output)
 	}
 	versionStr := parts[1]
+	// tmux master builds report "tmux next-3.4": strip the prefix so a
+	// development build of a >= 3.2 tmux passes the version gate instead of
+	// degrading on a parse failure.
+	versionStr = strings.TrimPrefix(versionStr, "next-")
 	// Strip trailing non-numeric suffix (e.g. "3.3a" → "3.3").
 	for len(versionStr) > 0 && (versionStr[len(versionStr)-1] < '0' || versionStr[len(versionStr)-1] > '9') {
 		versionStr = versionStr[:len(versionStr)-1]

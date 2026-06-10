@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/backend"
@@ -136,7 +137,7 @@ func runNotifyCmd(c *cobra.Command, args []string) error {
 	// stdio; the CLI exits with the wrapped command's own exit code.
 	if dashAt := c.ArgsLenAtDash(); dashAt >= 0 {
 		wrapped := args[dashAt:]
-		if werr := validateNotifyWrapFlags(f, wrapped); werr != nil {
+		if werr := validateNotifyWrapFlags(c, f, args[:dashAt], wrapped); werr != nil {
 			return werr
 		}
 		return runNotifyWrap(ctx, cc, nm, newPrinter(c), wrapped, resolveNotifyPane(f.pane))
@@ -169,7 +170,12 @@ func runNotifySend(ctx context.Context, c *cobra.Command, cc *cmdContext, deps m
 	if rigErr != nil {
 		return rigErr
 	}
-	if rt.fanOut && len(rt.rigs) > 0 {
+	if rt.fanOut && len(rt.rigs) == 0 {
+		// --all-rigs with zero enrolled rigs: falling through to a LOCAL send
+		// would silently misroute — the user explicitly asked for fan-out.
+		return fmt.Errorf("notify: --all-rigs: no rigs are enrolled (enroll one with `abysslink rig add`)")
+	}
+	if rt.fanOut {
 		if f.forceV2 {
 			return fmt.Errorf("notify: --kind/--pane cannot be combined with --rig/--all-rigs — v2 rides the local daemon socket only")
 		}
@@ -298,10 +304,22 @@ func sendNotifyV2(ctx context.Context, nm *notifymod.Module, f notifyFlags, titl
 	return nil
 }
 
-// validateNotifyWrapFlags rejects flag combinations wrap mode cannot honor.
-func validateNotifyWrapFlags(f notifyFlags, wrapped []string) error {
+// validateNotifyWrapFlags rejects flag and argument combinations wrap mode
+// cannot honor. pre holds the positional args that appeared BEFORE the -- (a
+// wrap invocation has none — the title is derived from the outcome, D-32).
+func validateNotifyWrapFlags(c *cobra.Command, f notifyFlags, pre, wrapped []string) error {
 	if len(wrapped) == 0 {
 		return fmt.Errorf("notify: wrap mode needs a command after -- (e.g. abysslink notify -- make build)")
+	}
+	if len(pre) > 0 {
+		// Silently discarding a user-supplied title/body would be a CLI-04
+		// violation — reject instead.
+		return fmt.Errorf("notify: wrap mode takes no arguments before -- (got %q) — the title is derived from the command outcome (D-32)", strings.Join(pre, " "))
+	}
+	rigName, _ := c.Flags().GetString("rig")
+	allRigs, _ := c.Flags().GetBool("all-rigs")
+	if rigName != "" || allRigs {
+		return fmt.Errorf("notify: --rig/--all-rigs cannot be combined with wrap mode — the wrapped command runs locally and its notification rides the local daemon socket only")
 	}
 	if f.stdin {
 		return fmt.Errorf("notify: --stdin cannot be combined with wrap mode (the wrapped command owns stdin)")
@@ -334,6 +352,18 @@ func runNotifyWrap(ctx context.Context, cc *cmdContext, nm *notifymod.Module, p 
 			return fmt.Errorf("notify wrap: %w", runErr)
 		}
 		exitCode = ec.ExitCode()
+		if exitCode == -1 {
+			// A signal-killed child reports ExitCode() == -1, which the process
+			// would surface as 255. Map it to the conventional 128+signum (e.g.
+			// SIGTERM → 143) so automation built on wrap sees the real outcome.
+			// The WaitStatus assertion's ok form guards platforms without it.
+			var sysErr interface{ Sys() any }
+			if errors.As(runErr, &sysErr) {
+				if ws, ok := sysErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+					exitCode = 128 + int(ws.Signal())
+				}
+			}
+		}
 	}
 
 	msg := notifyv2.Message{
@@ -421,8 +451,9 @@ func resolveFleetNtfyBaseURL(ctx context.Context, cc *cmdContext, b backend.Clie
 // rig's own ntfy topic. Each POST carries:
 //   - X-Abysslink-Rig:    the rig's logical name
 //   - X-Abysslink-Rig-Ts: epoch-seconds timestamp (so the verifier can recompute)
-//   - X-Abysslink-Rig-Sig: hex(HMAC-SHA256(rigName+"."+ts+"."+title+"."+message))
-//     signed with the per-rig keychain key (SC-5, D-NI-03, WR-02)
+//   - X-Abysslink-Rig-Sig: hex(HMAC-SHA256 over the length-prefixed fields
+//     rigName, ts, title, message — see fleet.SignRigMessage) signed with the
+//     per-rig keychain key (SC-5, D-NI-03, WR-02)
 //
 // Security invariants (T-14-17 / T-14-18 / T-14-19 / T-14-20):
 //   - HMAC key fetched from per-rig keychain namespace (fleet.RigService), never argv/yaml/log.
@@ -468,8 +499,6 @@ func sendNotifyAllRigs(
 	g, gctx := errgroup.WithContext(ctx) // D-FT-04: errgroup for concurrent fan-out
 
 	for i, rig := range rigs {
-		i, rig := i, rig // capture loop variables
-
 		g.Go(func() error {
 			// Per-rig timeout: wraps gctx (Pitfall 2) so parent cancellation propagates.
 			rctx, cancel := context.WithTimeout(gctx, perRigTimeout)
@@ -500,8 +529,10 @@ func sendNotifyAllRigs(
 // sendRigNotify sends a single HMAC-signed notification to one rig's ntfy topic.
 //
 // CR-04: an empty NtfyTopic is an error — we never fall back to a shared topic.
-// WR-02: the HMAC canonical string covers rigName+"."+ts+"."+title+"."+message
-// so a relay cannot alter the displayed X-Title without breaking the signature.
+// WR-02: the HMAC canonical string covers the length-prefixed fields rigName,
+// ts, title, message (fleet.SignRigMessage) so a relay cannot alter the
+// displayed X-Title — or shift bytes across the title/body boundary — without
+// breaking the signature.
 // Priority/tags ride as unsigned delivery hints (they affect rendering only,
 // never the authenticated payload).
 func sendRigNotify(
@@ -547,7 +578,7 @@ func sendRigNotify(
 		} else {
 			// WR-02: include title in the signed canonical string so a relay cannot
 			// alter the displayed subject (X-Title) without invalidating the HMAC.
-			// New canonical: rigName + "." + ts + "." + title + "." + message
+			// Canonical: length-prefixed fields rigName, ts, title, message.
 			sig, sigErr := fleet.SignRigMessage(hexKey, rig.Name, ts, title, message)
 			if sigErr != nil {
 				slog.Warn("notify fleet fan-out: HMAC sign failed", "rig", rig.Name, "err", sigErr)

@@ -101,6 +101,10 @@ func TestParseTmuxVersion(t *testing.T) {
 		{"tmux 3.6b", 3, 6},
 		{"tmux 3.1c", 3, 1},
 		{"tmux 3.2", 3, 2},
+		// tmux master builds: the next- prefix must be stripped so a
+		// development build of a >= 3.2 tmux passes the version gate.
+		{"tmux next-3.4", 3, 4},
+		{"tmux next-3.6a", 3, 6},
 	}
 	for _, tc := range cases {
 		major, minor, err := parseTmuxVersion(tc.in)

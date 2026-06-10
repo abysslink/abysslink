@@ -119,8 +119,10 @@ func renderTitle(m Message) string {
 
 // renderBody composes a few short lines of routing metadata only (D-19): a
 // display-name breadcrumb when the caller resolved names, then kind, host,
-// and raw IDs+epoch lines. Pane content structurally never reaches this
-// function — Message has no field that could carry it.
+// and raw IDs+epoch lines. Message has no body/content field, and the fields
+// rendered here are shape-pinned by Validate (Host to a hostname shape, IDs
+// to tmux literal forms) so pane content cannot reach this function through a
+// validated message. Callers must Validate before Render.
 func renderBody(m Message, opts RenderOpts) string {
 	var lines []string
 

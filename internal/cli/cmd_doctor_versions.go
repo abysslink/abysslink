@@ -108,6 +108,8 @@ var versionFloors = []versionFloor{
 //   - version < minVer  → SeverityFatal   (known-vulnerable; message names CVE + CVSS)
 //   - version >= minVer → SeverityOK
 //   - exec error        → SeverityWarning (binary absent or unprobeable)
+//   - non-zero exit     → SeverityWarning (probe failed; any N.N token in its
+//     output is untrustworthy — never a silent pass)
 //   - unparseable output → SeverityWarning (fail-honest; never silent pass — T-23-11)
 //
 // The detector is wired into collectDoctorFindings by Plan 04; it is NOT wired
@@ -125,14 +127,21 @@ func versionFloorFindings(ctx context.Context, runner shell.Runner) []modules.Fi
 // probeFloor executes one version-floor check and returns a single Finding.
 func probeFloor(ctx context.Context, runner shell.Runner, f versionFloor) modules.Finding {
 	// Probe via shell.Runner — no os/exec, no sh -c (CLAUDE.md hard rule, T-23-10).
+	// ExecRunner normalizes a non-zero exit to (Result, nil), so the exit code
+	// must be checked explicitly: a failing binary that happens to print an
+	// N.N token must degrade to WARN, never parse into a silent SeverityOK
+	// (fail-honest ladder — mirrors the daemon supervisor's versionGate).
 	res, err := runner.Run(ctx, f.binary, f.verArgs...)
-	if err != nil {
+	if err != nil || res.ExitCode != 0 {
+		detail := fmt.Sprintf("could not probe version (%q %s failed)", f.binary, strings.Join(f.verArgs, " "))
+		if err == nil {
+			detail = fmt.Sprintf("could not probe version (%q %s exited %d)", f.binary, strings.Join(f.verArgs, " "), res.ExitCode)
+		}
 		return modules.Finding{
 			Module:   "cli",
 			Check:    f.checkID,
 			Severity: modules.SeverityWarning,
-			Message: probeFailMessage(f, fmt.Sprintf(
-				"could not probe version (%q %s failed)", f.binary, strings.Join(f.verArgs, " "))),
+			Message:  probeFailMessage(f, detail),
 		}
 	}
 

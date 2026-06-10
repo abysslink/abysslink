@@ -151,7 +151,7 @@ func TestRunStreamCtxCancel(t *testing.T) {
 	}
 
 	// Goroutine count must return to baseline (retry loop: reaping is async).
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if runtime.NumGoroutine() <= before {
 			break
 		}
@@ -178,9 +178,9 @@ func TestStreamCloseIdempotent(t *testing.T) {
 // protocol channel — it is drained line-by-line to slog at Warn.
 func TestRunStreamStderr(t *testing.T) {
 	var buf bytes.Buffer
-	old := streamLogger
-	streamLogger = slog.New(slog.NewTextHandler(&buf, nil))
-	t.Cleanup(func() { streamLogger = old })
+	old := streamLogger.Load()
+	streamLogger.Store(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { streamLogger.Store(old) })
 
 	r := &ExecRunner{}
 	s, err := r.RunStream(context.Background(), "cat", "/nonexistent-path-xyz")

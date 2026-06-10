@@ -143,6 +143,20 @@ func TestSupervisorVersionGateUnsupported(t *testing.T) {
 	assert.Empty(t, m.StreamCalls(), "RunStream must NEVER be called for tmux < 3.2")
 }
 
+// TestSupervisorVersionGateNextPrefix: tmux master builds report
+// "tmux next-3.4" — the gate must parse it as 3.4 (>= 3.2, passes) instead
+// of degrading on a version-parse failure, and the raw token is kept for
+// Snapshot display.
+func TestSupervisorVersionGateNextPrefix(t *testing.T) {
+	m := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "tmux next-3.4\n"}},
+	)
+	r := New(m, config.Defaults())
+
+	assert.True(t, r.versionGate(context.Background()), "next-3.4 must pass the >= 3.2 gate")
+	assert.Equal(t, "next-3.4", r.Snapshot().TmuxVersion)
+}
+
 // TestSupervisorTmuxMissing: tmux absent degrades to "tmux: unavailable"
 // with backoff retries — the daemon is never hostage to tmux (D-26).
 func TestSupervisorTmuxMissing(t *testing.T) {
@@ -211,7 +225,7 @@ func TestSupervisorAttachSnapshot(t *testing.T) {
 	// Goroutine hygiene: Run's return leaves nothing behind. Polled on the
 	// test goroutine itself (the stream_test idiom) — an Eventually-spawned
 	// condition goroutine would inflate the count it is measuring.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if runtime.NumGoroutine() <= baseline {
 			break
 		}

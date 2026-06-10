@@ -216,6 +216,11 @@ func verifyChecksum(checksumFile, wantName, filePath string) error {
 		}
 		return nil
 	}
+	if err := sc.Err(); err != nil {
+		// A read error mid-scan would otherwise look like "entry absent" —
+		// surface it so a truncated checksum file never passes silently.
+		return fmt.Errorf("read checksum file %s: %w", checksumFile, err)
+	}
 	return fmt.Errorf("no checksum entry found for %s in %s", wantName, checksumFile)
 }
 

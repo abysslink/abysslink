@@ -144,9 +144,13 @@ func (r *Registry) pollIdleInterval() time.Duration {
 // runHeuristic drives pollTick on the adaptive D-05 cadence. It is started by
 // Run after each successful attach and stopped on detach/ctx — Run waits for
 // it to exit before re-attaching, so at most ONE heuristic goroutine ever
-// exists (single-writer discipline: only pollTick mutates heuristic state).
-// The wait comes FIRST: the supervisor already ran a full poll at attach
-// time, so the first capture pass is due one cadence later.
+// exists. That bound is NOT a single-writer guarantee: while it runs, the
+// consume goroutine's debounced syncPanes also mutates heuristic state (the
+// D-04 attach-clear writes needsInput/needsInputSince/idleSince). r.mu
+// serializes both writers, and the emit ordering contract (registry.go)
+// keeps the Events channel order matching the state-change order. The wait
+// comes FIRST: the supervisor already ran a full poll at attach time, so the
+// first capture pass is due one cadence later.
 func (r *Registry) runHeuristic(ctx context.Context) {
 	next := r.pollActiveInterval()
 	for {

@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -117,6 +118,14 @@ func ensurePrivateDir(dir string) error {
 	return nil
 }
 
+// ErrUnreachable marks a transport-level failure talking to the daemon socket
+// (no socket path, dial refused, missing file): the daemon never received the
+// request. Callers fall back to a direct backend ONLY on this error — a
+// reachable daemon that REJECTS a request (non-2xx, e.g. its policy engine)
+// is deliberately not ErrUnreachable, so a fallback can never bypass daemon
+// policy.
+var ErrUnreachable = errors.New("daemon unreachable")
+
 // Client talks to a running abysslinkd over its Unix socket.
 type Client struct {
 	socketPath string
@@ -139,8 +148,11 @@ func NewClient() *Client {
 	}
 }
 
-// Send delivers req via the daemon socket. It returns an error if the daemon is
-// not running or rejects the request; callers fall back to a direct backend.
+// Send delivers req via the daemon socket. A transport-level failure (the
+// daemon never received the request) returns an error wrapping ErrUnreachable
+// — the only condition under which callers may fall back to a direct backend.
+// A non-2xx response is a daemon REJECTION and deliberately does not wrap
+// ErrUnreachable: falling back on it would bypass daemon policy.
 func (c *Client) Send(ctx context.Context, req NotifyRequest) error {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -154,14 +166,20 @@ func (c *Client) Send(ctx context.Context, req NotifyRequest) error {
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("daemon client: socket unreachable: %w", err)
+		return fmt.Errorf("daemon client: socket unreachable: %w: %w", ErrUnreachable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("daemon client: notify returned HTTP %d", resp.StatusCode)
+		return fmt.Errorf("daemon client: notify rejected: HTTP %d", resp.StatusCode)
 	}
 	return nil
 }
+
+// CloseIdleConnections closes the keep-alive connections held by the client's
+// private transport. One-shot callers (e.g. the notify module's per-send fast
+// path) call it after the request so each send does not leak a unix conn plus
+// its readLoop/writeLoop goroutines in long-lived consumers.
+func (c *Client) CloseIdleConnections() { c.httpClient.CloseIdleConnections() }
 
 // Ping reports whether a daemon is listening and healthy.
 func (c *Client) Ping(ctx context.Context) bool {

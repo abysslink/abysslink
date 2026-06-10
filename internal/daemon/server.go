@@ -29,6 +29,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/backend"
@@ -62,6 +63,13 @@ const (
 	paneIdleInterval = 30 * time.Second
 	paneCoolOff      = 5 * time.Minute
 	readHeaderTO     = 5 * time.Second
+	// idleTO closes keep-alive connections that have sat idle so one-shot
+	// clients that skip CloseIdleConnections cannot pin conns (and their
+	// readLoop/writeLoop goroutines) on the daemon forever.
+	idleTO = 60 * time.Second
+	// socketProbeTimeout bounds the pre-listen liveness dial that prevents a
+	// second daemon instance from stealing a live daemon's socket.
+	socketProbeTimeout = 500 * time.Millisecond
 )
 
 // promptRegex matches common shell/REPL prompt-shaped trailing lines.
@@ -143,8 +151,8 @@ func (s *Server) Run(ctx context.Context) error {
 		// SocketPath failed closed (NET-13: socket dir verification failed).
 		return fmt.Errorf("daemon: no usable socket path (socket directory verification failed — see prior log)")
 	}
-	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("daemon: clear stale socket: %w", err)
+	if err := ensureSocketFree(s.socketPath); err != nil {
+		return err
 	}
 	ln, err := net.Listen("unix", s.socketPath)
 	if err != nil {
@@ -161,7 +169,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/sessions", s.handleSessions)
 
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO, IdleTimeout: idleTO}
 
 	s.startWatchers(ctx)
 	// v2 dispatch retry loop (D-28); exits on ctx cancellation.
@@ -170,10 +178,15 @@ func (s *Server) Run(ctx context.Context) error {
 	// Graceful-shutdown goroutine: by the time srv.Shutdown runs, ctx is
 	// already Done, so the drain needs a context detached from that
 	// cancellation (WithoutCancel keeps ctx values) plus its own timeout.
+	// runCtx exists so a real Serve() error — where ctx is still live — can
+	// also wake this goroutine for the NET-14 cleanup (drain + socket removal)
+	// instead of leaking it and the socket file.
+	runCtx, stopShutdown := context.WithCancel(ctx)
+	defer stopShutdown()
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
-		<-ctx.Done()
+		<-runCtx.Done()
 		shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
@@ -182,6 +195,10 @@ func (s *Server) Run(ctx context.Context) error {
 
 	slog.Info("abysslinkd listening", "socket", s.socketPath)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// A real Serve error: trigger the shutdown goroutine and wait for it so
+		// the socket file is removed and the goroutine stopped (NET-14).
+		stopShutdown()
+		<-shutdownDone
 		return fmt.Errorf("daemon: serve: %w", err)
 	}
 	// Serve returned ErrServerClosed, which only srv.Shutdown (in the goroutine
@@ -189,6 +206,33 @@ func (s *Server) Run(ctx context.Context) error {
 	// before returning so the caller cannot exit mid-shutdown (NET-14).
 	<-shutdownDone
 	return nil
+}
+
+// ensureSocketFree guards against a second daemon instance stealing a live
+// daemon's socket: an unconditional pre-listen os.Remove would unlink the
+// serving daemon's socket, and the usurper's later shutdown would then delete
+// the survivor's file. It probes the path with a short unix dial:
+//   - dial answers → another abysslinkd is serving; refuse to start.
+//   - ECONNREFUSED → stale file from a crashed daemon; remove it.
+//   - file does not exist → nothing to clear.
+//   - anything else → ambiguous; fail closed without removing.
+func ensureSocketFree(path string) error {
+	conn, err := net.DialTimeout("unix", path, socketProbeTimeout)
+	if err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("daemon: another abysslinkd is already serving %s — refusing to start", path)
+	}
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case errors.Is(err, syscall.ECONNREFUSED):
+		if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+			return fmt.Errorf("daemon: clear stale socket: %w", rerr)
+		}
+		return nil
+	default:
+		return fmt.Errorf("daemon: cannot verify whether socket %s is live: %w", path, err)
+	}
 }
 
 func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
@@ -205,12 +249,17 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// MaxBytesReader sets an internal flag that causes ResponseWriter to emit 413
 		// if we call http.Error after the read limit is exceeded; we disambiguate
-		// here to return 413 explicitly for clarity.
-		if strings.Contains(err.Error(), "request body too large") {
+		// here to return 413 explicitly for clarity. Typed match — a substring
+		// match on the error text would break on wording changes and could
+		// mislabel other read errors.
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		// Not a JSON problem — the body could not be read at all (e.g. the
+		// client hung up mid-body).
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
 	var probe struct {
@@ -272,27 +321,35 @@ func (s *Server) handleNotifyV2(w http.ResponseWriter, r *http.Request, raw []by
 		msg.Host = s.hostname
 	}
 
-	if err := msg.Validate(); err != nil {
+	// Single validation gate: dispatch's policy-side Validate (its first step)
+	// is the one gate; its error surfaces here as the 422 with the accurate
+	// reason. A handler-side pre-Validate would be a duplicate of the same
+	// check on the same (enriched) message.
+	//
+	// Delivery runs under WithoutCancel: the CLI client posts with a 2s
+	// timeout while the synchronous ntfy leg can take ~5s. If the client's
+	// disconnect cancelled delivery here, the daemon would queue the note for
+	// retry while the timed-out client falls back to a direct send — the same
+	// note delivered twice. Detaching from the request context makes the
+	// daemon's accepted-request delivery authoritative.
+	if err := s.dispatch.dispatch(context.WithoutCancel(r.Context()), msg, originExplicit, notifyv2.RenderOpts{}); err != nil {
 		slog.Warn("daemon: v2 notify rejected", "reason", err)
-		http.Error(w, "invalid v2 message: "+err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-
-	if err := s.dispatch.dispatch(r.Context(), msg, originExplicit, notifyv2.RenderOpts{}); err != nil {
-		slog.Warn("daemon: v2 dispatch rejected", "reason", err)
 		http.Error(w, "invalid v2 message: "+err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 
 	// Mirror the v1 ring-adder with METADATA ONLY (T-19-19): msg_id, kind,
 	// pane — never anything body-like (the schema has no body field anyway).
+	// The recorded priority is the post-render ntfy numeric value ("3"/"4"/"5"
+	// via D-14), not the raw wire word — v1 records ntfy numeric strings, so
+	// the webui history stays consistent across both paths.
 	if s.ring != nil {
 		parts := []string{string(msg.Kind)}
 		if msg.Session.Pane != "" {
 			parts = append(parts, msg.Session.Pane)
 		}
 		parts = append(parts, msg.MsgID)
-		s.ring.AddEvent(strings.Join(parts, " "), "", msg.Priority, time.Now())
+		s.ring.AddEvent(strings.Join(parts, " "), "", notifyv2.Render(msg, notifyv2.RenderOpts{}).Priority, time.Now())
 	}
 	// Success response mirrors the v1 handler exactly: 204 No Content.
 	w.WriteHeader(http.StatusNoContent)

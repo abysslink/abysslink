@@ -132,6 +132,11 @@ func parseSSHDConfigFile(path, keyword string) (string, error) {
 			return strings.TrimSpace(parts[1]), nil
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		// A read error mid-scan would otherwise read as "directive absent"
+		// and silently apply the compiled-in default — fail honest instead.
+		return "", fmt.Errorf("sec: read sshd_config: %w", err)
+	}
 	return "", nil // directive absent → caller applies compiled-in default
 }
 
