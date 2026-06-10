@@ -247,7 +247,7 @@ func completeInit(ctx context.Context, cfg *config.Config, cc *cmdContext, runne
 		}
 	} else {
 		// Linux: systemd service install.
-		if err := installHeadscaleLinux(ctx, cfg, runner, p, binPath, cfgPath, cc.dryRun); err != nil {
+		if err := installHeadscaleLinux(ctx, runner, p, binPath, cfgPath, cc.dryRun); err != nil {
 			return err
 		}
 	}
@@ -265,7 +265,7 @@ func completeInit(ctx context.Context, cfg *config.Config, cc *cmdContext, runne
 		return fmt.Errorf("headscale init: keychain unavailable: %w", err)
 	}
 
-	apiKey, err := ensureAPIKey(ctx, cfg, runner, kc, binPath, baseURL)
+	apiKey, err := ensureAPIKey(ctx, runner, kc, binPath, baseURL)
 	if err != nil {
 		return fmt.Errorf("headscale init: API key: %w", err)
 	}
@@ -302,7 +302,6 @@ func completeInit(ctx context.Context, cfg *config.Config, cc *cmdContext, runne
 // All file mutations go through audit.WriteFile. All exec calls go through runner.
 func installHeadscaleLinux(
 	ctx context.Context,
-	cfg *config.Config,
 	runner shell.Runner,
 	p Printer,
 	binPath, cfgPath string,
@@ -962,7 +961,6 @@ func doHeadscaleHealthCheck(ctx context.Context, url string) error {
 // The key value is never written to disk directly — only via keychain.
 func ensureAPIKey(
 	ctx context.Context,
-	cfg *config.Config,
 	runner shell.Runner,
 	kc secrets.KeychainStore,
 	binaryPath string,

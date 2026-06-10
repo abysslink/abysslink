@@ -180,9 +180,6 @@ func TestServerHeadscaleInitAPIKeyBootstrap(t *testing.T) {
 		Result: shell.Result{Stdout: "SomeAPIKey1234567890\n", ExitCode: 0},
 	})
 
-	cfg := config.Defaults()
-	cfg.Server.Headscale.BinaryPath = "/usr/local/bin/headscale"
-
 	// Mock keychain: no entry exists → Get returns error.
 	mockKC := &mockKeychainStore{entries: map[string]string{}}
 
@@ -193,7 +190,7 @@ func TestServerHeadscaleInitAPIKeyBootstrap(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	key, err := ensureAPIKey(ctx, cfg, mr, mockKC, "/usr/local/bin/headscale", srv.URL)
+	key, err := ensureAPIKey(ctx, mr, mockKC, "/usr/local/bin/headscale", srv.URL)
 	require.NoError(t, err, "API key bootstrap must succeed")
 	assert.Equal(t, "SomeAPIKey1234567890", key, "returned key must match runner output")
 

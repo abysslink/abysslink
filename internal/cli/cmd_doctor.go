@@ -55,7 +55,7 @@ var auditDefaultLogPath = audit.DefaultLogPath
 //
 // T-17-10: error messages describe the failure class only; key material is never
 // logged. T-17-13: a brand-new install with no anchor emits WARN, never FATAL.
-func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.KeychainStore) []modules.Finding {
+func auditDoctorFindings(logPath string, kc secrets.KeychainStore) []modules.Finding {
 	var findings []modules.Finding
 
 	// Check 1 — audit-keychain (FATAL when the signed path cannot reach the keychain).

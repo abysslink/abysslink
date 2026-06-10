@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -145,7 +146,8 @@ func TestNotifyAllRigs_Headers(t *testing.T) {
 	require.NotEmpty(t, sigA, "X-Abysslink-Rig-Sig must be set (SC-5)")
 
 	// Recompute the HMAC and verify it matches (round-trip: origin provable).
-	// WR-02: canonical string is now rigName+"."+ts+"."+title+"."+message.
+	// WR-02: canonical string covers the length-prefixed fields rigName, ts,
+	// title, message (fleet.SignRigMessage).
 	assert.True(t,
 		fleet.VerifyRigMessage(keyA, rigA, tsA, title, msgBody, sigA),
 		"HMAC recompute+VerifyRigMessage for Rig A must return true (SC-5)")
@@ -260,8 +262,8 @@ func TestNotifyAllRigs_PerRigTopic(t *testing.T) {
 }
 
 // TestNotifyAllRigs_HMACCanonicalString verifies that the signed canonical
-// string is rigName + "." + ts + "." + title + "." + message, matching the
-// verifier recipe (WR-02: title is now included in the signed payload).
+// string covers the length-prefixed fields rigName, ts, title, message,
+// matching the verifier recipe (WR-02: title is included in the signed payload).
 func TestNotifyAllRigs_HMACCanonicalString(t *testing.T) {
 	var mu sync.Mutex
 	var received []capturedRequest
@@ -307,9 +309,9 @@ func TestNotifyAllRigs_HMACCanonicalString(t *testing.T) {
 	assert.GreaterOrEqual(t, tsInt, beforeInt)
 	assert.LessOrEqual(t, tsInt, afterInt)
 
-	// Verify HMAC using the full canonical string: rigName+.+ts+.+title+.+message (WR-02).
+	// Verify HMAC using the full canonical string (length-prefixed fields, WR-02).
 	assert.True(t, fleet.VerifyRigMessage(key, rigName, ts, titleStr, msgStr, sig),
-		"VerifyRigMessage must return true using canonical string rigName+.+ts+.+title+.+message")
+		"VerifyRigMessage must return true using the length-prefixed canonical fields rigName, ts, title, message")
 
 	// Tampering the title alone must fail (WR-02 coverage).
 	assert.False(t, fleet.VerifyRigMessage(key, rigName, ts, "tampered title", msgStr, sig),
@@ -694,4 +696,86 @@ func TestNotifyWrap_EmptyArgvRejected(t *testing.T) {
 	runner.mu.Unlock()
 	assert.Empty(t, cap.v2Msgs)
 	assert.Empty(t, cap.v1Calls)
+}
+
+// TestNotifyWrap_PreDashArgsRejected (CLI-04): positionals before -- (e.g.
+// `notify "Deploy finished" -- make build`) would be silently discarded —
+// wrap mode must reject them with a descriptive error instead.
+func TestNotifyWrap_PreDashArgsRejected(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+	runner := installWrapRunner(t, nil)
+
+	err := execNotify(t, "Deploy finished", "--", "make", "build")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "before --", "the error must explain wrap mode takes no pre-dash args")
+	assert.Contains(t, err.Error(), "Deploy finished", "the error must echo the discarded args")
+
+	runner.mu.Lock()
+	assert.Empty(t, runner.argv, "nothing may be exec'd on a rejected invocation")
+	runner.mu.Unlock()
+	assert.Empty(t, cap.v2Msgs)
+	assert.Empty(t, cap.v1Calls)
+}
+
+// TestNotifyWrap_RigFlagsRejected: wrap mode never validates against rig
+// fan-out — `notify --all-rigs -- cmd` (or --rig) must be a hard error, not a
+// silent local-only v2 send.
+func TestNotifyWrap_RigFlagsRejected(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+	runner := installWrapRunner(t, nil)
+
+	for _, flags := range [][]string{{"--all-rigs"}, {"--rig", "alpha"}} {
+		args := append(append([]string{}, flags...), "--", "make", "build")
+		err := execNotify(t, args...)
+		require.Error(t, err, "wrap mode with %v must be rejected", flags)
+		assert.Contains(t, err.Error(), "wrap mode", "the error must name the conflict: %v", flags)
+	}
+
+	runner.mu.Lock()
+	assert.Empty(t, runner.argv, "nothing may be exec'd on a rejected invocation")
+	runner.mu.Unlock()
+	assert.Empty(t, cap.v2Msgs, "no local v2 send may fire on a rejected fan-out wrap")
+	assert.Empty(t, cap.v1Calls)
+}
+
+// TestNotifyAllRigs_ZeroEnrolledIsError: --all-rigs with zero enrolled rigs
+// must error instead of silently falling through to a LOCAL send (the user
+// explicitly asked for fan-out — a local send is a misroute).
+func TestNotifyAllRigs_ZeroEnrolledIsError(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+
+	err := runNotify(t, "--all-rigs", "title", "body")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no rigs are enrolled", "the error must explain the empty fleet")
+	assert.Empty(t, cap.v1Calls, "no local v1 send may fire when fan-out was requested")
+	assert.Empty(t, cap.v2Msgs, "no local v2 send may fire when fan-out was requested")
+}
+
+// signalExitError mimics *exec.ExitError for a signal-killed child: ExitCode()
+// reports -1 and Sys() exposes the syscall.WaitStatus (the ProcessState shape).
+type signalExitError struct{ ws syscall.WaitStatus }
+
+func (e *signalExitError) Error() string { return "signal: terminated" }
+func (e *signalExitError) ExitCode() int { return -1 }
+func (e *signalExitError) Sys() any      { return e.ws }
+
+// TestNotifyWrap_SignalKilledMapsTo128PlusSignum: a wrapped command killed by
+// SIGTERM must surface the conventional 128+signum (143), not the raw -1
+// (which the process layer would wrap to 255).
+func TestNotifyWrap_SignalKilledMapsTo128PlusSignum(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+	installWrapRunner(t, &signalExitError{ws: syscall.WaitStatus(int(syscall.SIGTERM))})
+
+	err := execNotify(t, "--", "sleep", "60")
+	var ee *exitError
+	require.ErrorAs(t, err, &ee, "a signal-killed wrap must still propagate an exitError")
+	assert.Equal(t, 128+int(syscall.SIGTERM), ee.ExitCode(), "signal-killed child maps to 128+signum (SIGTERM → 143)")
+
+	require.Len(t, cap.v2Msgs, 1, "the outcome notification must still be sent")
+	assert.Equal(t, "failed ✗", cap.v2Msgs[0].Title)
+	assert.Equal(t, "high", cap.v2Msgs[0].Priority)
 }

@@ -18,11 +18,13 @@ package notify
 import (
 	"context"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -205,6 +207,64 @@ func TestSendWithOptions_ZeroValueGuardStillComparable(t *testing.T) {
 	assert.Equal(t, "/alerts", gotPath)
 }
 
+// TestSendWithOptions_DaemonRejection_NoFallback: the v1 fast path must fall
+// back to a direct ntfy POST ONLY on a transport failure. An HTTP rejection
+// from a reachable daemon (its policy said no) surfaces to the caller — a
+// fallback there would bypass daemon policy.
+func TestSendWithOptions_DaemonRejection_NoFallback(t *testing.T) {
+	startFakeDaemonSocket(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rejected by daemon policy", http.StatusForbidden)
+	}))
+
+	var mu sync.Mutex
+	directHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		directHits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	old := ntfyBaseURL
+	ntfyBaseURL = srv.URL
+	defer func() { ntfyBaseURL = old }()
+
+	m := newSendMessageModule()
+	err := m.Send(context.Background(), "t", "b")
+	require.Error(t, err, "a daemon rejection must surface, not be silently retried directly")
+	assert.Contains(t, err.Error(), "403")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Zero(t, directHits, "a daemon rejection must NOT fall back to direct delivery")
+}
+
+// TestSendWithOptions_DaemonUnreachable_FallsBack: a transport-level failure
+// (nothing listening on the socket) still falls back to the direct ntfy POST.
+func TestSendWithOptions_DaemonUnreachable_FallsBack(t *testing.T) {
+	noDaemon(t)
+
+	var mu sync.Mutex
+	directHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		directHits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	old := ntfyBaseURL
+	ntfyBaseURL = srv.URL
+	defer func() { ntfyBaseURL = old }()
+
+	m := newSendMessageModule()
+	require.NoError(t, m.Send(context.Background(), "t", "b"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, directHits, "an unreachable daemon must fall back to the direct ntfy POST")
+}
+
 // TestSendDirectWithOptions_InvalidTopicRejected verifies that a topic override
 // outside the ntfy topic charset is refused before any request is built (the
 // override is a URL path segment — it must never alter the request path).
@@ -216,6 +276,52 @@ func TestSendDirectWithOptions_InvalidTopicRejected(t *testing.T) {
 	err := m.SendDirectWithOptions(context.Background(), "t", "b", SendOptions{Topic: "../evil"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid topic")
+}
+
+// TestSendDirect_EncodesNonASCIITitle: a title containing U+00B7 (" · " — every
+// v2 rendered title carries it by construction) must travel as an RFC 2047
+// Q-encoded X-Title header (pure-ASCII wire bytes), and a pure-ASCII title must
+// pass through unencoded.
+func TestSendDirect_EncodesNonASCIITitle(t *testing.T) {
+	var mu sync.Mutex
+	var rawTitle string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		rawTitle = r.Header.Get("X-Title")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := ntfyBaseURL
+	ntfyBaseURL = srv.URL
+	defer func() { ntfyBaseURL = old }()
+
+	cfg := config.Defaults()
+	cfg.Modules.Notify.Enabled = true
+	cfg.Modules.Notify.DefaultTopic = "alerts"
+	m := New(modules.Deps{Cfg: cfg, Runner: shell.NewMockRunner()})
+
+	const title = "rig-1 · claude · %3 needs input"
+	require.NoError(t, m.SendDirect(context.Background(), title, "b"))
+
+	mu.Lock()
+	got := rawTitle
+	mu.Unlock()
+	assert.True(t, strings.HasPrefix(got, "=?utf-8?q?"), "non-ASCII title must be RFC 2047 Q-encoded, got %q", got)
+	for i := 0; i < len(got); i++ {
+		assert.True(t, got[i] >= 0x20 && got[i] <= 0x7e, "encoded header must be pure printable ASCII")
+	}
+	decoded, err := new(mime.WordDecoder).DecodeHeader(got)
+	require.NoError(t, err)
+	assert.Equal(t, title, decoded, "the encoded header must round-trip to the original title")
+
+	// A pure-ASCII title is left untouched (v1 byte-identical path).
+	require.NoError(t, m.SendDirect(context.Background(), "plain ascii title", "b"))
+	mu.Lock()
+	got = rawTitle
+	mu.Unlock()
+	assert.Equal(t, "plain ascii title", got, "pure printable-ASCII titles must not be encoded")
 }
 
 // ── SendMessage (v2 socket-first with validated direct fallback) ─────────────
@@ -334,7 +440,11 @@ func TestSendMessage_FallbackRendersDirect(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, "/alerts", gotPath, "fallback delivers to the per-rig topic (D-20)")
-	assert.Equal(t, "rig-1 · %3 needs input", hdr.Get("X-Title"), "X-Title must carry the rendered compact title")
+	// The rendered title contains " · " (U+00B7), so the X-Title header is
+	// RFC 2047 Q-encoded on the wire; decode it back to the compact title.
+	decodedTitle, decErr := new(mime.WordDecoder).DecodeHeader(hdr.Get("X-Title"))
+	require.NoError(t, decErr)
+	assert.Equal(t, "rig-1 · %3 needs input", decodedTitle, "X-Title must carry the rendered compact title (Q-encoded)")
 	assert.Equal(t, "3", hdr.Get("X-Priority"), "needs_input default priority is 3")
 	assert.Equal(t, "question", hdr.Get("X-Tags"), "needs_input tag is question")
 	assert.Empty(t, hdr.Get("X-Click"), "the daemon owns click composition — fallback sends no X-Click")

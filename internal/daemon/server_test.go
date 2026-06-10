@@ -270,6 +270,52 @@ func TestHandleNotifyV2_Enrichment(t *testing.T) {
 		"an empty host must be enriched to the server's short hostname")
 }
 
+// TestRun_RefusesToStealLiveSocket: a second daemon instance on the same
+// socket path must refuse to start while the first is serving (its pre-listen
+// probe gets an answer), and the first daemon's socket must stay untouched —
+// no unconditional os.Remove may unlink a live daemon's socket.
+func TestRun_RefusesToStealLiveSocket(t *testing.T) {
+	client, cancel := startNotifyServer(t)
+	defer cancel()
+
+	srv2 := daemon.NewServer(notifyStubNotifier{}, nil, nil)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	err := srv2.Run(ctx2)
+	require.Error(t, err, "a second daemon on a live socket must refuse to start")
+	assert.Contains(t, err.Error(), "already serving")
+
+	// The first daemon keeps serving: its socket file was not stolen.
+	req, rerr := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://unix/health", nil)
+	require.NoError(t, rerr)
+	resp, derr := client.Do(req)
+	require.NoError(t, derr, "the first daemon's socket must still answer")
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestRun_RemovesStaleSocket: a leftover socket file from a crashed daemon
+// (file exists, nothing listening → ECONNREFUSED on the probe) is cleared and
+// the daemon starts normally.
+func TestRun_RemovesStaleSocket(t *testing.T) {
+	dir := shortRuntimeDir(t)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+
+	// Fabricate the crash artifact: bind the socket, keep the file on close.
+	ln, err := net.Listen("unix", filepath.Join(dir, "abysslinkd.sock"))
+	require.NoError(t, err)
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	require.NoError(t, ln.Close())
+
+	srv := daemon.NewServer(notifyStubNotifier{}, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Run(ctx) }()
+
+	require.Eventually(t, func() bool { return daemon.NewClient().Ping(context.Background()) },
+		2*time.Second, 20*time.Millisecond, "the daemon must clear the stale socket and come up")
+}
+
 // TestHandleNotifyV2_Oversize413: a v2-shaped body over the existing cap still
 // returns 413 (the A11 / DOS-01 guard covers both paths).
 func TestHandleNotifyV2_Oversize413(t *testing.T) {

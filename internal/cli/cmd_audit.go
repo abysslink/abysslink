@@ -320,7 +320,7 @@ func collectAggregateFindings(ctx context.Context, cc *cmdContext, deps modules.
 	all = append(all, supplyChainFindings(ctx, cc.runner, version, "")...)
 
 	// Audit posture (Phase 17) — captured for the sec-audit-anchor-age alias.
-	auditFinds := auditDoctorFindings(ctx, logPath, deps.Keychain)
+	auditFinds := auditDoctorFindings(logPath, deps.Keychain)
 	all = append(all, auditFinds...)
 
 	// Metrics posture (Phase 18) — captured for the sec-metrics-bind alias.

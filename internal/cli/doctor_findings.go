@@ -121,7 +121,7 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	// alias reuses it (run-once pattern).
 	var auditFinds []modules.Finding
 	if logPath, lpErr := auditDefaultLogPath(); lpErr == nil {
-		auditFinds = auditDoctorFindings(ctx, logPath, deps.Keychain)
+		auditFinds = auditDoctorFindings(logPath, deps.Keychain)
 		findings = append(findings, auditFinds...)
 	} else {
 		slog.Warn("doctor: audit log path unavailable; skipping audit checks", "err", lpErr)

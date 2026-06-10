@@ -355,10 +355,13 @@ func (m *Module) SendWithOptions(ctx context.Context, title, body string, opts S
 	return m.SendDirectWithOptions(ctx, title, body, opts)
 }
 
-// errDaemonUnreachable marks the daemon-socket transport failure that triggers
-// the validated direct-render fallback in SendMessage. A reachable daemon that
+// errDaemonUnreachable marks a dial-phase daemon-socket failure — the daemon
+// never received the request — and is the ONLY condition that triggers the
+// validated direct-render fallback in SendMessage. A reachable daemon that
 // REJECTS a message (non-2xx) is deliberately not this error — rejections
-// surface to the caller (no silent drop, no policy bypass via fallback).
+// surface to the caller (no silent drop, no policy bypass via fallback) — and
+// neither is a post-dial failure such as a client deadline expiring while the
+// daemon delivers (a fallback re-send there would duplicate the notification).
 var errDaemonUnreachable = errors.New("notify v2: daemon unreachable")
 
 // SendMessage delivers a v2 notifyv2.Message. It prefers the abysslinkd
@@ -407,10 +410,14 @@ func (m *Module) SendMessage(ctx context.Context, msg notifyv2.Message) error {
 
 // postV2ToDaemon POSTs raw v2 JSON to the daemon socket /notify — the same
 // socket fast path Send uses (daemon.SocketPath + a unix-dialing transport).
-// Transport-level failures (no socket path, dial refused) return an error
-// wrapping errDaemonUnreachable — the same condition under which Send's v1
-// fast path falls through to direct delivery. An HTTP-level non-2xx is a
-// daemon rejection carrying the response body text.
+// ONLY dial-phase failures (no socket path, dial refused, missing file) wrap
+// errDaemonUnreachable — the daemon never received the request, so a direct
+// fallback cannot double-deliver. A post-dial failure (notably the client's
+// 2s deadline expiring while the daemon's synchronous ~5s ntfy leg runs) means
+// the daemon HAS the request: classifying it unreachable would make the caller
+// fall back and re-send while the daemon retries the same note — duplicate
+// delivery. An HTTP-level non-2xx is a daemon rejection carrying the response
+// body text.
 func postV2ToDaemon(ctx context.Context, body []byte) error {
 	sp := daemon.SocketPath()
 	if sp == "" {
@@ -420,10 +427,18 @@ func postV2ToDaemon(ctx context.Context, body []byte) error {
 		Timeout: 2 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", sp)
+				conn, derr := (&net.Dialer{}).DialContext(ctx, "unix", sp)
+				if derr != nil {
+					// Tag dial-phase failures so Do errors can be classified.
+					return nil, fmt.Errorf("%w: %w", errDaemonUnreachable, derr)
+				}
+				return conn, nil
 			},
 		},
 	}
+	// One-shot client: drop the keep-alive unix conn so long-lived consumers
+	// do not leak a conn + readLoop/writeLoop pair per send.
+	defer client.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/notify", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("notify v2: build request: %w", err)
@@ -432,7 +447,12 @@ func postV2ToDaemon(ctx context.Context, body []byte) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errDaemonUnreachable, err)
+		if errors.Is(err, errDaemonUnreachable) {
+			return fmt.Errorf("notify v2: %w", err)
+		}
+		// Post-dial failure: the daemon received the request. NOT unreachable —
+		// surfacing instead of falling back prevents duplicate delivery.
+		return fmt.Errorf("notify v2: daemon request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
 
@@ -465,7 +485,7 @@ func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, 
 	if err != nil {
 		return fmt.Errorf("notify send: create request: %w", err)
 	}
-	req.Header.Set("X-Title", title)
+	req.Header.Set("X-Title", encodeNtfyHeader(title))
 	req.Header.Set("Content-Type", "text/plain")
 	if opts.Priority != "" {
 		req.Header.Set("X-Priority", opts.Priority)
@@ -502,6 +522,23 @@ func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, 
 		return fmt.Errorf("notify send: ntfy returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
-	slog.Info("notification sent", "title", title, "topic", topic)
+	// Metadata only: the title is caller-supplied content and must never land
+	// in logs verbatim (no secrets on observable surfaces — AUD-04).
+	slog.Info("notification sent", "title_len", len(title), "topic", topic)
 	return nil
+}
+
+// encodeNtfyHeader returns s unchanged when it is pure printable ASCII;
+// otherwise it RFC 2047 Q-encodes it (UTF-8) for the X-Title header. Every v2
+// title contains " · " (U+00B7) by construction, raw non-ASCII header bytes
+// are ntfy-server-version-dependent, and a control byte would make Go's HTTP
+// transport reject the request on every (re)try; ntfy decodes RFC 2047
+// encoded words server-side.
+func encodeNtfyHeader(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return mime.QEncoding.Encode("utf-8", s)
+		}
+	}
+	return s
 }

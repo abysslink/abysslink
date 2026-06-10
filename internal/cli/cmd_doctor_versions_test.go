@@ -99,6 +99,23 @@ func TestVersionFloor_NtfyExecError_Warn(t *testing.T) {
 	assert.Equal(t, modules.SeverityWarning, found.Severity, "exec error must yield WARN (fail-honest)")
 }
 
+// TestVersionFloor_NonZeroExit_Warn verifies that a binary exiting non-zero
+// yields SeverityWarning even when its output contains a parseable N.N token
+// that meets the floor. ExecRunner normalizes non-zero exits to (Result, nil),
+// so without an explicit ExitCode check this would be a silent SeverityOK pass
+// (fail-honest ladder violation).
+func TestVersionFloor_NonZeroExit_Warn(t *testing.T) {
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "ntfy version 2.21.0\n", ExitCode: 1}},
+	)
+	findings := versionFloorFindings(context.Background(), runner)
+	found := findFloorFinding(findings, "ntfy-version")
+	require.NotNil(t, found, "ntfy-version finding must be present on non-zero exit")
+	assert.Equal(t, modules.SeverityWarning, found.Severity,
+		"a failing probe must yield WARN even if its output parses to an at-floor version (never a silent pass)")
+	assert.Contains(t, found.Message, "exited 1", "the message must name the non-zero exit code")
+}
+
 // TestVersionFloor_NtfyUnparseable_Warn verifies that unparseable output yields
 // SeverityWarning (fail-honest).
 func TestVersionFloor_NtfyUnparseable_Warn(t *testing.T) {

@@ -461,6 +461,70 @@ func TestDispatch_PaneStatsSkipsExpiredCooldown(t *testing.T) {
 	assert.True(t, until.IsZero(), "paneStats must return zero cooldown_until for an expired cooldown")
 }
 
+// TestDispatch_RetryExhaustionReleasesCooldown (cooldown-before-delivery
+// silent loss): the cooldown window is armed BEFORE delivery succeeds. With a
+// user-configured cooldown far exceeding retryMaxAge, a delivery that fails
+// every retry must release its cooldown key when the entry is finally dropped
+// — otherwise heuristic repeats at the same (epoch,pane,kind) stay suppressed
+// for the rest of the window with nothing ever delivered.
+func TestDispatch_RetryExhaustionReleasesCooldown(t *testing.T) {
+	n := &captureNotifier{}
+	cfg := config.Defaults()
+	cfg.SessionRegistry.CooldownSecs = 3600 // window far exceeds retryMaxAge (5m)
+	d := newDispatcher(n, cfg)
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	d.now = clk.Now
+	d.lastRefill = clk.Now()
+	ctx := context.Background()
+
+	// Delivery fails: the note enters the retry queue, the cooldown is armed.
+	n.setErr(errors.New("ntfy unreachable"))
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+	require.Equal(t, 0, n.count())
+
+	// Past the retry max age: processRetries drops the entry for good.
+	clk.Advance(retryMaxAge + time.Minute)
+	n.setErr(nil)
+	d.processRetries(ctx)
+	require.Equal(t, 0, n.count(), "the expired entry is dropped, never delivered late")
+
+	// The repeat is still well inside the 1h cooldown window — without the
+	// release it would be suppressed even though nothing was ever delivered.
+	require.NoError(t, d.dispatch(ctx, dispatchMsg(notifyv2.KindNeedsInput, "%3", 1), originHeuristic, notifyv2.RenderOpts{}))
+	assert.Equal(t, 1, n.count(),
+		"a heuristic repeat after retry exhaustion must deliver — the armed cooldown was released at drop time")
+}
+
+// TestDispatch_ReleaseCooldownOnlyCurrentWindow: a final drop releases the
+// cooldown key only if it still maps to the exact window the failed dispatch
+// armed — a newer dispatch that re-armed the same key owns the window now, and
+// a stale drop must not clear it.
+func TestDispatch_ReleaseCooldownOnlyCurrentWindow(t *testing.T) {
+	d, _, clk := newTestDispatcher(t)
+	key := cooldownKey{epoch: 1, pane: "%3", kind: notifyv2.KindNeedsInput}
+	current := clk.Now().Add(time.Hour)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cooldown[key] = current
+
+	// A stale drop (older window) must not release the current window.
+	d.releaseCooldownLocked(retryEntry{cooldown: cooldownRef{armed: true, key: key, until: current.Add(-time.Minute)}})
+	_, stillArmed := d.cooldown[key]
+	assert.True(t, stillArmed, "a stale drop must not release a newer dispatch's window")
+
+	// A drop carrying the current window releases it.
+	d.releaseCooldownLocked(retryEntry{cooldown: cooldownRef{armed: true, key: key, until: current}})
+	_, afterRelease := d.cooldown[key]
+	assert.False(t, afterRelease, "a drop carrying the current window must release it")
+
+	// An unarmed ref is a no-op.
+	d.cooldown[key] = current
+	d.releaseCooldownLocked(retryEntry{})
+	_, untouched := d.cooldown[key]
+	assert.True(t, untouched, "an entry that armed no cooldown must release nothing")
+}
+
 // TestNewDispatcher_CooldownConfig: session_registry.cooldown_secs overrides
 // the compiled-in 300s default (zero means default).
 func TestNewDispatcher_CooldownConfig(t *testing.T) {
@@ -534,7 +598,7 @@ func TestDispatch_RequeueRespectsDepthAndDropsTrueOldest(t *testing.T) {
 	// Overflow now: the drop must remove the earliest firstTried (base+1s),
 	// not whatever happens to sit at index 0.
 	clk.Advance(time.Hour)
-	d.enqueueRetry(notifyv2.RenderedNote{Title: "newest"})
+	d.enqueueRetry(notifyv2.RenderedNote{Title: "newest"}, cooldownRef{})
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	require.Len(t, d.retry, retryDepth)
