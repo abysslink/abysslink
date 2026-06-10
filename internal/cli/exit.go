@@ -31,9 +31,21 @@ const (
 // exitError carries a process exit code. Returned from cobra RunE functions to
 // signal a specific exit code without calling os.Exit directly, which bypasses
 // defer chains and makes unit testing impossible.
+//
+// When err is nil the command has already printed its own diagnostics and
+// Execute only propagates the code (the doctor/status pattern). When err is
+// non-nil, Execute renders it through the central error path before exiting —
+// this is how fail-closed `up` gates report exit 2 with a visible message.
 type exitError struct {
 	code int
+	err  error // optional underlying error; rendered by Execute when non-nil
 }
 
-func (e *exitError) Error() string { return fmt.Sprintf("exit %d", e.code) }
+func (e *exitError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return fmt.Sprintf("exit %d", e.code)
+}
 func (e *exitError) ExitCode() int { return e.code }
+func (e *exitError) Unwrap() error { return e.err }

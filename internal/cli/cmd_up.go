@@ -98,10 +98,18 @@ func newUpCmd() *cobra.Command {
 
 			printPlanDetail(p, actions, findings, cc.dryRun, cc.explain)
 
+			// --json: emit one structured record per planned action so dry-run
+			// plans are scriptable (E1) — prose {"msg": …} lines are not.
+			if cc.jsonOut {
+				p.PrintJSON(buildPlanRecords(actions))
+			}
+
 			// All fail-closed gates in one block to keep cyclomatic complexity low.
 			if !cc.dryRun {
 				if err := applyTimeGates(cmd, p, cc, findings); err != nil {
-					return err
+					// W2: fail-closed gates are the documented "2 — Fatal" exit
+					// class; a plain error would map to exit 1 in Execute.
+					return &exitError{code: exitCodeFatal, err: err}
 				}
 			}
 
@@ -117,7 +125,12 @@ func newUpCmd() *cobra.Command {
 					// printed inside runApply. Skip all success/next-steps output.
 					return nil
 				}
-				printFinalSummary(p, actions, applyFindings, applyElapsed)
+				// I1: persist the NetBird --accept-no-sshcheck consent only
+				// AFTER the user confirmed the blast prompt — never before.
+				if persistErr := persistNetbirdConsent(cmd, cc); persistErr != nil {
+					return persistErr
+				}
+				printFinalSummary(p, actions, applyFindings, applyElapsed, applyErr)
 
 				// F-59: replay manual steps modules deferred during Apply.
 				// MUST run only after the live apply table is fully closed —
@@ -191,20 +204,61 @@ func netbirdSSHCheckGate(ctx context.Context, cmd *cobra.Command, cc *cmdContext
 
 	acceptFlag, _ := cmd.Flags().GetBool("accept-no-sshcheck")
 	if !acceptFlag {
-		// Refuse: emit the mandatory D-04 degradation message.
-		return fmt.Errorf("%s", warnSSHCheckFull)
+		// Refuse: emit the mandatory D-04 degradation message. This is a
+		// fail-closed gate → documented exit code 2 (W2).
+		return &exitError{code: exitCodeFatal, err: fmt.Errorf("%s", warnSSHCheckFull)}
 	}
 
-	// Flag is set but not yet persisted — write it now.
+	// Flag is set but not yet persisted. Record the acknowledgment in memory
+	// only — the config write happens AFTER the user confirms the blast prompt
+	// (persistNetbirdConsent), so declining the apply leaves nothing persisted (I1).
 	cc.cfg.Server.NetBird.AcceptNoSSHCheck = true
-	slog.Info("netbird: AcceptNoSSHCheck acknowledged; persisting to config")
+	cc.persistAcceptNoSSHCheck = true
+	slog.Info("netbird: AcceptNoSSHCheck acknowledged; will persist after confirmation")
+	_ = ctx // context available for future extension
+	return nil
+}
 
+// persistNetbirdConsent writes the in-memory AcceptNoSSHCheck acknowledgment
+// to abysslink.yaml. Called only after ConfirmBlast was accepted (I1): consent
+// recorded at confirmation time, never on a declined run.
+func persistNetbirdConsent(cmd *cobra.Command, cc *cmdContext) error {
+	if !cc.persistAcceptNoSSHCheck {
+		return nil
+	}
+	cc.persistAcceptNoSSHCheck = false
 	configPath := resolveConfigPath(cmd)
 	if err := config.Write(configPath, cc.cfg); err != nil {
 		return fmt.Errorf("up: persist AcceptNoSSHCheck: %w", err)
 	}
-	_ = ctx // context available for future extension
+	slog.Info("netbird: AcceptNoSSHCheck persisted to config")
 	return nil
+}
+
+// planRecord is the JSON record emitted per planned action under `up --json`
+// (E1). Fields mirror modules.Action with stable lowercase names.
+type planRecord struct {
+	Module      string `json:"module"`
+	Description string `json:"description"`
+	Explain     string `json:"explain,omitempty"`
+	Reversible  bool   `json:"reversible"`
+}
+
+// buildPlanRecords converts the deduplicated planned actions to JSON-safe
+// records. Always returns a non-nil slice so `--json` emits [] (not null)
+// for an already-converged system.
+func buildPlanRecords(actions []modules.Action) []planRecord {
+	unique := uniqueActions(actions)
+	records := make([]planRecord, 0, len(unique))
+	for _, a := range unique {
+		records = append(records, planRecord{
+			Module:      a.Module,
+			Description: a.Description,
+			Explain:     a.Explain,
+			Reversible:  a.Reversible,
+		})
+	}
+	return records
 }
 
 // runScan runs the Plan phase for all modules, choosing between an animated live
@@ -384,6 +438,7 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	// does not race with the interactive subprocess for stdin. See
 	// applyAnimationEnabled for the full rationale.
 	animate := applyAnimationEnabled(cc.jsonOut, sudoLines, interactiveLines)
+	start := time.Now()
 	if animate {
 		applyFindings, applyErr := runApplyAnimated(ctx, r)
 		if errors.Is(applyErr, errUserAborted) {
@@ -392,11 +447,11 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 			printerInfo(p, "  Aborted.")
 			return nil, 0, true, nil
 		}
-		return applyFindings, 0, false, applyErr
+		// U7: report the real wall-clock apply time, not a hardcoded zero.
+		return applyFindings, time.Since(start), false, applyErr
 	}
 
 	// Plain path.
-	start := time.Now()
 	applyFindings, applyErr := r.ApplyAll(ctx, func(evt modules.ModuleEvent) {
 		printerInfo(p, applyRowStr(evt))
 	})
@@ -542,18 +597,27 @@ func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []mo
 }
 
 // requireTailscaleDaemon ensures tailscaled is running before apply.
-// If the daemon is down it starts it automatically (same as `abysslink init` does)
-// and polls up to 15 s. The tailscale module's Apply handles `tailscale up`
-// (browser auth) interactively — this function only starts the daemon socket.
+// If the daemon is genuinely down it starts it automatically (same as
+// `abysslink init` does) and polls up to 15 s. The tailscale module's Apply
+// handles `tailscale up` (browser auth) interactively — this function only
+// starts the daemon socket.
+//
+// W3: the probe is probeTailscaleDaemon, NOT a bare exit-code check. A
+// logged-out daemon exits non-zero with the socket up; restarting it would
+// drop every live tailnet session — including the phone SSH session the user
+// may be running `up` from. Only a genuinely unreachable socket triggers the
+// restart, and the output says so. "Logged out" is handled by the tailscale
+// module's needs_login next-step, not here.
+//
 // ctx and runner are injected (CLI-10): the caller's signal-cancellable context
 // propagates and tests can substitute a MockRunner.
 func requireTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner) error {
-	if res, err := runner.Run(ctx, "tailscale", "status"); err == nil && res.ExitCode == 0 {
-		return nil // already running
+	if probeTailscaleDaemon(ctx, runner) {
+		return nil // daemon socket reachable (running, possibly logged out) — never restart a live daemon
 	}
 
 	printerInfo(p, "")
-	printerInfo(p, "  "+iconWarnStr()+"  tailscaled not running — starting...")
+	printerInfo(p, "  "+iconWarnStr()+"  tailscaled is not running (socket unreachable) — starting it...")
 
 	plat, err := platformauto.New(runner)
 	if err != nil {
@@ -824,10 +888,10 @@ func printSuccessSummary(p Printer, cfg *config.Config) {
 	sb.WriteString(styleCode.Render("abysslink enroll phone"))
 
 	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(boxBorder()).
 		BorderForeground(colorGreen).
 		Padding(1, 2).
-		Width(54)
+		Width(boxWidth())
 	printerInfo(p, style.Render(strings.TrimRight(sb.String(), "\n")))
 	printerInfo(p, "")
 }

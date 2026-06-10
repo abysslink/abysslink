@@ -106,20 +106,30 @@ func applyRowStr(evt modules.ModuleEvent) string {
 }
 
 // printFinalSummary prints the final summary line after ApplyAll completes.
-func printFinalSummary(p Printer, actions []modules.Action, findings []modules.Finding, elapsed time.Duration) {
+//
+// U7 honesty contract: "System converged · N applied · 0 errors" is printed
+// ONLY when the apply finished without an error AND no fatal findings were
+// emitted. On a failing run the line reports the planned count (we cannot
+// claim everything applied) and a non-zero error count — never a false green
+// right before the command exits non-zero.
+func printFinalSummary(p Printer, actions []modules.Action, findings []modules.Finding, elapsed time.Duration, applyErr error) {
 	errCount := countFindingSeverity(findings, modules.SeverityFatal)
-	appliedCount := len(uniqueActions(actions))
+	plannedCount := len(uniqueActions(actions))
 	elapsedStr := fmt.Sprintf("%.1fs", elapsed.Seconds())
 
 	printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
 
-	if errCount == 0 {
+	if errCount == 0 && applyErr == nil {
 		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render(
-			fmt.Sprintf("System converged  ·  %d applied  ·  0 errors  ·  %s", appliedCount, elapsedStr)))
-	} else {
-		printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render(
-			fmt.Sprintf("Finished with errors  ·  %d applied  ·  %d errors  ·  %s", appliedCount, errCount, elapsedStr)))
+			fmt.Sprintf("System converged  ·  %d applied  ·  0 errors  ·  %s", plannedCount, elapsedStr)))
+		return
 	}
+	// An apply error without a fatal finding still counts as ≥1 error.
+	if applyErr != nil && errCount == 0 {
+		errCount = 1
+	}
+	printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render(
+		fmt.Sprintf("Finished with errors  ·  %d planned  ·  %d error(s)  ·  %s", plannedCount, errCount, elapsedStr)))
 }
 
 // --- private helpers ---
