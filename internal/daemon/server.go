@@ -35,8 +35,17 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/notifyv2"
+	"github.com/abysslink/abysslink/internal/session"
 	"github.com/abysslink/abysslink/internal/shell"
 )
+
+// SessionSource is the daemon-side view of the tmux session registry: the
+// one method GET /sessions needs. It is a small daemon-owned interface (not
+// the concrete *session.Registry) so tests can wire a fake and the daemon
+// imports internal/session only for the Snapshot types (one-way, no cycle).
+type SessionSource interface {
+	Snapshot() session.Snapshot
+}
 
 // daemonVersion is the abysslinkd build version reported by GET /status. It
 // defaults to "dev"; Plan 04 wires the real value from the build ldflag.
@@ -87,6 +96,11 @@ type Server struct {
 	// hostname is the cached short hostname used to enrich v2 messages with
 	// an empty host field (computed once at NewServer).
 	hostname string
+	// sessionSource is the tmux session registry view served by GET /sessions
+	// (plan 27-07). nil unless the composition root wires it via
+	// SetSessionRegistry; handleSessions then reports "registry: disabled"
+	// (nil-safe, never an error).
+	sessionSource SessionSource
 }
 
 // NewServer returns a Server. notifier MUST be a direct backend (see Notifier).
@@ -114,6 +128,12 @@ func (s *Server) SetRing(r RingAdder) { s.ring = r }
 // handleStatus reports 0.
 func (s *Server) SetExecCounter(fn func() uint64) { s.execCount = fn }
 
+// SetSessionRegistry injects the tmux session registry served by GET
+// /sessions (BACK-04). Called by the composition root when
+// session_registry.enabled is true; nil-safe: when unset (or set to nil),
+// handleSessions reports "registry: disabled" with an empty sessions list.
+func (s *Server) SetSessionRegistry(src SessionSource) { s.sessionSource = src }
+
 // Run listens on the Unix socket and starts watchers until ctx is cancelled.
 // On cancellation it waits for the graceful shutdown (connection drain +
 // socket-file removal) to complete before returning (NET-14) so the process
@@ -139,6 +159,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/notify", s.handleNotify)
 	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/sessions", s.handleSessions)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO}
 
