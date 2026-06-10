@@ -1,0 +1,11 @@
+# Phase 27 plan 03 fixture (D-35): minimal healthy tmux -CC attach.
+# The %begin/%end greeting block tmux emits on connect, then the
+# session-changed notification for the attached session.
+<< %begin 1700000000 1 0
+<< %end 1700000000 1 0
+<< %session-changed $1 work
+# Hold the connection open so supervisor tests can assert steady state
+# deterministically; ctx cancel ends playback before the line below is
+# ever emitted (and the parser would skip it as unknown anyway).
+@delay 30s
+<< %test-hold-open

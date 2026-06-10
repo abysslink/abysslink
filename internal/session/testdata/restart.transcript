@@ -1,0 +1,11 @@
+# Phase 27 plan 03 fixture (D-35): tmux server restart cycle.
+# Greeting block, then two back-to-back structural events — they must
+# coalesce into exactly ONE debounced list-panes re-poll. The 400ms pause
+# lets the ~250ms debounce fire before %exit ends the stream; the
+# supervisor must then re-attach with an epoch bump and capped backoff.
+<< %begin 1700000000 1 0
+<< %end 1700000000 1 0
+<< %window-add @4
+<< %window-renamed @4 build
+@delay 400ms
+<< %exit
