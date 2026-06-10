@@ -15,6 +15,12 @@
 
 package notifyv2
 
+import (
+	"crypto/rand"
+
+	"github.com/oklog/ulid/v2"
+)
+
 // Kind classifies a v2 notification. The set is closed: Validate() rejects
 // anything outside the five enum values below.
 type Kind string
@@ -77,7 +83,11 @@ type Action struct {
 	Label string `json:"label,omitempty"`
 }
 
-// NewMsgID returns a fresh ULID string for Message.MsgID.
+// NewMsgID returns a fresh ULID string for Message.MsgID, using explicit
+// crypto/rand entropy (research A4: prefer explicit crypto entropy over
+// ulid.Make's shared default). crypto/rand.Reader never returns an error on
+// Go ≥ 1.24 (the runtime aborts if the OS entropy source is broken), so
+// MustNew cannot panic in normal control flow.
 func NewMsgID() string {
-	return "" // stub — implemented in the GREEN step
+	return ulid.MustNew(ulid.Now(), rand.Reader).String()
 }
