@@ -34,18 +34,34 @@ import (
 	"github.com/abysslink/abysslink/internal/metrics"
 	notifymod "github.com/abysslink/abysslink/internal/modules"
 	notify "github.com/abysslink/abysslink/internal/modules/notify"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
 // directNotifier adapts the notify module's direct backend to daemon.Notifier.
-// It deliberately uses SendDirect (not Send) so deliveries never loop back into
-// the daemon socket.
+// It deliberately uses SendDirect / SendDirectWithOptions (not Send) so
+// deliveries never loop back into the daemon socket.
 type directNotifier struct{ m *notify.Module }
+
+// Compile assertion: directNotifier satisfies the widened daemon.Notifier
+// (Send + SendNote).
+var _ daemon.Notifier = directNotifier{}
 
 func (d directNotifier) Send(ctx context.Context, title, body string) error {
 	return d.m.SendDirect(ctx, title, body)
+}
+
+// SendNote delivers a pre-rendered v2 note via the module's direct backend on
+// the same per-rig topic with the same keychain credentials (D-20: no
+// transport changes beyond the X-Click leg).
+func (d directNotifier) SendNote(ctx context.Context, n notifyv2.RenderedNote) error {
+	return d.m.SendDirectWithOptions(ctx, n.Title, n.Body, notify.SendOptions{
+		Priority: n.Priority,
+		Tags:     n.Tags,
+		Click:    n.Click,
+	})
 }
 
 func main() {

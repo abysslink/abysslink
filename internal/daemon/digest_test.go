@@ -25,6 +25,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/metrics"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,6 +45,8 @@ func (n *digestNotifier) Send(_ context.Context, title, body string) error {
 	n.body = body
 	return n.err
 }
+
+func (n *digestNotifier) SendNote(_ context.Context, _ notifyv2.RenderedNote) error { return nil }
 
 func TestStartDigestSchedulerDisabled(t *testing.T) {
 	cfg := config.Defaults()

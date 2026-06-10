@@ -27,14 +27,20 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/abysslink/abysslink/internal/notifyv2"
 )
 
 // Notifier delivers a notification to the phone. The daemon depends on this
-// interface rather than the notify module so there is no import cycle. The
-// implementation passed to the server MUST be the direct backend (not the
-// socket-aware Send) or notifications would loop back into the daemon.
+// interface rather than the notify module so there is no import cycle (the
+// daemon may import the notifyv2 leaf package — never modules/notify, which
+// imports the daemon). The implementation passed to the server MUST be the
+// direct backend (not the socket-aware Send) or notifications would loop back
+// into the daemon. SendNote delivers a pre-rendered v2 note; implementations
+// MUST use the direct backend for the same no-loop reason.
 type Notifier interface {
 	Send(ctx context.Context, title, body string) error
+	SendNote(ctx context.Context, n notifyv2.RenderedNote) error
 }
 
 // NotifyRequest is the JSON body accepted by POST /notify.

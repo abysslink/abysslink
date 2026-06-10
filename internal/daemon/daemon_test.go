@@ -24,6 +24,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,6 +54,8 @@ func (f *fakeNotifier) Send(_ context.Context, title, body string) error {
 	f.title, f.body, f.calls = title, body, f.calls+1
 	return nil
 }
+
+func (f *fakeNotifier) SendNote(_ context.Context, _ notifyv2.RenderedNote) error { return nil }
 
 func (f *fakeNotifier) last() (string, string, int) {
 	f.mu.Lock()

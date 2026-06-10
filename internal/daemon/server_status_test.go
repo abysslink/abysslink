@@ -32,12 +32,15 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 )
 
 // stubNotifier is a no-op Notifier for the status server tests.
 type stubNotifier struct{}
 
 func (stubNotifier) Send(_ context.Context, _, _ string) error { return nil }
+
+func (stubNotifier) SendNote(_ context.Context, _ notifyv2.RenderedNote) error { return nil }
 
 // startStatusServer spins up a daemon Server on a temp socket and returns an
 // HTTP client wired to that socket plus a cancel func. Optional configure

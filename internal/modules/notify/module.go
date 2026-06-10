@@ -358,6 +358,9 @@ func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, 
 	if opts.Tags != "" {
 		req.Header.Set("X-Tags", opts.Tags)
 	}
+	if opts.Click != "" {
+		req.Header.Set("X-Click", opts.Click)
+	}
 
 	// Attach basic auth from keychain if credentials are configured.
 	if m.keychain != nil {

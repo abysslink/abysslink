@@ -26,6 +26,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/abysslink/abysslink/internal/notifyv2"
 )
 
 type recordingNotifier struct {
@@ -39,6 +41,8 @@ func (r *recordingNotifier) Send(_ context.Context, _, body string) error {
 	r.msgs = append(r.msgs, body)
 	return nil
 }
+
+func (r *recordingNotifier) SendNote(_ context.Context, _ notifyv2.RenderedNote) error { return nil }
 
 func TestScanFileFrom_NotifiesOnMatchAndTracksOffset(t *testing.T) {
 	dir := t.TempDir()

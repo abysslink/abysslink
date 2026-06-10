@@ -30,12 +30,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 )
 
 // notifyStubNotifier satisfies daemon.Notifier for the notify body-size tests.
 type notifyStubNotifier struct{}
 
 func (notifyStubNotifier) Send(_ context.Context, _, _ string) error { return nil }
+
+func (notifyStubNotifier) SendNote(_ context.Context, _ notifyv2.RenderedNote) error { return nil }
 
 // startNotifyServer spins up a daemon Server on a temp Unix socket and returns
 // an HTTP client wired to that socket plus a cancel function.
