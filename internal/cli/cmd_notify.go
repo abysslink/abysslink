@@ -31,6 +31,7 @@ import (
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
+	"github.com/abysslink/abysslink/internal/modules"
 	notifymod "github.com/abysslink/abysslink/internal/modules/notify"
 	"github.com/abysslink/abysslink/internal/notifyv2"
 	"github.com/abysslink/abysslink/internal/secrets"
@@ -102,88 +103,99 @@ func newNotifyCmd() *cobra.Command {
 	cmd.Flags().String("kind", "", "v2 notification kind: needs_input|command_done|approval_request|watch_fired|agent_stopped (forces v2)")
 	cmd.Flags().String("pane", "", "tmux pane ID (%N form) for session routing; forces v2 (default: autodetect from $TMUX_PANE)")
 
-	cmd.RunE = func(c *cobra.Command, args []string) error {
-		ctx := c.Context()
-		cc, err := loadCmdContext(c)
-		if err != nil {
-			return err
-		}
+	cmd.RunE = runNotifyCmd
 
-		deps, err := buildDeps(ctx, cc)
-		if err != nil {
-			return fmt.Errorf("notify: %w", err)
-		}
-		nm := notifymod.New(deps)
+	return cmd
+}
 
-		// CLI-04: read and validate ALL flags up front — declared flags must
-		// never be silently dropped, and an invalid --kind/--pane is rejected
-		// before anything is sent (D-30).
-		f, err := parseNotifyFlags(c)
-		if err != nil {
-			return err
-		}
+// runNotifyCmd is the notify RunE: context/deps setup, flag validation, and
+// the wrap-vs-send dispatch (D-32 wrap mode runs before any arg parsing —
+// zero pre-dash args is legal there).
+func runNotifyCmd(c *cobra.Command, args []string) error {
+	ctx := c.Context()
+	cc, err := loadCmdContext(c)
+	if err != nil {
+		return err
+	}
 
-		// D-32: wrap mode — everything after `--` is exec'd with inherited
-		// stdio; the CLI exits with the wrapped command's own exit code.
-		if dashAt := c.ArgsLenAtDash(); dashAt >= 0 {
-			wrapped := args[dashAt:]
-			if werr := validateNotifyWrapFlags(f, wrapped); werr != nil {
-				return werr
-			}
-			return runNotifyWrap(ctx, cc, nm, newPrinter(c), wrapped, resolveNotifyPane(f.pane))
-		}
+	deps, err := buildDeps(ctx, cc)
+	if err != nil {
+		return fmt.Errorf("notify: %w", err)
+	}
+	nm := notifymod.New(deps)
 
-		// D-31: a body cannot ride v2 (content rides the v1 path until the
-		// Phase 28 fetched body) — combining them is an explicit error.
-		hasBody := f.stdin || len(args) >= 2
-		if f.forceV2 && hasBody {
-			return fmt.Errorf("notify: --kind/--pane select the v2 path, which carries no body (content rides the v1 path until Phase 28) — drop the body or the v2 flags")
-		}
-		if f.forceV2 && (f.priority != "" || f.tag != "" || f.topic != "") {
-			return fmt.Errorf("notify: --priority/--tag/--topic are v1 delivery options and cannot be combined with --kind/--pane (v2 derives priority and tags from the kind)")
-		}
+	// CLI-04: read and validate ALL flags up front — declared flags must
+	// never be silently dropped, and an invalid --kind/--pane is rejected
+	// before anything is sent (D-30).
+	f, err := parseNotifyFlags(c)
+	if err != nil {
+		return err
+	}
 
-		title, message, err := parseNotifyArgs(args, f.stdin)
-		if err != nil {
-			return err
+	// D-32: wrap mode — everything after `--` is exec'd with inherited
+	// stdio; the CLI exits with the wrapped command's own exit code.
+	if dashAt := c.ArgsLenAtDash(); dashAt >= 0 {
+		wrapped := args[dashAt:]
+		if werr := validateNotifyWrapFlags(f, wrapped); werr != nil {
+			return werr
 		}
+		return runNotifyWrap(ctx, cc, nm, newPrinter(c), wrapped, resolveNotifyPane(f.pane))
+	}
 
-		// --rig / --all-rigs branch: send per-rig HMAC-signed notifications
-		// (SC-5, FLEET-02, CLI-05). --rig X targets only the named enrolled rig.
-		rt, rigErr := resolveRigTargets(c, cc.cfg.Rigs)
-		if rigErr != nil {
-			return rigErr
-		}
-		if rt.fanOut && len(rt.rigs) > 0 {
-			if f.forceV2 {
-				return fmt.Errorf("notify: --kind/--pane cannot be combined with --rig/--all-rigs — v2 rides the local daemon socket only")
-			}
-			if f.topic != "" {
-				// CR-04 / T-14-14: each rig has its own isolated topic; a manual
-				// override would break per-rig isolation.
-				return fmt.Errorf("notify: --topic cannot be combined with --rig/--all-rigs — each rig has its own isolated topic")
-			}
-			return sendNotifyAllRigs(ctx, rt.rigs, deps.Keychain, title, message, rigNotifyOpts{
-				baseURL:  resolveFleetNtfyBaseURL(ctx, cc, deps.Backend),
-				priority: f.priority,
-				tags:     f.tag,
-			})
-		}
+	return runNotifySend(ctx, c, cc, deps, nm, args, f)
+}
 
-		// D-31 version selection: v2 inside tmux / on explicit flags, v1
-		// everywhere else — existing scripts keep working unchanged.
-		if useNotifyV2(f, hasBody) {
-			return sendNotifyV2(ctx, nm, f, title)
-		}
+// runNotifySend handles the non-wrap path: v1 arg parsing, the rig fan-out
+// branch, and the D-31 v1/v2 version selection.
+func runNotifySend(ctx context.Context, c *cobra.Command, cc *cmdContext, deps modules.Deps, nm *notifymod.Module, args []string, f notifyFlags) error {
+	// D-31: a body cannot ride v2 (content rides the v1 path until the
+	// Phase 28 fetched body) — combining them is an explicit error.
+	hasBody := f.stdin || len(args) >= 2
+	if f.forceV2 && hasBody {
+		return fmt.Errorf("notify: --kind/--pane select the v2 path, which carries no body (content rides the v1 path until Phase 28) — drop the body or the v2 flags")
+	}
+	if f.forceV2 && (f.priority != "" || f.tag != "" || f.topic != "") {
+		return fmt.Errorf("notify: --priority/--tag/--topic are v1 delivery options and cannot be combined with --kind/--pane (v2 derives priority and tags from the kind)")
+	}
 
-		return notifySendV1(ctx, nm, title, message, notifymod.SendOptions{
-			Priority: f.priority,
-			Tags:     f.tag,
-			Topic:    f.topic,
+	title, message, err := parseNotifyArgs(args, f.stdin)
+	if err != nil {
+		return err
+	}
+
+	// --rig / --all-rigs branch: send per-rig HMAC-signed notifications
+	// (SC-5, FLEET-02, CLI-05). --rig X targets only the named enrolled rig.
+	rt, rigErr := resolveRigTargets(c, cc.cfg.Rigs)
+	if rigErr != nil {
+		return rigErr
+	}
+	if rt.fanOut && len(rt.rigs) > 0 {
+		if f.forceV2 {
+			return fmt.Errorf("notify: --kind/--pane cannot be combined with --rig/--all-rigs — v2 rides the local daemon socket only")
+		}
+		if f.topic != "" {
+			// CR-04 / T-14-14: each rig has its own isolated topic; a manual
+			// override would break per-rig isolation.
+			return fmt.Errorf("notify: --topic cannot be combined with --rig/--all-rigs — each rig has its own isolated topic")
+		}
+		return sendNotifyAllRigs(ctx, rt.rigs, deps.Keychain, title, message, rigNotifyOpts{
+			baseURL:  resolveFleetNtfyBaseURL(ctx, cc, deps.Backend),
+			priority: f.priority,
+			tags:     f.tag,
 		})
 	}
 
-	return cmd
+	// D-31 version selection: v2 inside tmux / on explicit flags, v1
+	// everywhere else — existing scripts keep working unchanged.
+	if useNotifyV2(f, hasBody) {
+		return sendNotifyV2(ctx, nm, f, title)
+	}
+
+	return notifySendV1(ctx, nm, title, message, notifymod.SendOptions{
+		Priority: f.priority,
+		Tags:     f.tag,
+		Topic:    f.topic,
+	})
 }
 
 // notifyFlags carries the parsed and validated notify flag set.
