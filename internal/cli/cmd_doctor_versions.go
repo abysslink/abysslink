@@ -18,6 +18,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -36,25 +37,49 @@ const (
 	kindStdlibVendored
 )
 
+// floorSeverity selects the Finding severity reported when a probed version
+// sits below the floor. The zero value is fatal so every pre-existing CVE row
+// keeps its FATAL behavior without edits (regression-guarded in tests).
+type floorSeverity int
+
+const (
+	// floorSevFatal: below floor → SeverityFatal (known-vulnerable CVE rows).
+	floorSevFatal floorSeverity = iota
+	// floorSevWarn: below floor → SeverityWarning (capability floors — the
+	// feature degrades but the system stays safe and operable, D-27).
+	floorSevWarn
+)
+
+// finding maps a floorSeverity to the modules severity for a below-floor hit.
+func (s floorSeverity) finding() modules.Severity {
+	if s == floorSevWarn {
+		return modules.SeverityWarning
+	}
+	return modules.SeverityFatal
+}
+
 // versionFloor describes a minimum-safe version for a component that doctor
 // should probe.  The table is data-driven so Tailscale / tmux / mosh floors
 // can be added without new detector functions (D-08).
 type versionFloor struct {
-	component string    // human-readable name (e.g. "ntfy")
-	binary    string    // executable to probe (e.g. "ntfy")
-	verArgs   []string  // arguments to get the version string (e.g. ["--version"])
-	minVer    string    // minimum safe version (semver, no "v" prefix)
-	cve       string    // CVE identifier (e.g. "CVE-2026-39087")
-	cvss      string    // CVSS score string (e.g. "9.8")
-	kind      floorKind // kindProtocol or kindStdlibVendored
-	checkID   string    // stable Finding.Check ID used by findingFix map (e.g. "ntfy-version")
+	component string        // human-readable name (e.g. "ntfy")
+	binary    string        // executable to probe (e.g. "ntfy")
+	verArgs   []string      // arguments to get the version string (e.g. ["--version"])
+	minVer    string        // minimum safe version (semver, no "v" prefix)
+	cve       string        // CVE identifier (e.g. "CVE-2026-39087"); "" = capability floor
+	cvss      string        // CVSS score string (e.g. "9.8")
+	kind      floorKind     // kindProtocol or kindStdlibVendored
+	checkID   string        // stable Finding.Check ID used by findingFix map (e.g. "ntfy-version")
+	severity  floorSeverity // below-floor severity; zero value = FATAL (CVE rows)
 }
 
 // versionFloors is the package-level floor table.  Add rows here to extend
 // coverage; the detector loop handles them automatically.
 //
-// Only the ntfy row is live in this phase.  Tailscale / tmux / mosh rows are
-// deferred scaffolding — add rows when those floors are researched (D-08).
+// ntfy is a CVE floor (FATAL below). tmux is a capability floor (WARN below —
+// D-27: the session registry is optional, the daemon still runs). Tailscale /
+// mosh rows remain deferred scaffolding — add rows when those floors are
+// researched (D-08).
 var versionFloors = []versionFloor{
 	{
 		component: "ntfy",
@@ -65,6 +90,14 @@ var versionFloors = []versionFloor{
 		cvss:      "9.8",
 		kind:      kindProtocol,
 		checkID:   "ntfy-version",
+	},
+	{
+		component: "tmux",
+		binary:    "tmux",
+		verArgs:   []string{"-V"},
+		minVer:    "3.2",
+		checkID:   "tmux-version",
+		severity:  floorSevWarn, // D-27: registry is optional — never FATAL
 	},
 }
 
@@ -98,10 +131,8 @@ func probeFloor(ctx context.Context, runner shell.Runner, f versionFloor) module
 			Module:   "cli",
 			Check:    f.checkID,
 			Severity: modules.SeverityWarning,
-			Message: fmt.Sprintf(
-				"%s: could not probe version (%q --version failed) — version is unknown; upgrade to >= %s (%s, CVSS %s) to be safe",
-				f.checkID, f.binary, f.minVer, f.cve, f.cvss,
-			),
+			Message: probeFailMessage(f, fmt.Sprintf(
+				"could not probe version (%q %s failed)", f.binary, strings.Join(f.verArgs, " "))),
 		}
 	}
 
@@ -114,31 +145,75 @@ func probeFloor(ctx context.Context, runner shell.Runner, f versionFloor) module
 			Module:   "cli",
 			Check:    f.checkID,
 			Severity: modules.SeverityWarning,
-			Message: fmt.Sprintf(
-				"%s: could not parse version from output %q — version unknown; upgrade to >= %s (%s, CVSS %s) to be safe",
-				f.checkID, combined, f.minVer, f.cve, f.cvss,
-			),
+			Message:  probeFailMessage(f, fmt.Sprintf("could not parse version from output %q", combined)),
 		}
 	}
 
 	// Compare with floor using the package-level semverLT (cmd_server_headscale.go:1224).
-	// D-09: reuse this comparator; do NOT define a third semver function.
-	if semverLT(ver, f.minVer) {
-		msg := fatalMessage(f, ver)
+	// D-09: reuse this comparator; do NOT define a third semver function. The
+	// matched token is normalized first so the tmux "3.6b" letter-suffix
+	// release format never silently parses its minor component to 0.
+	if semverLT(normalizeFloorVersion(ver), f.minVer) {
 		return modules.Finding{
 			Module:   "cli",
 			Check:    f.checkID,
-			Severity: modules.SeverityFatal,
-			Message:  msg,
+			Severity: f.severity.finding(),
+			Message:  belowFloorMessage(f, ver),
 		}
 	}
 
+	okDetail := "no known CVE"
+	if f.cve == "" {
+		okDetail = "capability floor met"
+	}
 	return modules.Finding{
 		Module:   "cli",
 		Check:    f.checkID,
 		Severity: modules.SeverityOK,
-		Message:  fmt.Sprintf("%s: %s meets minimum v%s floor (no known CVE)", f.checkID, ver, f.minVer),
+		Message:  fmt.Sprintf("%s: %s meets minimum v%s floor (%s)", f.checkID, ver, f.minVer, okDetail),
 	}
+}
+
+// normalizeFloorVersion strips a trailing lowercase-letter suffix from a
+// matched version token ("3.6b" → "3.6" — the tmux release format, mirroring
+// modules/tmux parseTmuxVersion) so semverParts never silently parses the
+// suffixed component to 0. Pre-release suffixes ("2.21.0-beta") are
+// unaffected: semverParts already cuts at "-"/"+".
+func normalizeFloorVersion(ver string) string {
+	return strings.TrimRight(ver, "abcdefghijklmnopqrstuvwxyz")
+}
+
+// probeFailMessage explains an unprobeable or unparseable version per the
+// fail-honest ladder (uncertainty degrades to WARN, never a silent pass —
+// T-23-11). CVE rows name the CVE; capability rows name what needs the floor.
+func probeFailMessage(f versionFloor, detail string) string {
+	if f.cve != "" {
+		return fmt.Sprintf("%s: %s — version is unknown; upgrade to >= %s (%s, CVSS %s) to be safe",
+			f.checkID, detail, f.minVer, f.cve, f.cvss)
+	}
+	return fmt.Sprintf("%s: %s — version is unknown; the session registry needs %s >= %s (D-27)",
+		f.checkID, detail, f.component, f.minVer)
+}
+
+// belowFloorMessage routes a below-floor hit to the kind-appropriate message:
+// CVE rows get the FATAL remediation, capability rows the WARN degradation.
+func belowFloorMessage(f versionFloor, ver string) string {
+	if f.severity == floorSevWarn {
+		return warnMessage(f, ver)
+	}
+	return fatalMessage(f, ver)
+}
+
+// warnMessage builds the WARN-severity capability-floor message (D-27): it
+// names the found version, the floor, and exactly what degrades — the daemon
+// still runs (D-26), so this is never a FATAL.
+func warnMessage(f versionFloor, ver string) string {
+	return fmt.Sprintf(
+		"%s: %s %s is below the %s capability floor — the session registry requires tmux >= %s "+
+			"(attach-session -f client flags); below it notifications lose session identity and "+
+			"GET /sessions reports unsupported; the daemon still runs (D-26/D-27)",
+		f.checkID, f.component, ver, f.minVer, f.minVer,
+	)
 }
 
 // fatalMessage builds the kind-appropriate FATAL message (D-10).
