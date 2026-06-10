@@ -16,11 +16,13 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -32,6 +34,7 @@ import (
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/metrics"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -78,6 +81,12 @@ type Server struct {
 	// unless the composition root wires it via SetExecCounter; handleStatus
 	// reports 0 when unset (nil-safe).
 	execCount func() uint64
+	// dispatch is the v2 policy engine (cooldown, flood ceiling, retry —
+	// plan 27-05); its retry loop is started by Run.
+	dispatch *dispatcher
+	// hostname is the cached short hostname used to enrich v2 messages with
+	// an empty host field (computed once at NewServer).
+	hostname string
 }
 
 // NewServer returns a Server. notifier MUST be a direct backend (see Notifier).
@@ -88,6 +97,8 @@ func NewServer(notifier Notifier, runner shell.Runner, cfg *config.Config) *Serv
 		cfg:        cfg,
 		socketPath: SocketPath(),
 		startedAt:  time.Now(),
+		dispatch:   newDispatcher(notifier, cfg),
+		hostname:   shortHostname(),
 	}
 }
 
@@ -132,6 +143,8 @@ func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO}
 
 	s.startWatchers(ctx)
+	// v2 dispatch retry loop (D-28); exits on ctx cancellation.
+	go s.dispatch.run(ctx)
 
 	// Graceful-shutdown goroutine: by the time srv.Shutdown runs, ctx is
 	// already Done, so the drain needs a context detached from that
@@ -165,8 +178,10 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	// A11 / DOS-01: cap the request body before decoding to prevent memory-exhaustion
 	// from a hostile or compromised tailnet peer flooding POST /notify.
 	r.Body = http.MaxBytesReader(w, r.Body, maxNotifyBody)
-	var req NotifyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Read once (RESEARCH Pattern 5), probe the "v" field, branch. The cap
+	// error now surfaces at ReadAll instead of Decode — same disambiguation.
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		// MaxBytesReader sets an internal flag that causes ResponseWriter to emit 413
 		// if we call http.Error after the read limit is exceeded; we disambiguate
 		// here to return 413 explicitly for clarity.
@@ -174,6 +189,24 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	var probe struct {
+		V int `json:"v"`
+	}
+	// A probe failure on malformed JSON is fine: probe.V stays 0 and the v1
+	// unmarshal below reports the identical "invalid JSON" 400.
+	_ = json.Unmarshal(raw, &probe)
+	if probe.V == 2 {
+		s.handleNotifyV2(w, r, raw)
+		return
+	}
+
+	// v1 path — byte-identical behavior (v1 NotifyRequest has no v field, so
+	// probe.V == 0 routes every existing consumer here unchanged).
+	var req NotifyRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -191,6 +224,56 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	if s.ring != nil {
 		s.ring.AddEvent(req.Title, req.Topic, req.Priority, time.Now())
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleNotifyV2 is the POST /notify v2 branch (BACK-05): strict decode
+// (DisallowUnknownFields — the D-17 decode gate: Message has no body field,
+// so any body/content-shaped key is unknown by construction), server-side
+// enrichment, Validate, then dispatch through the policy engine. Explicit
+// POSTs bypass the heuristic cooldown by origin (D-10). Display-name
+// enrichment from the registry arrives with the bridge in plan 27-07.
+func (s *Server) handleNotifyV2(w http.ResponseWriter, r *http.Request, raw []byte) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var msg notifyv2.Message
+	if err := dec.Decode(&msg); err != nil {
+		http.Error(w, "invalid v2 payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Enrichment before validation: hook/CLI consumers may omit msg_id and
+	// host; the daemon fills both server-side.
+	if msg.MsgID == "" {
+		msg.MsgID = notifyv2.NewMsgID()
+	}
+	if msg.Host == "" {
+		msg.Host = s.hostname
+	}
+
+	if err := msg.Validate(); err != nil {
+		slog.Warn("daemon: v2 notify rejected", "reason", err)
+		http.Error(w, "invalid v2 message: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	if err := s.dispatch.dispatch(r.Context(), msg, originExplicit, notifyv2.RenderOpts{}); err != nil {
+		slog.Warn("daemon: v2 dispatch rejected", "reason", err)
+		http.Error(w, "invalid v2 message: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	// Mirror the v1 ring-adder with METADATA ONLY (T-19-19): msg_id, kind,
+	// pane — never anything body-like (the schema has no body field anyway).
+	if s.ring != nil {
+		parts := []string{string(msg.Kind)}
+		if msg.Session.Pane != "" {
+			parts = append(parts, msg.Session.Pane)
+		}
+		parts = append(parts, msg.MsgID)
+		s.ring.AddEvent(strings.Join(parts, " "), "", msg.Priority, time.Now())
+	}
+	// Success response mirrors the v1 handler exactly: 204 No Content.
 	w.WriteHeader(http.StatusNoContent)
 }
 
