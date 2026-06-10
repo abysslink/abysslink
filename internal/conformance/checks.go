@@ -42,6 +42,15 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)"?api[_-]?key"?\s*[=:]\s*["']?.{8,}`),
 }
 
+// SecretPatterns returns the canonical secret-shape regexes shared by every
+// secret scan in the binary (SPEC §4.3: single source of truth for "what looks
+// like a secret"). The audit-log leak check above and notifyv2's Message
+// Validate() both consult this exact slice — do not copy the patterns
+// elsewhere. Callers must treat the returned slice as read-only.
+func SecretPatterns() []*regexp.Regexp {
+	return secretPatterns
+}
+
 // telemetryPackages are import paths whose presence in .go source files
 // indicates unauthorized telemetry / analytics usage.
 var telemetryPackages = []string{
