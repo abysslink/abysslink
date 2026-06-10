@@ -150,10 +150,16 @@ type paneRecord struct {
 	alternateOn bool
 	consumer    string
 
-	// Heuristic fields (written by plan 27-06): preserved across syncs
-	// within the same epoch, cleared by an epoch bump (Pitfall 5).
+	// Heuristic fields (written by the plan-27-06 poll-tick engine):
+	// preserved across syncs within the same epoch, cleared by an epoch
+	// bump (Pitfall 5). lastHash/idleSince are the watchPane content-hash
+	// idle state; they live on the record (under r.mu) so the D-04
+	// attach-clear in syncPanes can restart the idle window of a
+	// just-cleared pane.
 	needsInput      bool
 	needsInputSince time.Time
+	lastHash        string
+	idleSince       time.Time
 	epoch           uint64
 }
 
@@ -170,6 +176,19 @@ type Registry struct {
 	// (RESEARCH Pitfall 9). Defaults to ctxSleep.
 	sleep func(ctx context.Context, d time.Duration)
 
+	// now is the injected heuristic clock (RESEARCH Pitfall 9); defaults to
+	// time.Now. NeedsInputSince and idle-window arithmetic come from it.
+	now func() time.Time
+	// heurSleep paces the heuristic poll loop. It is DELIBERATELY separate
+	// from sleep: cadence waits must never pollute supervisor backoff test
+	// recorders. Defaults to ctxSleep.
+	heurSleep func(ctx context.Context, d time.Duration)
+	// promptRe is the compiled optional session_registry.prompt_regex
+	// (D-02 extension point); nil means built-in sentinels only.
+	promptRe *regexp.Regexp
+	// floorWarnOnce dedups the D-01 idle-floor clamp warning.
+	floorWarnOnce sync.Once
+
 	mu          sync.Mutex
 	epoch       uint64
 	status      string
@@ -184,14 +203,27 @@ type Registry struct {
 // GatedRunner (D-40; the gate lands in plan 27-04). cfg supplies the
 // session_registry knobs (zero values mean compiled-in defaults).
 func New(plain shell.Runner, cfg *config.Config) *Registry {
-	return &Registry{
-		plain:  plain,
-		cfg:    cfg,
-		sleep:  ctxSleep,
-		status: StatusUnavailable, // honest initial state: nothing attached yet
-		panes:  make(map[string]*paneRecord),
-		events: make(chan Transition, eventsChanDepth),
+	r := &Registry{
+		plain:     plain,
+		cfg:       cfg,
+		sleep:     ctxSleep,
+		now:       time.Now,
+		heurSleep: ctxSleep,
+		status:    StatusUnavailable, // honest initial state: nothing attached yet
+		panes:     make(map[string]*paneRecord),
+		events:    make(chan Transition, eventsChanDepth),
 	}
+	if cfg != nil && cfg.SessionRegistry.PromptRegex != "" {
+		// Validated with regexp.Compile at config load (T-27-12); a failure
+		// here (unvalidated cfg) degrades to sentinels-only, never a panic.
+		re, err := regexp.Compile(cfg.SessionRegistry.PromptRegex)
+		if err != nil {
+			slog.Warn("session: prompt_regex does not compile; using built-in sentinels only", "err", err)
+		} else {
+			r.promptRe = re
+		}
+	}
+	return r
 }
 
 // Events returns the bounded transition channel. Transitions are dropped
@@ -280,6 +312,8 @@ func (r *Registry) syncPanes(lines []string) {
 		if prev, exists := r.panes[rec.paneID]; exists && prev.epoch == r.epoch {
 			rec.needsInput = prev.needsInput
 			rec.needsInputSince = prev.needsInputSince
+			rec.lastHash = prev.lastHash
+			rec.idleSince = prev.idleSince
 		}
 		rec.epoch = r.epoch
 		next[rec.paneID] = &rec

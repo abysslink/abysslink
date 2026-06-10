@@ -79,7 +79,20 @@ func (r *Registry) Run(ctx context.Context) error {
 		// previous epoch died. The re-snapshot itself stays silent at
 		// this layer.
 		r.pollPanes(ctx)
+
+		// Heuristic poll loop: one goroutine per live attach, stopped (and
+		// WAITED for) on detach/ctx so heuristic state has exactly one
+		// writer at any time (D-05 cadence lives inside runHeuristic).
+		hctx, hcancel := context.WithCancel(ctx)
+		hdone := make(chan struct{})
+		go func() {
+			defer close(hdone)
+			r.runHeuristic(hctx)
+		}()
+
 		r.consume(ctx, stream)
+		hcancel()
+		<-hdone
 		if cerr := stream.Close(); cerr != nil {
 			slog.Debug("session: control stream closed", "err", cerr)
 		}
