@@ -16,6 +16,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -27,6 +28,9 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
+	notifymod "github.com/abysslink/abysslink/internal/modules/notify"
+	"github.com/abysslink/abysslink/internal/notifyv2"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -398,4 +402,296 @@ func TestNotifyAllRigs_BaseURLFromOpts(t *testing.T) {
 		rigNotifyOpts{baseURL: srv.URL})
 	require.NoError(t, err)
 	assert.Equal(t, 1, hits, "POST must target the caller-resolved base URL, not localhost:2586")
+}
+
+// ── D-30/D-31/D-32: notify v2 — --kind/--pane, TMUX_PANE autodetect, wrap ────
+
+// v1SendCall records one v1-path send (title, body, options) captured at the
+// notifySendV1 seam.
+type v1SendCall struct {
+	title string
+	body  string
+	opts  notifymod.SendOptions
+}
+
+// notifySeamCapture records every send routed through the v1/v2 seams so the
+// D-31 selection matrix can be asserted without any network or daemon.
+type notifySeamCapture struct {
+	mu      sync.Mutex
+	v2Msgs  []notifyv2.Message
+	v2Err   error // returned from the v2 seam (scripted notification failure)
+	v1Calls []v1SendCall
+}
+
+// installNotifySeams swaps the package send seams for capturing fakes and
+// restores them at cleanup.
+func installNotifySeams(t *testing.T) *notifySeamCapture {
+	t.Helper()
+	cap := &notifySeamCapture{}
+	oldV2, oldV1 := notifySendMessage, notifySendV1
+	notifySendMessage = func(_ context.Context, _ *notifymod.Module, msg notifyv2.Message) error {
+		cap.mu.Lock()
+		defer cap.mu.Unlock()
+		cap.v2Msgs = append(cap.v2Msgs, msg)
+		return cap.v2Err
+	}
+	notifySendV1 = func(_ context.Context, _ *notifymod.Module, title, body string, opts notifymod.SendOptions) error {
+		cap.mu.Lock()
+		defer cap.mu.Unlock()
+		cap.v1Calls = append(cap.v1Calls, v1SendCall{title: title, body: body, opts: opts})
+		return nil
+	}
+	t.Cleanup(func() { notifySendMessage, notifySendV1 = oldV2, oldV1 })
+	return cap
+}
+
+// runNotify executes `abysslink notify` through the real cobra tree with a
+// zero-scripted MockRunner (no external command may run) and returns the
+// command error plus captured output.
+func runNotify(t *testing.T, args ...string) error {
+	t.Helper()
+	origNewRunner := newRunner
+	newRunner = func() shell.Runner { return shell.NewMockRunner() }
+	t.Cleanup(func() { newRunner = origNewRunner })
+	return execNotify(t, args...)
+}
+
+// execNotify runs the notify command without touching the newRunner seam (the
+// caller already installed one).
+func execNotify(t *testing.T, args ...string) error {
+	t.Helper()
+	cfgPath := writeDaemonCfg(t)
+	root := buildRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	full := append([]string{"notify", "--config", cfgPath}, args...)
+	root.SetArgs(full)
+	return root.Execute()
+}
+
+// TestNotifyV2_Matrix_AutoInsideTmux is D-31 case (a): title only with
+// TMUX_PANE set → v2 with the pane autodetected and Kind needs_input.
+func TestNotifyV2_Matrix_AutoInsideTmux(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%3")
+	cap := installNotifySeams(t)
+
+	require.NoError(t, runNotify(t, "ping"))
+
+	require.Len(t, cap.v2Msgs, 1, "inside tmux a title-only notify must take the v2 path")
+	msg := cap.v2Msgs[0]
+	assert.Equal(t, 2, msg.V)
+	assert.Equal(t, "needs_input", string(msg.Kind), "auto kind defaults to needs_input")
+	assert.Equal(t, "%3", msg.Session.Pane, "pane must be autodetected from TMUX_PANE")
+	assert.Equal(t, "ping", msg.Title)
+	assert.NotEmpty(t, msg.MsgID, "a fresh msg_id must be minted")
+	assert.NotEmpty(t, msg.Host, "host must carry the short hostname")
+	assert.Empty(t, cap.v1Calls, "v1 path must not fire")
+}
+
+// TestNotifyV2_Matrix_OutsideTmuxStaysV1 is D-31 case (b): title only without
+// TMUX_PANE → the v1 path with byte-identical args to today.
+func TestNotifyV2_Matrix_OutsideTmuxStaysV1(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+
+	require.NoError(t, runNotify(t, "ping"))
+
+	require.Len(t, cap.v1Calls, 1, "outside tmux the v1 path must fire")
+	assert.Equal(t, v1SendCall{title: "ping", body: "", opts: notifymod.SendOptions{}}, cap.v1Calls[0],
+		"v1 args must be byte-identical to today")
+	assert.Empty(t, cap.v2Msgs, "v2 path must not fire outside tmux")
+}
+
+// TestNotifyV2_Matrix_BodyForcesV1 is D-31 case (c): title + body rides the v1
+// path even inside tmux (v2 carries no body until Phase 28).
+func TestNotifyV2_Matrix_BodyForcesV1(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%3")
+	cap := installNotifySeams(t)
+
+	require.NoError(t, runNotify(t, "ping", "all good"))
+
+	require.Len(t, cap.v1Calls, 1, "a body argument must force the v1 path")
+	assert.Equal(t, v1SendCall{title: "ping", body: "all good", opts: notifymod.SendOptions{}}, cap.v1Calls[0])
+	assert.Empty(t, cap.v2Msgs)
+}
+
+// TestNotifyV2_Matrix_KindForcesV2OutsideTmux is D-31 case (d): explicit
+// --kind forces v2 even outside tmux, with an empty SessionRef.
+func TestNotifyV2_Matrix_KindForcesV2OutsideTmux(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+
+	require.NoError(t, runNotify(t, "--kind", "command_done", "ping"))
+
+	require.Len(t, cap.v2Msgs, 1, "--kind must force the v2 path")
+	msg := cap.v2Msgs[0]
+	assert.Equal(t, "command_done", string(msg.Kind))
+	assert.Equal(t, notifyv2.SessionRef{}, msg.Session, "outside tmux the SessionRef is empty")
+	assert.Equal(t, "ping", msg.Title)
+	assert.Empty(t, cap.v1Calls)
+}
+
+// TestNotifyV2_Matrix_BodyPlusKindIsError is D-31 case (e): combining a body
+// with --kind/--pane is an error explaining that v2 carries no body.
+func TestNotifyV2_Matrix_BodyPlusKindIsError(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+
+	err := runNotify(t, "--kind", "needs_input", "ping", "some body")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no body", "the error must explain v2 carries no body")
+	assert.Empty(t, cap.v2Msgs, "nothing may be sent on a flag conflict")
+	assert.Empty(t, cap.v1Calls)
+}
+
+// TestNotifyV2_InvalidKindRejected: --kind outside the closed enum is a
+// descriptive error listing the five valid kinds, sent before anything fires.
+func TestNotifyV2_InvalidKindRejected(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+
+	err := runNotify(t, "--kind", "bogus", "ping")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "needs_input", "the error must list the valid kinds")
+	assert.Contains(t, err.Error(), "agent_stopped", "the error must list the valid kinds")
+	assert.Empty(t, cap.v2Msgs)
+	assert.Empty(t, cap.v1Calls)
+}
+
+// TestNotifyV2_MalformedPaneFlagRejected: --pane must match ^%\d+$.
+func TestNotifyV2_MalformedPaneFlagRejected(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+
+	err := runNotify(t, "--pane", "3", "ping")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `%\d+`, "the error must name the required pane format")
+	assert.Empty(t, cap.v2Msgs)
+	assert.Empty(t, cap.v1Calls)
+}
+
+// TestNotifyV2_MalformedTmuxPaneIgnored: a malformed TMUX_PANE (stale/forged
+// metadata, Pitfall 8) is ignored without error — v2 proceeds with an empty
+// pane because the env var being set still means "inside tmux".
+func TestNotifyV2_MalformedTmuxPaneIgnored(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%x")
+	cap := installNotifySeams(t)
+
+	require.NoError(t, runNotify(t, "ping"))
+
+	require.Len(t, cap.v2Msgs, 1, "malformed TMUX_PANE must not fail the notification")
+	assert.Empty(t, cap.v2Msgs[0].Session.Pane, "the malformed pane value must be dropped")
+	assert.Empty(t, cap.v1Calls)
+}
+
+// TestNotifyV2_PaneFlagOverridesEnv: --pane wins over TMUX_PANE.
+func TestNotifyV2_PaneFlagOverridesEnv(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%3")
+	cap := installNotifySeams(t)
+
+	require.NoError(t, runNotify(t, "--pane", "%7", "ping"))
+
+	require.Len(t, cap.v2Msgs, 1)
+	assert.Equal(t, "%7", cap.v2Msgs[0].Session.Pane, "--pane must override TMUX_PANE")
+}
+
+// wrapTestRunner is a shell.Runner whose RunInteractive records the exact argv
+// and returns a scripted error. Every non-interactive method delegates to the
+// embedded zero-scripted MockRunner (which errors — proving wrap mode execs
+// nothing besides the wrapped command).
+type wrapTestRunner struct {
+	shell.Runner
+	mu   sync.Mutex
+	argv [][]string
+	err  error
+}
+
+func (r *wrapTestRunner) RunInteractive(_ context.Context, name string, args ...string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.argv = append(r.argv, append([]string{name}, args...))
+	return r.err
+}
+
+// installWrapRunner swaps newRunner for a wrapTestRunner scripted with err.
+func installWrapRunner(t *testing.T, err error) *wrapTestRunner {
+	t.Helper()
+	runner := &wrapTestRunner{Runner: shell.NewMockRunner(), err: err}
+	origNewRunner := newRunner
+	newRunner = func() shell.Runner { return runner }
+	t.Cleanup(func() { newRunner = origNewRunner })
+	return runner
+}
+
+// TestNotifyWrap_Success (D-32): notify -- <argv> execs the exact argv via
+// RunInteractive, sends a v2 command_done titled "done ✓", and exits 0.
+func TestNotifyWrap_Success(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+	runner := installWrapRunner(t, nil)
+
+	require.NoError(t, execNotify(t, "--", "make", "build", "-j4"))
+
+	runner.mu.Lock()
+	require.Len(t, runner.argv, 1, "exactly one wrapped exec")
+	assert.Equal(t, []string{"make", "build", "-j4"}, runner.argv[0], "argv must pass through exactly (flags included)")
+	runner.mu.Unlock()
+
+	require.Len(t, cap.v2Msgs, 1, "wrap must send a v2 command_done")
+	msg := cap.v2Msgs[0]
+	assert.Equal(t, "command_done", string(msg.Kind))
+	assert.Equal(t, "done ✓", msg.Title, "success title word is 'done ✓' (D-32)")
+	assert.Empty(t, msg.Priority, "success rides the default priority")
+}
+
+// TestNotifyWrap_FailureExitCodeAndHighPriority (D-32): a wrapped command
+// exiting 3 yields Title "failed ✗" at Priority high, and the CLI exits 3.
+func TestNotifyWrap_FailureExitCodeAndHighPriority(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+	installWrapRunner(t, &exitError{code: 3})
+
+	err := execNotify(t, "--", "false")
+	var ee *exitError
+	require.ErrorAs(t, err, &ee, "wrap must propagate the wrapped exit code as an exitError")
+	assert.Equal(t, 3, ee.ExitCode(), "the CLI exit code must be the wrapped command's own")
+
+	require.Len(t, cap.v2Msgs, 1)
+	msg := cap.v2Msgs[0]
+	assert.Equal(t, "failed ✗", msg.Title, "failure title word is 'failed ✗' (D-32)")
+	assert.Equal(t, "high", msg.Priority, "failure is high priority")
+}
+
+// TestNotifyWrap_NotificationFailureNeverMasksExitCode (T-27-34): a
+// SendMessage error must not change the wrapped command's exit code; a warning
+// is printed instead.
+func TestNotifyWrap_NotificationFailureNeverMasksExitCode(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+	cap.v2Err = errors.New("ntfy is down")
+	installWrapRunner(t, &exitError{code: 3})
+
+	err := execNotify(t, "--", "false")
+	var ee *exitError
+	require.ErrorAs(t, err, &ee, "a notification failure must not replace the exit code")
+	assert.Equal(t, 3, ee.ExitCode(), "exit code 3 must survive the SendMessage failure")
+	require.Len(t, cap.v2Msgs, 1, "the send was attempted")
+}
+
+// TestNotifyWrap_EmptyArgvRejected: `notify --` with nothing after the dash is
+// a usage error, not a silent no-op.
+func TestNotifyWrap_EmptyArgvRejected(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	cap := installNotifySeams(t)
+	runner := installWrapRunner(t, nil)
+
+	err := execNotify(t, "--")
+	require.Error(t, err)
+
+	runner.mu.Lock()
+	assert.Empty(t, runner.argv, "nothing may be exec'd")
+	runner.mu.Unlock()
+	assert.Empty(t, cap.v2Msgs)
+	assert.Empty(t, cap.v1Calls)
 }
