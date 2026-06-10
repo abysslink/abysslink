@@ -23,9 +23,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/platform"
+	"github.com/abysslink/abysslink/internal/shell"
 )
 
 // ServiceInstall writes a launchd plist and bootstraps the service for the current GUI session.
@@ -49,9 +51,49 @@ func (p *Platform) ServiceInstall(ctx context.Context, spec platform.ServiceSpec
 		return fmt.Errorf("write plist: %w", err)
 	}
 	uid := fmt.Sprintf("%d", os.Getuid())
-	// bootstrap returns error if already loaded; ignore
-	_, _ = p.runner.Run(ctx, "launchctl", "bootstrap", "gui/"+uid, plistPath)
+	// Boot out any previously-loaded instance first so the rewritten plist is
+	// re-read; bootout fails when nothing is loaded, which is fine (best-effort).
+	_, _ = p.runner.Run(ctx, "launchctl", "bootout", "gui/"+uid+"/"+spec.Label)
+
+	// Bootstrap the (re)written plist. shell.Runner reports a non-zero exit in
+	// Result.ExitCode with err == nil — both must be checked, or a failed
+	// bootstrap silently "succeeds" (C3/C4 bug class). "already bootstrapped"
+	// (exit 5 / EALREADY wording) is tolerated: the kickstart below restarts it.
+	res, err := p.runner.Run(ctx, "launchctl", "bootstrap", "gui/"+uid, plistPath)
+	if err != nil {
+		return fmt.Errorf("launchctl bootstrap %s: %w", spec.Label, err)
+	}
+	if !res.Ok() && !isAlreadyBootstrapped(res) {
+		return fmt.Errorf("launchctl bootstrap %s exited %d: %s",
+			spec.Label, res.ExitCode, strings.TrimSpace(res.Stderr+res.Stdout))
+	}
+
+	// Kickstart -k kills any running instance and restarts it so a changed
+	// service spec takes effect immediately instead of after logout/login
+	// (parity with the systemd daemon-reload + enable --now path).
+	if spec.RunAtLoad {
+		kres, kerr := p.runner.Run(ctx, "launchctl", "kickstart", "-k", "gui/"+uid+"/"+spec.Label)
+		if kerr != nil {
+			return fmt.Errorf("launchctl kickstart %s: %w", spec.Label, kerr)
+		}
+		if !kres.Ok() {
+			return fmt.Errorf("launchctl kickstart %s exited %d: %s",
+				spec.Label, kres.ExitCode, strings.TrimSpace(kres.Stderr+kres.Stdout))
+		}
+	}
 	return nil
+}
+
+// isAlreadyBootstrapped reports whether a failed `launchctl bootstrap` only
+// failed because the service is already loaded in the target domain.
+// launchctl signals this as "Bootstrap failed: 5: Input/output error" or with
+// "already bootstrapped"/"service already loaded" wording depending on the
+// macOS release.
+func isAlreadyBootstrapped(res shell.Result) bool {
+	out := strings.ToLower(res.Stderr + res.Stdout)
+	return strings.Contains(out, "already bootstrapped") ||
+		strings.Contains(out, "already loaded") ||
+		strings.Contains(out, "bootstrap failed: 5:")
 }
 
 // ServiceUninstall bootouts and removes the launchd plist for the given label.

@@ -49,13 +49,24 @@ func (p *Platform) ServiceInstall(ctx context.Context, spec platform.ServiceSpec
 		return fmt.Errorf("write unit file: %w", err)
 	}
 
-	if _, err := p.runner.Run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
+	// shell.Runner returns err == nil for a process that exits non-zero — the
+	// failure is in Result.ExitCode (checked via Ok()). Ignoring it would make
+	// a failed daemon-reload/enable look like success (C3/C4 bug class).
+	res, err := p.runner.Run(ctx, "systemctl", "--user", "daemon-reload")
+	if err != nil {
 		return fmt.Errorf("systemctl daemon-reload: %w", err)
+	}
+	if !res.Ok() {
+		return fmt.Errorf("systemctl daemon-reload exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 
 	if spec.RunAtLoad {
-		if _, err := p.runner.Run(ctx, "systemctl", "--user", "enable", "--now", spec.Label); err != nil {
+		res, err := p.runner.Run(ctx, "systemctl", "--user", "enable", "--now", spec.Label)
+		if err != nil {
 			return fmt.Errorf("systemctl enable --now %s: %w", spec.Label, err)
+		}
+		if !res.Ok() {
+			return fmt.Errorf("systemctl enable --now %s exited %d: %s", spec.Label, res.ExitCode, strings.TrimSpace(res.Stderr))
 		}
 	}
 
@@ -79,20 +90,41 @@ func (p *Platform) ServiceUninstall(ctx context.Context, label string) error {
 
 // ServiceStart starts the systemd --user service.
 func (p *Platform) ServiceStart(ctx context.Context, label string) error {
-	_, err := p.runner.Run(ctx, "systemctl", "--user", "start", label)
-	return err
+	res, err := p.runner.Run(ctx, "systemctl", "--user", "start", label)
+	if err != nil {
+		return err
+	}
+	if !res.Ok() {
+		return fmt.Errorf("systemctl start %s exited %d: %s", label, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return nil
 }
 
 // ServiceStop stops the systemd --user service.
 func (p *Platform) ServiceStop(ctx context.Context, label string) error {
-	_, err := p.runner.Run(ctx, "systemctl", "--user", "stop", label)
-	return err
+	res, err := p.runner.Run(ctx, "systemctl", "--user", "stop", label)
+	if err != nil {
+		return err
+	}
+	if !res.Ok() {
+		return fmt.Errorf("systemctl stop %s exited %d: %s", label, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return nil
 }
 
 // ServiceStatus returns Running if the service is active, Stopped otherwise.
+//
+// `systemctl --user is-active` exits 0 when active and non-zero (3) when
+// inactive/missing — with err == nil from shell.Runner in both cases. The
+// exit code is the signal, NOT the error (C3): checking only err reported
+// Running for every stopped or missing service.
 func (p *Platform) ServiceStatus(ctx context.Context, label string) (platform.ServiceStatus, error) {
-	_, err := p.runner.Run(ctx, "systemctl", "--user", "is-active", label)
+	res, err := p.runner.Run(ctx, "systemctl", "--user", "is-active", label)
 	if err != nil {
+		// systemctl itself could not be executed — the status is unknown.
+		return platform.ServiceUnknown, fmt.Errorf("systemctl is-active %s: %w", label, err)
+	}
+	if !res.Ok() {
 		return platform.ServiceStopped, nil
 	}
 	return platform.ServiceRunning, nil

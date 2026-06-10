@@ -76,8 +76,16 @@ func (p *Platform) InstallPackage(ctx context.Context, name string) error {
 	case platform.PkgPacman:
 		return p.runPrivileged(ctx, "pacman", "-S", "--noconfirm", name)
 	case platform.PkgNix:
-		_, err := p.runner.Run(ctx, "nix-env", "-iA", "nixpkgs."+name)
-		return err
+		// nix-env needs no sudo, but its failure is still carried in the exit
+		// code with err == nil (C4 bug class) — check Ok(), not just err.
+		res, err := p.runner.Run(ctx, "nix-env", "-iA", "nixpkgs."+name)
+		if err != nil {
+			return err
+		}
+		if !res.Ok() {
+			return fmt.Errorf("nix-env -iA nixpkgs.%s exited %d: %s", name, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported package manager: %q", p.pkgMgr)
 	}
@@ -93,8 +101,14 @@ func (p *Platform) RemovePackage(ctx context.Context, name string) error {
 	case platform.PkgPacman:
 		return p.runPrivileged(ctx, "pacman", "-R", "--noconfirm", name)
 	case platform.PkgNix:
-		_, err := p.runner.Run(ctx, "nix-env", "-e", name)
-		return err
+		res, err := p.runner.Run(ctx, "nix-env", "-e", name)
+		if err != nil {
+			return err
+		}
+		if !res.Ok() {
+			return fmt.Errorf("nix-env -e %s exited %d: %s", name, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported package manager: %q", p.pkgMgr)
 	}

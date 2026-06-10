@@ -41,8 +41,11 @@ func ParseOSRelease(r io.Reader) (map[string]string, error) {
 		}
 		key := line[:idx]
 		val := line[idx+1:]
-		// Strip surrounding double-quotes.
-		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+		// Strip surrounding quotes. os-release(5) allows both double- and
+		// single-quoted values (ID='arch' is legal and seen on some images).
+		if len(val) >= 2 &&
+			((val[0] == '"' && val[len(val)-1] == '"') ||
+				(val[0] == '\'' && val[len(val)-1] == '\'')) {
 			val = val[1 : len(val)-1]
 		}
 		fields[key] = val

@@ -27,6 +27,17 @@ type Result struct {
 	ExitCode int
 }
 
+// Ok reports whether the command exited successfully (exit code 0).
+//
+// ExecRunner.Run returns err == nil for a process that started and exited
+// non-zero — the failure is carried in Result.ExitCode. Callers MUST check
+// both the returned error AND Ok(); checking only the error silently treats
+// failed commands as successes (the C3/C4 bug class). Prefer:
+//
+//	res, err := runner.Run(ctx, ...)
+//	if err != nil || !res.Ok() { /* handle failure */ }
+func (r Result) Ok() bool { return r.ExitCode == 0 }
+
 // Runner executes external commands. All code outside internal/shell must call
 // through this interface — never import os/exec directly.
 type Runner interface {
