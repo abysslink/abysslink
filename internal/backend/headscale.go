@@ -115,16 +115,27 @@ func (a *headscaleAdapter) listNodes(ctx context.Context, op string) ([]hsNode, 
 // name/givenName (NET-07). Returns a clear error when the local node is not
 // found — never an arbitrary other machine's entry.
 func (a *headscaleAdapter) localNode(nodes []hsNode) (*hsNode, error) {
-	candidates := localNodeCandidates(a.cfg.Tailnet.Hostname)
-	for i := range nodes {
-		if matchesLocalNode(candidates, nodes[i].Name, nodes[i].GivenName) {
-			return &nodes[i], nil
+	matches := findLocalNodes(a.cfg.Tailnet.Hostname, len(nodes), func(i int) []string {
+		return []string{nodes[i].Name, nodes[i].GivenName}
+	})
+	switch len(matches) {
+	case 1:
+		return &nodes[matches[0]], nil
+	case 0:
+		return nil, fmt.Errorf(
+			"headscale: local node not found among %d enrolled node(s) (looked for %v) — "+
+				"set tailnet.hostname in abysslink.yaml to this machine's enrolled name, or enroll first (abysslink up)",
+			len(nodes), localNodeCandidates(a.cfg.Tailnet.Hostname))
+	default:
+		names := make([]string, 0, len(matches))
+		for _, i := range matches {
+			names = append(names, nodes[i].Name)
 		}
+		return nil, fmt.Errorf(
+			"headscale: local node is ambiguous — %d enrolled nodes match (%s); "+
+				"set tailnet.hostname in abysslink.yaml to this machine's exact enrolled name",
+			len(matches), strings.Join(names, ", "))
 	}
-	return nil, fmt.Errorf(
-		"headscale: local node not found among %d enrolled node(s) (looked for %v) — "+
-			"set tailnet.hostname in abysslink.yaml to this machine's enrolled name, or enroll first (abysslink up)",
-		len(nodes), candidates)
 }
 
 // Status returns a synthetic Status for the Headscale backend.

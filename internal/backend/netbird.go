@@ -125,19 +125,32 @@ func (a *netbirdAdapter) listPeers(ctx context.Context, op string) ([]nbPeer, er
 
 // localPeer identifies THIS machine in the account-wide peer list by matching
 // the configured tailnet hostname and the OS hostname against each peer's
-// name/hostname (NET-07). Returns a clear error when the local peer is not
-// found — never an arbitrary other machine's entry.
+// name/hostname/dns_label (NET-07). Returns a clear error when the local peer
+// is not found — never an arbitrary other machine's entry — and an explicit
+// ambiguity error when more than one peer matches (e.g. "laptop.a" and
+// "laptop.b" both matching a configured short name "laptop").
 func (a *netbirdAdapter) localPeer(peers []nbPeer) (*nbPeer, error) {
-	candidates := localNodeCandidates(a.cfg.Tailnet.Hostname)
-	for i := range peers {
-		if matchesLocalNode(candidates, peers[i].Name, peers[i].Hostname) {
-			return &peers[i], nil
+	matches := findLocalNodes(a.cfg.Tailnet.Hostname, len(peers), func(i int) []string {
+		return []string{peers[i].Name, peers[i].Hostname, peers[i].DNSLabel}
+	})
+	switch len(matches) {
+	case 1:
+		return &peers[matches[0]], nil
+	case 0:
+		return nil, fmt.Errorf(
+			"netbird: local peer not found among %d enrolled peer(s) (looked for %v) — "+
+				"set tailnet.hostname in abysslink.yaml to this machine's enrolled name, or enroll first (abysslink up)",
+			len(peers), localNodeCandidates(a.cfg.Tailnet.Hostname))
+	default:
+		names := make([]string, 0, len(matches))
+		for _, i := range matches {
+			names = append(names, peers[i].Name)
 		}
+		return nil, fmt.Errorf(
+			"netbird: local peer is ambiguous — %d enrolled peers match (%s); "+
+				"set tailnet.hostname in abysslink.yaml to this machine's exact enrolled name",
+			len(matches), strings.Join(names, ", "))
 	}
-	return nil, fmt.Errorf(
-		"netbird: local peer not found among %d enrolled peer(s) (looked for %v) — "+
-			"set tailnet.hostname in abysslink.yaml to this machine's enrolled name, or enroll first (abysslink up)",
-		len(peers), candidates)
 }
 
 // Status returns a synthetic Status for the NetBird backend.
@@ -158,7 +171,9 @@ func (a *netbirdAdapter) Status(ctx context.Context) (*Status, error) {
 	if p, lErr := a.localPeer(peers); lErr == nil {
 		st.Self = &PeerStatus{
 			HostName: p.Name,
-			Online:   true,
+			// Map the API's connected field — a disconnected peer must never be
+			// reported as online.
+			Online: p.Connected,
 		}
 	}
 	return st, nil
@@ -176,19 +191,10 @@ func (a *netbirdAdapter) IP(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("netbird: ip: %w", err)
 	}
-	var firstIP string
-	for _, ip := range p.IPAddresses {
-		if firstIP == "" {
-			firstIP = ip
-		}
-		if !strings.Contains(ip, ":") {
-			return ip, nil
-		}
+	if p.IP == "" {
+		return "", fmt.Errorf("netbird: ip: local peer %q has no IP address: %w", p.Name, ErrUnsupported)
 	}
-	if firstIP != "" {
-		return firstIP, nil
-	}
-	return "", fmt.Errorf("netbird: ip: local peer %q has no IP addresses: %w", p.Name, ErrUnsupported)
+	return p.IP, nil
 }
 
 // Hostname returns the control-plane name of THIS machine's peer (NET-07).
@@ -370,11 +376,15 @@ func (a *netbirdAdapter) Devices(ctx context.Context) ([]Device, error) {
 	}
 	devices := make([]Device, len(peers))
 	for i, p := range peers {
+		tags := make([]string, 0, len(p.Groups))
+		for _, g := range p.Groups {
+			tags = append(tags, g.Name)
+		}
 		devices[i] = Device{
 			ID:       p.ID,
 			Name:     p.Name,
 			Hostname: p.Hostname,
-			Tags:     p.Groups,
+			Tags:     tags,
 		}
 	}
 	return devices, nil
@@ -591,13 +601,24 @@ func (a *netbirdAdapter) doRequest(ctx context.Context, method, path string, bod
 
 // ── NetBird REST API response types ─────────────────────────────────────
 
-// nbPeer is a single peer from GET /api/peers.
+// nbGroupRef is the embedded group object on a peer: GET /api/peers returns
+// group OBJECTS ({id, name, ...}), not bare name strings.
+type nbGroupRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// nbPeer is a single peer from GET /api/peers, matching the real NetBird API:
+// a single "ip" string (not "ip_addresses"), a "connected" liveness bool, a
+// "dns_label", and group objects.
 type nbPeer struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Hostname    string   `json:"hostname"`
-	IPAddresses []string `json:"ip_addresses"`
-	Groups      []string `json:"groups"`
+	ID        string       `json:"id"`
+	Name      string       `json:"name"`
+	Hostname  string       `json:"hostname"`
+	DNSLabel  string       `json:"dns_label"`
+	IP        string       `json:"ip"`
+	Connected bool         `json:"connected"`
+	Groups    []nbGroupRef `json:"groups"`
 }
 
 // nbCreateSetupKeyRequest is the POST /api/setup-keys request body.
