@@ -40,6 +40,14 @@ type MockRunner struct {
 	mu    sync.Mutex
 	calls []Call
 	idx   int
+
+	// Streaming state (mock_stream.go): scripted transcripts consumed by
+	// RunStream in order, recorded RunStream argvs, and bytes written to the
+	// mock streams' stdin for >> assertions via StreamStdinWrites.
+	streams     []*Transcript
+	streamIdx   int
+	streamCalls [][]string
+	stdinBuf    []byte
 }
 
 // NewMockRunner returns a MockRunner that will replay calls in order.
