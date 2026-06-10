@@ -191,11 +191,10 @@ func TestSendWithOptions_ZeroValueGuardStillComparable(t *testing.T) {
 	cfg.Modules.Notify.DefaultTopic = "alerts"
 	m := New(modules.Deps{Cfg: cfg, Runner: shell.NewMockRunner()})
 
-	// Compile-level: the struct must stay comparable for the fast-path guard.
-	assert.True(t, SendOptions{} == SendOptions{}) //nolint:gocritic // gocritic: deliberate comparability assertion
-
-	// Behavioral: zero options still deliver via the direct fallback to the
-	// configured default topic (no daemon is listening in tests).
+	// Comparability is compile-level: SendWithOptions' own
+	// `opts == (SendOptions{})` guard would not build if the Click field
+	// broke it. Behavioral: zero options still deliver via the direct
+	// fallback to the configured default topic (no daemon is listening).
 	require.NoError(t, m.SendWithOptions(context.Background(), "t", "b", SendOptions{}))
 	assert.Equal(t, "/alerts", gotPath)
 }

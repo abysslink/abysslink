@@ -289,6 +289,22 @@ type SendOptions struct {
 // hostile value can never alter the request path ("../", query strings, etc.).
 var validTopicRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+// resolveTopic picks the effective topic (override → configured default →
+// "rig") and rejects anything outside the ntfy topic charset.
+func (m *Module) resolveTopic(opts SendOptions) (string, error) {
+	topic := opts.Topic
+	if topic == "" {
+		topic = m.cfg.Modules.Notify.DefaultTopic
+	}
+	if topic == "" {
+		topic = "rig"
+	}
+	if !validTopicRe.MatchString(topic) {
+		return "", fmt.Errorf("notify send: invalid topic %q: only [A-Za-z0-9_-] (max 64 chars) allowed", topic)
+	}
+	return topic, nil
+}
+
 // Send sends a notification via the configured ntfy backend.
 // It tries the abysslinkd Unix socket first (fast path, no process startup),
 // then falls back to a direct ntfy POST when the daemon is not running.
@@ -334,15 +350,9 @@ func (m *Module) SendDirect(ctx context.Context, title, body string) error {
 // (priority, tags, topic override — CLI-04). ntfy semantics: X-Priority and
 // X-Tags headers; the topic is the URL path segment.
 func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, opts SendOptions) error {
-	topic := opts.Topic
-	if topic == "" {
-		topic = m.cfg.Modules.Notify.DefaultTopic
-	}
-	if topic == "" {
-		topic = "rig"
-	}
-	if !validTopicRe.MatchString(topic) {
-		return fmt.Errorf("notify send: invalid topic %q: only [A-Za-z0-9_-] (max 64 chars) allowed", topic)
+	topic, err := m.resolveTopic(opts)
+	if err != nil {
+		return err
 	}
 
 	url := fmt.Sprintf("%s/%s", m.baseURL(ctx), topic)

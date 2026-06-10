@@ -305,7 +305,12 @@ func (d *dispatcher) processRetries(ctx context.Context) {
 			continue
 		}
 		e.attempts++
-		backoff := d.retryBase << uint(e.attempts) //nolint:gosec // gosec: attempts is bounded by retryMaxAttempts (6)
+		// Double the base interval per attempt, capped at retryMaxBackoff
+		// (attempts is bounded by retryMaxAttempts, so this loop is tiny).
+		backoff := d.retryBase
+		for i := 0; i < e.attempts && backoff < retryMaxBackoff; i++ {
+			backoff *= 2
+		}
 		if backoff > retryMaxBackoff {
 			backoff = retryMaxBackoff
 		}
