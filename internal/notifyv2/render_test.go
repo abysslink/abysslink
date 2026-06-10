@@ -93,8 +93,8 @@ func TestRender_BodyBreadcrumbAndMetadata(t *testing.T) {
 
 func TestRender_DisplayNameTruncationRuneSafe(t *testing.T) {
 	m := renderMsg()
-	longCJK := strings.Repeat("界", 40)      // 40 runes, 120 bytes
-	longEmoji := strings.Repeat("🚀", 40)    // 40 runes, 160 bytes
+	longCJK := strings.Repeat("界", 40)   // 40 runes, 120 bytes
+	longEmoji := strings.Repeat("🚀", 40) // 40 runes, 160 bytes
 	note := notifyv2.Render(m, notifyv2.RenderOpts{SessionName: longCJK, WindowName: longEmoji})
 
 	require.True(t, strings.Contains(note.Body, strings.Repeat("界", 32)),
