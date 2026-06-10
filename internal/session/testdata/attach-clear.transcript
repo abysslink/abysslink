@@ -1,0 +1,16 @@
+# Phase 27 plan 06 fixture (D-35): a client attaches while a pane is
+# needs_input. After the greeting block, the %client-session-changed
+# structural notification (a second client attaching to the session)
+# drives ONE debounced list-panes re-poll; the test scripts that re-poll's
+# Run result with the session's attached count incremented (1 -> 2), which
+# must clear needs_input and emit TransitionCleared WITHOUT any pane
+# output change (D-04). The greeting deliberately carries no structural
+# notification so the only re-poll is the one this fixture's event drives.
+<< %begin 1700000000 1 0
+<< %end 1700000000 1 0
+@delay 600ms
+<< %client-session-changed /dev/ttys001 $1 work
+# Hold the connection open so steady-state asserts are deterministic; ctx
+# cancel ends playback before the line below is ever emitted.
+@delay 30s
+<< %test-hold-open

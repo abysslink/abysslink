@@ -286,6 +286,195 @@ func TestSupervisorBackoffResetAfterSuccess(t *testing.T) {
 	assert.Equal(t, time.Second, durations[1], "backoff must reset to base after a successful attach")
 }
 
+// awaitTransition receives one Transition from Events or fails the test.
+func awaitTransition(t *testing.T, r *Registry, timeout time.Duration) Transition {
+	t.Helper()
+	select {
+	case tr := <-r.Events():
+		return tr
+	case <-time.After(timeout):
+		t.Fatal("no transition arrived on Events within the timeout")
+		return Transition{}
+	}
+}
+
+// markNeedsInput flips a pane's needs_input directly (the heuristic's job —
+// these tests exercise the clear/lost paths, not detection).
+func markNeedsInput(t *testing.T, r *Registry, paneID string) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.panes[paneID]
+	require.True(t, ok, "pane %s must be in the registry before marking", paneID)
+	p.needsInput = true
+	p.needsInputSince = time.Now()
+}
+
+// TestAttachClearViaControlMode: D-04 over the live supervisor — the
+// attach-clear.transcript's %client-session-changed drives ONE debounced
+// re-poll whose scripted list-panes result shows the attached count
+// incremented; needs_input clears and TransitionCleared is emitted with no
+// content-hash compare anywhere (capture-pane is never called).
+func TestAttachClearViaControlMode(t *testing.T) {
+	attached1 := paneLine("$1", "@1", "%1", "0", "1", "1", "claude", "work", "editor") + "\n"
+	attached2 := paneLine("$1", "@1", "%1", "0", "1", "2", "claude", "work", "editor") + "\n"
+	m := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // version gate
+		shell.Call{Result: shell.Result{Stdout: attached1}},     // initial full poll
+		shell.Call{Result: shell.Result{Stdout: attached2}},     // debounced re-poll: attached 1 -> 2
+	)
+	m.AddStream(loadFixture(t, "attach-clear.transcript"))
+
+	r := New(m, config.Defaults())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.sleep = func(ctx context.Context, _ time.Duration) { <-ctx.Done() }
+
+	done := runSupervisor(ctx, r)
+
+	require.Eventually(t, func() bool {
+		s := r.Snapshot()
+		return s.Epoch == 1 && s.Status == StatusOK && len(s.Sessions) == 1
+	}, 3*time.Second, 10*time.Millisecond)
+	markNeedsInput(t, r, "%1")
+
+	tr := awaitTransition(t, r, 3*time.Second)
+	assert.Equal(t, TransitionCleared, tr.Type, "client attach must clear needs_input (D-04)")
+	assert.Equal(t, "%1", tr.PaneID)
+	assert.Equal(t, "$1", tr.SessionID)
+	assert.Equal(t, uint64(1), tr.Epoch)
+	assert.Equal(t, "claude", tr.Consumer)
+
+	snap := r.Snapshot()
+	assert.False(t, snap.Sessions[0].Windows[0].Panes[0].NeedsInput)
+	assert.Empty(t, r.events, "exactly one transition for the attach-clear")
+	for _, argv := range m.RunCalls() {
+		if len(argv) > 1 {
+			assert.NotEqual(t, "capture-pane", argv[1],
+				"the attach-clear path must involve no content-hash compare")
+		}
+	}
+
+	cancel()
+	waitDone(t, done)
+}
+
+// TestRestartLostEmission: D-29 — pane %3 is needs_input when the tmux
+// server dies (%exit). After the re-attach (epoch 2), exactly one
+// TransitionRestartLost is emitted carrying the OLD identity and the OLD
+// epoch: someone was waiting on a now-dead pane.
+func TestRestartLostEmission(t *testing.T) {
+	paneA := paneLine("$1", "@1", "%3", "0", "1", "1", "claude", "work", "editor") + "\n"
+	paneB := paneLine("$2", "@5", "%7", "0", "1", "1", "zsh", "fresh", "main") + "\n"
+	m := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate, attach 1
+		shell.Call{Result: shell.Result{Stdout: paneA}},         // initial poll, epoch 1
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}}, // gate, attach 2 (after %exit)
+		shell.Call{Result: shell.Result{Stdout: paneB}},         // initial poll, epoch 2
+		shell.Call{Result: shell.Result{Stdout: paneB}},         // debounced re-poll (%session-changed)
+	)
+	m.AddStream(writeTranscript(t,
+		"<< %begin 1700000000 1 0\n<< %end 1700000000 1 0\n@delay 800ms\n<< %exit\n"))
+	m.AddStream(loadFixture(t, "attach-basic.transcript"))
+
+	r := New(m, config.Defaults())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.sleep = func(ctx context.Context, _ time.Duration) { <-ctx.Done() }
+
+	done := runSupervisor(ctx, r)
+
+	require.Eventually(t, func() bool {
+		s := r.Snapshot()
+		return s.Epoch == 1 && s.Status == StatusOK && len(s.Sessions) == 1
+	}, 3*time.Second, 10*time.Millisecond)
+	markNeedsInput(t, r, "%3")
+
+	tr := awaitTransition(t, r, 5*time.Second)
+	assert.Equal(t, TransitionRestartLost, tr.Type)
+	assert.Equal(t, "%3", tr.PaneID, "the lost pane's LAST-KNOWN identity")
+	assert.Equal(t, "$1", tr.SessionID)
+	assert.Equal(t, "@1", tr.WindowID)
+	assert.Equal(t, uint64(1), tr.Epoch, "RestartLost must carry the OLD epoch — the pane died with it")
+	assert.Equal(t, "claude", tr.Consumer)
+	assert.Equal(t, "work", tr.SessionName)
+	assert.Equal(t, "editor", tr.WindowName)
+
+	require.Eventually(t, func() bool { return r.Snapshot().Epoch == 2 }, 3*time.Second, 10*time.Millisecond)
+	assert.Empty(t, r.events, "exactly one RestartLost for one lost pane")
+
+	cancel()
+	waitDone(t, done)
+}
+
+// TestRestartLostCleanRestartSilent: D-29's other half — a restart with ZERO
+// needs_input panes emits nothing. A clean restart is silent.
+func TestRestartLostCleanRestartSilent(t *testing.T) {
+	paneA := paneLine("$1", "@1", "%3", "0", "1", "1", "claude", "work", "editor") + "\n"
+	paneB := paneLine("$2", "@5", "%7", "0", "1", "1", "zsh", "fresh", "main") + "\n"
+	m := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}},
+		shell.Call{Result: shell.Result{Stdout: paneA}},
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}},
+		shell.Call{Result: shell.Result{Stdout: paneB}},
+		shell.Call{Result: shell.Result{Stdout: paneB}},
+	)
+	m.AddStream(writeTranscript(t,
+		"<< %begin 1700000000 1 0\n<< %end 1700000000 1 0\n@delay 400ms\n<< %exit\n"))
+	m.AddStream(loadFixture(t, "attach-basic.transcript"))
+
+	r := New(m, config.Defaults())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.sleep = func(ctx context.Context, _ time.Duration) { <-ctx.Done() }
+
+	done := runSupervisor(ctx, r)
+
+	require.Eventually(t, func() bool {
+		s := r.Snapshot()
+		return s.Epoch == 2 && s.Status == StatusOK
+	}, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // settle: any buggy emission would land here
+	assert.Empty(t, r.events, "a clean restart (no needs_input panes) must be silent (D-29)")
+
+	cancel()
+	waitDone(t, done)
+}
+
+// TestRestartLostFirstAttachSilent: the baselined idiom — the first-ever
+// attach of the process lifetime emits nothing, even if stale needs_input
+// state somehow exists before any attach.
+func TestRestartLostFirstAttachSilent(t *testing.T) {
+	paneA := paneLine("$1", "@1", "%1", "0", "1", "1", "claude", "work", "editor") + "\n"
+	m := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n"}},
+		shell.Call{Result: shell.Result{Stdout: paneA}},
+		shell.Call{Result: shell.Result{Stdout: paneA}}, // debounced re-poll (%session-changed)
+	)
+	m.AddStream(loadFixture(t, "attach-basic.transcript"))
+
+	r := New(m, config.Defaults())
+	// Stale pre-attach state: a needs_input pane with NO prior epoch.
+	r.syncPanes([]string{paneLine("$1", "@1", "%9", "0", "1", "1", "claude", "stale", "win")})
+	markNeedsInput(t, r, "%9")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.sleep = func(ctx context.Context, _ time.Duration) { <-ctx.Done() }
+
+	done := runSupervisor(ctx, r)
+
+	require.Eventually(t, func() bool {
+		s := r.Snapshot()
+		return s.Epoch == 1 && s.Status == StatusOK
+	}, 3*time.Second, 10*time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	assert.Empty(t, r.events, "the first-ever attach has no baseline: nothing was lost (D-29)")
+
+	cancel()
+	waitDone(t, done)
+}
+
 // TestSupervisorBackoffCap: repeated failures double the delay and cap at
 // 30s — asserted via the injected sleep, no real waiting (Pitfall 9).
 func TestSupervisorBackoffCap(t *testing.T) {

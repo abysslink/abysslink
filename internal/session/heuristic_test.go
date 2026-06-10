@@ -420,6 +420,137 @@ func (s *heurSleepRecorder) recorded() []time.Duration {
 	return out
 }
 
+// ---- transition emission (plan 27-06 Task 2) ----
+
+// drainEvents empties the Events channel without blocking.
+func drainEvents(r *Registry) []Transition {
+	var out []Transition
+	for {
+		select {
+		case tr := <-r.Events():
+			out = append(out, tr)
+		default:
+			return out
+		}
+	}
+}
+
+// TestTransitionEdgeSemantics: emission is edge-triggered, never
+// level-triggered — three consecutive idle+prompt ticks emit exactly ONE
+// TransitionNeedsInput, the clearing tick exactly ONE TransitionCleared, and
+// every Transition carries the full identity set.
+func TestTransitionEdgeSemantics(t *testing.T) {
+	line := onePaneLine()
+	fresh := "new output after the answer\n$ \n"
+	r, clk, _ := newHeuristicRegistry(config.Defaults(), joinCalls(
+		tickCalls(line, promptTailContent), // tick 1: baseline
+		tickCalls(line, promptTailContent), // tick 2: idle past threshold -> set
+		tickCalls(line, promptTailContent), // tick 3: still set -> NO emission
+		tickCalls(line, promptTailContent), // tick 4: still set -> NO emission
+		tickCalls(line, fresh),             // tick 5: output change -> clear
+	)...)
+	r.bumpEpoch() // transitions must carry the live epoch
+	ctx := context.Background()
+
+	r.pollTick(ctx)
+	clk.advance(30 * time.Second)
+	r.pollTick(ctx)
+	clk.advance(5 * time.Second)
+	r.pollTick(ctx)
+	clk.advance(5 * time.Second)
+	r.pollTick(ctx)
+
+	events := drainEvents(r)
+	require.Len(t, events, 1, "three consecutive idle+prompt ticks must emit exactly ONE NeedsInput")
+	ni := events[0]
+	assert.Equal(t, TransitionNeedsInput, ni.Type)
+	assert.Equal(t, "$1", ni.SessionID)
+	assert.Equal(t, "@1", ni.WindowID)
+	assert.Equal(t, "%1", ni.PaneID)
+	assert.Equal(t, uint64(1), ni.Epoch)
+	assert.Equal(t, "claude", ni.Consumer)
+	assert.Equal(t, "work", ni.SessionName)
+	assert.Equal(t, "editor", ni.WindowName)
+
+	r.pollTick(ctx) // tick 5: the clear
+	events = drainEvents(r)
+	require.Len(t, events, 1, "the clearing tick must emit exactly ONE Cleared")
+	cl := events[0]
+	assert.Equal(t, TransitionCleared, cl.Type)
+	assert.Equal(t, "%1", cl.PaneID)
+	assert.Equal(t, uint64(1), cl.Epoch)
+	assert.Equal(t, "claude", cl.Consumer)
+	assert.Equal(t, "work", cl.SessionName)
+	assert.Equal(t, "editor", cl.WindowName)
+}
+
+// TestAttachClearOnPollTick: D-04 — a poll where the session's attached
+// count increased clears needs_input and emits Cleared with NO output change,
+// and the idle window restarts so the next tick does not instantly re-set.
+func TestAttachClearOnPollTick(t *testing.T) {
+	attached1 := onePaneLine()
+	attached2 := paneLine("$1", "@1", "%1", "0", "1", "2", "claude", "work", "editor") + "\n"
+	r, clk, _ := newHeuristicRegistry(config.Defaults(), joinCalls(
+		tickCalls(attached1, promptTailContent), // tick 1: baseline
+		tickCalls(attached1, promptTailContent), // tick 2: set
+		tickCalls(attached2, promptTailContent), // tick 3: attach 1->2, SAME content
+		tickCalls(attached2, promptTailContent), // tick 4: +29s, window restarted
+	)...)
+	r.bumpEpoch()
+	ctx := context.Background()
+
+	r.pollTick(ctx)
+	clk.advance(30 * time.Second)
+	r.pollTick(ctx)
+	events := drainEvents(r)
+	require.Len(t, events, 1)
+	require.Equal(t, TransitionNeedsInput, events[0].Type)
+
+	// Tick 3: the attached count increases with the pane content unchanged.
+	r.pollTick(ctx)
+	events = drainEvents(r)
+	require.Len(t, events, 1, "attach increase must emit exactly one Cleared (D-04)")
+	assert.Equal(t, TransitionCleared, events[0].Type)
+	assert.Equal(t, "%1", events[0].PaneID)
+	p := onlyPane(t, r)
+	assert.False(t, p.NeedsInput, "client attach must clear needs_input without any output change")
+	assert.True(t, p.NeedsInputSince.IsZero())
+
+	// Tick 4 at +29s after the clear: idle window restarted -> must NOT
+	// re-set (and so must not emit).
+	clk.advance(29 * time.Second)
+	r.pollTick(ctx)
+	assert.False(t, onlyPane(t, r).NeedsInput, "attach-clear must restart the idle window")
+	assert.Empty(t, drainEvents(r))
+}
+
+// TestTransitionChannelBoundDrop: with a full Events channel, emission drops
+// with a warning and never blocks the caller (T-27-11) — and the state
+// mutation still lands.
+func TestTransitionChannelBoundDrop(t *testing.T) {
+	h := captureWarns(t)
+	r := newTestRegistry()
+	r.syncPanes([]string{paneLine("$1", "@1", "%1", "0", "1", "1", "claude", "work", "editor")})
+	for i := 0; i < eventsChanDepth; i++ {
+		r.emit(Transition{Type: TransitionCleared, PaneID: "%9"})
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.setNeedsInput("%1")
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("setNeedsInput blocked on a full Events channel")
+	}
+
+	assert.Len(t, r.events, eventsChanDepth, "the dropped transition must not grow the channel")
+	assert.GreaterOrEqual(t, h.warnCount(), 1, "the drop must be logged, never silent")
+	assert.True(t, onlyPane(t, r).NeedsInput, "the state mutation must land even when the emission drops")
+}
+
 // TestCadenceRunLoopSchedules: runHeuristic waits BEFORE each tick using the
 // cadence the previous tick selected (initial wait = active cadence).
 func TestCadenceRunLoopSchedules(t *testing.T) {
