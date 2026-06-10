@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -38,7 +39,15 @@ type Transcript struct {
 	path           string
 	steps          []playbackStep
 	expectedWrites []string
+	// exitErr is the error Stream.Wait/Close return after all << lines have
+	// been emitted. Set via the @exit <code> directive; nil when absent or
+	// code == 0.
+	exitErr error
 }
+
+// ExitErr returns the scripted exit error for this transcript (nil when the
+// @exit directive is absent or specifies code 0).
+func (t *Transcript) ExitErr() error { return t.exitErr }
 
 // LoadTranscript parses a D-35 annotated script file:
 //
@@ -46,6 +55,9 @@ type Transcript struct {
 //	<< line          — a protocol line the mock emits onto the channel
 //	>> write         — a stdin write the test expects the consumer to make
 //	@delay <dur>     — paces the NEXT << emit (time.ParseDuration syntax)
+//	@exit <code>     — the exit disposition Wait/Close return after playback;
+//	                   0 or absent means success (nil error); non-zero sets the
+//	                   error returned by Stream.Wait/Close after playback ends.
 //
 // Anything else is an error naming the 1-based line number.
 func LoadTranscript(path string) (*Transcript, error) {
@@ -77,6 +89,14 @@ func LoadTranscript(path string) (*Transcript, error) {
 				return nil, fmt.Errorf("shell: transcript %s: line %d: bad @delay: %w", path, lineNo, derr)
 			}
 			pending += d
+		case strings.HasPrefix(line, "@exit "):
+			code, aerr := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "@exit ")))
+			if aerr != nil {
+				return nil, fmt.Errorf("shell: transcript %s: line %d: bad @exit: %w", path, lineNo, aerr)
+			}
+			if code != 0 {
+				t.exitErr = fmt.Errorf("shell: mock stream: exit status %d", code)
+			}
 		default:
 			return nil, fmt.Errorf("shell: transcript %s: line %d: unknown directive %q", path, lineNo, trimmed)
 		}
@@ -161,6 +181,7 @@ func (m *MockRunner) RunStream(ctx context.Context, name string, args ...string)
 	// The mock constructs the Stream's unexported fields directly (same
 	// package) so ExecRunner and MockRunner hand consumers the identical
 	// handle type — no exported setters on Stream.
+	exitErr := t.exitErr // capture before the goroutine closes over t
 	return &Stream{
 		lines: lines,
 		stdin: &mockStreamStdin{m: m},
@@ -168,7 +189,7 @@ func (m *MockRunner) RunStream(ctx context.Context, name string, args ...string)
 		waitFn: func() error {
 			<-done
 			cancel()
-			return nil
+			return exitErr
 		},
 	}, nil
 }

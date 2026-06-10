@@ -140,6 +140,90 @@ func TestMockRunStreamUnexpectedCall(t *testing.T) {
 	assert.Contains(t, err.Error(), "-CC")
 }
 
+// TestTranscriptExitDirective verifies that "@exit <code>" is parsed by
+// LoadTranscript: "@exit 1" loads without error; "@exit notanumber" returns
+// a parse error that names the 1-based line number (mirroring bad-@delay).
+func TestTranscriptExitDirective(t *testing.T) {
+	t.Run("valid non-zero exit", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "exit.transcript")
+		require.NoError(t, os.WriteFile(path, []byte("@exit 1\n"), 0o600))
+		tr, err := LoadTranscript(path)
+		require.NoError(t, err)
+		require.NotNil(t, tr)
+		assert.NotNil(t, tr.ExitErr(), "@exit 1 must set a non-nil exit error")
+	})
+
+	t.Run("zero exit is nil", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "exit0.transcript")
+		require.NoError(t, os.WriteFile(path, []byte("@exit 0\n"), 0o600))
+		tr, err := LoadTranscript(path)
+		require.NoError(t, err)
+		require.NotNil(t, tr)
+		assert.Nil(t, tr.ExitErr(), "@exit 0 must keep exitErr nil")
+	})
+
+	t.Run("absent directive is nil", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "noexit.transcript")
+		require.NoError(t, os.WriteFile(path, []byte("<< %begin 1 2 3\n"), 0o600))
+		tr, err := LoadTranscript(path)
+		require.NoError(t, err)
+		assert.Nil(t, tr.ExitErr(), "absent @exit directive must keep exitErr nil")
+	})
+
+	t.Run("bad code", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "badexit.transcript")
+		require.NoError(t, os.WriteFile(path, []byte("# comment\n@exit notanumber\n"), 0o600))
+		_, err := LoadTranscript(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "line 2", "error must name the 1-based line number")
+	})
+}
+
+// TestMockRunStreamScriptedExitError verifies that a transcript with "@exit 1"
+// causes Stream.Close() / Wait() to return a non-nil error; and that a
+// transcript without @exit keeps the existing nil-error behavior.
+func TestMockRunStreamScriptedExitError(t *testing.T) {
+	t.Run("exit 1 yields non-nil error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "exit1.transcript")
+		require.NoError(t, os.WriteFile(path, []byte("@exit 1\n"), 0o600))
+		tr, err := LoadTranscript(path)
+		require.NoError(t, err)
+
+		m := NewMockRunner()
+		m.AddStream(tr)
+		s, err := m.RunStream(context.Background(), "tmux", "-CC", "attach-session")
+		require.NoError(t, err, "RunStream itself must not fail — only the stream carries the exit")
+
+		requireClosed(t, s.Lines(), 5*time.Second)
+		assert.Error(t, s.Wait(), "Wait must return non-nil error for @exit 1")
+	})
+
+	t.Run("no exit directive yields nil error", func(t *testing.T) {
+		tr, err := LoadTranscript(filepath.Join("testdata", "basic.transcript"))
+		require.NoError(t, err)
+
+		m := NewMockRunner()
+		m.AddStream(tr)
+		s, err := m.RunStream(context.Background(), "tmux", "-CC", "attach-session")
+		require.NoError(t, err)
+
+		// Drain all lines before waiting for close.
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case _, ok := <-s.Lines():
+				if !ok {
+					goto drained
+				}
+			case <-deadline:
+				t.Fatal("basic.transcript playback did not complete")
+			}
+		}
+	drained:
+		assert.NoError(t, s.Wait(), "Wait must return nil when no @exit directive is present")
+	})
+}
+
 // TestMockRunStreamCloseMidPlayback verifies Close stops emission and closes
 // the channel even while a long @delay is pending.
 func TestMockRunStreamCloseMidPlayback(t *testing.T) {
