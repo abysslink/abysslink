@@ -207,7 +207,7 @@ func TestValidate_SecretScan(t *testing.T) {
 	data, err := os.ReadFile("testdata/secrets.txt")
 	require.NoError(t, err)
 	var lines []string
-	for _, l := range strings.Split(string(data), "\n") {
+	for l := range strings.SplitSeq(string(data), "\n") {
 		if strings.TrimSpace(l) != "" {
 			lines = append(lines, l)
 		}

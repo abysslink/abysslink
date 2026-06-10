@@ -76,7 +76,6 @@ func defaultHealthProbe(ctx context.Context, url string) error {
 
 const (
 	ntfyHealthPath = "/v1/health"
-	ntfyMsgPath    = "/v1/message"
 	httpTimeout    = 5 * time.Second
 
 	keychainService = "abysslink"

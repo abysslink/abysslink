@@ -178,7 +178,7 @@ func TestRender_ActionsDropped(t *testing.T) {
 		assert.NotContains(t, strings.ToLower(field), "deny")
 	}
 
-	typ := reflect.TypeOf(notifyv2.RenderedNote{})
+	typ := reflect.TypeFor[notifyv2.RenderedNote]()
 	require.Equal(t, 5, typ.NumField(), "RenderedNote has exactly 5 fields")
 	wantFields := []string{"Title", "Body", "Priority", "Tags", "Click"}
 	for i, name := range wantFields {

@@ -216,7 +216,7 @@ func CheckDefaultsMatchThreatModel(_ context.Context, cfgDefaults interface {
 // CheckNtfyConfigBindAddr verifies that a generated ntfy server config does not
 // bind to all interfaces. Rejects 0.0.0.0 or a bare :port (no IP prefix).
 func CheckNtfyConfigBindAddr(_ context.Context, configContent string) error {
-	for _, line := range strings.Split(configContent, "\n") {
+	for line := range strings.SplitSeq(configContent, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "listen-http:") {
 			continue

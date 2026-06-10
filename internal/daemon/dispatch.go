@@ -18,9 +18,7 @@ package daemon
 import (
 	"context"
 	"log/slog"
-	"os"
 	"os/user"
-	"strings"
 	"sync"
 	"time"
 
@@ -121,7 +119,7 @@ func newDispatcher(n Notifier, cfg *config.Config) *dispatcher {
 	if cfg != nil && cfg.SessionRegistry.CooldownSecs > 0 {
 		cooldown = time.Duration(cfg.SessionRegistry.CooldownSecs) * time.Second
 	}
-	host := shortHostname()
+	host := notifyv2.ShortHostname()
 	return &dispatcher{
 		notifier:    n,
 		now:         time.Now,
@@ -134,19 +132,6 @@ func newDispatcher(n Notifier, cfg *config.Config) *dispatcher {
 		tokens:      bucketCapacity,
 		lastRefill:  time.Now(),
 	}
-}
-
-// shortHostname returns the local hostname with any domain stripped at the
-// first dot; "" when the hostname cannot be resolved.
-func shortHostname() string {
-	h, err := os.Hostname()
-	if err != nil {
-		return ""
-	}
-	if i := strings.IndexByte(h, '.'); i >= 0 {
-		h = h[:i]
-	}
-	return h
 }
 
 // composeClickURL builds the server-side ssh:// deep link (D-16 —

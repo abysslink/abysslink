@@ -170,25 +170,8 @@ func runNotifySend(ctx context.Context, c *cobra.Command, cc *cmdContext, deps m
 	if rigErr != nil {
 		return rigErr
 	}
-	if rt.fanOut && len(rt.rigs) == 0 {
-		// --all-rigs with zero enrolled rigs: falling through to a LOCAL send
-		// would silently misroute — the user explicitly asked for fan-out.
-		return fmt.Errorf("notify: --all-rigs: no rigs are enrolled (enroll one with `abysslink rig add`)")
-	}
 	if rt.fanOut {
-		if f.forceV2 {
-			return fmt.Errorf("notify: --kind/--pane cannot be combined with --rig/--all-rigs — v2 rides the local daemon socket only")
-		}
-		if f.topic != "" {
-			// CR-04 / T-14-14: each rig has its own isolated topic; a manual
-			// override would break per-rig isolation.
-			return fmt.Errorf("notify: --topic cannot be combined with --rig/--all-rigs — each rig has its own isolated topic")
-		}
-		return sendNotifyAllRigs(ctx, rt.rigs, deps.Keychain, title, message, rigNotifyOpts{
-			baseURL:  resolveFleetNtfyBaseURL(ctx, cc, deps.Backend),
-			priority: f.priority,
-			tags:     f.tag,
-		})
+		return runNotifyFanOut(ctx, cc, deps, rt, f, title, message)
 	}
 
 	// D-31 version selection: v2 inside tmux / on explicit flags, v1
@@ -201,6 +184,30 @@ func runNotifySend(ctx context.Context, c *cobra.Command, cc *cmdContext, deps m
 		Priority: f.priority,
 		Tags:     f.tag,
 		Topic:    f.topic,
+	})
+}
+
+// runNotifyFanOut handles the resolved --rig/--all-rigs branch: it rejects the
+// fan-out-incompatible flag combinations and dispatches the per-rig
+// HMAC-signed sends (SC-5, FLEET-02, CLI-05).
+func runNotifyFanOut(ctx context.Context, cc *cmdContext, deps modules.Deps, rt rigTargets, f notifyFlags, title, message string) error {
+	if len(rt.rigs) == 0 {
+		// --all-rigs with zero enrolled rigs: falling through to a LOCAL send
+		// would silently misroute — the user explicitly asked for fan-out.
+		return fmt.Errorf("notify: --all-rigs: no rigs are enrolled (enroll one with `abysslink rig add`)")
+	}
+	if f.forceV2 {
+		return fmt.Errorf("notify: --kind/--pane cannot be combined with --rig/--all-rigs — v2 rides the local daemon socket only")
+	}
+	if f.topic != "" {
+		// CR-04 / T-14-14: each rig has its own isolated topic; a manual
+		// override would break per-rig isolation.
+		return fmt.Errorf("notify: --topic cannot be combined with --rig/--all-rigs — each rig has its own isolated topic")
+	}
+	return sendNotifyAllRigs(ctx, rt.rigs, deps.Keychain, title, message, rigNotifyOpts{
+		baseURL:  resolveFleetNtfyBaseURL(ctx, cc, deps.Backend),
+		priority: f.priority,
+		tags:     f.tag,
 	})
 }
 
@@ -294,7 +301,7 @@ func sendNotifyV2(ctx context.Context, nm *notifymod.Module, f notifyFlags, titl
 		V:       2,
 		MsgID:   notifyv2.NewMsgID(),
 		Kind:    kind,
-		Host:    shortNotifyHostname(),
+		Host:    notifyv2.ShortHostname(),
 		Session: notifyv2.SessionRef{Pane: resolveNotifyPane(f.pane)},
 		Title:   title,
 	}
@@ -370,7 +377,7 @@ func runNotifyWrap(ctx context.Context, cc *cmdContext, nm *notifymod.Module, p 
 		V:       2,
 		MsgID:   notifyv2.NewMsgID(),
 		Kind:    notifyv2.KindCommandDone,
-		Host:    shortNotifyHostname(),
+		Host:    notifyv2.ShortHostname(),
 		Session: notifyv2.SessionRef{Pane: pane},
 		Title:   "done ✓", // D-32: the title word drives tag/priority
 	}
@@ -406,19 +413,6 @@ func resolveNotifyPane(paneFlag string) string {
 		return ""
 	}
 	return env
-}
-
-// shortNotifyHostname returns the short host name for Message.Host (the
-// daemon enriches an empty host server-side, but the CLI knows its own).
-func shortNotifyHostname() string {
-	h, err := os.Hostname()
-	if err != nil {
-		return ""
-	}
-	if i := strings.IndexByte(h, '.'); i > 0 {
-		h = h[:i]
-	}
-	return h
 }
 
 // rigNotifyOpts carries the resolved delivery options for the per-rig fan-out.

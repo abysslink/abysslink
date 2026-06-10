@@ -120,7 +120,7 @@ func NewServer(notifier Notifier, runner shell.Runner, cfg *config.Config) *Serv
 		socketPath: SocketPath(),
 		startedAt:  time.Now(),
 		dispatch:   newDispatcher(notifier, cfg),
-		hostname:   shortHostname(),
+		hostname:   notifyv2.ShortHostname(),
 	}
 }
 
