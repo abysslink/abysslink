@@ -72,11 +72,11 @@ func TestRegistrySyncSkipsMalformedLines(t *testing.T) {
 	r := newTestRegistry()
 	r.syncPanes([]string{
 		"only\ttwo", // too few fields
-		paneLine("bogus", "@1", "%9", "0", "1", "1", "zsh", "a", "b"),       // session ID fails ^\$\d+$
-		paneLine("$1", "w1", "%8", "0", "1", "1", "zsh", "a", "b"),          // window ID fails ^@\d+$
-		paneLine("$1", "@1", "%-1", "0", "1", "1", "zsh", "a", "b"),         // pane ID fails ^%\d+$
-		paneLine("$1", "@1", "%1", "0", "1", "1", "zsh", "work", "editor"),  // valid
-		"",                                                                  // blank line (empty poll tail)
+		paneLine("bogus", "@1", "%9", "0", "1", "1", "zsh", "a", "b"),      // session ID fails ^\$\d+$
+		paneLine("$1", "w1", "%8", "0", "1", "1", "zsh", "a", "b"),         // window ID fails ^@\d+$
+		paneLine("$1", "@1", "%-1", "0", "1", "1", "zsh", "a", "b"),        // pane ID fails ^%\d+$
+		paneLine("$1", "@1", "%1", "0", "1", "1", "zsh", "work", "editor"), // valid
+		"", // blank line (empty poll tail)
 	})
 
 	snap := r.Snapshot()

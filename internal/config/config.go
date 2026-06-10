@@ -53,6 +53,46 @@ type Config struct {
 	Observability Observability `yaml:"observability"`
 
 	WebUI WebUIConfig `yaml:"webui"`
+
+	SessionRegistry SessionRegistry `yaml:"session_registry"`
+}
+
+// SessionRegistry configures the daemon-side tmux session registry (Phase 27,
+// BACK-03): the tmux -CC control-mode attach, the list-panes poll cadence,
+// and the needs_input heuristic knobs. Every timing field follows the
+// zero-value-means-default idiom (the WatchModule pattern): 0 uses the
+// compiled-in default noted on the field.
+type SessionRegistry struct {
+	Enabled bool `yaml:"enabled"`
+
+	// IgnoreSessions lists session display names exempted from the
+	// needs_input heuristic (D-07, key path session_registry.ignore_sessions).
+	// Display names are acceptable here — it is user config, never routing.
+	IgnoreSessions []string `yaml:"ignore_sessions,omitempty"`
+
+	// IdleSecs is the no-output threshold before a prompt-shaped pane is
+	// considered needs_input. Zero means the compiled-in default 30; the
+	// registry clamps values below the 10s floor up to 10 (D-01).
+	IdleSecs int `yaml:"idle_secs,omitempty"`
+
+	// PollActiveSecs is the list-panes poll cadence while any pane is
+	// active. Zero means the compiled-in default 5 (D-05).
+	PollActiveSecs int `yaml:"poll_active_secs,omitempty"`
+
+	// PollIdleSecs is the backed-off poll cadence when all panes are idle.
+	// Zero means the compiled-in default 15 (D-05).
+	PollIdleSecs int `yaml:"poll_idle_secs,omitempty"`
+
+	// PromptRegex optionally extends the built-in prompt sentinel set
+	// (D-02). It must compile (validated at load — T-27-12); empty means
+	// sentinels only.
+	PromptRegex string `yaml:"prompt_regex,omitempty"`
+
+	// CooldownSecs is the per-(pane, kind) re-notify suppression window.
+	// Zero means the compiled-in default 300 (D-08). Declared here so every
+	// registry knob lives in one section; consumed by the daemon dispatcher
+	// (plan 27-05).
+	CooldownSecs int `yaml:"cooldown_secs,omitempty"`
 }
 
 // WebUIConfig configures the opt-in (//go:build webui, default OFF) browser
@@ -395,6 +435,7 @@ func Defaults() *Config {
 			ReadOnly: true,
 			Port:     8443,
 		},
+		SessionRegistry: SessionRegistry{Enabled: true},
 	}
 }
 
@@ -539,6 +580,9 @@ func Validate(cfg *Config) error {
 		return err
 	}
 	if err := validateWatchPanes(cfg); err != nil {
+		return err
+	}
+	if err := validateSessionRegistry(cfg); err != nil {
 		return err
 	}
 	return nil
@@ -752,6 +796,23 @@ func validateWatchPanes(cfg *Config) error {
 			return fmt.Errorf("config: modules.watch.panes element %q is not a valid pane name — "+
 				"only [a-z0-9] and internal hyphens/dots allowed, no leading dash (A8/NET-03)", pane)
 		}
+	}
+	return nil
+}
+
+// validateSessionRegistry enforces that session_registry.prompt_regex
+// compiles (T-27-12). User-supplied regex is compiled with regexp.Compile —
+// never MustCompile — and rejected with a named-field error; Go's RE2 engine
+// has no catastrophic backtracking, so a pattern that compiles is always safe
+// to evaluate against pane content. The zero-value section is valid: every
+// timing knob defaults downstream (the validateWatchPanes/WatchModule idiom).
+func validateSessionRegistry(cfg *Config) error {
+	if cfg.SessionRegistry.PromptRegex == "" {
+		return nil
+	}
+	if _, err := regexp.Compile(cfg.SessionRegistry.PromptRegex); err != nil {
+		return fmt.Errorf("config: session_registry.prompt_regex %q does not compile: %w",
+			cfg.SessionRegistry.PromptRegex, err)
 	}
 	return nil
 }
