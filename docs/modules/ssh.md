@@ -39,7 +39,7 @@ audit log records the diff hash (never the content).
 ## Commands
 
 ```sh
-abysslink up [--apply]           # apply SSH hardening
-abysslink backup --component ssh # backup current sshd_config
+abysslink up [--apply]           # apply SSH hardening (backs up sshd_config first)
+abysslink backup ls              # list backups, including sshd_config
 abysslink doctor                 # verify SSH config
 ```

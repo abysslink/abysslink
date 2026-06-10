@@ -111,7 +111,7 @@ ssh user@my-rig.tail12345.ts.net
 Enable verbose logging:
 
 ```sh
-abysslink --log-level debug doctor
+abysslink -v doctor
 ```
 
 Check the audit log:

@@ -48,7 +48,7 @@ No. The `claudecode` module is one opt-in consumer of the generic notification s
 
 ### How do I get notified when Claude finishes?
 
-1. Enable the claudecode module: set `claudecode.enable: true` in `abysslink.yaml`
+1. Enable the claudecode module: `abysslink enable claudecode --apply` (sets `claudecode.enabled: true` in `abysslink.yaml`)
 2. Run `abysslink up --apply` to install the hooks
 3. Install ntfy on your phone and subscribe to your rig's topic
 4. Start a Claude session — you'll get a push notification when it completes

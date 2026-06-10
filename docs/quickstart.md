@@ -40,7 +40,8 @@ go install github.com/abysslink/abysslink/cmd/abysslinkd@latest   # daemon — n
 
 > Package-manager installs (`brew install abysslink/tap/abysslink`, `apt`, `dnf`)
 > are **planned** but not yet published. Use the installer or `go install` for now.
-> Check for newer releases any time with `abysslink upgrade --check`.
+> Check for newer releases any time with `abysslink upgrade --check`
+> (exits `3` when a newer release is available — handy for scripts).
 
 ## 2. Initialize
 
@@ -113,8 +114,11 @@ abysslink doctor
 
 ## 6. Enroll your phone
 
+Like every mutating command, `enroll phone` is dry-run by default — run it bare
+to preview, then add `--apply` to actually pair:
+
 ```sh
-abysslink enroll phone
+abysslink enroll phone --apply
 ```
 
 This installs Tailscale on the phone (QR to the download page), mints a
