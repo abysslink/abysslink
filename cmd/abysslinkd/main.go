@@ -37,6 +37,7 @@ import (
 	"github.com/abysslink/abysslink/internal/notifyv2"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/secrets"
+	"github.com/abysslink/abysslink/internal/session"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -98,6 +99,23 @@ func main() {
 	// visible right here in the wiring — and not runtime-toggleable.
 	srv := daemon.NewServer(directNotifier{m: nm}, base, cfg)
 	srv.SetExecCounter(gated.Count)
+
+	// tmux session registry (Phase 27, BACK-03/BACK-04). D-40: registry execs
+	// (tmux -CC attach, list-panes, capture-pane) are daemon-internal plumbing
+	// on the ungated PLAIN runner — never gated, so the Phase 30 enforcing
+	// gate can never deadlock the daemon on its own plumbing. Run degrades
+	// internally when tmux is missing or too old (D-26/D-27): there is no
+	// startup failure path here, and GET /sessions reports the honest status.
+	// The bridge turns registry transitions into heuristic-origin v2 Messages.
+	if cfg.SessionRegistry.Enabled {
+		reg := session.New(base, cfg)
+		go func() { _ = reg.Run(ctx) }() // Run returns nil after ctx cancel
+		srv.SetSessionRegistry(reg)
+		go srv.ConsumeTransitions(ctx, reg.Events())
+		slog.Info("abysslinkd: session registry enabled (degrades to honest status when tmux is unavailable)")
+	} else {
+		slog.Info("abysslinkd: session registry disabled by config; /sessions reports registry: disabled")
+	}
 
 	// Hourly tamper-evident anchor writer. When a keychain is available and the
 	// signed-audit path is reachable, the daemon refreshes the external anchor
