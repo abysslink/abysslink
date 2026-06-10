@@ -814,12 +814,24 @@ func validateInitHostname(s string) error {
 }
 
 // initEmailFromFlags resolves the headless email source: --email flag first,
-// ABYSSLINK_EMAIL env second (C2).
+// ABYSSLINK_EMAIL env second (C2). cmd may be nil (direct test callers).
 func initEmailFromFlags(cmd *cobra.Command) string {
-	if email, _ := cmd.Flags().GetString("email"); email != "" {
-		return email
+	if cmd != nil {
+		if email, _ := cmd.Flags().GetString("email"); email != "" {
+			return email
+		}
 	}
 	return os.Getenv("ABYSSLINK_EMAIL")
+}
+
+// initHostnameFromFlags returns the --hostname flag value, or "" when unset or
+// cmd is nil (direct test callers).
+func initHostnameFromFlags(cmd *cobra.Command) string {
+	if cmd == nil {
+		return ""
+	}
+	h, _ := cmd.Flags().GetString("hostname")
+	return h
 }
 
 // runInitForm runs the interactive questionnaire and returns the resulting Config.
@@ -835,7 +847,7 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 	r.email = initEmailFromFlags(cmd)
 	// Pre-fill from the OS hostname, sanitized to the lowercase DNS-safe set
 	// config.Load enforces — never offer a default the loader rejects (C1).
-	if h, _ := cmd.Flags().GetString("hostname"); h != "" {
+	if h := initHostnameFromFlags(cmd); h != "" {
 		r.hostname = sanitizeHostname(h)
 	} else {
 		osHost, _ := os.Hostname()
@@ -993,31 +1005,4 @@ func previewAndConfirmConfig(ctx context.Context, p Printer, cfg *config.Config,
 		return false, err
 	}
 	return ok, nil
-}
-
-// countEnabledModules counts the number of modules that are enabled in cfg.
-func countEnabledModules(cfg *config.Config) int {
-	n := 0
-	if cfg.Modules.SSH.Enabled {
-		n++
-	}
-	if cfg.Modules.Tmux.Enabled {
-		n++
-	}
-	if cfg.Modules.Mosh.Enabled {
-		n++
-	}
-	if cfg.Modules.Ntfy.Enabled {
-		n++
-	}
-	if cfg.Modules.Watch.Enabled {
-		n++
-	}
-	if cfg.Modules.Notify.Enabled {
-		n++
-	}
-	if cfg.ClaudeCode.Enabled {
-		n++
-	}
-	return n
 }

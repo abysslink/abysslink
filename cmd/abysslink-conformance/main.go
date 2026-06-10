@@ -49,9 +49,16 @@ func main() {
 
 	configPath := filepath.Join(tempDir, "config.yaml")
 
+	// Destructive scenarios run REAL mutating commands against the host (a real
+	// `panic` touches the tailnet + OS keychain; `up --apply` mutates system
+	// state when a gate fails open). The temp config dir does NOT sandbox the
+	// tailnet, the keychain, or system files, so these are opt-in only.
+	destructiveEnabled := os.Getenv("ABYSSLINK_CONFORMANCE_DESTRUCTIVE") == "1"
+
 	type scenario struct {
-		name string
-		fn   func(ctx context.Context) error
+		name        string
+		destructive bool // requires ABYSSLINK_CONFORMANCE_DESTRUCTIVE=1
+		fn          func(ctx context.Context) error
 	}
 
 	scenarios := []scenario{
@@ -76,8 +83,9 @@ func main() {
 			fn:   func(ctx context.Context) error { return testStatusJSON(ctx, binPath, configPath) },
 		},
 		{
-			name: "panic command completes without hang (15s timeout)",
-			fn:   func(ctx context.Context) error { return testPanicNoHang(ctx, binPath, configPath) },
+			name:        "panic command completes without hang (15s timeout)",
+			destructive: true, // real tailscale down + keychain Delete + device revocation
+			fn:          func(ctx context.Context) error { return testPanicNoHang(ctx, binPath, configPath) },
 		},
 		{
 			name: "notify --stdin completes without hang",
@@ -88,8 +96,9 @@ func main() {
 			fn:   func(ctx context.Context) error { return testDisableEnableRoundTrip(ctx, binPath, configPath) },
 		},
 		{
-			name: "checkperiod gate rejects >12h without flag",
-			fn:   func(ctx context.Context) error { return testCheckPeriodGateRejectsOver12h(ctx, binPath, tempDir) },
+			name:        "checkperiod gate rejects >12h without flag",
+			destructive: true, // runs `up --apply` — would mutate the host if the gate failed open
+			fn:          func(ctx context.Context) error { return testCheckPeriodGateRejectsOver12h(ctx, binPath, tempDir) },
 		},
 		{
 			name: "dry-run mutates no files",
@@ -139,8 +148,14 @@ func main() {
 
 	passed := 0
 	failed := 0
+	skipped := 0
 
 	for _, s := range scenarios {
+		if s.destructive && !destructiveEnabled {
+			fmt.Printf("SKIP [%s] (destructive — set ABYSSLINK_CONFORMANCE_DESTRUCTIVE=1 to run)\n", s.name)
+			skipped++
+			continue
+		}
 		scenCtx, scenCancel := context.WithTimeout(ctx, 30*time.Second)
 		if err := s.fn(scenCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "FAIL [%s]: %v\n", s.name, err)
@@ -152,7 +167,7 @@ func main() {
 		scenCancel()
 	}
 
-	fmt.Printf("\n%d passed, %d failed\n", passed, failed)
+	fmt.Printf("\n%d passed, %d failed, %d skipped\n", passed, failed, skipped)
 	if failed > 0 {
 		os.Exit(1)
 	}

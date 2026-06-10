@@ -171,7 +171,7 @@ func runNotifySend(ctx context.Context, c *cobra.Command, cc *cmdContext, deps m
 		return rigErr
 	}
 	if rt.fanOut {
-		return runNotifyFanOut(ctx, cc, deps, rt, f, title, message)
+		return runNotifyFanOut(ctx, newPrinter(c), cc, deps, rt, f, title, message)
 	}
 
 	// D-31 version selection: v2 inside tmux / on explicit flags, v1
@@ -189,8 +189,9 @@ func runNotifySend(ctx context.Context, c *cobra.Command, cc *cmdContext, deps m
 
 // runNotifyFanOut handles the resolved --rig/--all-rigs branch: it rejects the
 // fan-out-incompatible flag combinations and dispatches the per-rig
-// HMAC-signed sends (SC-5, FLEET-02, CLI-05).
-func runNotifyFanOut(ctx context.Context, cc *cmdContext, deps modules.Deps, rt rigTargets, f notifyFlags, title, message string) error {
+// HMAC-signed sends (SC-5, FLEET-02, CLI-05). p receives the visible
+// per-rig skip warnings (T-14-17/18: a missing signing key skips the rig).
+func runNotifyFanOut(ctx context.Context, p Printer, cc *cmdContext, deps modules.Deps, rt rigTargets, f notifyFlags, title, message string) error {
 	if len(rt.rigs) == 0 {
 		// --all-rigs with zero enrolled rigs: falling through to a LOCAL send
 		// would silently misroute — the user explicitly asked for fan-out.
@@ -204,7 +205,7 @@ func runNotifyFanOut(ctx context.Context, cc *cmdContext, deps modules.Deps, rt 
 		// override would break per-rig isolation.
 		return fmt.Errorf("notify: --topic cannot be combined with --rig/--all-rigs — each rig has its own isolated topic")
 	}
-	return sendNotifyAllRigs(ctx, rt.rigs, deps.Keychain, title, message, rigNotifyOpts{
+	return sendNotifyAllRigs(ctx, p, rt.rigs, deps.Keychain, title, message, rigNotifyOpts{
 		baseURL:  resolveFleetNtfyBaseURL(ctx, cc, deps.Backend),
 		priority: f.priority,
 		tags:     f.tag,
@@ -420,6 +421,16 @@ type rigNotifyOpts struct {
 	baseURL  string // resolved ntfy base URL; the test seam (notifyCmdBaseURL) wins over it
 	priority string // optional X-Priority value ("" = unset)
 	tags     string // optional X-Tags value ("" = unset)
+	authPass string // ntfy admin password from keychain ("" = no basic auth)
+}
+
+// errRigNoSigningKey marks a rig whose per-rig HMAC signing key is absent from
+// the keychain. The fan-out treats it as a SKIP (printed warning, no POST) —
+// never a silent unsigned send (T-14-17/T-14-18 signature-stripping downgrade).
+type errRigNoSigningKey struct{ rig string }
+
+func (e *errRigNoSigningKey) Error() string {
+	return fmt.Sprintf("rig %q has no HMAC signing key in the keychain — skipped (re-enroll with `abysslink enroll rig %s --apply`)", e.rig, e.rig)
 }
 
 // resolveFleetNtfyBaseURL resolves the local ntfy base URL for per-rig fan-out
@@ -453,11 +464,17 @@ func resolveFleetNtfyBaseURL(ctx context.Context, cc *cmdContext, b backend.Clie
 //   - HMAC key fetched from per-rig keychain namespace (fleet.RigService), never argv/yaml/log.
 //   - Each rig's notification targets only its own NtfyTopic (no cross-topic delivery).
 //   - Timestamp transmitted so verifier can reconstruct the canonical string (Pitfall 6).
-//   - If a rig has no enrolled signing key, it is skipped with a WARN, not a crash.
+//   - If a rig has no enrolled signing key, it is SKIPPED with a printed warning —
+//     never sent unsigned (signature-stripping downgrade, T-14-17/T-14-18).
 //   - Title is included in the HMAC canonical string (WR-02) so a relay cannot alter
 //     the displayed subject without breaking the signature.
 //   - If a rig has no NtfyTopic, the send fails with an error rather than falling
 //     back to a shared topic (CR-04, T-14-14, D-NI-01: no cross-tenant leakage).
+//
+// Auth (NET-02): the abysslink-managed ntfy server is provisioned deny-all with
+// a single admin user, so every POST carries basic auth from the keychain
+// (service "abysslink", account "ntfy-password") — mirroring the v1 local send
+// path in notify/module.go. Without it every fleet notify would 403.
 //
 // Concurrency (WR-04, D-FT-04): all rigs are notified concurrently via errgroup,
 // mirroring fleet.FanOut. A per-rig timeout is enforced. UNREACHABLE rigs are
@@ -465,6 +482,7 @@ func resolveFleetNtfyBaseURL(ctx context.Context, cc *cmdContext, b backend.Clie
 // http.Client is safe for concurrent use and is shared across goroutines.
 func sendNotifyAllRigs(
 	ctx context.Context,
+	p Printer,
 	rigs []config.RigConfig,
 	kc secrets.KeychainStore,
 	title, message string,
@@ -479,6 +497,21 @@ func sendNotifyAllRigs(
 		opts.baseURL = notifyCmdBaseURL
 	case opts.baseURL == "":
 		opts.baseURL = "http://localhost:2586"
+	}
+
+	// Resolve the ntfy admin password once for the whole batch — the server
+	// credential is shared; only the HMAC signing keys are per-rig.
+	if kc != nil {
+		password, kerr := kc.Get(ctx, "abysslink", "ntfy-password")
+		switch {
+		case kerr == nil && password != "":
+			opts.authPass = password
+		case kerr != nil && !errors.Is(kerr, secrets.ErrNotFound):
+			// A genuine keychain failure (locked, backend error) is worth a log
+			// line; absence of credentials is the normal unauthenticated path
+			// (mirrors notify/module.go SendDirectWithOptions).
+			slog.Warn("notify fleet fan-out: keychain read failed; sending without auth", "err", kerr)
+		}
 	}
 
 	// http.Client is goroutine-safe; share it across concurrent rig calls.
@@ -512,12 +545,27 @@ func sendNotifyAllRigs(
 	// We surface the first per-rig error to the caller for logging / exit-code purposes.
 	_ = g.Wait()
 
+	var firstErr error
 	for _, e := range rigErrs {
-		if e != nil {
-			return e // return the first rig error (consistent with prior sequential behaviour)
+		if e == nil {
+			continue
+		}
+		var noKey *errRigNoSigningKey
+		if errors.As(e, &noKey) {
+			// SKIP, not failure: the rig was deliberately not notified because an
+			// unsigned send would be a silent signature-stripping downgrade. The
+			// warning is printed (stderr) so the operator sees it even at the
+			// default slog level.
+			if p != nil {
+				printerError(p, "notify: "+e.Error())
+			}
+			continue
+		}
+		if firstErr == nil {
+			firstErr = e // first real rig error (consistent with prior sequential behaviour)
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // sendRigNotify sends a single HMAC-signed notification to one rig's ntfy topic.
@@ -544,6 +592,27 @@ func sendRigNotify(
 		return fmt.Errorf("notify rig %q: ntfy_topic is not configured; re-enroll with --apply to assign a unique topic", rig.Name)
 	}
 
+	// Fetch the per-rig HMAC signing key from the keychain (T-14-19: never argv)
+	// BEFORE building the request: a rig without a signing key is SKIPPED, never
+	// sent unsigned (silent signature-stripping downgrade — T-14-17/T-14-18).
+	if kc == nil {
+		return &errRigNoSigningKey{rig: rig.Name}
+	}
+	hexKey, keyErr := kc.Get(ctx, fleet.RigService(rig.Name), "hmac-signing-key")
+	if keyErr != nil || hexKey == "" {
+		return &errRigNoSigningKey{rig: rig.Name}
+	}
+	// WR-02: include title in the signed canonical string so a relay cannot
+	// alter the displayed subject (X-Title) without invalidating the HMAC.
+	// Canonical: length-prefixed fields rigName, ts, title, message.
+	sig, sigErr := fleet.SignRigMessage(hexKey, rig.Name, ts, title, message)
+	if sigErr != nil {
+		// A malformed key cannot produce a signature — skipping is the same
+		// no-unsigned-send discipline as a missing key.
+		slog.Warn("notify fleet fan-out: HMAC sign failed", "rig", rig.Name, "err", sigErr)
+		return &errRigNoSigningKey{rig: rig.Name}
+	}
+
 	url := fmt.Sprintf("%s/%s", opts.baseURL, topic)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(message))
@@ -562,24 +631,12 @@ func sendRigNotify(
 	// Set rig-identity headers (SC-5, D-NI-03).
 	req.Header.Set("X-Abysslink-Rig", rig.Name)
 	req.Header.Set("X-Abysslink-Rig-Ts", ts) // Pitfall 6: verifier needs the timestamp
+	req.Header.Set("X-Abysslink-Rig-Sig", sig)
 
-	// Fetch the per-rig HMAC signing key from the keychain (T-14-19: never argv).
-	if kc != nil {
-		hexKey, keyErr := kc.Get(ctx, fleet.RigService(rig.Name), "hmac-signing-key")
-		if keyErr != nil || hexKey == "" {
-			// Rig not enrolled with a signing key — surface as WARN, skip signing.
-			slog.Warn("notify fleet fan-out: rig has no signing key; sending unsigned", "rig", rig.Name)
-		} else {
-			// WR-02: include title in the signed canonical string so a relay cannot
-			// alter the displayed subject (X-Title) without invalidating the HMAC.
-			// Canonical: length-prefixed fields rigName, ts, title, message.
-			sig, sigErr := fleet.SignRigMessage(hexKey, rig.Name, ts, title, message)
-			if sigErr != nil {
-				slog.Warn("notify fleet fan-out: HMAC sign failed", "rig", rig.Name, "err", sigErr)
-			} else {
-				req.Header.Set("X-Abysslink-Rig-Sig", sig)
-			}
-		}
+	// NET-02: the abysslink ntfy server is deny-all; attach the admin basic auth
+	// resolved once per batch (mirrors notify/module.go SendDirectWithOptions).
+	if opts.authPass != "" {
+		req.SetBasicAuth("admin", opts.authPass)
 	}
 
 	resp, err := client.Do(req)

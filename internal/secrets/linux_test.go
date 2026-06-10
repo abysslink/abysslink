@@ -15,45 +15,70 @@
 
 //go:build linux
 
-package secrets_test
+// In-package test (package secrets, not secrets_test) so the lookPath probe
+// can be stubbed: backend detection is an in-process exec.LookPath since R2-I8,
+// no longer a mockable `which` subprocess.
+package secrets
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
-// newSecretToolStore builds a LinuxStore on the secret-tool backend with the
-// given scripted calls following the `which secret-tool` probe.
-func newSecretToolStore(t *testing.T, calls ...shell.Call) *secrets.LinuxStore {
+// stubLookPath makes only the named backends "installed" for the duration of
+// the test.
+func stubLookPath(t *testing.T, available ...string) {
 	t.Helper()
-	all := append([]shell.Call{{Result: shell.Result{ExitCode: 0}}}, calls...) // which secret-tool → found
-	runner := shell.NewMockRunner(all...)
-	store, err := secrets.NewLinuxStore(context.Background(), runner)
+	orig := lookPath
+	lookPath = func(name string) (string, error) {
+		for _, a := range available {
+			if a == name {
+				return "/usr/bin/" + name, nil
+			}
+		}
+		return "", fmt.Errorf("%s: executable file not found in $PATH", name)
+	}
+	t.Cleanup(func() { lookPath = orig })
+}
+
+// newSecretToolStore builds a LinuxStore on the secret-tool backend with the
+// given scripted calls.
+func newSecretToolStore(t *testing.T, calls ...shell.Call) *LinuxStore {
+	t.Helper()
+	stubLookPath(t, backendSecretTool)
+	runner := shell.NewMockRunner(calls...)
+	store, err := NewLinuxStore(context.Background(), runner)
 	require.NoError(t, err)
 	require.Equal(t, "secret-tool", store.Backend())
 	return store
 }
 
-// newPassStore builds a LinuxStore on the pass backend with the given scripted
-// calls following the two `which` probes (secret-tool missing, pass found).
-func newPassStore(t *testing.T, calls ...shell.Call) *secrets.LinuxStore {
+// newPassStore builds a LinuxStore on the pass backend (secret-tool absent)
+// with the given scripted calls.
+func newPassStore(t *testing.T, calls ...shell.Call) *LinuxStore {
 	t.Helper()
-	all := append([]shell.Call{
-		{Result: shell.Result{ExitCode: 1}}, // which secret-tool → missing
-		{Result: shell.Result{ExitCode: 0}}, // which pass → found
-	}, calls...)
-	runner := shell.NewMockRunner(all...)
-	store, err := secrets.NewLinuxStore(context.Background(), runner)
+	stubLookPath(t, backendPass)
+	runner := shell.NewMockRunner(calls...)
+	store, err := NewLinuxStore(context.Background(), runner)
 	require.NoError(t, err)
 	require.Equal(t, "pass", store.Backend())
 	return store
+}
+
+// TestNewLinuxStore_NoBackendFound: with neither backend on PATH, construction
+// must fail with an actionable message.
+func TestNewLinuxStore_NoBackendFound(t *testing.T) {
+	stubLookPath(t) // nothing available
+	_, err := NewLinuxStore(context.Background(), shell.NewMockRunner())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no keychain backend found")
 }
 
 // TestLinuxSecretTool_GetNotFound proves CORE-02: a silent non-zero exit
@@ -63,7 +88,7 @@ func TestLinuxSecretTool_GetNotFound(t *testing.T) {
 
 	_, err := store.Get(context.Background(), "svc", "acct")
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, secrets.ErrNotFound))
+	assert.True(t, errors.Is(err, ErrNotFound))
 	assert.Contains(t, err.Error(), "secret not found") // COMPAT substring
 }
 
@@ -78,7 +103,7 @@ func TestLinuxSecretTool_GetUnavailableIsNotNotFound(t *testing.T) {
 
 	_, err := store.Get(context.Background(), "svc", "acct")
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, secrets.ErrNotFound))
+	assert.False(t, errors.Is(err, ErrNotFound))
 	assert.Contains(t, err.Error(), "keychain unavailable")
 	assert.NotContains(t, err.Error(), "secret not found")
 }
@@ -93,7 +118,7 @@ func TestLinuxPass_GetNotFound(t *testing.T) {
 
 	_, err := store.Get(context.Background(), "svc", "acct")
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, secrets.ErrNotFound))
+	assert.True(t, errors.Is(err, ErrNotFound))
 	assert.Contains(t, err.Error(), "secret not found") // COMPAT substring
 }
 
@@ -107,7 +132,7 @@ func TestLinuxPass_GetUnavailableIsNotNotFound(t *testing.T) {
 
 	_, err := store.Get(context.Background(), "svc", "acct")
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, secrets.ErrNotFound))
+	assert.False(t, errors.Is(err, ErrNotFound))
 	assert.Contains(t, err.Error(), "keychain unavailable")
 	assert.NotContains(t, err.Error(), "secret not found")
 }

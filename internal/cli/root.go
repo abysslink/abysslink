@@ -209,14 +209,14 @@ func enforceSubcommandErrors(cmd *cobra.Command) {
 	}
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
-			return fmt.Errorf("missing subcommand for %q\n\nRun '%s --help' to see available subcommands.",
+			return fmt.Errorf("missing subcommand for %q\n\nRun '%s --help' to see available subcommands",
 				cmd.CommandPath(), cmd.CommandPath())
 		}
 		msg := fmt.Sprintf("unknown subcommand %q for %q", args[0], cmd.CommandPath())
 		if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
 			msg += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
 		}
-		msg += fmt.Sprintf("\n\nRun '%s --help' to see available subcommands.", cmd.CommandPath())
+		msg += fmt.Sprintf("\n\nRun '%s --help' to see available subcommands", cmd.CommandPath())
 		return errors.New(msg)
 	}
 }

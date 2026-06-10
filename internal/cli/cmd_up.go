@@ -116,28 +116,16 @@ func newUpCmd() *cobra.Command {
 			// Pass 2 — Apply phase (only if not dry-run).
 			var applyFindings []modules.Finding
 			var applyErr error
-			var applyElapsed time.Duration
 			if !cc.dryRun {
 				var aborted bool
-				applyFindings, applyElapsed, aborted, applyErr = runApply(ctx, cmd, p, r, actions, cc)
+				applyFindings, aborted, applyErr = runUpApplyPhase(ctx, cmd, p, r, actions, cc)
 				if aborted {
 					// User explicitly declined ConfirmBlast — "Aborted." already
-					// printed inside runApply. Skip all success/next-steps output.
+					// printed inside the apply phase. Skip all further output.
 					return nil
 				}
-				// I1: persist the NetBird --accept-no-sshcheck consent only
-				// AFTER the user confirmed the blast prompt — never before.
-				if persistErr := persistNetbirdConsent(cmd, cc); persistErr != nil {
-					return persistErr
-				}
-				printFinalSummary(p, actions, applyFindings, applyElapsed, applyErr)
-
-				// F-59: replay manual steps modules deferred during Apply.
-				// MUST run only after the live apply table is fully closed —
-				// this is the single terminal owner now. Not reached on the
-				// abort path (returned above).
-				if flushErr := flushManualSteps(ctx, cc, p); flushErr != nil {
-					return fmt.Errorf("up: manual steps: %w", flushErr)
+				if applyErr != nil && errors.As(applyErr, new(*exitError)) {
+					return applyErr
 				}
 			}
 
@@ -684,6 +672,15 @@ func diskEncryptionBlockers(findings []modules.Finding) []modules.Finding {
 // distinguish a genuinely-unknown disk-encryption state (cannot be determined)
 // from a known-off state (disk is confirmed unencrypted). Plan 04 gates on this
 // substring to refuse --force-unsafe for unknown-state FATALs (D-05).
+//
+// KNOWN LIMITATION (review W10): keying a security gate off a message substring
+// is fragile; a structured field (a distinct Check name such as
+// "filevault-unknown", or an explicit State field on modules.Finding) would be
+// robust. The emitting side lives in internal/modules/hardening — outside this
+// package — and both sides document the marker as a stable cross-package
+// contract, so migrating it requires a coordinated change to the hardening
+// module's detect_darwin.go/detect_linux.go emitters. Tracked for the modules
+// owner; do not change only one side.
 const unknownDiskEncryptionMarker = "disk-encryption state is UNKNOWN"
 
 // diskEncryptionGate applies the gate logic over a pre-filtered blocker slice

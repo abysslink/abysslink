@@ -21,10 +21,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"sync"
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"tailscale.com/client/local"
 )
 
 // ErrAlreadyApplied is returned by Apply when the webui server is already
@@ -39,6 +41,11 @@ type Module struct {
 
 	mu     sync.Mutex
 	cancel context.CancelFunc // non-nil while the server goroutine is running
+
+	// bind is the listener-factory seam. nil (production) resolves the tailnet
+	// IP via the local tailscaled and TLS-listens on it; tests inject a stub so
+	// Apply's synchronous bind error path is testable without a live tailscaled.
+	bind func(ctx context.Context) (net.Listener, *local.Client, error)
 }
 
 // New constructs the webui Module from the shared module dependencies. Only the
@@ -77,10 +84,13 @@ func (m *Module) Plan(_ context.Context, _ bool) ([]modules.Action, error) {
 	}}, nil
 }
 
-// Apply starts the web UI server in a background goroutine bound to a
-// cancellable context. It returns ErrAlreadyApplied if a server is already
-// running for this instance. A disabled module is a no-op. The actual listener
-// only binds after the TLS fail-closed probe passes (see Verify / WEB-03).
+// Apply binds the web UI listener SYNCHRONOUSLY, then serves in a background
+// goroutine bound to a cancellable context. Binding before returning means a
+// bind/TLS failure (port in use, listen error, unresolvable tailnet IP) is
+// returned as Apply's error instead of being lost as a goroutine log line —
+// `abysslink up --apply` must not report a dashboard as started when it
+// isn't (W9). It returns ErrAlreadyApplied if a server is already running for
+// this instance. A disabled module is a no-op.
 func (m *Module) Apply(ctx context.Context) error {
 	if !m.cfg.WebUI.Enabled {
 		return nil
@@ -98,14 +108,37 @@ func (m *Module) Apply(ctx context.Context) error {
 		return errors.New(f.Message)
 	}
 
+	bind := m.bind
+	if bind == nil {
+		bind = m.bindProduction
+	}
+
 	srvCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	ln, lc, err := bind(srvCtx)
+	if err != nil {
+		cancel()
+		return err
+	}
+
 	m.cancel = cancel
 	go func() {
-		if err := StartWebUIServer(srvCtx, m.cfg, nil); err != nil && !errors.Is(err, context.Canceled) {
+		// Only post-bind serve errors land here; bind errors were returned above.
+		if err := serveWebUI(srvCtx, m.cfg, lc, ln, nil); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("webui: server exited", "err", err)
 		}
 	}()
 	return nil
+}
+
+// bindProduction is the default listener factory: it resolves the tailnet IP
+// from the platform tailscaled and TLS-listens on it (WEB-02/WEB-03).
+func (m *Module) bindProduction(ctx context.Context) (net.Listener, *local.Client, error) {
+	lc := &local.Client{} // zero value uses the platform-default tailscaled socket
+	ln, err := bindWebUIListener(ctx, m.cfg, lc, localTailnetResolver{lc: lc})
+	if err != nil {
+		return nil, nil, err
+	}
+	return ln, lc, nil
 }
 
 // Stop terminates the background webui server started by Apply. Apply detaches

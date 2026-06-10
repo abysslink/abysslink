@@ -253,14 +253,25 @@ func runAuditAggregate(ctx context.Context, cc *cmdContext, p Printer, logPath s
 	if opts.format == "json" {
 		verifyP = stderrOnlyPrinter{inner: p}
 	}
+	// degradedCode records a non-fatal verify result (exit 1: kc==nil walk or
+	// CounterStatus "unknown") so the final exit code can never roll back to 0
+	// purely on the strength of the findings (WR-02/AUD-02: a skipped HMAC or
+	// tail-truncation check is not a clean result).
+	degradedCode := exitCodeOK
 	if err := runAuditVerify(ctx, verifyP, logPath, kc); err != nil {
 		var ee *exitError
-		if errors.As(err, &ee) && ee.ExitCode() == exitCodeFatal {
+		switch {
+		case errors.As(err, &ee) && ee.ExitCode() == exitCodeFatal:
 			return err // CHAIN BROKEN — propagate exit 2 immediately.
+		case errors.As(err, &ee):
+			degradedCode = ee.ExitCode()
+		default:
+			// Parse/IO failure in the verify step: still a degraded posture.
+			degradedCode = exitCodeError
 		}
-		// A non-fatal chain result (e.g. exit 1 when kc==nil: chain walked but
-		// signatures unauthenticated) does not abort the aggregate — the posture
-		// findings still matter. Fall through and let the roll-up decide.
+		// A non-fatal chain result does not abort the aggregate — the posture
+		// findings still matter. Fall through; the roll-up takes max(degraded,
+		// findings).
 	}
 
 	// 2. Obtain deps with graceful degradation (mirrors cmd_doctor.go).
@@ -284,17 +295,25 @@ func runAuditAggregate(ctx context.Context, cc *cmdContext, p Printer, logPath s
 	// 6. --format=json: emit a machine-parseable JSON array and roll up.
 	if opts.format == "json" {
 		p.PrintJSON(buildDoctorFindings(allFindings))
-		return exitCodeToError(aggregateExitCode(allFindings))
+		return exitCodeToError(maxExitCode(degradedCode, aggregateExitCode(allFindings)))
 	}
 
-	// 7. Human output + severity roll-up.
+	// 7. Human output + severity roll-up (never below the degraded verify code).
 	if len(allFindings) == 0 {
 		printerInfo(p, "All checks passed — security posture is clean.")
-		return nil
+		return exitCodeToError(degradedCode)
 	}
 	doctorHumanOutput(p, allFindings)
 	printerInfo(p, doctorSeverityCounts(allFindings))
-	return exitCodeToError(aggregateExitCode(allFindings))
+	return exitCodeToError(maxExitCode(degradedCode, aggregateExitCode(allFindings)))
+}
+
+// maxExitCode returns the more severe of two roll-up exit codes.
+func maxExitCode(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // collectAggregateFindings runs every doctor finding source exactly once and

@@ -24,10 +24,23 @@ import (
 // MockStore is an in-memory KeychainStore for tests. It is goroutine-safe.
 // It implements KeychainStore and can be used as a drop-in replacement for
 // DarwinStore / LinuxStore in unit tests without invoking any real CLI tools.
+//
+// PRODUCTION-WIRING HAZARD (R2-I5): MockStore persists NOTHING — every secret
+// lives only in process memory and is gone on exit. It compiles into
+// production binaries because it cannot carry a build tag: external test
+// packages across the repo (internal/cli, internal/audit, internal/fleet, …)
+// import it, and a tag would exclude it from their default-tag test builds.
+// NEVER wire MockStore into production code paths; the only production
+// constructor is secrets.NewStore (store_darwin/linux/other.go). A mis-wire
+// would silently "store" the audit HMAC key and other secrets in RAM.
 type MockStore struct {
 	mu      sync.Mutex
 	entries map[string]string // key: service + "\x00" + account
 }
+
+// Compile-time guard that MockStore keeps satisfying the production interface
+// (so a drift would fail here, in the test double, not at a call site).
+var _ KeychainStore = (*MockStore)(nil)
 
 // NewMockStore returns an empty MockStore.
 func NewMockStore() *MockStore {

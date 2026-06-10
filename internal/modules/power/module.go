@@ -199,9 +199,13 @@ func (m *Module) applyDarwin(ctx context.Context) error {
 	return nil
 }
 
-// Verify re-runs Detect.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// Verify is a no-op for the power module — all checks run in Detect.
+// Pitfall 4 (Doctor double-emission): do NOT call Detect here — runner.Doctor
+// calls both Detect and Verify, so re-running Detect would double-emit every
+// Detect finding per doctor pass (W4/NET-18). Verify adds no new information
+// beyond Detect; returning nil avoids the duplication (mirrors ssh/ntfy).
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair attempts to fix findings.

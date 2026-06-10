@@ -510,16 +510,22 @@ func secFunnelSchemaCheck(cfg *config.Config) modules.Finding {
 
 // secDiskEncryptionCheck aliases the FileVault/LUKS fail-closed disk-encryption
 // posture via platform.DiskEncryptionStatus (reuse — RESEARCH Don't Hand-Roll).
+//
+// Severity contract (W10): UNKNOWN is FATAL, not WARN. `abysslink up` treats an
+// unknown disk-encryption state as a non-overridable blocker (D-05: even
+// --force-unsafe cannot bypass it), so doctor must not under-report the exact
+// state up considers the most severe — a user triaging with doctor would see
+// "review recommended" and then hit a hard block in up.
 func secDiskEncryptionCheck(ctx context.Context, plat platform.Platform) modules.Finding {
 	const check = "sec-disk-encryption"
 	if plat == nil {
-		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
-			Message: "platform unavailable — cannot determine disk encryption status"}
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
+			Message: "disk-encryption state is UNKNOWN: platform unavailable — verify FileVault/LUKS manually; `up --apply` will refuse until the state is determinable"}
 	}
 	state, err := plat.DiskEncryptionStatus(ctx)
 	if err != nil {
-		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
-			Message: "disk encryption status unknown: " + err.Error()}
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
+			Message: "disk-encryption state is UNKNOWN: " + err.Error() + " — verify FileVault/LUKS manually; `up --apply` will refuse until the state is determinable"}
 	}
 	switch state {
 	case platform.DiskEncrypted:
@@ -529,8 +535,8 @@ func secDiskEncryptionCheck(ctx context.Context, plat platform.Platform) modules
 		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
 			Message: "disk is NOT encrypted — enable FileVault (macOS) / LUKS (Linux) before remote access"}
 	default: // DiskUnknown
-		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
-			Message: "disk encryption status could not be determined"}
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
+			Message: "disk-encryption state is UNKNOWN — could not be determined; verify FileVault (macOS) / LUKS (Linux) manually; `up --apply` refuses this state even with --force-unsafe (D-05)"}
 	}
 }
 
@@ -593,8 +599,15 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 // authoritative `sshd -T` even when not root (bypassing the os.Getuid()==0
 // guard). The normal doctor path passes pentest=false so sshd -T is attempted
 // only as root and the always-available sshd_config parse is the primary source.
+//
+// supplyFindings (optional, variadic for call-site compatibility): when the
+// caller already ran supplyChainFindings, pass its result so sec-binary-signed
+// aliases the pre-computed supply-cosign-bundle finding instead of triggering
+// a second release-artifact download (W8 / RESEARCH Pitfall 3). When absent,
+// the check runs itself (legacy single-run callers: audit aggregate, report).
 func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, pentest bool,
-	metFindings, webuiFindings, auditFindings []modules.Finding) []modules.Finding {
+	metFindings, webuiFindings, auditFindings []modules.Finding,
+	supplyFindings ...[]modules.Finding) []modules.Finding {
 	findings := make([]modules.Finding, 0, 18)
 
 	// SSH checks (6) — guarded so a parse failure never crashes the doctor run.
@@ -620,11 +633,21 @@ func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, p
 		secDiskEncryptionCheck(ctx, deps.Platform),
 	)
 
-	// Supply-chain aliases (2).
-	findings = append(findings,
-		secBinarySignedCheck(ctx, cc.runner),
-		secUpgradeVerifiedCheck(),
-	)
+	// Supply-chain aliases (2). Reuse the caller's pre-computed supply findings
+	// when provided so the cosign bundle check (a network download) runs exactly
+	// once per doctor invocation (W8).
+	if len(supplyFindings) > 0 && supplyFindings[0] != nil {
+		findings = append(findings,
+			secAliasFromFindings(supplyFindings[0], "supply-cosign-bundle", "sec-binary-signed",
+				"supply-chain check did not run"),
+			secUpgradeVerifiedCheck(),
+		)
+	} else {
+		findings = append(findings,
+			secBinarySignedCheck(ctx, cc.runner),
+			secUpgradeVerifiedCheck(),
+		)
+	}
 
 	// Cross-ref aliases (3) — reuse pre-computed findings.
 	findings = append(findings,

@@ -25,7 +25,11 @@ import (
 	"time"
 )
 
-// Backup atomically copies src to <src>.bak.<timestamp> in the same directory.
+// Backup atomically copies src to <src>.bak.<timestamp> in the same directory
+// (temp + fsync + rename — a crash can no longer leave a truncated .bak that a
+// later restore would trust, R2-W4). The backup carries src's permission bits
+// so a later restore can put them back (R2-W3); the .bak holds the same bytes
+// src already exposed, so mirroring its mode leaks nothing new.
 // It returns the path of the backup file on success.
 func Backup(src string) (string, error) {
 	content, err := os.ReadFile(src) //nolint:gosec // G304: src is an audit backup path derived from the target path, not user-controlled
@@ -39,7 +43,7 @@ func Backup(src string) (string, error) {
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	dst := fmt.Sprintf("%s.bak.%s", src, stamp)
 
-	if err := os.WriteFile(dst, content, 0o600); err != nil { //nolint:gosec // G304: dst is an audit backup path derived internally; 0o600 enforces owner-only perms
+	if err := atomicWriteFile(dst, content, sourceMode(src)); err != nil {
 		return "", fmt.Errorf("audit: backup write %s: %w", dst, err)
 	}
 	return dst, nil
@@ -61,7 +65,7 @@ func BackupWithChain(ctx context.Context, src string, sa *SignedAudit) (string, 
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	dst := fmt.Sprintf("%s.bak.%s", src, stamp)
 
-	if err := os.WriteFile(dst, content, 0o600); err != nil { //nolint:gosec // G304: dst is an audit backup path derived internally; 0o600 enforces owner-only perms
+	if err := atomicWriteFile(dst, content, sourceMode(src)); err != nil {
 		return "", fmt.Errorf("audit: backup write %s: %w", dst, err)
 	}
 
@@ -76,9 +80,13 @@ func BackupWithChain(ctx context.Context, src string, sa *SignedAudit) (string, 
 }
 
 // BackupsFromChain returns chain entries for target by walking the signed audit
-// log and filtering entries where Op="backup" and the Target path has target as
-// a prefix. This is the authoritative backup-selection path (AUD-01 / D-02):
-// chain-recorded entries are the source of truth, not filesystem glob order.
+// log and filtering entries where Op="backup" and the Target is one of target's
+// own ".bak.<stamp>" sidecars. This is the authoritative backup-selection path
+// (AUD-01 / D-02): chain-recorded entries are the source of truth, not
+// filesystem glob order.
+//
+// R2-I1: the match is target+".bak." (not a bare prefix), so backups of a
+// sibling path like "/a/b2" can never be claimed for target "/a/b".
 //
 // logPath is the path of the signed audit log. target is the original source
 // file path (not the .bak path). A missing or empty log returns (nil, nil).
@@ -89,7 +97,7 @@ func BackupsFromChain(logPath, target string) ([]Entry, error) {
 	}
 	var result []Entry
 	for _, e := range entries {
-		if e.Op == "backup" && strings.HasPrefix(e.Target, target) {
+		if e.Op == "backup" && strings.HasPrefix(e.Target, target+".bak.") {
 			result = append(result, e)
 		}
 	}
@@ -115,14 +123,8 @@ func Restore(dst, backupPath string) error {
 		return fmt.Errorf("audit: restore read backup %s: %w", cleanBak, err)
 	}
 
-	tmp := cleanDst + ".tmp"
-	if err := os.WriteFile(tmp, content, 0o600); err != nil { //nolint:gosec // G304: tmp is an internally-derived restore temp path; 0o600 enforces owner-only perms
-		return fmt.Errorf("audit: restore write tmp %s: %w", tmp, err)
-	}
-
-	if err := os.Rename(tmp, cleanDst); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("audit: restore rename %s → %s: %w", tmp, cleanDst, err)
-	}
-	return nil
+	// R2-W3: unique O_EXCL temp (no predictable dst+".tmp" an attacker can
+	// pre-plant as a symlink) and the backup's recorded permission bits — a
+	// 0644 original comes back 0644, an unknown mode falls back to 0600.
+	return atomicRestoreWrite(cleanDst, content, sourceMode(cleanBak))
 }

@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,7 +27,7 @@ import (
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
-	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/spf13/cobra"
 )
 
@@ -73,9 +74,10 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			if err != nil || cc == nil {
 				// Emergency kill switch MUST NOT crash: on a config-load failure cc is
 				// nil, so synthesize a defaults context rather than deref a nil pointer
-				// at the first cc.runner use below (CR-02).
+				// at the first cc.runner use below (CR-02). newRunner() keeps the
+				// exec-gate decoration (D-38) — never a bare ExecRunner.
 				slog.Warn("panic: could not load config, proceeding with defaults", "err", err)
-				cc = &cmdContext{cfg: config.Defaults(), runner: &shell.ExecRunner{}}
+				cc = &cmdContext{cfg: config.Defaults(), runner: newRunner()}
 			}
 			p := newPrinter(cmd)
 			start := time.Now()
@@ -257,7 +259,10 @@ func revokePhoneDevicesWithStep(ctx context.Context, cc *cmdContext, p Printer, 
 }
 
 // destroyLocalAPIKeyWithStep deletes the Anthropic API key from the local
-// keychain and emits a ✓/✕ step marker.
+// keychain and emits a ✓/✕ step marker. It destroys BOTH the v1 entry
+// (service "abysslink") AND every rig-scoped copy created by `enroll rig`'s
+// keychain migration (fleet.RigService(name)) — a kill switch that leaves live
+// migrated copies behind has not revoked anything.
 //
 // CLI-19: when the dependency bundle cannot be built or no keychain backend is
 // available, the operator MUST be told the key was NOT destroyed — a silent
@@ -271,8 +276,23 @@ func destroyLocalAPIKeyWithStep(ctx context.Context, cc *cmdContext, p Printer, 
 	}
 	if err := deps.Keychain.Delete(ctx, "abysslink", "anthropic-api-key"); err != nil {
 		panicStep(p, "destroy local API key", errPanicStepFailed{err.Error()})
-		return
+	} else {
+		panicStep(p, "deleted local Anthropic API key from keychain", nil)
+		logPanic("destroy_local_api_key")
 	}
-	panicStep(p, "deleted local Anthropic API key from keychain", nil)
-	logPanic("destroy_local_api_key")
+
+	// Rig-scoped migrated copies (enroll rig --apply copies the v1 entries into
+	// fleet.RigService(name) — those must die with the kill switch too).
+	for _, rig := range cc.cfg.Rigs {
+		svc := fleet.RigService(rig.Name)
+		if delErr := deps.Keychain.Delete(ctx, svc, "anthropic-api-key"); delErr != nil {
+			if errors.Is(delErr, secrets.ErrNotFound) {
+				continue // never migrated — nothing to destroy
+			}
+			panicStep(p, "destroy rig-scoped API key ("+rig.Name+")", errPanicStepFailed{delErr.Error()})
+			continue
+		}
+		panicStep(p, "deleted rig-scoped Anthropic API key ("+rig.Name+")", nil)
+		logPanic("destroy_rig_api_key")
+	}
 }

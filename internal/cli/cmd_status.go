@@ -62,6 +62,13 @@ func newStatusCmd() *cobra.Command {
 
 			p := newPrinter(cmd)
 
+			// Fresh machine: no config exists yet. Say so instead of rendering
+			// a green dashboard built from Defaults (U10).
+			if cc.cfgMissing {
+				printStatusNotInitialised(p, cc.jsonOut)
+				return nil
+			}
+
 			// Read persistent fan-out flags (registered in Plan 03 / root.go).
 			strict, _ := cmd.Flags().GetBool("strict")
 
@@ -71,7 +78,13 @@ func newStatusCmd() *cobra.Command {
 			if rigErr != nil {
 				return rigErr
 			}
-			if rt.fanOut && len(rt.rigs) > 0 {
+			if rt.fanOut {
+				// --all-rigs with zero enrolled rigs must say so, not silently
+				// degrade to local-only output (U3).
+				if len(rt.rigs) == 0 {
+					printStatusNoRigs(p, cc.jsonOut)
+					return nil
+				}
 				return statusRigs(ctx, cc, p, strict, rt.rigs)
 			}
 
@@ -125,7 +138,9 @@ func newStatusCmd() *cobra.Command {
 				TailnetLock:  lockStatus,
 				Ntfy:         ntfyStatus,
 				DiskEncrypt:  diskEncrypt,
-				Timestamp:    time.Now().Format("2006-01-02 15:04"),
+				// RFC3339 UTC — the same format the fleet fan-out rows use, so
+				// JSON consumers parse exactly one timestamp format (U5).
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			}
 
 			if cc.jsonOut {
@@ -140,9 +155,37 @@ func newStatusCmd() *cobra.Command {
 	}
 }
 
+// printStatusNotInitialised renders the "not initialised — run init" banner
+// for a machine with no abysslink.yaml (U10). JSON mode emits a structured
+// record so scripts can detect the state.
+func printStatusNotInitialised(p Printer, jsonOut bool) {
+	if jsonOut {
+		p.PrintJSON(map[string]string{
+			"status": "not-initialised",
+			"hint":   "run `abysslink init` to create abysslink.yaml",
+		})
+		return
+	}
+	printerInfo(p, "")
+	printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("Abysslink is not initialised on this machine."))
+	printerInfo(p, "  "+styleMuted.Render("Run ")+styleCode.Render("abysslink init")+styleMuted.Render(" to set it up."))
+	printerInfo(p, "")
+}
+
+// printStatusNoRigs renders the empty-fleet notice for --all-rigs (U3). JSON
+// mode emits [] so list consumers get a stable empty-list encoding.
+func printStatusNoRigs(p Printer, jsonOut bool) {
+	if jsonOut {
+		p.PrintJSON([]statusReport{})
+		return
+	}
+	printerInfo(p, "  No rigs enrolled — enroll one with "+styleCode.Render("abysslink rig add")+".")
+}
+
 // statusAllRigs fans out `abysslink status --json` to every enrolled rig and
 // aggregates the results into a per-rig slice. Offline rigs appear as UNREACHABLE
-// rows (SC-2); --strict maps to exit 1 when any rig is offline (T-14-21).
+// rows (SC-2); --strict maps to exit 2 when any rig is offline (T-14-21,
+// matches root --help and the exitCodeFatal return below).
 func statusAllRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool) error {
 	return statusRigs(ctx, cc, p, strict, cc.cfg.Rigs)
 }
@@ -267,23 +310,45 @@ func diskEncryptionStatus(ctx context.Context, r shell.Runner) string {
 	}
 }
 
+// statusRowState classifies a status panel row for icon rendering.
+type statusRowState int
+
+const (
+	rowOK      statusRowState = iota // green — feature healthy/enabled
+	rowBad                           // red — feature expected but failing
+	rowNeutral                       // muted — feature deliberately disabled (U4)
+)
+
 // statusRow renders one row of the status panel.
-func statusRow(label, value string, ok bool) string {
+func statusRow(label, value string, state statusRowState) string {
 	var icon string
-	if ok {
+	switch state {
+	case rowOK:
 		icon = iconOKStr()
-	} else {
+	case rowNeutral:
+		icon = iconNeutralStr()
+	default:
 		icon = iconFatalStr()
 	}
 	lbl := styleMuted.Render(fmt.Sprintf("%-18s", label))
 	return fmt.Sprintf("  %s  %s  %s", icon, lbl, styleBold.Render(value))
 }
 
+// statusRowStateFor maps a status value to its row state. "disabled" is a
+// deliberate user choice and renders neutral, never as a red failure (U4).
+func statusRowStateFor(s string) statusRowState {
+	switch s {
+	case "running", "enabled", "encrypted":
+		return rowOK
+	case "disabled":
+		return rowNeutral
+	default:
+		return rowBad
+	}
+}
+
 // printStatusPanel renders the styled status box.
 func printStatusPanel(p Printer, rep statusReport) {
-	isOK := func(s string) bool {
-		return s == "running" || s == "enabled" || s == "encrypted"
-	}
 
 	hostnameLabel := rep.Tailscale
 	if rep.Hostname != "" || rep.TailscaleIP != "" {
@@ -301,11 +366,11 @@ func printStatusPanel(p Printer, rep statusReport) {
 	sb.WriteString(styleBold.Render("Abysslink Status"))
 	sb.WriteString("\n\n")
 	for _, row := range []string{
-		statusRow("Tailscale", hostnameLabel, isOK(rep.Tailscale)),
-		statusRow("Tailscale SSH", rep.TailscaleSSH, isOK(rep.TailscaleSSH)),
-		statusRow("Tailnet Lock", rep.TailnetLock, isOK(rep.TailnetLock)),
-		statusRow("ntfy", rep.Ntfy, isOK(rep.Ntfy)),
-		statusRow("Disk Encryption", rep.DiskEncrypt, isOK(rep.DiskEncrypt)),
+		statusRow("Tailscale", hostnameLabel, statusRowStateFor(rep.Tailscale)),
+		statusRow("Tailscale SSH", rep.TailscaleSSH, statusRowStateFor(rep.TailscaleSSH)),
+		statusRow("Tailnet Lock", rep.TailnetLock, statusRowStateFor(rep.TailnetLock)),
+		statusRow("ntfy", rep.Ntfy, statusRowStateFor(rep.Ntfy)),
+		statusRow("Disk Encryption", rep.DiskEncrypt, statusRowStateFor(rep.DiskEncrypt)),
 	} {
 		sb.WriteString(row)
 		sb.WriteString("\n")

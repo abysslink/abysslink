@@ -294,7 +294,7 @@ func TestEnsureAdminUser_KeychainUnavailableAborts(t *testing.T) {
 	r := shell.NewMockRunner() // NO runner calls may happen
 	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}, Keychain: errKeychain{}})
 
-	err := m.ensureAdminUser(context.Background())
+	err := m.ensureAdminUser(context.Background(), "/home/u/.config/ntfy/server.yml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "keychain unavailable",
 		"a non-NotFound keychain error must abort with a clear message")
@@ -317,12 +317,40 @@ func TestEnsureAdminUser_NotFoundGenerates(t *testing.T) {
 	)
 	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}, Keychain: kc})
 
-	require.NoError(t, m.ensureAdminUser(context.Background()))
+	const cfgPath = "/home/u/.config/ntfy/server.yml"
+	require.NoError(t, m.ensureAdminUser(context.Background(), cfgPath))
 	require.True(t, r.Done())
 
 	pw, err := kc.Get(context.Background(), keychainService, keychainAccount)
 	require.NoError(t, err, "generated password must be stored in the keychain")
 	assert.NotEmpty(t, pw)
+}
+
+// TestEnsureAdminUser_PassesConfigFlag is the C5 regression test: the native
+// `ntfy user add` / `ntfy user change-pass` invocations must carry
+// `--config <abysslink server.yml>`. Without it the ntfy CLI reads the default
+// /etc/ntfy/server.yml and the admin user lands in the WRONG auth DB — the
+// abysslink server (deny-all) would reject every authenticated send.
+func TestEnsureAdminUser_PassesConfigFlag(t *testing.T) {
+	kc := secrets.NewMockStore()
+	require.NoError(t, kc.Set(context.Background(), keychainService, keychainAccount, "pw"))
+
+	r := shell.NewMockRunner(
+		// user add → "already exists" so the change-pass path runs too.
+		shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "user admin already exists"}},
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}, Keychain: kc})
+
+	const cfgPath = "/home/u/.config/ntfy/server.yml"
+	require.NoError(t, m.ensureAdminUser(context.Background(), cfgPath))
+	require.True(t, r.Done())
+
+	for _, c := range r.RecordedCalls() {
+		argv := strings.Join(c.Args, " ")
+		assert.Contains(t, argv, "--config "+cfgPath,
+			"every native ntfy user command must target the abysslink server.yml, got %q", argv)
+	}
 }
 
 // TestEnsureAdminUser_AlreadyExistsForcesChangePass asserts the NET-12 repair
@@ -341,7 +369,7 @@ func TestEnsureAdminUser_AlreadyExistsForcesChangePass(t *testing.T) {
 	)
 	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}, Keychain: kc})
 
-	require.NoError(t, m.ensureAdminUser(context.Background()))
+	require.NoError(t, m.ensureAdminUser(context.Background(), "/home/u/.config/ntfy/server.yml"))
 	require.True(t, r.Done(), "change-pass must run when the admin already exists")
 
 	calls := r.RecordedCalls()
@@ -392,4 +420,97 @@ func TestGetTailnetHostname_SelfNotPeer(t *testing.T) {
 	got := m.getTailnetHostname(context.Background())
 	assert.Equal(t, "rig.example.ts.net", got,
 		"hostname must be Self.DNSName (trailing dot trimmed), never a Peer's DNSName")
+}
+
+// TestPlan_HealthyConfigConverges is the W1 regression test: a correctly
+// configured ntfy (Detect emits listen_address SeverityOK) must NOT plan a
+// "write ntfy server.yml" action — SeverityOK findings are confirmation, not
+// remediation targets, and the plan must converge.
+func TestPlan_HealthyConfigConverges(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfgDir := filepath.Join(dir, ".config", "ntfy")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "server.yml"),
+		[]byte(`listen-http: "100.64.1.2:2586"`+"\n"), 0o600))
+
+	r := shell.NewMockRunner(
+		// Detect → ntfyBinaryPresent: ntfy --help (has "serve")
+		shell.Call{Result: shell.Result{Stdout: "serve  Start ntfy server\n", ExitCode: 0}},
+	)
+	cfg := config.Defaults()
+	cfg.Modules.Ntfy.Enabled = true
+	m := New(modules.Deps{Cfg: cfg, Runner: r, Platform: &testPlatform{}})
+
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	for _, a := range actions {
+		assert.NotContains(t, a.Description, "write ntfy server.yml",
+			"a healthy SeverityOK listen_address must not schedule a config rewrite")
+	}
+}
+
+// TestGetTailnetIP_TakesFirstLine: `tailscale ip --4` may print multiple
+// addresses one per line; an embedded newline must never reach the generated
+// server.yml.
+func TestGetTailnetIP_TakesFirstLine(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "100.64.1.2\n100.64.9.9\n", ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	ip, err := m.getTailnetIP(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "100.64.1.2", ip)
+	assert.NotContains(t, ip, "\n")
+}
+
+// TestDockerImagePinnedByDigest: the Docker image must be pinned by digest so
+// a floating tag cannot silently swap the image (supply chain).
+func TestDockerImagePinnedByDigest(t *testing.T) {
+	assert.Contains(t, dockerImage, "@sha256:", "ntfy Docker image must be digest-pinned")
+	assert.True(t, strings.HasPrefix(dockerImage, "binwiederhier/ntfy:"),
+		"image must keep a human-readable tag alongside the digest")
+}
+
+// TestConfigureNative_CreatesStateDirAndTargetsConfig covers the rest of C5:
+// configureNative must create the auth-file parent dir (the native server.yml
+// points auth-file into it) and provision the admin user against the SAME
+// config file the service is launched with.
+func TestConfigureNative_CreatesStateDirAndTargetsConfig(t *testing.T) {
+	home := t.TempDir()
+	auditLog := filepath.Join(t.TempDir(), "audit.log")
+
+	r := shell.NewMockRunner(
+		// ensureAdminUser → ntfy user add (exit 0)
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+	m := New(modules.Deps{
+		Cfg:      config.Defaults(),
+		Runner:   r,
+		Audit:    audit.New(auditLog),
+		Platform: &testPlatform{},
+		Keychain: &stubKeychain{pw: "pw"},
+	})
+
+	require.NoError(t, m.configureNative(context.Background(), "100.64.1.2", home))
+	require.True(t, r.Done())
+
+	// Auth-file parent dir must exist before ntfy serve starts.
+	st, err := os.Stat(filepath.Join(home, ".local", "state", "abysslink", "ntfy"))
+	require.NoError(t, err, "configureNative must create the auth-file parent dir")
+	assert.True(t, st.IsDir())
+
+	// The user command must target the abysslink server.yml via --config.
+	cfgPath := filepath.Join(home, ".config", "ntfy", "server.yml")
+	calls := r.RecordedCalls()
+	require.Len(t, calls, 1)
+	assert.Contains(t, strings.Join(calls[0].Args, " "), "--config "+cfgPath,
+		"ntfy user add must run against the abysslink config, not /etc/ntfy")
+
+	// And the server config itself must exist, bound to the tailnet IP.
+	data, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `listen-http: "100.64.1.2:`)
 }

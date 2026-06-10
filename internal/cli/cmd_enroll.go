@@ -75,6 +75,7 @@ type enrollRigOpts struct {
 	hostname      string         // Tailscale hostname for the rig (empty = use os.Hostname)
 	backendType   string         // backend type string (empty = "tailscale")
 	stdout        io.Writer      // optional: capture stdout (nil = os.Stdout)
+	printer       Printer        // optional: Printer for all output (CLI-17); nil = human printer over stdout
 }
 
 // aclGrant mirrors the subset of tailscale/acl.go aclGrant used for rig-to-rig detection.
@@ -93,7 +94,7 @@ type enrollACLGrant struct {
 // no fmt.Println. All output goes to opts.stdout (or is suppressed in dry-run).
 //
 // Step order (D-KN/D-NI/D-AI):
-//  1. Validate rig name.
+//  1. Validate rig name; refuse a duplicate name BEFORE any mutation (CR-02).
 //  2. Generate HMAC signing key; store in keychain (apply) or preview (dry-run).
 //  3. Migrate v1 keychain entries (non-destructive; dry-run skips Set).
 //  4. Derive ntfy topic; collision-check against existing rigs.
@@ -103,6 +104,13 @@ func enrollRig(ctx context.Context, opts enrollRigOpts) error {
 	out := opts.stdout
 	if out == nil {
 		out = os.Stdout
+	}
+	// CLI-17: all output goes through the Printer abstraction so --json never
+	// receives raw prose and tests can capture output. A nil printer wraps the
+	// supplied writer in a human printer (keeps the test seam unchanged).
+	p := opts.printer
+	if p == nil {
+		p = NewHumanPrinterTo(out, out)
 	}
 
 	if !rigNameRe.MatchString(opts.name) {
@@ -123,12 +131,20 @@ func enrollRig(ctx context.Context, opts enrollRigOpts) error {
 		}
 	}
 
-	rigSvc := fleet.RigService(opts.name)
-
-	if err := enrollRigGenerateKey(ctx, opts, rigSvc, out); err != nil {
+	// CR-02 / T-14-15: duplicate-name guard MUST run before any mutation.
+	// Generating a new HMAC key first would silently overwrite the existing
+	// rig's signing key in the keychain — exactly the disaster CR-02 documents —
+	// so the guard fires here, ahead of enrollRigGenerateKey.
+	if err := enrollRigCheckDuplicateName(cfg, opts.name); err != nil {
 		return err
 	}
-	if err := enrollRigMigrateV1(ctx, opts, rigSvc, out); err != nil {
+
+	rigSvc := fleet.RigService(opts.name)
+
+	if err := enrollRigGenerateKey(ctx, opts, rigSvc, p); err != nil {
+		return err
+	}
+	if err := enrollRigMigrateV1(ctx, opts, rigSvc, p); err != nil {
 		return err
 	}
 
@@ -138,23 +154,36 @@ func enrollRig(ctx context.Context, opts enrollRigOpts) error {
 	}
 
 	if opts.aclManager != nil {
-		if err := enforceRigToRigACLDeny(ctx, opts.aclManager, opts.apply, out); err != nil {
+		if err := enforceRigToRigACLDeny(ctx, opts.aclManager, opts.apply, p); err != nil {
 			return err
 		}
 	}
 
-	return enrollRigWriteConfig(opts, cfg, topic, out)
+	return enrollRigWriteConfig(opts, cfg, topic, p)
+}
+
+// enrollRigCheckDuplicateName refuses re-enrollment of an existing rig name
+// (CR-02, T-14-15). It fails unconditionally — both dry-run and apply must
+// surface this error so the operator knows the name is already enrolled before
+// any mutations occur.
+func enrollRigCheckDuplicateName(cfg *config.Config, name string) error {
+	for _, existing := range cfg.Rigs {
+		if existing.Name == name {
+			return fmt.Errorf("enroll rig: rig %q is already enrolled; use a unique name or remove the existing entry first (re-enrolling silently destroys the HMAC key)", name)
+		}
+	}
+	return nil
 }
 
 // enrollRigGenerateKey generates the HMAC signing key and stores it (or previews).
 // NEVER writes the key to yaml or audit body (T-14-09, D-KN-01).
-func enrollRigGenerateKey(ctx context.Context, opts enrollRigOpts, rigSvc string, out io.Writer) error {
+func enrollRigGenerateKey(ctx context.Context, opts enrollRigOpts, rigSvc string, p Printer) error {
 	hexKey, err := fleet.GenerateSigningKey()
 	if err != nil {
 		return fmt.Errorf("enroll rig: key gen: %w", err)
 	}
 	if !opts.apply {
-		_, _ = fmt.Fprintf(out, "[dry-run] Would generate and store HMAC signing key for rig %q\n", opts.name)
+		printerInfo(p, fmt.Sprintf("[dry-run] Would generate and store HMAC signing key for rig %q", opts.name))
 		return nil
 	}
 	if opts.keychain == nil {
@@ -164,13 +193,15 @@ func enrollRigGenerateKey(ctx context.Context, opts enrollRigOpts, rigSvc string
 		return fmt.Errorf("enroll rig: store signing key: %w", err)
 	}
 	// Print the key ONCE with a one-time-warning box (mirror Tailnet Lock UX).
-	_, _ = fmt.Fprintf(out, "\n")
-	_, _ = fmt.Fprintf(out, "┌─────────────────────────────────────────────────────────────────┐\n")
-	_, _ = fmt.Fprintf(out, "│  ONE-TIME SECRET: HMAC signing key for rig %q\n", opts.name)
-	_, _ = fmt.Fprintf(out, "│  Store this in your password manager — it will not be shown again.\n")
-	_, _ = fmt.Fprintf(out, "│  %s\n", hexKey)
-	_, _ = fmt.Fprintf(out, "└─────────────────────────────────────────────────────────────────┘\n")
-	_, _ = fmt.Fprintf(out, "\n")
+	// Under --json the Printer emits each line as a {"msg": ...} record — the
+	// one-time secret still reaches the operator without corrupting the stream.
+	printerInfo(p, "")
+	printerInfo(p, "┌─────────────────────────────────────────────────────────────────┐")
+	printerInfo(p, fmt.Sprintf("│  ONE-TIME SECRET: HMAC signing key for rig %q", opts.name))
+	printerInfo(p, "│  Store this in your password manager — it will not be shown again.")
+	printerInfo(p, "│  "+hexKey)
+	printerInfo(p, "└─────────────────────────────────────────────────────────────────┘")
+	printerInfo(p, "")
 	return nil
 }
 
@@ -178,7 +209,7 @@ func enrollRigGenerateKey(ctx context.Context, opts enrollRigOpts, rigSvc string
 // Known v1 accounts under service="abysslink". Headscale/NetBird keys are
 // separate service names and must NOT be migrated here. Non-destructive: v1 entries
 // remain accessible after migration. Dry-run previews without calling Set (Pitfall 4).
-func enrollRigMigrateV1(ctx context.Context, opts enrollRigOpts, rigSvc string, out io.Writer) error {
+func enrollRigMigrateV1(ctx context.Context, opts enrollRigOpts, rigSvc string, p Printer) error {
 	if opts.keychain == nil {
 		return nil
 	}
@@ -192,17 +223,21 @@ func enrollRigMigrateV1(ctx context.Context, opts enrollRigOpts, rigSvc string, 
 				return fmt.Errorf("enroll rig: migrate keychain entry %q: %w", acct, setErr)
 			}
 		} else {
-			_, _ = fmt.Fprintf(out, "[dry-run] Would migrate keychain entry abysslink/%s → %s/%s\n", acct, rigSvc, acct)
+			printerInfo(p, fmt.Sprintf("[dry-run] Would migrate keychain entry abysslink/%s → %s/%s", acct, rigSvc, acct))
 		}
 	}
 	return nil
 }
 
 // enrollRigDeriveTopic derives the ntfy topic and checks for collisions (SC-1, D-NI-02).
+//
+// The random suffix is 16 bytes (32 hex chars, matching GenPassword's entropy):
+// when ntfy.sh is the delivery target the topic IS the credential, and a 4-byte
+// (2^32) suffix over a guessable rig name is brute-forceable.
 func enrollRigDeriveTopic(opts enrollRigOpts, cfg *config.Config) (string, error) {
 	topic := opts.overrideTopic
 	if topic == "" {
-		suffix := make([]byte, 4)
+		suffix := make([]byte, 16)
 		if _, err := rand.Read(suffix); err != nil {
 			return "", fmt.Errorf("enroll rig: topic suffix: %w", err)
 		}
@@ -210,7 +245,7 @@ func enrollRigDeriveTopic(opts enrollRigOpts, cfg *config.Config) (string, error
 	}
 	for _, existing := range cfg.Rigs {
 		if existing.NtfyTopic == topic {
-			return "", fmt.Errorf("enroll rig: ntfy topic %q already used by rig %q (SC-1, D-NI-02); choose a unique name or override --ntfy-topic", topic, existing.Name)
+			return "", fmt.Errorf("enroll rig: ntfy topic %q already used by rig %q (SC-1, D-NI-02); re-enroll the conflicting rig to derive a fresh topic", topic, existing.Name)
 		}
 	}
 	return topic, nil
@@ -219,14 +254,12 @@ func enrollRigDeriveTopic(opts enrollRigOpts, cfg *config.Config) (string, error
 // enrollRigWriteConfig appends the RigConfig and persists via config.Write (audit).
 // Refuses re-enrollment of an existing rig name (CR-02: silent duplicate creation
 // causes mr-key-uniqueness FATAL and silently destroys the existing HMAC key).
-func enrollRigWriteConfig(opts enrollRigOpts, cfg *config.Config, topic string, out io.Writer) error {
-	// Guard against duplicate-name enrollment (CR-02, T-14-15).
-	// Fail unconditionally — both dry-run and apply must surface this error so
-	// the operator knows the name is already enrolled before any mutations occur.
-	for _, existing := range cfg.Rigs {
-		if existing.Name == opts.name {
-			return fmt.Errorf("enroll rig: rig %q is already enrolled; use a unique name or remove the existing entry first (re-enrolling silently destroys the HMAC key)", opts.name)
-		}
+func enrollRigWriteConfig(opts enrollRigOpts, cfg *config.Config, topic string, p Printer) error {
+	// Defense in depth: the duplicate-name guard already ran at the TOP of
+	// enrollRig (before key generation — CR-02); re-assert here so a future
+	// direct caller of this helper cannot append a duplicate.
+	if err := enrollRigCheckDuplicateName(cfg, opts.name); err != nil {
+		return err
 	}
 
 	hostname := opts.hostname
@@ -256,10 +289,10 @@ func enrollRigWriteConfig(opts enrollRigOpts, cfg *config.Config, topic string, 
 		if err := config.Write(opts.cfgPath, cfg); err != nil {
 			return fmt.Errorf("enroll rig: write config: %w", err)
 		}
-		_, _ = fmt.Fprintf(out, "Enrolled rig %q (topic=%s, backend=%s)\n", opts.name, topic, backendType)
+		printerInfo(p, fmt.Sprintf("Enrolled rig %q (topic=%s, backend=%s)", opts.name, topic, backendType))
 	} else {
-		_, _ = fmt.Fprintf(out, "[dry-run] Would enroll rig %q (topic=%s, backend=%s, hostname=%s)\n",
-			opts.name, topic, backendType, hostname)
+		printerInfo(p, fmt.Sprintf("[dry-run] Would enroll rig %q (topic=%s, backend=%s, hostname=%s)",
+			opts.name, topic, backendType, hostname))
 	}
 	return nil
 }
@@ -269,7 +302,7 @@ func enrollRigWriteConfig(opts enrollRigOpts, cfg *config.Config, topic string, 
 //  2. Assert no tag:laptop→tag:laptop (or reverse) grant exists.
 //  3. SetACL to persist (forces a validate-after-push round-trip).
 //  4. GetACL again to confirm read-back shows no rig↔rig allow path (Phase 13 SC-3).
-func enforceRigToRigACLDeny(ctx context.Context, mgr aclManagerFace, apply bool, out io.Writer) error {
+func enforceRigToRigACLDeny(ctx context.Context, mgr aclManagerFace, apply bool, p Printer) error {
 	// Read current ACL.
 	raw, etag, err := mgr.GetACL(ctx)
 	if err != nil {
@@ -295,9 +328,9 @@ func enforceRigToRigACLDeny(ctx context.Context, mgr aclManagerFace, apply bool,
 		if err := assertNoRigRigGrant(raw2); err != nil {
 			return fmt.Errorf("enroll rig: ACL validate-after-push failed: %w", err)
 		}
-		_, _ = fmt.Fprintf(out, "ACL isolation verified: no tag:laptop↔tag:laptop grant found (absence-of-grant, SC-3)\n")
+		printerInfo(p, "ACL isolation verified: no tag:laptop↔tag:laptop grant found (absence-of-grant, SC-3)")
 	} else {
-		_, _ = fmt.Fprintf(out, "[dry-run] Would verify ACL: no tag:laptop↔tag:laptop grant (absence-of-grant)\n")
+		printerInfo(p, "[dry-run] Would verify ACL: no tag:laptop↔tag:laptop grant (absence-of-grant)")
 	}
 
 	return nil
@@ -411,6 +444,7 @@ func newEnrollCmd() *cobra.Command {
 				hostname:    hostname,
 				backendType: cc.cfg.Backend.Type,
 				stdout:      cmd.OutOrStdout(),
+				printer:     p, // CLI-17: --json gets structured records, not raw prose
 			})
 		},
 	}
@@ -568,8 +602,10 @@ func enrollWithAdminKey(ctx context.Context, p Printer, out io.Writer, jsonOut b
 			}
 		}
 	}
+	// CLI: a join-poll timeout must exit non-zero — automation believing the
+	// enrollment succeeded would skip the manual follow-up entirely.
 	printerInfo(p, styleWarn.Render("Timed out waiting for the phone. Re-run `abysslink doctor` once it has joined."))
-	return nil
+	return fmt.Errorf("timed out waiting for the phone to join the tailnet after 2 minutes — scan the auth-key QR and re-run `abysslink doctor` once it has joined")
 }
 
 // printNtfyQR shows a QR for the ntfy subscription URL when the tailnet IP is

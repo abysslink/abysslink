@@ -38,8 +38,16 @@ import (
 // This function is wired into the doctor RunE at cmd_doctor.go (its findings are
 // appended to the doctor finding set there). It is also unit-tested directly.
 //
+// Severity contract (review W7): the structural advisories below (wol-apply-gate,
+// atuin-bind, asciinema-rec-warning) are unconditional reminders that fire
+// whenever the module is enabled — they probe nothing and detect no actual
+// misconfiguration. They are SeverityWarning so a perfectly healthy rig with an
+// optional module enabled does not permanently exit 2 ("system is not safe")
+// from doctor/CI/--strict runs. FATAL is reserved for probed, genuinely unsafe
+// states.
+//
 // WoL/upsnap findings (emitted only when cfg.Modules.Upsnap.Enabled):
-//   - wol-apply-gate (FATAL): structural advisory that every WoL send is audited
+//   - wol-apply-gate (WARN): structural advisory that every WoL send is audited
 //     and gated behind --apply; `abysslink wol <rig>` without --apply must send
 //     zero UDP packets (HARD FLOOR, T-21-01-01).
 //   - upsnap-bind (WARN): if an UpSnap HTTP service is running, it must bind to
@@ -48,7 +56,7 @@ import (
 //     UpSnap HTTP interface to the public internet.
 //
 // atuin findings (emitted only when cfg.Modules.Atuin.Enabled):
-//   - atuin-bind (FATAL): sync_address must stay local-only ("") and never point
+//   - atuin-bind (WARN): sync_address must stay local-only ("") and never point
 //     at a public cloud endpoint (T-21-02-02).
 //   - atuin-key-backed-up (WARN): the sync key must be backed up in a password
 //     manager; the check only os.Stats the key path, never reads its contents.
@@ -60,7 +68,7 @@ import (
 //     Linux kernels < 5.13 — the sandbox module is a no-op there (MOD3-03).
 //
 // asciinema findings (emitted only when cfg.Modules.Asciinema.Enabled):
-//   - asciinema-rec-warning (FATAL): structural invariant that `abysslink
+//   - asciinema-rec-warning (WARN): structural invariant that `abysslink
 //     asciinema rec` requires an interactive TTY and shows a non-suppressible
 //     credential warning before any recording, with no bypass flag/env-var
 //     (T-21-02-01); enforced by TestAsciinemaRec_RequiresInteractiveTTY.
@@ -72,7 +80,7 @@ func mod3DoctorFindings(ctx context.Context, cfg *config.Config, _ shell.Runner)
 			modules.Finding{
 				Module:   "upsnap",
 				Check:    "wol-apply-gate",
-				Severity: modules.SeverityFatal,
+				Severity: modules.SeverityWarning,
 				Message:  "wol-apply-gate — WoL is enabled; every `abysslink wol --apply` send is audited and gated behind --apply; verify `abysslink wol <rig>` without --apply sends zero UDP packets",
 			},
 			modules.Finding{
@@ -95,7 +103,7 @@ func mod3DoctorFindings(ctx context.Context, cfg *config.Config, _ shell.Runner)
 			modules.Finding{
 				Module:   "atuin",
 				Check:    "atuin-bind",
-				Severity: modules.SeverityFatal,
+				Severity: modules.SeverityWarning,
 				Message:  `atuin-bind — atuin sync_address must not point to a public cloud endpoint; local-only mode is enforced by abysslink config (sync_address = "")`,
 			},
 			atuinKeyBackedUpFinding(),
@@ -111,7 +119,7 @@ func mod3DoctorFindings(ctx context.Context, cfg *config.Config, _ shell.Runner)
 			modules.Finding{
 				Module:   "asciinema",
 				Check:    "asciinema-rec-warning",
-				Severity: modules.SeverityFatal,
+				Severity: modules.SeverityWarning,
 				Message:  "asciinema-rec-warning — structural invariant: `abysslink asciinema rec` requires an interactive TTY and shows a non-suppressible credential warning before any recording; no bypass env-var or flag exists; verified by TestAsciinemaRec_RequiresInteractiveTTY",
 			},
 		)

@@ -17,6 +17,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -84,8 +86,29 @@ func (s *Server) watchFile(ctx context.Context, fw config.FileWatch) {
 	}
 }
 
-// scanFileFrom reads new lines from offset, notifies on matches, and returns the
-// new offset. A shrunk file (rotation/truncation) resets the offset to 0.
+// scanCompleteLines is a bufio.SplitFunc that emits ONLY newline-terminated
+// lines, INCLUDING the terminator, and never emits a trailing partial line —
+// even at EOF. The caller advances its file offset by the exact token length,
+// so the offset always lands on a line boundary (R2-W6): the old
+// `len(line)+1` accounting overshot by one byte on an unterminated final line
+// (and desynced on CRLF files), making the next poll read info.Size() < offset
+// and misdiagnose a rotation — re-scanning the whole file and re-notifying
+// every matching line on every poll until a newline arrived.
+func scanCompleteLines(data []byte, _ bool) (int, []byte, error) {
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		return i + 1, data[:i+1], nil
+	}
+	// No terminator yet: the writer may still be appending this line. Request
+	// more data; at EOF the scanner stops and the partial bytes are re-read
+	// from the same offset on the next poll (no token, no offset advance).
+	return 0, nil, nil
+}
+
+// scanFileFrom reads new COMPLETE lines from offset, notifies on matches, and
+// returns the new offset. Only newline-terminated lines are consumed, so the
+// returned offset is always a line boundary; a partially-written final line is
+// left for the next poll. A shrunk file (rotation/truncation) resets the
+// offset to 0.
 func (s *Server) scanFileFrom(ctx context.Context, path string, offset int64, re *regexp.Regexp, label string) int64 {
 	f, err := os.Open(path) //nolint:gosec // path is operator-configured
 	if err != nil {
@@ -104,9 +127,13 @@ func (s *Server) scanFileFrom(ctx context.Context, path string, offset int64, re
 	// NET-11: enlarge the scanner buffer past bufio's 64 KiB default so long
 	// log lines do not poison the watcher.
 	scanner.Buffer(make([]byte, 64*1024), maxScanLine)
+	scanner.Split(scanCompleteLines)
 	for scanner.Scan() {
-		line := scanner.Text()
-		offset += int64(len(line)) + 1
+		tok := scanner.Bytes() // includes the trailing '\n'
+		offset += int64(len(tok))
+		// Trim the LF and any CR (CRLF files) — terminator bytes are accounted
+		// for in the offset but never matched or notified.
+		line := strings.TrimRight(string(tok), "\r\n")
 		if !re.MatchString(line) {
 			continue
 		}

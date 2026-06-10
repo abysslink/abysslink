@@ -17,6 +17,9 @@ package eternalterminal
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -214,14 +217,73 @@ func TestApply_InstallsViaPlatform(t *testing.T) {
 }
 
 func TestApply_AlreadyInstalled_SkipsInstall(t *testing.T) {
-	// et --version succeeds — no install needed.
+	// BOTH binaries present — no install needed.
 	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "et version 6.4.9\n"}},
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "et version 6.4.9\n"}},       // et
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "etserver version 6.4.9\n"}}, // etserver
 	)
 	plat := &mockPlatform{}
 	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: plat})
 	err := m.Apply(context.Background())
 	require.NoError(t, err)
-	assert.Empty(t, plat.installed, "must not install when et is already present")
+	assert.Empty(t, plat.installed, "must not install when et AND etserver are already present")
 	require.Len(t, plat.services, 1)
+	assert.True(t, r.Done())
+}
+
+// TestApply_ServerMissing_StillInstalls is the W5b regression test: a present
+// client (`et`) with a missing server (`etserver`) must still trigger the
+// package install — the service Apply registers runs etserver.
+func TestApply_ServerMissing_StillInstalls(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "et version 6.4.9\n"}},  // et present
+		shell.Call{Result: shell.Result{ExitCode: 127, Stderr: "command not found"}}, // etserver missing
+	)
+	plat := &mockPlatform{}
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: plat})
+	require.NoError(t, m.Apply(context.Background()))
+	assert.Equal(t, []string{"eternal-terminal"}, plat.installed,
+		"missing etserver must trigger the package install even when et is present")
+	require.Len(t, plat.services, 1)
+	assert.True(t, r.Done())
+}
+
+// TestDetect_ServiceUnitPresent_NoWarning is the W5a regression test: Detect
+// must look for the USER-level unit Apply actually writes (etServiceLabel via
+// platform.ServiceInstall), not system unit paths Apply never touches. With
+// the unit present, the et_service_unit_installed warning must not fire.
+func TestDetect_ServiceUnitPresent_NoWarning(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	unitPath, err := etServiceUnitPath(runtime.GOOS)
+	require.NoError(t, err)
+	if unitPath == "" {
+		t.Skipf("unsupported GOOS %s", runtime.GOOS)
+	}
+	require.NoError(t, os.MkdirAll(filepath.Dir(unitPath), 0o750))
+	require.NoError(t, os.WriteFile(unitPath, []byte("unit"), 0o600))
+
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "et version 6.4.9\n"}},
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "etserver version 6.4.9\n"}},
+	)
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+	for _, f := range findings {
+		assert.NotEqual(t, "et_service_unit_installed", f.Check,
+			"unit written by Apply at %s must satisfy Detect", unitPath)
+	}
+}
+
+// TestVerify_ReturnsNil: Verify must not re-run Detect — runner.Doctor calls
+// both, and delegating would double every finding per doctor pass (W4/NET-18).
+func TestVerify_ReturnsNil(t *testing.T) {
+	r := shell.NewMockRunner() // Verify must not touch the runner
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	findings, err := m.Verify(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, findings)
+	assert.True(t, r.Done())
 }

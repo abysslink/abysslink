@@ -32,8 +32,13 @@ import (
 )
 
 // atuinConfig is the default config written when atuin is first set up.
-// sync_address is intentionally empty — local-only mode, no cloud sync.
+// sync_address is intentionally empty and auto_sync is off — local-only mode,
+// no cloud sync. secrets_filter keeps tokens/keys out of the recorded history
+// (defense in depth). Top-level keys MUST come before the first [section].
 const atuinConfig = `## atuin config — managed by abysslink
+auto_sync = false
+secrets_filter = true
+
 [sync]
 sync_address = ""
 
@@ -88,8 +93,7 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	cfgPath := atuinConfigPath()
 	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the module config path resolved internally, not user input
 	if err == nil {
-		content := string(data)
-		if strings.Contains(content, "api.atuin.sh") {
+		if configEnablesCloudSync(string(data)) {
 			findings = append(findings, modules.Finding{
 				Module:   m.Name(),
 				Check:    "no_cloud_sync",
@@ -100,6 +104,23 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	}
 
 	return findings, nil
+}
+
+// configEnablesCloudSync reports whether the atuin config actively points at
+// the public cloud server. Stock atuin configs ship with the default
+// `# sync_address = "https://api.atuin.sh"` commented out, so a naive
+// whole-file substring match would flag every default install forever (W8) —
+// only non-comment content counts. TOML comments run from an unquoted `#` to
+// end of line; "api.atuin.sh" can never legitimately contain `#`, so the
+// simple cut-at-# rule is safe here.
+func configEnablesCloudSync(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		code, _, _ := strings.Cut(line, "#")
+		if strings.Contains(code, "api.atuin.sh") {
+			return true
+		}
+	}
+	return false
 }
 
 // Plan computes the actions needed.
@@ -131,7 +152,10 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 		}
 	}
 
-	if len(actions) == 0 {
+	// Only promise a config write when the file is actually missing — Apply
+	// never overwrites a clean existing config, so an unconditional action
+	// here would be a dry-run preview of a change that never happens (W8 UX).
+	if _, err := os.Stat(atuinConfigPath()); os.IsNotExist(err) {
 		actions = append(actions, modules.Action{
 			Module:      m.Name(),
 			Description: "write atuin config (local-only, no cloud sync)",
@@ -160,18 +184,13 @@ func (m *Module) Apply(ctx context.Context) error {
 		return fmt.Errorf("atuin apply: mkdir config dir: %w", err)
 	}
 
-	// Only write the config if it doesn't already exist to avoid clobbering
-	// user customisations.
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		if m.audit == nil {
-			return fmt.Errorf("atuin apply: audit not available")
-		}
-		if err := m.audit.WriteFile(cfgPath, []byte(atuinConfig), 0o600, false); err != nil {
-			return fmt.Errorf("atuin apply: write config: %w", err)
-		}
-		slog.Info("atuin apply: wrote local-only config", "path", cfgPath)
-	} else {
-		slog.Debug("atuin apply: config already exists, not overwriting", "path", cfgPath)
+	// Write the default local-only config when none exists; when one exists,
+	// only touch it if it actively syncs with the public cloud — Detect flags
+	// that (no_cloud_sync) and Apply must converge it, not skip it forever
+	// (W8: planned action that never executed). User customisations in a
+	// clean config are never rewritten.
+	if err := m.ensureLocalOnlyConfig(cfgPath); err != nil {
+		return err
 	}
 
 	// Append the atuin shell-init line to the user's shell rc. This is an
@@ -182,6 +201,88 @@ func (m *Module) Apply(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// ensureLocalOnlyConfig writes the default local-only config when cfgPath does
+// not exist, and rewrites an existing config that actively points at the
+// public cloud (api.atuin.sh) so the no_cloud_sync finding converges (W8).
+// Both writes go through audit (backup + log entry).
+func (m *Module) ensureLocalOnlyConfig(cfgPath string) error {
+	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the module config path resolved internally, not user input
+	switch {
+	case os.IsNotExist(err):
+		if m.audit == nil {
+			return fmt.Errorf("atuin apply: audit not available")
+		}
+		if err := m.audit.WriteFile(cfgPath, []byte(atuinConfig), 0o600, false); err != nil {
+			return fmt.Errorf("atuin apply: write config: %w", err)
+		}
+		slog.Info("atuin apply: wrote local-only config", "path", cfgPath)
+	case err != nil:
+		return fmt.Errorf("atuin apply: read config: %w", err)
+	case configEnablesCloudSync(string(data)):
+		if m.audit == nil {
+			return fmt.Errorf("atuin apply: audit not available")
+		}
+		remediated := remediateCloudSync(string(data))
+		// Preserve the user's existing file mode (mirrors the shell-rc rule).
+		perm := os.FileMode(0o600)
+		if fi, statErr := os.Stat(cfgPath); statErr == nil {
+			perm = fi.Mode().Perm()
+		}
+		if err := m.audit.WriteFile(cfgPath, []byte(remediated), perm, false); err != nil {
+			return fmt.Errorf("atuin apply: rewrite config for local-only mode: %w", err)
+		}
+		slog.Info("atuin apply: disabled cloud sync in existing config (local-only mode)", "path", cfgPath)
+	default:
+		slog.Debug("atuin apply: config already exists and is local-only, not touching", "path", cfgPath)
+	}
+	return nil
+}
+
+// remediateCloudSync rewrites an atuin config that syncs with the public cloud
+// into local-only mode: every active sync_address is blanked, auto_sync is
+// forced off, and secrets_filter is forced on. All other lines — comments,
+// sections, user customisations — are preserved verbatim. Keys that need to be
+// added are PREPENDED (before the first [section]) because appending top-level
+// TOML keys at EOF would land them inside the last section.
+func remediateCloudSync(content string) string {
+	lines := strings.Split(content, "\n")
+	var sawAutoSync, sawSecretsFilter bool
+	for i, line := range lines {
+		switch tomlKey(line) {
+		case "sync_address":
+			lines[i] = `sync_address = "" # managed by abysslink — local-only mode`
+		case "auto_sync":
+			lines[i] = "auto_sync = false # managed by abysslink — local-only mode"
+			sawAutoSync = true
+		case "secrets_filter":
+			lines[i] = "secrets_filter = true # managed by abysslink"
+			sawSecretsFilter = true
+		}
+	}
+	var header []string
+	if !sawAutoSync {
+		header = append(header, "auto_sync = false # managed by abysslink — local-only mode")
+	}
+	if !sawSecretsFilter {
+		header = append(header, "secrets_filter = true # managed by abysslink")
+	}
+	if len(header) > 0 {
+		lines = append(header, lines...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// tomlKey extracts the bare key of a `key = value` TOML line, or "" for
+// comments, section headers, and anything else.
+func tomlKey(line string) string {
+	code, _, _ := strings.Cut(line, "#")
+	key, _, found := strings.Cut(code, "=")
+	if !found {
+		return ""
+	}
+	return strings.TrimSpace(key)
 }
 
 // appendShellInit ensures the atuin shell-init `eval` line is present in the

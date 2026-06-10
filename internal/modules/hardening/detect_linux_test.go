@@ -20,6 +20,7 @@ package hardening
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/modules"
@@ -179,4 +180,91 @@ func TestIsHomeEncrypted_HomeNotMounted(t *testing.T) {
 	}
 	// /home/alice is under / which is on an encrypted device.
 	assert.True(t, isHomeEncrypted("/home/alice", devices))
+}
+
+// TestIsHomeEncrypted_PlaintextHomeOnEncryptedRoot is the W5 regression test:
+// a LUKS root (/) plus a separate PLAINTEXT /home partition must FAIL the
+// encryption check — /home is where the user's data actually lives, and the
+// old any-covering-mount-is-crypt logic passed because "/" also covers $HOME.
+func TestIsHomeEncrypted_PlaintextHomeOnEncryptedRoot(t *testing.T) {
+	devices := []lsblkDevice{
+		{
+			Name: "sda",
+			Type: "disk",
+			Children: []lsblkDevice{
+				{
+					Name: "sda1",
+					Type: "crypt",
+					Children: []lsblkDevice{
+						{Name: "dm-0", Type: "lvm", MountPoint: "/"},
+					},
+				},
+				{
+					Name:       "sda2",
+					Type:       "part",
+					MountPoint: "/home", // plaintext — no crypt ancestor
+				},
+			},
+		},
+	}
+	assert.False(t, isHomeEncrypted("/home/alice", devices),
+		"plaintext /home must fail even when / is LUKS (W5 — longest mountpoint wins)")
+}
+
+// TestIsHomeEncrypted_EncryptedHomeOnPlaintextRoot is the inverse: plaintext
+// root, encrypted separate /home → pass. Also proves device ORDER does not
+// matter (the / mount is seen after /home here).
+func TestIsHomeEncrypted_EncryptedHomeOnPlaintextRoot(t *testing.T) {
+	devices := []lsblkDevice{
+		{
+			Name: "sda",
+			Type: "disk",
+			Children: []lsblkDevice{
+				{
+					Name: "sda2",
+					Type: "crypt",
+					Children: []lsblkDevice{
+						{Name: "dm-1", Type: "lvm", MountPoint: "/home"},
+					},
+				},
+				{Name: "sda1", Type: "part", MountPoint: "/"},
+			},
+		},
+	}
+	assert.True(t, isHomeEncrypted("/home/alice", devices),
+		"encrypted /home must pass regardless of the plaintext root")
+}
+
+// TestIsHomeEncrypted_DeepestMountWins covers nested covering mounts:
+// encrypted /, plaintext /home, encrypted /home/alice — the deepest mount
+// hosting $HOME decides.
+func TestIsHomeEncrypted_DeepestMountWins(t *testing.T) {
+	devices := []lsblkDevice{
+		{Name: "sda1", Type: "crypt", Children: []lsblkDevice{{Name: "dm-0", MountPoint: "/"}}},
+		{Name: "sda2", Type: "part", MountPoint: "/home"},
+		{Name: "sda3", Type: "crypt", Children: []lsblkDevice{{Name: "dm-1", MountPoint: "/home/alice"}}},
+	}
+	assert.True(t, isHomeEncrypted("/home/alice", devices),
+		"the deepest covering mount (/home/alice, crypt) must win")
+	assert.False(t, isHomeEncrypted("/home/bob", devices),
+		"/home/bob lives on the plaintext /home partition")
+}
+
+// TestCheckLUKS_FatalOnPlaintextHomePartition runs the W5 scenario through the
+// full checkLUKS path with realistic lsblk JSON.
+func TestCheckLUKS_FatalOnPlaintextHomePartition(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	// Build a fixture in which "/" is crypt-backed and home's own partition is not.
+	jsonOut := fmt.Sprintf(`{"blockdevices":[{"name":"sda","type":"disk","children":[`+
+		`{"name":"sda1","type":"crypt","children":[{"name":"dm-0","type":"lvm","mountpoint":"/"}]},`+
+		`{"name":"sda2","type":"part","mountpoint":%q}]}]}`, home)
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: jsonOut}})
+	m := &Module{runner: r}
+	findings, err := checkLUKS(context.Background(), m)
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+	assert.Equal(t, modules.SeverityFatal, findings[0].Severity,
+		"plaintext home partition under an encrypted root must be FATAL (W5)")
 }

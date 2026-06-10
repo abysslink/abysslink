@@ -136,3 +136,14 @@ func TestConfirmBlast_CancelledContext(t *testing.T) {
 	_, err := tui.ConfirmBlast(ctx, "Will install mosh.", 1, false)
 	require.Error(t, err)
 }
+
+// ConfirmBlast in a non-interactive session (stdin is not a TTY — the exact
+// state under go test) without --yes must fail with a clean error that names
+// --yes, never auto-approve and never surface a raw huh/bubbletea failure (U1).
+func TestConfirmBlast_NonTTYWithoutYes(t *testing.T) {
+	ok, err := tui.ConfirmBlast(context.Background(), "sudo required for: ssh", 3, false)
+	require.Error(t, err, "non-TTY without --yes must error, not hang or auto-approve")
+	assert.False(t, ok, "a mutation must never be approved by the absence of a terminal")
+	assert.Contains(t, err.Error(), "--yes", "the error must tell the user how to consent")
+	assert.Contains(t, err.Error(), "non-interactive")
+}

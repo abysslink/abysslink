@@ -156,12 +156,18 @@ func ConfirmTyped(ctx context.Context, prompt, phrase string, yes bool) (bool, e
 
 // ConfirmBlast renders a change-count summary and asks the user to approve
 // before a high-blast-radius operation proceeds. If yes is true, it returns
-// true immediately. Otherwise it shows the summary lines and
+// true immediately. When stdin is not a TTY (pipe, CI) and yes is false, it
+// fails with a clear error naming --yes instead of letting huh surface a raw
+// terminal failure (U1) — a mutation must never be auto-approved by the mere
+// absence of a terminal. Otherwise it shows the summary lines and
 // "Apply N changes? This will modify your system." in a y/N huh.NewConfirm
 // and returns the user's choice.
 func ConfirmBlast(ctx context.Context, summary string, count int, yes bool) (bool, error) {
 	if yes {
 		return true, nil
+	}
+	if !stdinIsTTY() {
+		return false, fmt.Errorf("non-interactive session: cannot confirm applying %d change(s) — re-run with --yes to approve", count)
 	}
 	var result bool
 	title := fmt.Sprintf("Apply %d change(s)? This will modify your system.", count)

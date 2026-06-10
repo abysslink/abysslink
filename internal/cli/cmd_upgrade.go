@@ -42,14 +42,33 @@ const (
 	upgradeRepo           = "abysslink/abysslink"
 	upgradeOIDCIssuer     = "https://token.actions.githubusercontent.com"
 	upgradeIdentityRegexp = `^https://github\.com/abysslink/abysslink/\.github/workflows/release\.yml@refs/tags/.*$`
+
+	// upgradeArtifactCeiling bounds downloaded/extracted release artifacts
+	// (200 MiB). Reads use an N+1 sentinel — never a silent truncation.
+	upgradeArtifactCeiling int64 = 200 << 20
 )
+
+// upgradeExitUpdateAvailable is the `upgrade --check` exit code signalling that
+// a newer release exists (convention: softwareupdate / gh-style distinct code
+// so cron/scripts can branch). 0 = up to date, 1 = error, 3 = update available.
+const upgradeExitUpdateAvailable = 3
 
 func newUpgradeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Upgrade abysslink to the latest release",
+		Long: `Check GitHub for the latest release and (with --apply) download, verify the
+cosign signature + SHA-256 checksum, and atomically self-replace the binary.
+
+Exit codes with --check:
+  0  — already up to date (or the installed build is newer than the latest release).
+  1  — the check itself failed (network, API error).
+  3  — a newer release is available.`,
 		Example: `  # Preview the upgrade (dry-run — no changes)
   abysslink upgrade
+
+  # Script-friendly check: exit 3 when a newer release is available
+  abysslink upgrade --check
 
   # Download and install the latest release
   abysslink upgrade --apply`,
@@ -60,6 +79,7 @@ func newUpgradeCmd() *cobra.Command {
 
 			checkOnly, _ := c.Flags().GetBool("check")
 			apply, _ := c.Flags().GetBool("apply")
+			force, _ := c.Flags().GetBool("force")
 			p := newPrinter(c)
 
 			latest, err := latestReleaseTag(c.Context())
@@ -67,14 +87,33 @@ func newUpgradeCmd() *cobra.Command {
 				return fmt.Errorf("upgrade: check latest release: %w", err)
 			}
 			printerInfo(p, fmt.Sprintf("Installed: %s   Latest: %s", version, latest))
-			if normalizeTag(latest) == normalizeTag(version) {
+
+			// Semver comparison, not string equality: a build NEWER than the
+			// latest release must not be advertised (and silently downgraded)
+			// as "a newer release is available".
+			rel := compareUpgradeVersions(version, latest)
+			switch rel {
+			case upgradeUpToDate:
 				printerInfo(p, styleSuccess.Render("Already up to date."))
 				return nil
+			case upgradeInstalledNewer:
+				printerInfo(p, styleWarn.Render("Installed version is NEWER than the latest release."))
+				if checkOnly {
+					return nil // not "update available" — exit 0
+				}
+				if !force {
+					return fmt.Errorf("upgrade: installed %s is newer than latest release %s — refusing downgrade (pass --force to downgrade anyway)", version, latest)
+				}
+				printerInfo(p, styleWarn.Render("--force: downgrading to "+latest+"."))
+			case upgradeNewerAvailable:
+				printerInfo(p, styleWarn.Render("A newer release is available."))
+			case upgradeUnknownInstalled:
+				printerInfo(p, styleWarn.Render("Installed version is not a release build; latest release is "+latest+"."))
 			}
-			printerInfo(p, styleWarn.Render("A newer release is available."))
 
 			if checkOnly {
-				return nil
+				// Distinct exit code so cron/scripts can branch (documented in Long).
+				return &exitError{code: upgradeExitUpdateAvailable}
 			}
 
 			if !apply {
@@ -87,12 +126,48 @@ func newUpgradeCmd() *cobra.Command {
 			}
 
 			// --apply path: download → verify cosign → verify checksum → self-replace.
-			return applyUpgrade(c.Context(), p, &shell.ExecRunner{}, latest)
+			// newRunner() keeps the exec-gate decoration (D-38) on the cosign call.
+			return applyUpgrade(c.Context(), p, newRunner(), latest)
 		},
 	}
-	cmd.Flags().Bool("check", false, "Only check for a newer version, do not upgrade")
+	cmd.Flags().Bool("check", false, "Only check for a newer version, do not upgrade (exit 3 when an update is available)")
 	cmd.Flags().Bool("apply", false, "Download, verify signature, and self-replace the binary")
+	cmd.Flags().Bool("force", false, "Allow installing the latest release even when the installed build is newer (downgrade)")
 	return cmd
+}
+
+// Upgrade version relations as computed by compareUpgradeVersions.
+const (
+	upgradeUpToDate         = iota // installed == latest
+	upgradeNewerAvailable          // installed < latest
+	upgradeInstalledNewer          // installed > latest (downgrade territory)
+	upgradeUnknownInstalled        // installed is not a semver (dev/unknown builds)
+)
+
+// compareUpgradeVersions classifies the installed/latest version relationship
+// using the semver comparison shared with the headscale/netbird upgrade paths.
+// A non-semver installed version (dev, unknown, commit hashes) cannot be
+// ordered, so it is classified separately — those builds may install the
+// latest release but are never told "already up to date".
+func compareUpgradeVersions(installed, latest string) int {
+	iv := normalizeTag(installed)
+	lv := normalizeTag(latest)
+	if iv == lv {
+		return upgradeUpToDate
+	}
+	if semverParts(iv) == [3]int{} {
+		// Not parseable as semver (e.g. "dev"): treat as unknown.
+		return upgradeUnknownInstalled
+	}
+	if semverLT(iv, lv) {
+		return upgradeNewerAvailable
+	}
+	if semverLT(lv, iv) {
+		return upgradeInstalledNewer
+	}
+	// Same major.minor.patch but different raw tags (pre-release suffix):
+	// treat as up to date rather than flapping.
+	return upgradeUpToDate
 }
 
 // applyUpgrade downloads the release for the current OS/arch, verifies its
@@ -269,12 +344,19 @@ func extractBinary(tarPath, outDir string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// N+1 sentinel: a bare LimitReader would silently TRUNCATE an oversize
+		// binary AFTER checksum verification — installing a truncated "verified"
+		// binary. Copy one byte past the cap and fail when it arrives.
 		// nosemgrep: go.lang.security.decompression_bomb.potential-dos-via-decompression-bomb
-		if _, err := io.Copy(out, io.LimitReader(tr, 200<<20)); err != nil { //nolint:gosec // G110: io.LimitReader caps extraction at 200MiB — decompression bomb mitigated
+		n, err := io.Copy(out, io.LimitReader(tr, upgradeArtifactCeiling+1)) //nolint:gosec // G110: bounded copy with N+1 overflow sentinel — decompression bomb mitigated
+		if err != nil {
 			_ = out.Close()
 			return "", err
 		}
 		_ = out.Close()
+		if n > upgradeArtifactCeiling {
+			return "", fmt.Errorf("extracted binary exceeds %d byte ceiling — refusing truncated install", int64(upgradeArtifactCeiling))
+		}
 		return outPath, nil
 	}
 	return "", fmt.Errorf("abysslink binary not found in archive")
@@ -331,8 +413,17 @@ func downloadFile(ctx context.Context, url, dest string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	_, err = io.Copy(f, io.LimitReader(resp.Body, 200<<20)) //nolint:gosec // G110: io.LimitReader caps download at 200MiB — decompression/oversize bomb mitigated
-	return err
+	// N+1 sentinel: never silently truncate at the cap (a truncated download
+	// would otherwise surface only as a confusing checksum mismatch — or not at
+	// all for callers without a checksum step).
+	n, err := io.Copy(f, io.LimitReader(resp.Body, upgradeArtifactCeiling+1)) //nolint:gosec // G110: bounded copy with N+1 overflow sentinel — oversize bomb mitigated
+	if err != nil {
+		return err
+	}
+	if n > upgradeArtifactCeiling {
+		return fmt.Errorf("download %s exceeds %d byte ceiling — refusing truncated artifact", url, int64(upgradeArtifactCeiling))
+	}
+	return nil
 }
 
 // latestReleaseTag returns the tag_name of the latest GitHub release.

@@ -37,7 +37,14 @@ const (
 	serverConfigPath       = ".config/ntfy/server.yml"
 	dockerServerConfigPath = ".config/ntfy/server-docker.yml"
 	dockerContainerName    = "abysslink-ntfy"
-	dockerImage            = "binwiederhier/ntfy"
+	// stateDirPath is the auth-file parent directory (relative to $HOME) shared
+	// by the native and Docker paths. The native server.yml points its auth-file
+	// here, so it MUST exist before `ntfy serve` starts.
+	stateDirPath = ".local/state/abysslink/ntfy"
+	// dockerImage is pinned by manifest-list digest (supply chain): a floating
+	// `latest` tag could silently swap the image under us. The tag is kept for
+	// human readability; the digest is authoritative for docker pull/run.
+	dockerImage = "binwiederhier/ntfy:v2.24@sha256:f8a9b104313b87cc24ae4f775f39e6328205b57dff6ede3eaf098a91e5d79f59"
 )
 
 // Module implements the ntfy module.
@@ -241,6 +248,13 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 
 	var actions []modules.Action
 	for _, f := range findings {
+		// SeverityOK findings are the healthy tri-state signal (D-03) — they
+		// confirm a check ran and passed. Planning remediation for them would
+		// schedule a config rewrite forever on a correctly configured ntfy
+		// (non-convergent plan).
+		if f.Severity == modules.SeverityOK {
+			continue
+		}
 		switch f.Check {
 		case "installed":
 			desc := "install ntfy"
@@ -347,12 +361,19 @@ func (m *Module) configureNative(ctx context.Context, tailnetIP, home string) er
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		return fmt.Errorf("ntfy apply: mkdir %s: %w", filepath.Dir(cfgPath), err)
 	}
+	// The generated server.yml points auth-file at the state dir; ntfy will not
+	// create the parent itself, so a missing dir breaks `ntfy user add` and the
+	// server's auth DB on first run.
+	stateDir := filepath.Join(home, stateDirPath)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return fmt.Errorf("ntfy apply: mkdir %s: %w", stateDir, err)
+	}
 	data := m.generateServerConfig(tailnetIP, home)
 	slog.Info("ntfy apply: writing server config", "path", cfgPath)
 	if err := m.audit.WriteFile(cfgPath, data, 0o600, false); err != nil {
 		return fmt.Errorf("ntfy apply: write config: %w", err)
 	}
-	if err := m.ensureAdminUser(ctx); err != nil {
+	if err := m.ensureAdminUser(ctx, cfgPath); err != nil {
 		return fmt.Errorf("ntfy apply: provision admin user: %w", err)
 	}
 	ntfyBin := m.ntfyBinPath()
@@ -380,12 +401,18 @@ func (m *Module) applyDocker(ctx context.Context, tailnetIP, home string) error 
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		return fmt.Errorf("mkdir config dir: %w", err)
 	}
-	dataDir := filepath.Join(home, ".local", "state", "abysslink", "ntfy")
+	dataDir := filepath.Join(home, stateDirPath)
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir data dir: %w", err)
 	}
 	// Use MagicDNS hostname for base-url so the phone URL survives IP changes.
+	// Guard the empty case (status ok-but-empty AND the IP fallback failed):
+	// an empty hostname would render a useless `base-url: "http://:2586"`.
+	// tailnetIP is always non-empty here (Apply resolved it before calling us).
 	hostname := m.getTailnetHostname(ctx)
+	if hostname == "" {
+		hostname = tailnetIP
+	}
 	dockerCfg := fmt.Sprintf(`# ntfy Docker config — managed by abysslink
 listen-http: "0.0.0.0:80"
 base-url: "http://%s:%s"
@@ -517,14 +544,20 @@ behind-proxy: false
 }
 
 // ensureAdminUser provisions the ntfy admin account for native installs.
-func (m *Module) ensureAdminUser(ctx context.Context) error {
+//
+// Both user commands MUST carry `--config cfgPath`: without it the ntfy CLI
+// reads its default /etc/ntfy/server.yml, so the admin user would land in the
+// wrong auth DB (or the command would fail outright) while the abysslink
+// server — launched with `--config ~/.config/ntfy/server.yml` — keeps serving
+// an empty user.db against auth-default-access deny-all.
+func (m *Module) ensureAdminUser(ctx context.Context, cfgPath string) error {
 	pw, err := m.getOrCreateAdminPassword(ctx)
 	if err != nil {
 		return err
 	}
 	ntfyBin := m.ntfyBinPath()
 	res, err := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
-		ntfyBin, "user", "add", "--role=admin", "admin")
+		ntfyBin, "user", "add", "--config", cfgPath, "--role=admin", "admin")
 	if err != nil {
 		return fmt.Errorf("ntfy user add: %w", err)
 	}
@@ -535,7 +568,7 @@ func (m *Module) ensureAdminUser(ctx context.Context) error {
 		// Admin already exists: force the server-side password to match the
 		// keychain so user.db and keychain cannot diverge (NET-12).
 		cres, cerr := m.runner.RunWithStdin(ctx, strings.NewReader(pw+"\n"+pw+"\n"),
-			ntfyBin, "user", "change-pass", "admin")
+			ntfyBin, "user", "change-pass", "--config", cfgPath, "admin")
 		if cerr != nil {
 			return fmt.Errorf("ntfy user change-pass: %w", cerr)
 		}
@@ -555,7 +588,13 @@ func (m *Module) getTailnetIP(ctx context.Context) (string, error) {
 	if res.ExitCode != 0 {
 		return "", fmt.Errorf("tailscale ip exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
+	// `tailscale ip --4` can print multiple addresses, one per line. Take only
+	// the first: TrimSpace alone would leave an embedded newline that corrupts
+	// the generated server.yml listen/base-url lines.
 	ip := strings.TrimSpace(res.Stdout)
+	if i := strings.IndexByte(ip, '\n'); i >= 0 {
+		ip = strings.TrimSpace(ip[:i])
+	}
 	if ip == "" {
 		return "", fmt.Errorf("tailscale ip returned empty output")
 	}

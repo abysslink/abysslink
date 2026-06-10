@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -33,10 +34,16 @@ import (
 
 // verifyResult is the JSON record emitted by `abysslink verify --json`.
 type verifyResult struct {
-	BundleOK bool   `json:"bundle_ok"`
-	SLSAOK   bool   `json:"slsa_ok"`
-	Version  string `json:"version"`
-	Commit   string `json:"commit"`
+	BundleOK bool `json:"bundle_ok"`
+	// BinaryChecked is true when the running executable was hashed against the
+	// release binary extracted from the signed-manifest-verified tarball. It is
+	// false in --bundle override (offline/test) mode, where no release
+	// artifacts are downloaded.
+	BinaryChecked bool   `json:"binary_checked"`
+	BinaryOK      bool   `json:"binary_ok"`
+	SLSAOK        bool   `json:"slsa_ok"`
+	Version       string `json:"version"`
+	Commit        string `json:"commit"`
 }
 
 // verifyCosignBundle verifies a cosign v3 bundle file against a target artifact.
@@ -68,9 +75,14 @@ func newVerifyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Verify the installed binary's cosign signature and SLSA provenance",
-		Long: `Fetch the cosign v3 bundle and checksum manifest for this release and
-verify them offline (no Rekor dependency). Optionally confirms that a SLSA
-provenance attestation is published for the release artifacts.`,
+		Long: `Fetch the cosign v3 bundle and checksum manifest for this release, verify
+them offline (no Rekor dependency), then hash the RUNNING executable against
+the released binary extracted from the checksum-verified tarball — a locally
+tampered binary fails verification. Optionally confirms that a SLSA provenance
+attestation is published for the release artifacts.
+
+With --bundle (offline/test mode) only the manifest signature is verified; the
+binary self-check is skipped because no release artifacts are downloaded.`,
 		Example: `  # Verify the running binary's release signature
   abysslink verify
 
@@ -82,7 +94,9 @@ provenance attestation is published for the release artifacts.`,
 			bundleOverride, _ := c.Flags().GetString("bundle")
 			verOverride, _ := c.Flags().GetString("version")
 			p := newPrinter(c)
-			return runVerify(c.Context(), p, &shell.ExecRunner{}, verifyOpts{
+			// newRunner() keeps the exec-gate decoration (D-38) on the cosign
+			// invocation — never a bare ExecRunner.
+			return runVerify(c.Context(), p, newRunner(), verifyOpts{
 				jsonOut:        jsonOut,
 				bundleOverride: bundleOverride,
 				version:        verOverride,
@@ -140,34 +154,94 @@ func runVerify(ctx context.Context, p Printer, runner shell.Runner, opts verifyO
 		bundleOK = false
 	}
 
-	// Informational SLSA provenance presence check (best-effort, never fatal).
-	// Skipped when a local bundle override is supplied (offline / test mode):
-	// the attestations API lookup requires network and is purely advisory.
-	slsaOK := false
-	if opts.bundleOverride == "" {
-		slsaOK = slsaProvenanceExists(ctx, checksumPath)
+	// Self-verification: hash the RUNNING executable against the release binary
+	// from the signed-manifest-verified tarball. Without this step a locally
+	// tampered binary would pass `abysslink verify` on the strength of the
+	// manifest signature alone. Skipped in --bundle override (offline/test)
+	// mode and when the bundle itself failed (an unverified manifest proves
+	// nothing about the binary).
+	binaryChecked, binaryOK := false, false
+	var binErr error
+	if bundleOK && opts.bundleOverride == "" {
+		binaryChecked = true
+		binaryOK, binErr = verifySelfBinary(ctx, tmpDir, ver, checksumPath)
 	}
 
 	res := verifyResult{
-		BundleOK: bundleOK,
-		SLSAOK:   slsaOK,
-		Version:  ver,
-		Commit:   commit,
+		BundleOK:      bundleOK,
+		BinaryChecked: binaryChecked,
+		BinaryOK:      binaryOK,
+		SLSAOK:        false,
+		Version:       ver,
+		Commit:        commit,
 	}
 
+	// Informational SLSA provenance presence check (best-effort, never fatal).
+	// Skipped when a local bundle override is supplied (offline / test mode):
+	// the attestations API lookup requires network and is purely advisory.
+	if opts.bundleOverride == "" {
+		res.SLSAOK = slsaProvenanceExists(ctx, checksumPath)
+	}
+
+	failed := !bundleOK || (binaryChecked && !binaryOK)
 	if opts.jsonOut {
 		p.PrintJSON(res)
-		if !bundleOK {
+		if failed {
 			return &exitError{code: exitCodeError}
 		}
 		return nil
 	}
 
-	emitVerifyHuman(p, res, verr)
-	if !bundleOK {
+	emitVerifyHuman(p, res, verr, binErr)
+	if failed {
 		return &exitError{code: exitCodeError}
 	}
 	return nil
+}
+
+// verifySelfBinary downloads the release tarball for this OS/arch, verifies its
+// SHA-256 against the (already cosign-verified) checksum manifest, extracts the
+// abysslink binary, and compares its SHA-256 with the running executable's.
+// Returns (true, nil) only when the running binary is byte-identical to the
+// released one.
+func verifySelfBinary(ctx context.Context, tmpDir, ver, checksumPath string) (bool, error) {
+	selfPath, err := os.Executable()
+	if err != nil {
+		return false, fmt.Errorf("resolve running executable: %w", err)
+	}
+	selfPath, err = filepath.EvalSymlinks(selfPath)
+	if err != nil {
+		return false, fmt.Errorf("resolve symlinks: %w", err)
+	}
+
+	tarball := fmt.Sprintf("abysslink_%s_%s_%s.tar.gz", ver, runtime.GOOS, runtime.GOARCH)
+	baseURL := fmt.Sprintf("https://github.com/%s/releases/download/v%s", upgradeRepo, ver)
+	tarPath := filepath.Join(tmpDir, tarball)
+	if err := downloadFile(ctx, baseURL+"/"+tarball, tarPath); err != nil {
+		return false, fmt.Errorf("download release tarball: %w", err)
+	}
+	// The tarball hash MUST match the signed manifest before its contents are
+	// trusted as the comparison baseline.
+	if err := verifyChecksum(checksumPath, tarball, tarPath); err != nil {
+		return false, fmt.Errorf("tarball checksum: %w", err)
+	}
+	released, err := extractBinary(tarPath, tmpDir)
+	if err != nil {
+		return false, fmt.Errorf("extract released binary: %w", err)
+	}
+
+	selfSum, err := sha256File(selfPath)
+	if err != nil {
+		return false, fmt.Errorf("hash running executable: %w", err)
+	}
+	releasedSum, err := sha256File(released)
+	if err != nil {
+		return false, fmt.Errorf("hash released binary: %w", err)
+	}
+	if selfSum != releasedSum {
+		return false, fmt.Errorf("running binary sha256 %s does not match released v%s binary sha256 %s — the installed binary is NOT the released artifact", selfSum, ver, releasedSum)
+	}
+	return true, nil
 }
 
 // resolveVerifyArtifacts resolves the checksum + bundle file paths for the
@@ -206,7 +280,7 @@ func resolveVerifyArtifacts(ctx context.Context, tmpDir, ver, bundleOverride str
 }
 
 // emitVerifyHuman prints a human-readable verification summary.
-func emitVerifyHuman(p Printer, res verifyResult, verr error) {
+func emitVerifyHuman(p Printer, res verifyResult, verr, binErr error) {
 	printerInfo(p, styleBold.Render("abysslink verify")+"  "+styleMuted.Render("v"+res.Version))
 	if res.BundleOK {
 		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("cosign bundle verified (offline)"))
@@ -216,6 +290,18 @@ func emitVerifyHuman(p Printer, res verifyResult, verr error) {
 			msg += ": " + verr.Error()
 		}
 		printerInfo(p, "  "+iconFatalStr()+"  "+styleFatal.Render(msg))
+	}
+	switch {
+	case res.BinaryChecked && res.BinaryOK:
+		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("running binary matches the released artifact (sha256)"))
+	case res.BinaryChecked:
+		msg := "running binary does NOT match the released artifact"
+		if binErr != nil {
+			msg += ": " + binErr.Error()
+		}
+		printerInfo(p, "  "+iconFatalStr()+"  "+styleFatal.Render(msg))
+	default:
+		printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("binary self-check skipped (local --bundle mode or bundle verification failed)"))
 	}
 	if res.SLSAOK {
 		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("SLSA provenance attestation found"))

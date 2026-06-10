@@ -34,6 +34,7 @@ import (
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/limitio"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
@@ -133,7 +134,9 @@ Binary acquisition routes (Linux only):
 				return err
 			}
 			binaryPath, _ := cmd.Flags().GetString("binary-path")
-			return netbirdInitRunE(cmd.Context(), cc.cfg, cc, cc.runner, binaryPath)
+			// UX: route through newPrinter(cmd) so --json and cmd.SetOut capture
+			// are honored (never a raw os.Stdout human printer).
+			return netbirdInitRunE(cmd.Context(), cc.cfg, cc, cc.runner, binaryPath, newPrinter(cmd))
 		},
 	}
 	cmd.Flags().String("binary-path", "", "Path to pre-built netbird-server binary (Linux only; see --help for acquisition routes)")
@@ -145,16 +148,18 @@ Binary acquisition routes (Linux only):
 // config.yaml via audit, installs systemd unit, sets up service user, then
 // executes the ZITADEL post-provision probe (SC-2).
 // On macOS: pulls pinned-digest container image, runs with loopback-bound ports.
-func netbirdInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, binaryPath string) error {
-	p := newHumanPrinterStdout()
+func netbirdInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, binaryPath string, p Printer) error {
+	if p == nil {
+		p = newHumanPrinterStdout()
+	}
 
 	// ── Dry-run gate ──────────────────────────────────────────────────────────
 	if cc.dryRun {
 		if runtime.GOOS == "linux" {
 			printerInfo(p, "[plan] server netbird init (Linux) would:")
 			printerInfo(p, "  1. Verify --binary-path binary version >= "+netbirdMinVersion)
-			printerInfo(p, "  2. Compute SHA-256 checksum of supplied binary")
-			printerInfo(p, "  3. Copy binary to "+netbirdBinaryDest)
+			printerInfo(p, "  2. Install binary → "+netbirdBinaryDest+" (audited write: backup + audit-log entry)")
+			printerInfo(p, "  3. Compute SHA-256 of the INSTALLED binary + write checksum sidecar (audited)")
 			printerInfo(p, "  4. Create service user '"+netbirdServiceUser+"' (non-login, non-root)")
 			printerInfo(p, "  5. Merge hardened config.yaml → "+netbirdConfigPath)
 			printerInfo(p, "  6. Write systemd unit → /etc/systemd/system/netbird-server.service")
@@ -165,7 +170,7 @@ func netbirdInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, ru
 			printerInfo(p, "[plan] server netbird init (macOS container) would:")
 			printerInfo(p, "  1. Detect container runtime (docker/colima/podman)")
 			printerInfo(p, "  2. Pull "+netbirdContainerImage)
-			printerInfo(p, "  3. Verify image digest via inspect")
+			printerInfo(p, "  3. Record image repo digest via inspect (informational — the tag is not digest-pinned)")
 			printerInfo(p, "  4. Run container with loopback-bound ports (127.0.0.1:PORT:PORT)")
 			printerInfo(p, "  5. Verify container runs as non-root")
 			printerInfo(p, "  6. Write run config via audit")
@@ -256,37 +261,80 @@ func netbirdLinuxBinarySetup(ctx context.Context, runner shell.Runner, p Printer
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  version "+version+" meets floor "+netbirdMinVersion))
 
-	// ── SHA-256 checksum: stream through the hasher with a 256 MiB ceiling so a
-	// multi-GB --binary-path cannot exhaust memory before the checksum runs (WR-04).
-	checksumHex, err := streamSHA256(binaryPath, netbirdBinaryCeiling)
+	// ── Install binary via internal/audit (CLAUDE.md hard rule) ───────────────
+	// audit.WriteFilePath streams src→dst with a backup of the previous binary
+	// and an audit-log entry — never a bare cp+chmod (which bypassed the audit
+	// trail entirely). Keychain ops use ExecRunner: always real system calls.
+	sa, err := newNetbirdSignedAudit(ctx)
 	if err != nil {
-		return fmt.Errorf("netbird init: checksum binary: %w", err)
+		return fmt.Errorf("netbird init: %w", err)
 	}
-	printerInfo(p, "  SHA-256 checksum of supplied binary (record for audit purposes):")
+	if err := sa.WriteFilePath(ctx, binaryPath, netbirdBinaryDest, 0o755, false); err != nil {
+		return fmt.Errorf("netbird init: install binary to %s: %w", netbirdBinaryDest, err)
+	}
+	printerInfo(p, styleSuccess.Render("  ✓  binary installed → "+netbirdBinaryDest+" (audited write)"))
+
+	// ── SHA-256 checksum of the INSTALLED binary ───────────────────────────────
+	// Hashing the destination (not the --binary-path source) closes the
+	// hash-then-copy TOCTOU window: the recorded checksum always describes the
+	// binary that was actually installed (WR-04: stream with a 256 MiB ceiling).
+	checksumHex, err := streamSHA256(netbirdBinaryDest, netbirdBinaryCeiling)
+	if err != nil {
+		return fmt.Errorf("netbird init: checksum installed binary: %w", err)
+	}
+	printerInfo(p, "  SHA-256 checksum of installed binary (recorded for audit purposes):")
 	printerInfo(p, "  "+checksumHex)
 
-	// ── Copy binary to /usr/local/bin/netbird-server ──────────────────────────
-	if _, err := runner.Run(ctx, "cp", binaryPath, netbirdBinaryDest); err != nil {
-		return fmt.Errorf("netbird init: copy binary to %s: %w", netbirdBinaryDest, err)
-	}
-	if _, err := runner.Run(ctx, "chmod", "0755", netbirdBinaryDest); err != nil {
-		return fmt.Errorf("netbird init: chmod %s: %w", netbirdBinaryDest, err)
-	}
-	printerInfo(p, styleSuccess.Render("  ✓  binary installed → "+netbirdBinaryDest))
-
-	// Write checksum via audit (backup + log). Non-fatal if audit dir missing.
-	if logPath, logErr := audit.DefaultLogPath(); logErr == nil {
-		checksumData := []byte(checksumHex + "  " + netbirdBinaryDest + "\n")
-		if writeErr := audit.New(logPath).WriteFile(netbirdBinaryDest+".sha256", checksumData, 0o644, false); writeErr != nil {
-			return fmt.Errorf("netbird init: write checksum sidecar: %w", writeErr)
-		}
+	// Write the checksum sidecar through the same audited writer — a failure is
+	// an error, never a silent skip (the sidecar is the audit record's anchor).
+	checksumData := []byte(checksumHex + "  " + netbirdBinaryDest + "\n")
+	if writeErr := sa.WriteFile(netbirdBinaryDest+".sha256", checksumData, 0o644, false); writeErr != nil {
+		return fmt.Errorf("netbird init: write checksum sidecar: %w", writeErr)
 	}
 
 	// ── Create service user (idempotent) ──────────────────────────────────────
-	_, _ = runner.Run(ctx, "useradd",
-		"--system", "--no-create-home", "--shell", "/usr/sbin/nologin", netbirdServiceUser)
-	// Ignore "already exists" error (idempotent).
+	if err := ensureNetbirdServiceUser(ctx, runner); err != nil {
+		return fmt.Errorf("netbird init: %w", err)
+	}
 	printerInfo(p, styleSuccess.Render("  ✓  service user '"+netbirdServiceUser+"' ensured (non-root, non-login)"))
+	return nil
+}
+
+// newNetbirdSignedAudit builds the chain-recording *SignedAudit used for the
+// NetBird binary install/upgrade writes. The keychain uses ExecRunner — secrets
+// CLI calls are always real system calls, never the CLI mock runner (mirrors
+// headscaleInitRunE step 5).
+func newNetbirdSignedAudit(ctx context.Context) (*audit.SignedAudit, error) {
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return nil, fmt.Errorf("audit log path: %w", err)
+	}
+	kc, kcErr := secrets.NewStore(ctx, &shell.ExecRunner{})
+	if kcErr != nil {
+		return nil, fmt.Errorf("keychain: %w", kcErr)
+	}
+	sa, saErr := audit.NewSigned(logPath, kc)
+	if saErr != nil {
+		return nil, fmt.Errorf("audit init: %w", saErr)
+	}
+	return sa, nil
+}
+
+// ensureNetbirdServiceUser creates the netbird service user idempotently.
+// useradd exit code 9 means "username already in use" — the expected re-init
+// outcome. Every other failure (exec error or non-zero exit) is surfaced
+// instead of being silently swallowed (a real useradd failure otherwise
+// resurfaces later as a confusing systemd error).
+func ensureNetbirdServiceUser(ctx context.Context, runner shell.Runner) error {
+	res, err := runner.Run(ctx, "useradd",
+		"--system", "--no-create-home", "--shell", "/usr/sbin/nologin", netbirdServiceUser)
+	if err != nil {
+		return fmt.Errorf("useradd %s: %w", netbirdServiceUser, err)
+	}
+	const useraddAlreadyExists = 9 // useradd(8): username already in use
+	if res.ExitCode != 0 && res.ExitCode != useraddAlreadyExists {
+		return fmt.Errorf("useradd %s exited %d: %s", netbirdServiceUser, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
 	return nil
 }
 
@@ -340,14 +388,17 @@ func netbirdInitMacOS(ctx context.Context, cfg *config.Config, runner shell.Runn
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  image pulled: "+netbirdContainerImage))
 
-	// ── Verify image digest via inspect ───────────────────────────────────────
+	// ── Record image repo digest via inspect (INFORMATIONAL) ──────────────────
+	// The image reference is a version tag, not a pinned digest, so there is no
+	// expected value to compare against — the digest is recorded for the audit
+	// trail and the run-config file only. Never claim "verified" here.
 	digestRes, err := runner.Run(ctx, runtime, "inspect", "--format", "{{.RepoDigests}}", netbirdContainerImage)
 	if err != nil {
 		return fmt.Errorf("netbird init (macOS): inspect image digest: %w", err)
 	}
 	digest := strings.TrimSpace(digestRes.Stdout)
 	slog.InfoContext(ctx, "netbird init (macOS): image digest", "digest", digest, "image", netbirdContainerImage)
-	printerInfo(p, "  image digest: "+digest)
+	printerInfo(p, "  image digest (informational — tag is not digest-pinned): "+digest)
 
 	// ── Run container with loopback-bound ports (PR-A) ─────────────────────────
 	// ALL port bindings MUST use 127.0.0.1:PORT:PORT — no binding may omit the
@@ -730,15 +781,17 @@ func newServerNetBirdUpgradeCmd() *cobra.Command {
 				return err
 			}
 			binaryPath, _ := cmd.Flags().GetString("binary-path")
-			return netbirdUpgradeRunE(cmd.Context(), cc.cfg, cc, cc.runner, binaryPath)
+			return netbirdUpgradeRunE(cmd.Context(), cc.cfg, cc, cc.runner, binaryPath, newPrinter(cmd))
 		},
 	}
 	cmd.Flags().String("binary-path", "", "Path to new netbird-server binary (Linux only)")
 	return cmd
 }
 
-func netbirdUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, newBinaryPath string) error {
-	p := newHumanPrinterStdout()
+func netbirdUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, newBinaryPath string, p Printer) error {
+	if p == nil {
+		p = newHumanPrinterStdout()
+	}
 
 	if cc.dryRun {
 		printerInfo(p, "[plan] server netbird upgrade would verify version, backup, swap binary, restart, health-check")
@@ -788,8 +841,8 @@ func netbirdUpgradeLinux(ctx context.Context, cfg *config.Config, runner shell.R
 		}
 	}
 
-	// Stop → copy → start → health-check.
-	if err := netbirdUpgradeSwapBinary(ctx, cfg, runner, newBinaryPath); err != nil {
+	// Stop → audited write → start → health-check.
+	if err := netbirdUpgradeSwapBinary(ctx, cfg, runner, newBinaryPath, sa); err != nil {
 		return err
 	}
 
@@ -831,17 +884,24 @@ func netbirdUpgradeVerifyVersions(ctx context.Context, cfg *config.Config, runne
 	return newVer, nil
 }
 
-// netbirdUpgradeSwapBinary stops the service, copies the new binary, restarts,
-// and health-checks. Extracted to keep netbirdUpgradeLinux cyclomatic < 15.
-func netbirdUpgradeSwapBinary(ctx context.Context, cfg *config.Config, runner shell.Runner, newBinaryPath string) error {
+// netbirdUpgradeSwapBinary stops the service, installs the new binary via the
+// audited streaming write (backup of the previous binary + audit-log entry —
+// never a bare cp+chmod), restarts, and health-checks. sa is the caller's
+// chain-recording writer; when nil (keychain unavailable at the caller), a
+// fresh SignedAudit is built here (mirrors headscaleSwapBinary's fallback).
+func netbirdUpgradeSwapBinary(ctx context.Context, cfg *config.Config, runner shell.Runner, newBinaryPath string, sa *audit.SignedAudit) error {
+	if sa == nil {
+		var saErr error
+		sa, saErr = newNetbirdSignedAudit(ctx)
+		if saErr != nil {
+			return fmt.Errorf("netbird upgrade: %w", saErr)
+		}
+	}
 	if _, err := runner.Run(ctx, "systemctl", "stop", "netbird-server"); err != nil {
 		return fmt.Errorf("netbird upgrade: stop service: %w", err)
 	}
-	if _, err := runner.Run(ctx, "cp", newBinaryPath, netbirdBinaryDest); err != nil {
-		return fmt.Errorf("netbird upgrade: copy binary: %w", err)
-	}
-	if _, err := runner.Run(ctx, "chmod", "0755", netbirdBinaryDest); err != nil {
-		return fmt.Errorf("netbird upgrade: chmod binary: %w", err)
+	if err := sa.WriteFilePath(ctx, newBinaryPath, netbirdBinaryDest, 0o755, false); err != nil {
+		return fmt.Errorf("netbird upgrade: install binary: %w", err)
 	}
 	if _, err := runner.Run(ctx, "systemctl", "start", "netbird-server"); err != nil {
 		return fmt.Errorf("netbird upgrade: start service: %w", err)
@@ -863,14 +923,16 @@ func netbirdUpgradeMacOS(ctx context.Context, runner shell.Runner, p Printer) er
 		return err
 	}
 
-	// Stop + remove old container.
+	// Pull the new image FIRST: if the pull fails (offline, registry down) the
+	// running control plane must be left untouched — stopping/removing before a
+	// failed pull would destroy it with no rollback.
+	if _, err := runner.Run(ctx, rt, "pull", netbirdContainerImage); err != nil {
+		return fmt.Errorf("netbird upgrade (macOS): pull image: %w (running container left untouched)", err)
+	}
+
+	// Stop + remove old container only after the new image is local.
 	_, _ = runner.Run(ctx, rt, "stop", netbirdServiceName)
 	_, _ = runner.Run(ctx, rt, "rm", netbirdServiceName)
-
-	// Pull new pinned image.
-	if _, err := runner.Run(ctx, rt, "pull", netbirdContainerImage); err != nil {
-		return fmt.Errorf("netbird upgrade (macOS): pull image: %w", err)
-	}
 
 	// Re-run container with loopback-bound ports.
 	if _, err := runner.Run(ctx, rt,
@@ -997,13 +1059,20 @@ func doNetBirdHealthCheck(ctx context.Context, url string) error {
 }
 
 // netbirdServiceIsActive returns true if the netbird-server service is running.
+// On macOS the container runtime is detected (docker/podman/colima) rather than
+// hardcoding docker — init already supports all three, and a podman/colima user
+// would otherwise see "Service: inactive" forever.
 func netbirdServiceIsActive(ctx context.Context, runner shell.Runner) bool {
 	switch runtime.GOOS {
 	case "linux":
 		res, err := runner.Run(ctx, "systemctl", "is-active", "netbird-server")
 		return err == nil && strings.TrimSpace(res.Stdout) == "active"
 	case "darwin":
-		res, err := runner.Run(ctx, "docker", "ps", "--filter", "name=netbird-server", "--format", "{{.Names}}")
+		rt, err := detectContainerRuntime(ctx, runner)
+		if err != nil {
+			return false
+		}
+		res, err := runner.Run(ctx, rt, "ps", "--filter", "name=netbird-server", "--format", "{{.Names}}")
 		return err == nil && strings.Contains(res.Stdout, "netbird-server")
 	default:
 		return false

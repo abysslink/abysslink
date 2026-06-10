@@ -68,6 +68,17 @@ func TestApplyDarwin_SleepEnabledRunsSudo(t *testing.T) {
 	assert.Equal(t, []string{"sudo", "pmset", "-c", "sleep", "0", "disksleep", "0"}, interactive[0])
 }
 
+// TestVerify_ReturnsNil: Verify must not re-run Detect — runner.Doctor calls
+// both, and delegating would double every finding per doctor pass (W4/NET-18).
+func TestVerify_ReturnsNil(t *testing.T) {
+	r := shell.NewMockRunner() // Verify must not touch the runner
+	m := New(modules.Deps{Runner: r, Cfg: config.Defaults()})
+	findings, err := m.Verify(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, findings)
+	assert.True(t, r.Done())
+}
+
 func TestACSleepState(t *testing.T) {
 	cases := []struct {
 		name      string

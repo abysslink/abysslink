@@ -17,9 +17,12 @@ package ssh
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"runtime"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -251,4 +254,204 @@ func TestApply_NonOK_RunsMutation(t *testing.T) {
 	default:
 		t.Skipf("TestApply_NonOK_RunsMutation not applicable on %s", runtime.GOOS)
 	}
+}
+
+// TestParseRemoteLogin pins the exact-match parser (W4): only the literal
+// "Remote Login: On"/"Remote Login: Off" status line is trusted; note lines,
+// permission warnings, and error text yield unknown.
+func TestParseRemoteLogin(t *testing.T) {
+	cases := []struct {
+		name   string
+		stdout string
+		want   string
+	}{
+		{"on", "Remote Login: On\n", remoteLoginOn},
+		{"off", "Remote Login: Off\n", remoteLoginOff},
+		{"on_with_note_lines", "### Notice: Full Disk Access permission is required\nRemote Login: On\n", remoteLoginOn},
+		{"permission_warning_only", "You need administrator access to run this tool... exiting!\n", remoteLoginUnknown},
+		{"word_containing_on", "Remote Login configuration unavailable\n", remoteLoginUnknown},
+		{"empty", "", remoteLoginUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseRemoteLogin(tc.stdout))
+		})
+	}
+}
+
+// TestDetectDarwin_UnknownState asserts that unparseable systemsetup output
+// (or a non-zero exit) emits the remote_login_unknown WARN finding — a check
+// name Plan/Apply never map to the disable mutation (W4: no action on unknown).
+func TestDetectDarwin_UnknownState(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Mode = "tailscale"
+
+	t.Run("noise_output", func(t *testing.T) {
+		r := shell.NewMockRunner(
+			shell.Call{Result: shell.Result{Stdout: "### Notice: some permission warning\n", ExitCode: 0}},
+		)
+		m := New(modules.Deps{Cfg: cfg, Runner: r})
+		findings := m.detectDarwin(context.Background())
+		require.Len(t, findings, 1)
+		assert.Equal(t, "remote_login_unknown", findings[0].Check)
+		assert.Equal(t, modules.SeverityWarning, findings[0].Severity)
+	})
+
+	t.Run("non_zero_exit_overrides_parsed_state", func(t *testing.T) {
+		r := shell.NewMockRunner(
+			shell.Call{Result: shell.Result{Stdout: "Remote Login: On\n", ExitCode: 1}},
+		)
+		m := New(modules.Deps{Cfg: cfg, Runner: r})
+		findings := m.detectDarwin(context.Background())
+		require.Len(t, findings, 1)
+		assert.Equal(t, "remote_login_unknown", findings[0].Check,
+			"a non-zero systemsetup exit must never be parsed as state (W4)")
+	})
+}
+
+// TestApply_UnknownRemoteLogin_NoMutation asserts that the unknown Remote
+// Login state never triggers the `systemsetup -setremotelogin off` mutation.
+func TestApply_UnknownRemoteLogin_NoMutation(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Apply routes Detect through runtime.GOOS; darwin-only scenario")
+	}
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Mode = "tailscale"
+	cfg.Modules.SSH.Enabled = true
+
+	// Single scripted call: the Detect probe. A second (mutation) call would
+	// make MockRunner return an error and fail the test.
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "garbage output\n", ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+	require.NoError(t, m.Apply(context.Background()))
+	assert.True(t, r.Done(), "unknown state must not trigger the disable mutation")
+}
+
+// newFallbackModule builds an ssh module in openssh-fallback mode with HOME
+// pointed at a temp dir and a real (temp) audit writer.
+func newFallbackModule(t *testing.T, r *shell.MockRunner) *Module {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Enabled = true
+	cfg.Modules.SSH.Mode = "openssh-fallback"
+	cfg.Identity.UnixUser = "alice"
+	return New(modules.Deps{Cfg: cfg, Runner: r, Audit: audit.New(filepath.Join(dir, "audit.log"))})
+}
+
+// TestInstallHardenedSSHD_RemovesDropInOnValidationFailure is the W2
+// regression test: when `sshd -t` rejects the freshly-installed drop-in, the
+// drop-in must be removed again — otherwise the NEXT sshd restart (reboot,
+// package upgrade) parses the broken config and locks the user out remotely.
+func TestInstallHardenedSSHD_RemovesDropInOnValidationFailure(t *testing.T) {
+	r := shell.NewMockRunner(
+		// 1. sudo install -m 600 <staged> /etc/ssh/sshd_config.d/99-abysslink.conf
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		// 2. sudo sshd -t → invalid config
+		shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "/etc/ssh/sshd_config.d/99-abysslink.conf: bad directive"}},
+		// 3. rollback: sudo rm -f /etc/ssh/sshd_config.d/99-abysslink.conf
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+	m := newFallbackModule(t, r)
+
+	err := m.installHardenedSSHD(context.Background())
+	require.Error(t, err, "validation failure must surface as an error")
+	assert.Contains(t, err.Error(), "sshd config invalid")
+	assert.Contains(t, err.Error(), "removed again", "the error must report the rollback")
+
+	calls := r.RecordedCalls()
+	require.Len(t, calls, 3, "install, validate, rollback — and NO reload")
+	assert.Equal(t, "sudo", calls[2].Name)
+	assert.Equal(t, []string{"rm", "-f", sshdDropInPath}, calls[2].Args,
+		"the invalid drop-in must be removed after failed validation (W2)")
+}
+
+// TestInstallHardenedSSHD_RollbackFailureIsLoud asserts that when the rollback
+// rm itself fails, the returned error tells the user to remove the file
+// manually before the next sshd restart.
+func TestInstallHardenedSSHD_RollbackFailureIsLoud(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                  // install
+		shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "bad directive"}},         // sshd -t
+		shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "rm: permission denied"}}, // rm fails
+	)
+	m := newFallbackModule(t, r)
+
+	err := m.installHardenedSSHD(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ROLLBACK FAILED")
+	assert.Contains(t, err.Error(), sshdDropInPath)
+}
+
+// TestInstallHardenedSSHD_ValidConfigReloads pins the happy path: install,
+// validate OK, reload — no rollback call.
+func TestInstallHardenedSSHD_ValidConfigReloads(t *testing.T) {
+	calls := []shell.Call{
+		{Result: shell.Result{ExitCode: 0}}, // install
+		{Result: shell.Result{ExitCode: 0}}, // sshd -t OK
+		{Result: shell.Result{ExitCode: 0}}, // reload (launchctl on darwin / systemctl on linux)
+	}
+	r := shell.NewMockRunner(calls...)
+	m := newFallbackModule(t, r)
+	require.NoError(t, m.installHardenedSSHD(context.Background()))
+	require.Len(t, r.RecordedCalls(), 3)
+}
+
+// TestInstallHardenedSSHD_RejectsUnsafeUnixUser is the W3 use-site guard:
+// even if an unsafe unix_user slips past config validation (or arrives via the
+// $USER fallback), the sshd config renderer must refuse to interpolate it.
+func TestInstallHardenedSSHD_RejectsUnsafeUnixUser(t *testing.T) {
+	unsafe := []string{
+		"me\nPasswordAuthentication yes", // newline → sshd directive injection
+		"alice bob",                      // whitespace → extra AllowUsers entry
+		"",                               // empty (with $USER also empty) → AllowUsers with no operand
+		"Alice",                          // uppercase — outside the POSIX-portable shape
+	}
+	for _, user := range unsafe {
+		r := shell.NewMockRunner() // NO calls expected — must fail before any exec
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		// Neutralize the $USER fallback so the empty-user case stays empty —
+		// and so a hostile $USER value is covered by the same use-site guard.
+		t.Setenv("USER", "")
+		cfg := config.Defaults()
+		cfg.Modules.SSH.Enabled = true
+		cfg.Modules.SSH.Mode = "openssh-fallback"
+		cfg.Identity.UnixUser = user
+		m := New(modules.Deps{Cfg: cfg, Runner: r, Audit: audit.New(filepath.Join(dir, "audit.log"))})
+
+		err := m.installHardenedSSHD(context.Background())
+		require.Error(t, err, "unsafe unix_user %q must be rejected", user)
+		assert.Contains(t, err.Error(), "refusing to render sshd config")
+		assert.Empty(t, r.RecordedCalls(), "no command may run for unsafe user %q", user)
+	}
+}
+
+// TestApply_DisableSshd_ExecErrorReported asserts the real exec error is
+// surfaced when systemctl cannot be executed at all — not a fabricated
+// "exit 0" from the zero Result (review INFO).
+func TestApply_DisableSshd_ExecErrorReported(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Apply routes Detect through runtime.GOOS; linux-only scenario")
+	}
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Mode = "tailscale"
+	cfg.Modules.SSH.Enabled = true
+
+	r := shell.NewMockRunner(
+		// Detect: systemctl is-active sshd → active
+		shell.Call{Result: shell.Result{Stdout: "active\n", ExitCode: 0}},
+		// Apply: sudo systemctl disable --now sshd → exec error (zero Result)
+		shell.Call{Err: fmt.Errorf("exec: sudo: not found")},
+		// Apply: sudo systemctl disable --now ssh → exec error too
+		shell.Call{Err: fmt.Errorf("exec: sudo: not found")},
+	)
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+	err := m.Apply(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sudo: not found", "the real exec error must be in the message")
+	assert.NotContains(t, err.Error(), "exit 0", "never fabricate an exit code from the zero Result")
 }

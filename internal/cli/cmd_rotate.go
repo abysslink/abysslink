@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/spf13/cobra"
 )
@@ -74,11 +75,30 @@ func newRotateAnthropicCmd() *cobra.Command {
 				return fmt.Errorf("rotate anthropic-key: no keychain backend available")
 			}
 
-			if ok := verifyAnthropicKey(ctx, newKey); !ok {
-				return fmt.Errorf("rotate anthropic-key: the new key was rejected by the Anthropic API; not storing it")
+			ok, verifyErr := verifyAnthropicKey(ctx, newKey)
+			if verifyErr != nil {
+				// Transport failure ≠ key rejection: tell the offline user the
+				// truth instead of "the new key was rejected".
+				return fmt.Errorf("rotate anthropic-key: could not reach the Anthropic API to verify the new key (%w); not storing it — check your connection and retry", verifyErr)
+			}
+			if !ok {
+				return fmt.Errorf("rotate anthropic-key: the new key was rejected by the Anthropic API (401/403); not storing it")
 			}
 			if err := deps.Keychain.Set(ctx, "abysslink", "anthropic-api-key", newKey); err != nil {
 				return fmt.Errorf("rotate anthropic-key: store: %w", err)
+			}
+			// Rig-scoped migrated copies (enroll rig copies the v1 entry into
+			// fleet.RigService(name)) must be rotated too — otherwise the old,
+			// still-valid key survives under every rig service.
+			for _, rig := range cc.cfg.Rigs {
+				svc := fleet.RigService(rig.Name)
+				if _, getErr := deps.Keychain.Get(ctx, svc, "anthropic-api-key"); getErr != nil {
+					continue // never migrated for this rig — nothing to update
+				}
+				if setErr := deps.Keychain.Set(ctx, svc, "anthropic-api-key", newKey); setErr != nil {
+					return fmt.Errorf("rotate anthropic-key: update rig-scoped copy for %q: %w", rig.Name, setErr)
+				}
+				printerInfo(p, styleMuted.Render("Updated rig-scoped key copy: "+rig.Name))
 			}
 			printerInfo(p, styleSuccess.Render("New Anthropic key verified and stored in the keychain."))
 			printerInfo(p, styleMuted.Render("Now REVOKE the old key in the console tab that just opened."))
@@ -141,22 +161,24 @@ func newRotateNtfyCmd() *cobra.Command {
 }
 
 // verifyAnthropicKey makes a 1-token ping to confirm the key authenticates.
-// A 401/403 means the key is bad; anything else (including 400) means auth ok.
-func verifyAnthropicKey(ctx context.Context, key string) bool {
+// A 401/403 means the key is bad (ok=false); anything else (including 400)
+// means auth ok. A transport failure (offline, DNS, timeout) is returned as a
+// non-nil error so callers can distinguish "could not verify" from "rejected".
+func verifyAnthropicKey(ctx context.Context, key string) (bool, error) {
 	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
 	if err != nil {
-		return false
+		return false, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("x-api-key", key)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("content-type", "application/json")
 	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("network: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden
+	return resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden, nil
 }
 
 // openInBrowser opens a URL with the platform opener (best-effort).

@@ -125,3 +125,38 @@ func TestVerifyReturnsNil(t *testing.T) {
 	require.NoError(t, err, "Verify must not return an error")
 	require.Empty(t, findings, "Verify must return nil/empty findings (no double-emission)")
 }
+
+// TestDetect_ConfigDisabled_EmitsVisibleWarning: Tailnet Lock is an
+// on-by-default, "never weaken" control. When the user disables it in config
+// (and it is off on the tailnet), Detect must emit a WARN finding so the
+// disablement is visible in doctor output instead of silently fail-open
+// (review INFO — contrast with the disk-encryption FATAL posture).
+func TestDetect_ConfigDisabled_EmitsVisibleWarning(t *testing.T) {
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: `{"Enabled":false}`}})
+	cfg := config.Defaults()
+	cfg.Tailnet.Lock.Enabled = false
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+	require.Len(t, findings, 1, "config-disabled lock must be visible, not silent")
+	assert.Equal(t, "lock_disabled", findings[0].Check)
+	assert.Equal(t, modules.SeverityWarning, findings[0].Severity)
+}
+
+// TestPlanApply_ConfigDisabled_NoAction asserts the lock_disabled finding is
+// report-only: Plan emits no action and Apply returns nil (the check name is
+// deliberately distinct from lock_enabled).
+func TestPlanApply_ConfigDisabled_NoAction(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Tailnet.Lock.Enabled = false
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: `{"Enabled":false}`}})
+	m := New(modules.Deps{Cfg: cfg, Runner: r})
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	assert.Empty(t, actions, "lock_disabled is report-only — no plan action")
+
+	r2 := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: `{"Enabled":false}`}})
+	m2 := New(modules.Deps{Cfg: cfg, Runner: r2})
+	assert.NoError(t, m2.Apply(context.Background()), "Apply must not error on lock_disabled")
+}

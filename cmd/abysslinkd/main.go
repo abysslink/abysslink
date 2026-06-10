@@ -19,6 +19,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -65,7 +69,71 @@ func (d directNotifier) SendNote(ctx context.Context, n notifyv2.RenderedNote) e
 	})
 }
 
+// version is the daemon build version. "dev" unless overridden at build time
+// via -ldflags "-X main.version=...".
+var version = "dev"
+
+// usageText is the abysslinkd usage block printed for -h/--help and on
+// argument errors.
+const usageText = `abysslinkd — the Abysslink user-level daemon.
+
+Serves the notify Unix socket and runs the configured watchers. It is
+normally managed by ` + "`abysslink daemon start --apply`" + `, not run by hand.
+
+Usage:
+  abysslinkd [flags]
+
+Flags:
+  -h, --help     show this help and exit
+      --version  print the daemon version and exit
+
+Configuration is read from abysslink.yaml (XDG_CONFIG_HOME or
+~/.config/abysslink/abysslink.yaml).
+`
+
+// parseArgs handles the daemon's command-line arguments BEFORE any side effect
+// (config load, socket bind, tmux probes, ntfy POSTs). A packaging script or
+// user probing `abysslinkd --help` / `--version` must never start a network
+// daemon (UX review CRITICAL #1).
+//
+// Returns (exitCode, false) when the process should exit immediately with
+// exitCode, or (0, true) when startup should proceed:
+//   - -h/--help  → usage on out, exit 0
+//   - --version  → version on out, exit 0
+//   - unknown flags or positional args → error + usage on errOut, exit 2
+func parseArgs(args []string, out, errOut io.Writer) (int, bool) {
+	fs := flag.NewFlagSet("abysslinkd", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	fs.Usage = func() {} // suppress flag's default usage; printed explicitly below
+	showVersion := fs.Bool("version", false, "print the daemon version and exit")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			// -h/--help: usage to stdout, exit 0 (conventional help contract).
+			_, _ = fmt.Fprint(out, usageText)
+			return 0, false
+		}
+		// Unknown flag: flag already printed the error line to errOut.
+		_, _ = fmt.Fprint(errOut, "\n"+usageText)
+		return 2, false
+	}
+	if *showVersion {
+		_, _ = fmt.Fprintf(out, "abysslinkd %s\n", version)
+		return 0, false
+	}
+	if fs.NArg() > 0 {
+		_, _ = fmt.Fprintf(errOut, "abysslinkd: unknown argument %q\n\n", fs.Arg(0))
+		_, _ = fmt.Fprint(errOut, usageText)
+		return 2, false
+	}
+	return 0, true
+}
+
 func main() {
+	if code, proceed := parseArgs(os.Args[1:], os.Stdout, os.Stderr); !proceed {
+		os.Exit(code)
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 

@@ -18,11 +18,15 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -170,8 +174,11 @@ func foreignEntry(cmd string) map[string]interface{} {
 
 // TestRemoveHooks covers all six required cases for RemoveHooks.
 func TestRemoveHooks(t *testing.T) {
-	newModule := func() *Module {
-		return New(modules.Deps{})
+	// RemoveHooks writes through the INJECTED audit writer (modules.Deps.Audit),
+	// never an inline audit.New(DefaultLogPath()) — review INFO.
+	newModule := func(t *testing.T) *Module {
+		t.Helper()
+		return New(modules.Deps{Audit: audit.New(filepath.Join(t.TempDir(), "audit.log"))})
 	}
 
 	writeSettings := func(t *testing.T, dir string, content []byte) string {
@@ -194,7 +201,7 @@ func TestRemoveHooks(t *testing.T) {
 		}, nil)
 		writeSettings(t, dir, fixture)
 
-		removed, err := newModule().RemoveHooks(context.Background(), false)
+		removed, err := newModule(t).RemoveHooks(context.Background(), false)
 		require.NoError(t, err)
 		assert.Len(t, removed, 2, "both Stop and Notification abysslink entries must be reported")
 
@@ -221,7 +228,7 @@ func TestRemoveHooks(t *testing.T) {
 		}, nil)
 		writeSettings(t, dir, fixture)
 
-		removed, err := newModule().RemoveHooks(context.Background(), false)
+		removed, err := newModule(t).RemoveHooks(context.Background(), false)
 		require.NoError(t, err)
 		assert.Len(t, removed, 2, "only abysslink entries should be removed")
 
@@ -246,7 +253,7 @@ func TestRemoveHooks(t *testing.T) {
 		}, nil)
 		writeSettings(t, dir, fixture)
 
-		removed, err := newModule().RemoveHooks(context.Background(), false)
+		removed, err := newModule(t).RemoveHooks(context.Background(), false)
 		require.NoError(t, err)
 		assert.Len(t, removed, 2)
 
@@ -268,7 +275,7 @@ func TestRemoveHooks(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		// Do NOT create ~/.claude/ or settings.json.
 
-		removed, err := newModule().RemoveHooks(context.Background(), false)
+		removed, err := newModule(t).RemoveHooks(context.Background(), false)
 		require.NoError(t, err)
 		assert.Nil(t, removed, "missing file/dir must return nil, nil")
 	})
@@ -280,7 +287,7 @@ func TestRemoveHooks(t *testing.T) {
 
 		settingsPath := writeSettings(t, dir, []byte("not json"))
 
-		_, err := newModule().RemoveHooks(context.Background(), false)
+		_, err := newModule(t).RemoveHooks(context.Background(), false)
 		assert.Error(t, err, "invalid JSON must return an error")
 
 		raw, readErr := os.ReadFile(settingsPath)
@@ -299,7 +306,7 @@ func TestRemoveHooks(t *testing.T) {
 		}, nil)
 		settingsPath := writeSettings(t, dir, original)
 
-		removed, err := newModule().RemoveHooks(context.Background(), true /*dryRun*/)
+		removed, err := newModule(t).RemoveHooks(context.Background(), true /*dryRun*/)
 		require.NoError(t, err)
 		assert.Len(t, removed, 2, "dry-run must compute descriptors")
 
@@ -308,4 +315,210 @@ func TestRemoveHooks(t *testing.T) {
 		require.NoError(t, readErr)
 		assert.Equal(t, string(original), string(after), "dry-run must not mutate settings.json")
 	})
+}
+
+// failingStore is a KeychainStore whose Get fails with a non-ErrNotFound error,
+// simulating a locked login keychain after reboot.
+type failingStore struct{}
+
+func (failingStore) Set(_ context.Context, _, _, _ string) error { return nil }
+func (failingStore) Get(_ context.Context, _, _ string) (string, error) {
+	return "", fmt.Errorf("keychain: interaction not allowed (locked)")
+}
+func (failingStore) Delete(_ context.Context, _, _ string) error { return nil }
+
+func enabledCfg() *config.Config {
+	cfg := config.Defaults()
+	cfg.ClaudeCode.Enabled = true
+	cfg.ClaudeCode.APIKeySource = "none" // skip keychain probing unless a test opts in
+	return cfg
+}
+
+// TestApply_Disabled_NoMutation is the C3 regression test: Apply on a disabled
+// claudecode module must mutate NOTHING — Runner.ApplyAll calls Apply for every
+// module, so without the Enabled gate `abysslink disable claudecode` would be
+// silently undone (hooks re-installed) by the next `up --apply`.
+func TestApply_Disabled_NoMutation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfg := config.Defaults()
+	cfg.ClaudeCode.Enabled = false
+	m := New(modules.Deps{Cfg: cfg, Audit: audit.New(filepath.Join(t.TempDir(), "audit.log"))})
+
+	require.NoError(t, m.Apply(context.Background()))
+	_, err := os.Stat(filepath.Join(dir, ".claude"))
+	assert.True(t, os.IsNotExist(err), "disabled module must not create ~/.claude/")
+}
+
+// TestApply_Disabled_DoesNotReinstallRemovedHooks proves the full disable
+// round-trip: hooks installed, then removed, then a disabled Apply must NOT
+// bring them back.
+func TestApply_Disabled_DoesNotReinstallRemovedHooks(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	a := audit.New(filepath.Join(t.TempDir(), "audit.log"))
+
+	cfg := enabledCfg()
+	m := New(modules.Deps{Cfg: cfg, Audit: a})
+	require.NoError(t, m.Apply(context.Background()))
+
+	removed, err := m.RemoveHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.NotEmpty(t, removed)
+
+	cfg.ClaudeCode.Enabled = false // simulate `abysslink disable claudecode --apply`
+	require.NoError(t, m.Apply(context.Background()))
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "abysslink notify",
+		"a disabled module's Apply must not re-install the removed hooks (C3)")
+}
+
+// TestApply_Enabled_InstallsHooksViaInjectedAudit verifies the happy path and
+// that the write goes through the injected audit writer (nil writer errors).
+func TestApply_Enabled_InstallsHooksViaInjectedAudit(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	m := New(modules.Deps{Cfg: enabledCfg(), Audit: audit.New(filepath.Join(t.TempDir(), "audit.log"))})
+	require.NoError(t, m.Apply(context.Background()))
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	require.NoError(t, err)
+	assert.True(t, hasStopHook(raw), "Stop hook must be installed")
+	assert.True(t, hasNotificationHook(raw), "Notification hook must be installed")
+}
+
+func TestApply_NilAudit_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	m := New(modules.Deps{Cfg: enabledCfg(), Audit: nil})
+	err := m.Apply(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "audit not available")
+}
+
+// TestDetectKeychainState_NotFoundVsLocked is the W7 regression test: a key
+// that was never stored (wrapped secrets.ErrNotFound) must produce the
+// api_key_present finding (so Plan offers to store it), while any OTHER Get
+// error must produce the api_key_keychain "locked keychain" finding.
+func TestDetectKeychainState_NotFoundVsLocked(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.ClaudeCode.APIKeySource = "keychain"
+
+	t.Run("never_stored_is_api_key_present", func(t *testing.T) {
+		m := New(modules.Deps{Cfg: cfg, Keychain: secrets.NewMockStore()})
+		findings := m.detectKeychainState(context.Background())
+		require.Len(t, findings, 1)
+		assert.Equal(t, "api_key_present", findings[0].Check,
+			"ErrNotFound means the key was never stored — not a locked keychain (W7)")
+		assert.Contains(t, findings[0].Message, "ANTHROPIC_API_KEY")
+	})
+
+	t.Run("other_error_is_api_key_keychain", func(t *testing.T) {
+		m := New(modules.Deps{Cfg: cfg, Keychain: failingStore{}})
+		findings := m.detectKeychainState(context.Background())
+		require.Len(t, findings, 1)
+		assert.Equal(t, "api_key_keychain", findings[0].Check)
+		assert.Contains(t, findings[0].Message, "locked")
+	})
+
+	t.Run("stored_key_is_clean", func(t *testing.T) {
+		store := secrets.NewMockStore()
+		require.NoError(t, store.Set(context.Background(), keychainService, keychainAccount, "sk-test"))
+		m := New(modules.Deps{Cfg: cfg, Keychain: store})
+		assert.Empty(t, m.detectKeychainState(context.Background()))
+	})
+}
+
+// TestPlan_StoreKeyActionReachable proves the api_key_present plan action is
+// reachable again (W7): with an empty keychain, Plan must offer to store the key.
+func TestPlan_StoreKeyActionReachable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfg := config.Defaults()
+	cfg.ClaudeCode.Enabled = true
+	cfg.ClaudeCode.APIKeySource = "keychain"
+	m := New(modules.Deps{Cfg: cfg, Keychain: secrets.NewMockStore()})
+
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	var found bool
+	for _, a := range actions {
+		if a.Description == "store Anthropic API key in OS keychain (reads from $ANTHROPIC_API_KEY)" {
+			found = true
+		}
+	}
+	assert.True(t, found, "Plan must include the store-API-key action when the key was never stored")
+}
+
+// TestPlan_DedupesMergeAction verifies the UX fix: when both the Stop and
+// Notification hooks are missing, Plan emits ONE merge action, not two
+// identical ones.
+func TestPlan_DedupesMergeAction(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	claudeDir := filepath.Join(dir, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte("{}\n"), 0o600))
+
+	m := New(modules.Deps{Cfg: enabledCfg()})
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+
+	merges := 0
+	for _, a := range actions {
+		if a.Description == "merge abysslink notify hooks into ~/.claude/settings.json (preserves existing hooks)" {
+			merges++
+		}
+	}
+	assert.Equal(t, 1, merges, "identical merge actions must be deduplicated")
+}
+
+// TestPlan_Disabled_NoActions pins the existing Plan gate.
+func TestPlan_Disabled_NoActions(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.ClaudeCode.Enabled = false
+	m := New(modules.Deps{Cfg: cfg})
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	assert.Empty(t, actions)
+}
+
+// TestResolveHookBinary covers the absolute-path enhancement: hook commands
+// embed the running binary's absolute path (Claude hook environments often
+// lack the user's PATH) and fall back to the bare name when that is unsafe.
+func TestResolveHookBinary(t *testing.T) {
+	cases := []struct {
+		name string
+		exe  string
+		err  error
+		want string
+	}{
+		{"abysslink_absolute_path", "/usr/local/bin/abysslink", nil, "/usr/local/bin/abysslink"},
+		{"os_executable_error", "", fmt.Errorf("boom"), "abysslink"},
+		{"empty_path", "", nil, "abysslink"},
+		{"test_binary_falls_back", "/tmp/go-build123/claudecode.test", nil, "abysslink"},
+		{"path_with_space_falls_back", "/Users/My Name/bin/abysslink", nil, "abysslink"},
+		{"path_with_quote_falls_back", `/tmp/a"b/abysslink`, nil, "abysslink"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, resolveHookBinary(tc.exe, tc.err))
+		})
+	}
+}
+
+// TestHookCommands_RecognizableAsAbysslink pins the invariant the hook
+// detection/removal substring matcher depends on: whatever binary token is
+// chosen, the rendered commands must contain "abysslink notify".
+func TestHookCommands_RecognizableAsAbysslink(t *testing.T) {
+	assert.Contains(t, stopHookCommand, "abysslink notify")
+	assert.Contains(t, notifyHookCommand, "abysslink notify")
+	assert.True(t, hookEntryIsAbysslink(abysslinkEntry(stopHookCommand)))
+	assert.True(t, hookEntryIsAbysslink(abysslinkEntry(notifyHookCommand)))
 }

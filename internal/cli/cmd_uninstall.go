@@ -203,8 +203,9 @@ func uninstallConfirmSeq(ctx context.Context, p Printer, plan []audit.ReverseAct
 	if yes {
 		slog.Warn("uninstall --yes: skipping UNINSTALL typed confirmation gate; executing immediately")
 	} else if !interactive(false, false) {
-		// Non-interactive context (CI, pipe, no TTY): abort without hanging.
-		return false, false, nil
+		// Non-interactive context (CI, pipe, no TTY): abort without hanging —
+		// and exit NON-ZERO so scripts can tell the uninstall did not happen.
+		return false, false, errMissingInput("yes")
 	}
 
 	// Stage 1: typed UNINSTALL confirm.

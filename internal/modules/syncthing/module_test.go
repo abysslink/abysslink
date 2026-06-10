@@ -17,7 +17,9 @@ package syncthing
 
 import (
 	"context"
-	"strings"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -97,22 +99,120 @@ func TestDetect_Installed_NoConfigFile_NoFindings(t *testing.T) {
 	assert.Empty(t, findings)
 }
 
-func TestDetect_GUIBoundToWildcard_ConfigContent(t *testing.T) {
-	// Confirm the wildcard-address detection logic triggers on 0.0.0.0 content.
-	// syncthingConfigPath() resolves relative to os.UserHomeDir() which is not
-	// portable in CI; we exercise the string-matching logic directly here.
-	cfgXML := `<configuration><gui><address>0.0.0.0:8384</address></gui></configuration>`
-
-	// Replicate the exact conditions from Detect's config check.
-	assert.True(t, wildcardBound(cfgXML), "0.0.0.0 bind must be detected as wildcard")
-	assert.False(t, wildcardBound(`<address>100.64.1.2:8384</address>`), "tailnet-only bind is fine")
+// TestGUIAddrWildcard is the wildcard matrix for the parsed GUI address. The
+// regression case is `::1` — the old substring check on "<address>::" flagged
+// the IPv6 loopback (and every v6 literal starting with "::") as a wildcard.
+func TestGUIAddrWildcard(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"0.0.0.0:8384", true},
+		{"0.0.0.0", true},
+		{"*:8384", true},
+		{"*", true},
+		{":8384", true},     // empty host binds all interfaces
+		{"[::]:8384", true}, // IPv6 wildcard
+		{"::", true},
+		{"::1", false}, // IPv6 loopback — must NOT false-positive
+		{"[::1]:8384", false},
+		{"127.0.0.1:8384", false},
+		{"100.64.1.2:8384", false},
+		{"fd7a:115c:a1e0::1", false}, // v6 literal is not a wildcard
+		{"", false},                  // absent element → syncthing default (loopback)
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, guiAddrWildcard(tc.addr), "addr=%q", tc.addr)
+	}
 }
 
-// wildcardBound replicates the Detect logic for testing the string pattern.
-func wildcardBound(content string) bool {
-	return strings.Contains(content, "<address>0.0.0.0:") ||
-		strings.Contains(content, "<address>*:") ||
-		strings.Contains(content, "<address>::")
+func TestParseGUIConfig(t *testing.T) {
+	data := []byte(`<configuration version="37">
+  <gui enabled="true" tls="false">
+    <address>0.0.0.0:8384</address>
+    <user>admin</user>
+    <password>$2a$10$hash</password>
+  </gui>
+</configuration>`)
+	gui, err := parseGUIConfig(data)
+	require.NoError(t, err)
+	assert.Equal(t, "0.0.0.0:8384", gui.Address)
+	assert.Equal(t, "admin", gui.User)
+	assert.Equal(t, "$2a$10$hash", gui.Password)
+
+	_, err = parseGUIConfig([]byte("not xml <<<"))
+	assert.Error(t, err)
+}
+
+// writeSyncthingConfig writes a config.xml at the path Detect resolves for the
+// current GOOS under a temp HOME, and returns nothing — Detect reads it itself.
+func writeSyncthingConfig(t *testing.T, home, xmlBody string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	var dir string
+	if runtime.GOOS == "darwin" {
+		dir = filepath.Join(home, "Library", "Application Support", "Syncthing")
+	} else {
+		dir = filepath.Join(home, ".config", "syncthing")
+	}
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.xml"), []byte(xmlBody), 0o600))
+}
+
+// TestDetect_IPv6LoopbackNotFlagged is the end-to-end regression for the `::1`
+// false positive: a GUI bound to the IPv6 loopback must not produce the
+// gui_bind_tailnet wildcard finding.
+func TestDetect_IPv6LoopbackNotFlagged(t *testing.T) {
+	writeSyncthingConfig(t, t.TempDir(),
+		`<configuration><gui><address>[::1]:8384</address><user>u</user><password>x</password></gui></configuration>`)
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "syncthing v1.27.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+	for _, f := range findings {
+		assert.NotEqual(t, "gui_bind_tailnet", f.Check, "::1 is loopback, not a wildcard bind")
+	}
+}
+
+// TestDetect_GUINoPassword_Warning: a passwordless GUI on the tailnet must
+// surface as a doctor finding, not just an apply-time log note.
+func TestDetect_GUINoPassword_Warning(t *testing.T) {
+	writeSyncthingConfig(t, t.TempDir(),
+		`<configuration><gui><address>100.64.1.2:8384</address></gui></configuration>`)
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "syncthing v1.27.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+
+	var pwFinding *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "gui_password" {
+			pwFinding = &findings[i]
+		}
+	}
+	require.NotNil(t, pwFinding, "missing GUI password must produce a gui_password warning")
+	assert.Equal(t, modules.SeverityWarning, pwFinding.Severity)
+}
+
+// TestDetect_GUIWildcardAndPasswordSet: 0.0.0.0 still flags, and a set
+// password suppresses the gui_password warning.
+func TestDetect_GUIWildcardAndPasswordSet(t *testing.T) {
+	writeSyncthingConfig(t, t.TempDir(),
+		`<configuration><gui><address>0.0.0.0:8384</address><user>u</user><password>$2a$10$h</password></gui></configuration>`)
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "syncthing v1.27.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+
+	checks := map[string]bool{}
+	for _, f := range findings {
+		checks[f.Check] = true
+	}
+	assert.True(t, checks["gui_bind_tailnet"], "0.0.0.0 must still be flagged")
+	assert.False(t, checks["gui_password"], "a set password must not warn")
 }
 
 func TestPlan_Disabled_Nil(t *testing.T) {

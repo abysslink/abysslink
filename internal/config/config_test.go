@@ -507,3 +507,97 @@ func TestSessionRegistryConfigDefaultEnabled(t *testing.T) {
 	assert.Zero(t, cfg.SessionRegistry.IdleSecs, "timing knobs default to zero = compiled-in default")
 	assert.Zero(t, cfg.SessionRegistry.CooldownSecs)
 }
+
+// TestValidate_UnixUser covers the W3 charset validation: identity.unix_user
+// is interpolated into the hardened sshd drop-in (`AllowUsers %s`) and the
+// tailnet ACL, so anything outside the POSIX-portable username shape must be
+// rejected at config-load time.
+func TestValidate_UnixUser(t *testing.T) {
+	mkCfg := func(user string) *config.Config {
+		cfg := config.Defaults()
+		cfg.Identity.Email = "a@b.com"
+		cfg.Identity.UnixUser = user
+		cfg.Tailnet.Hostname = "host"
+		return cfg
+	}
+
+	valid := []string{"alice", "_svc", "a", "me-2", "dev_user", "u0123456789012345678901234567890"}
+	for _, u := range valid {
+		assert.NoError(t, config.Validate(mkCfg(u)), "unix_user %q must be accepted", u)
+	}
+
+	invalid := []string{
+		"me\nPasswordAuthentication yes", // newline → sshd directive injection (W3)
+		"alice bob",                      // whitespace → extra AllowUsers entry
+		"Alice",                          // uppercase
+		"1user",                          // leading digit
+		"-user",                          // leading dash
+		"user!",                          // shell metacharacter
+		"a234567890123456789012345678901234567890", // > 32 chars
+	}
+	for _, u := range invalid {
+		err := config.Validate(mkCfg(u))
+		require.Error(t, err, "unix_user %q must be rejected", u)
+		assert.Contains(t, err.Error(), "unix_user")
+	}
+}
+
+// TestLoad_RejectsUnixUserNewlineInjection is the end-to-end W3 test: a YAML
+// file carrying a newline-embedded unix_user (legal YAML!) must fail Load —
+// it would otherwise inject arbitrary directives into the hardened sshd config.
+func TestLoad_RejectsUnixUserNewlineInjection(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "inject.yaml")
+	content := "version: 1\n" +
+		"identity:\n" +
+		"  email: you@example.com\n" +
+		"  unix_user: \"me\\nPasswordAuthentication yes\"\n" +
+		"tailnet:\n" +
+		"  hostname: mac-dev\n"
+	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+
+	_, err := config.Load(p)
+	require.Error(t, err, "newline-in-unix_user must be rejected at load time (W3)")
+	assert.Contains(t, err.Error(), "unix_user")
+}
+
+func TestValidateUnixUser_Exported(t *testing.T) {
+	assert.NoError(t, config.ValidateUnixUser("alice"))
+	assert.Error(t, config.ValidateUnixUser(""), "empty user must be rejected at use sites")
+	assert.Error(t, config.ValidateUnixUser("me\nX yes"))
+}
+
+// TestLoad_EmptyFile asserts the actionable empty-config message (review INFO).
+func TestLoad_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "empty.yaml")
+	require.NoError(t, os.WriteFile(p, nil, 0o600))
+
+	_, err := config.Load(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is empty")
+	assert.Contains(t, err.Error(), "abysslink init")
+	assert.Contains(t, err.Error(), p, "the message must say WHICH file is empty")
+
+	_, err = config.LoadForRead(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "abysslink init")
+}
+
+// TestLoad_ValidationErrorIncludesPath asserts validation failures name the
+// offending file (review INFO) — users may have several config candidates.
+func TestLoad_ValidationErrorIncludesPath(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "bad.yaml")
+	content := "version: 1\nidentity:\n  email: nope\n  unix_user: you\ntailnet:\n  hostname: mac-dev\n"
+	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+
+	_, err := config.Load(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), p, "Load validation error must include the file path")
+
+	cfg, verr := config.LoadForRead(p)
+	require.Error(t, verr)
+	require.NotNil(t, cfg, "LoadForRead returns the parsed config alongside the validation error")
+	assert.Contains(t, verr.Error(), p, "LoadForRead validation error must include the file path")
+}

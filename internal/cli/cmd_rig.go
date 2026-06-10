@@ -16,6 +16,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +26,6 @@ import (
 	"regexp"
 
 	"github.com/abysslink/abysslink/internal/config"
-	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -250,6 +250,10 @@ func validateImportRigs(existing, incoming []config.RigConfig) error {
 		if existingNames[inc.Name] {
 			return fmt.Errorf("rig import: name collision for rig %q — use a unique name or remove the existing entry first (D-NI-02)", inc.Name)
 		}
+		// Record the incoming name so an in-file duplicate (two rigs with the
+		// same name inside one import batch) is rejected too (CR-02 — the exact
+		// duplicate condition import validation exists to prevent).
+		existingNames[inc.Name] = true
 		if !safeImportHostname.MatchString(inc.Hostname) {
 			return fmt.Errorf("rig import: invalid hostname %q for rig %q: must be a valid DNS name (no spaces or shell metacharacters)", inc.Hostname, inc.Name)
 		}
@@ -284,7 +288,7 @@ func runRigImport(cfgPath, importPath string, apply bool, in io.Reader, out io.W
 
 	// Unmarshal with strict KnownFields (T-14-12: crafted import file guard).
 	var incoming rigExportWrapper
-	dec := yaml.NewDecoder(bytesReader(data))
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&incoming); err != nil {
 		return fmt.Errorf("rig import: parse %s: %w", importPath, err)
@@ -317,14 +321,6 @@ func runRigImport(cfgPath, importPath string, apply bool, in io.Reader, out io.W
 		return nil
 	}
 
-	// Validate signing-key availability: FanOut requires enrolled rigs to have
-	// a keychain entry; import only writes the config — the caller must separately
-	// run `abysslink enroll rig <name> --apply` for the keychain side.
-	// We surface this as an informational note, not an error.
-	for _, r := range incoming.Rigs {
-		_ = fleet.RigService(r.Name) // call used to validate package linkage; actual key check is at runtime
-	}
-
 	// Merge.
 	cfg.Rigs = append(cfg.Rigs, incoming.Rigs...)
 
@@ -332,6 +328,14 @@ func runRigImport(cfgPath, importPath string, apply bool, in io.Reader, out io.W
 	if err := config.Write(cfgPath, cfg); err != nil {
 		return fmt.Errorf("rig import: write config: %w", err)
 	}
+
+	// Confirmation on success (apply must not be silent — UX parity with the
+	// dry-run per-rig preview). Signing keys are NOT imported: FanOut needs a
+	// keychain entry per rig, so point at enroll for that half.
+	for _, r := range incoming.Rigs {
+		_, _ = fmt.Fprintf(out, "Imported rig %q (hostname=%s, backend=%s)\n", r.Name, r.Hostname, r.Backend)
+	}
+	_, _ = fmt.Fprintf(out, "Imported %d rig(s). Note: HMAC signing keys are not imported — run `abysslink enroll rig <name> --apply` on this machine for each rig that should sign.\n", len(incoming.Rigs))
 
 	return nil
 }
@@ -343,23 +347,4 @@ func repeatStr(s string, n int) string {
 		result = append(result, s...)
 	}
 	return string(result)
-}
-
-// bytesReader wraps a []byte as an io.Reader for yaml.NewDecoder.
-type bytesReaderWrapper struct {
-	data []byte
-	pos  int
-}
-
-func bytesReader(data []byte) *bytesReaderWrapper {
-	return &bytesReaderWrapper{data: data}
-}
-
-func (r *bytesReaderWrapper) Read(p []byte) (n int, err error) {
-	if r.pos >= len(r.data) {
-		return 0, io.EOF
-	}
-	n = copy(p, r.data[r.pos:])
-	r.pos += n
-	return n, nil
 }

@@ -176,31 +176,35 @@ func WithDoctorProvider(fn DoctorFunc) Option {
 }
 
 func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingBuffer, opts ...Option) error {
-	if err := config.ValidateWebUI(cfg); err != nil {
+	var lc local.Client // zero value uses the platform-default tailscaled socket
+	ln, err := bindWebUIListener(ctx, cfg, &lc, localTailnetResolver{lc: &lc})
+	if err != nil {
 		return err
 	}
-	if ring == nil {
-		ring = NewNotifyRingBuffer()
+	return serveWebUI(ctx, cfg, &lc, ln, ring, opts...)
+}
+
+// bindWebUIListener validates the config, resolves the tailnet-only bind
+// address, and creates the TLS listener. It is split from the serve loop so
+// callers (module.Apply) can bind SYNCHRONOUSLY and surface port-in-use /
+// TLS-listen failures as errors instead of losing them inside the serve
+// goroutine (W9).
+//
+// WEB-02 floor: resolve the listener address to the tailnet IP and FAIL
+// CLOSED if it cannot be confirmed. An empty bind_addr binds the resolved
+// tailnet IP; an explicit bind_addr must equal it. Never a wildcard bind.
+// This mirrors the metrics server's resolveMetricsAddr (OBS-03) — the config
+// validator only rejects an *explicit* 0.0.0.0/::, so without this the
+// default empty bind_addr would have bound :8443 on every interface.
+func bindWebUIListener(ctx context.Context, cfg *config.Config, lc *local.Client, resolver tailnetIPResolver) (net.Listener, error) {
+	if err := config.ValidateWebUI(cfg); err != nil {
+		return nil, err
 	}
-
-	var so serverOptions
-	for _, opt := range opts {
-		opt(&so)
-	}
-
-	var lc local.Client // zero value uses the platform-default tailscaled socket
-
-	// WEB-02 floor: resolve the listener address to the tailnet IP and FAIL
-	// CLOSED if it cannot be confirmed. An empty bind_addr binds the resolved
-	// tailnet IP; an explicit bind_addr must equal it. Never a wildcard bind.
-	// This mirrors the metrics server's resolveMetricsAddr (OBS-03) — the config
-	// validator only rejects an *explicit* 0.0.0.0/::, so without this the
-	// default empty bind_addr would have bound :8443 on every interface.
-	addr, ok := resolveWebUIAddr(ctx, cfg, localTailnetResolver{lc: &lc})
+	addr, ok := resolveWebUIAddr(ctx, cfg, resolver)
 	if !ok {
 		// resolveWebUIAddr already logged the fail-closed reason. Never fall back
 		// to a wildcard bind (WEB-02).
-		return fmt.Errorf("webui: refusing to bind; tailnet IP could not be confirmed (WEB-02)")
+		return nil, fmt.Errorf("webui: refusing to bind; tailnet IP could not be confirmed (WEB-02)")
 	}
 
 	tlsCfg := &tls.Config{
@@ -210,8 +214,23 @@ func StartWebUIServer(ctx context.Context, cfg *config.Config, ring *NotifyRingB
 
 	ln, err := tls.Listen("tcp", addr, tlsCfg)
 	if err != nil {
-		return fmt.Errorf("webui: tls listen %s: %w", addr, err)
+		return nil, fmt.Errorf("webui: tls listen %s: %w", addr, err)
 	}
+	return ln, nil
+}
+
+// serveWebUI composes the middleware chain and serves on an already-bound
+// listener until ctx is cancelled. It owns ln and closes it on every exit path.
+func serveWebUI(ctx context.Context, cfg *config.Config, lc *local.Client, ln net.Listener, ring *NotifyRingBuffer, opts ...Option) error {
+	if ring == nil {
+		ring = NewNotifyRingBuffer()
+	}
+
+	var so serverOptions
+	for _, opt := range opts {
+		opt(&so)
+	}
+	addr := ln.Addr().String()
 
 	// The mux carries the four read-only view routes plus the embedded static
 	// assets, and is wrapped by CrossOriginProtection+securityHeaders (CSRF/CSP),

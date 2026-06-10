@@ -83,13 +83,14 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	}
 	slog.Debug("asciinema version", "output", strings.TrimSpace(res.Stdout+res.Stderr))
 
-	// Check config for cloud upload URL.
+	// Check config for an ACTIVE cloud upload URL. The line-based helper skips
+	// comment lines — a naive substring match would flag the module's own
+	// default config (whose comments mention the asciinema.org URL) and any
+	// commented-out url, making Detect/Apply non-convergent.
 	cfgPath := asciinemaConfigPath()
 	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the module config path resolved internally, not user input
 	if err == nil {
-		content := string(data)
-		// Warn if url is set to the public asciinema.org (privacy consideration).
-		if strings.Contains(content, "url = https://asciinema.org") {
+		if hasActiveCloudUploadURL(string(data)) {
 			findings = append(findings, modules.Finding{
 				Module:   m.Name(),
 				Check:    "no_cloud_upload",
@@ -100,6 +101,46 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	}
 
 	return findings, nil
+}
+
+// hasActiveCloudUploadURL reports whether content has an uncommented
+// `url = …asciinema.org…` line. Comment lines (`;` or `#`) never count.
+func hasActiveCloudUploadURL(content string) bool {
+	for _, raw := range strings.Split(content, "\n") {
+		if isActiveCloudUploadLine(raw) {
+			return true
+		}
+	}
+	return false
+}
+
+// isActiveCloudUploadLine reports whether a single config line actively points
+// uploads at asciinema.org.
+func isActiveCloudUploadLine(raw string) bool {
+	line := strings.TrimSpace(raw)
+	if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
+		return false
+	}
+	if !strings.HasPrefix(line, "url") {
+		return false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(line, "url"))
+	if !strings.HasPrefix(rest, "=") {
+		return false
+	}
+	return strings.Contains(rest, "asciinema.org")
+}
+
+// disableCloudUploadURL comments out every active asciinema.org url line so
+// uploads are disabled while the rest of the user's config is preserved.
+func disableCloudUploadURL(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, raw := range lines {
+		if isActiveCloudUploadLine(raw) {
+			lines[i] = "; url =  ; cloud upload disabled by abysslink (was: " + strings.TrimSpace(raw) + ")"
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Plan computes the actions needed.
@@ -160,25 +201,42 @@ func (m *Module) Apply(ctx context.Context) error {
 		return fmt.Errorf("asciinema apply: mkdir config dir: %w", err)
 	}
 
-	// Only write if the file doesn't already exist.
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		if m.audit == nil {
-			return fmt.Errorf("asciinema apply: audit not available")
-		}
+	if m.audit == nil {
+		return fmt.Errorf("asciinema apply: audit not available")
+	}
+
+	data, err := os.ReadFile(cfgPath) //nolint:gosec // G304: cfgPath is the module config path resolved internally, not user input
+	switch {
+	case os.IsNotExist(err):
 		if err := m.audit.WriteFile(cfgPath, []byte(asciinemaConfig), 0o600, false); err != nil {
 			return fmt.Errorf("asciinema apply: write config: %w", err)
 		}
 		slog.Info("asciinema apply: wrote privacy config (cloud uploads disabled)", "path", cfgPath)
-	} else {
-		slog.Debug("asciinema apply: config already exists, not overwriting", "path", cfgPath)
+	case err != nil:
+		return fmt.Errorf("asciinema apply: read config: %w", err)
+	case hasActiveCloudUploadURL(string(data)):
+		// Plan promises "configure asciinema to disable cloud uploads" — honor
+		// it on an EXISTING config too (W6): comment the active url line(s)
+		// out under audit instead of leaving the finding unremediated forever.
+		patched := disableCloudUploadURL(string(data))
+		if err := m.audit.WriteFile(cfgPath, []byte(patched), 0o600, false); err != nil {
+			return fmt.Errorf("asciinema apply: disable cloud upload: %w", err)
+		}
+		slog.Info("asciinema apply: disabled cloud upload URL in existing config", "path", cfgPath)
+	default:
+		slog.Debug("asciinema apply: config already privacy-safe, not touching", "path", cfgPath)
 	}
 
 	return nil
 }
 
-// Verify re-runs Detect.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// Verify is a no-op for the asciinema module — all checks run in Detect.
+// Pitfall 4 (Doctor double-emission): do NOT call Detect here — runner.Doctor
+// calls both Detect and Verify, so re-running Detect would double-emit every
+// Detect finding per doctor pass (W4/NET-18). Verify adds no new information
+// beyond Detect; returning nil avoids the duplication (mirrors ssh/ntfy).
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair re-runs Apply.

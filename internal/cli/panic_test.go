@@ -17,10 +17,12 @@ package cli
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -112,8 +114,15 @@ func TestPanicRigFlag_UnknownRigErrors(t *testing.T) {
 	var out strings.Builder
 	root.SetOut(&out)
 	root.SetErr(&out)
-	// Default config has no enrolled rigs — "laptop" is unknown.
-	root.SetArgs([]string{"panic", "--rig", "laptop", "--config", filepath.Join(t.TempDir(), "absent.yaml")})
+	// A valid config with no enrolled rigs — "laptop" is unknown. The config
+	// file must exist: an explicitly-passed missing --config is now a hard
+	// error before rig resolution (UX review #4), which would mask the
+	// unknown-rig assertion this test exists for.
+	cfgPath := filepath.Join(t.TempDir(), "abysslink.yaml")
+	cfgData, merr := config.Marshal(testCfgDefaults())
+	require.NoError(t, merr)
+	require.NoError(t, os.WriteFile(cfgPath, cfgData, 0o600))
+	root.SetArgs([]string{"panic", "--rig", "laptop", "--config", cfgPath})
 
 	err := root.ExecuteContext(context.Background())
 	require.Error(t, err, "panic --rig <unknown> must error, not run local panic")

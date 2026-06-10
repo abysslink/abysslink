@@ -308,8 +308,9 @@ func printLineDiffSummary(p Printer, current, backup []byte) {
 
 // confirmRestore prints the diff preview and asks the user to confirm the
 // restore. With --yes it returns (true, nil) immediately. In a non-interactive
-// context (no TTY, no --yes) it returns (false, nil) so callers can print
-// "Aborted." without hanging.
+// context (no TTY, no --yes) it returns errMissingInput so the command exits
+// non-zero — a piped/CI invocation must be able to tell the restore did not
+// happen (never a silent "Aborted." + exit 0).
 func confirmRestore(ctx context.Context, p Printer, target, backupPath, backupLabel string, yes bool) (bool, error) {
 	if err := restoreDiffPreview(p, target, backupPath, backupLabel); err != nil {
 		printerInfo(p, styleMuted.Render(fmt.Sprintf("  (diff preview unavailable: %v)", err)))
@@ -320,7 +321,7 @@ func confirmRestore(ctx context.Context, p Printer, target, backupPath, backupLa
 	}
 
 	if !interactive(false, false) {
-		return false, nil
+		return false, errMissingInput("yes")
 	}
 
 	return tui.Confirm(ctx,

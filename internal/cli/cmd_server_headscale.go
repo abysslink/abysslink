@@ -99,7 +99,9 @@ func newServerHeadscaleInitCmd() *cobra.Command {
 				return err
 			}
 			runner := cc.runner
-			return headscaleInitRunE(cmd.Context(), cc.cfg, cc, runner)
+			// UX: route through newPrinter(cmd) so --json and cmd.SetOut capture
+			// are honored (never a raw os.Stdout human printer).
+			return headscaleInitRunE(cmd.Context(), cc.cfg, cc, runner, newPrinter(cmd))
 		},
 	}
 }
@@ -115,8 +117,10 @@ func newServerHeadscaleInitCmd() *cobra.Command {
 //	Step 6: MergeHeadscaleConfig (hardened config.yaml)
 //	Step 7-11: Service install + health-check + API key + user-ensure + pre-auth key
 //	           (delegated to completeInit — skipped in dryRun mode)
-func headscaleInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner) error {
-	p := newHumanPrinterStdout()
+func headscaleInitRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, p Printer) error {
+	if p == nil {
+		p = newHumanPrinterStdout()
+	}
 
 	// ── Step 0: TLS gate (fail-closed, before any mutation) ───────────────────
 	// This call imports internal/backend (cli→backend direction — no cycle).
@@ -330,6 +334,15 @@ WantedBy=multi-user.target
 	}
 	if err := audit.New(logPath).WriteFile(unitPath, []byte(unitContent), 0o644, dryRun); err != nil {
 		return fmt.Errorf("headscale init: write systemd unit: %w", err)
+	}
+
+	// Dry-run gate: a "dry run" must never start a real service. The unit write
+	// above already honors dryRun; the systemctl mutations must too (the macOS
+	// sibling ensureMacOSDirs / writeMacOSPlistAndLoad gates the same way).
+	if dryRun {
+		printerInfo(p, "[plan] would write systemd unit → "+unitPath)
+		printerInfo(p, "[plan] would systemctl daemon-reload && systemctl enable headscale && systemctl start headscale")
+		return nil
 	}
 
 	for _, args := range [][]string{
@@ -634,7 +647,7 @@ func newServerHeadscaleUpgradeCmd() *cobra.Command {
 			if ver == "" {
 				ver = headscaleDefaultVersion
 			}
-			return headscaleUpgradeRunE(cmd.Context(), cc.cfg, cc, cc.runner, ver)
+			return headscaleUpgradeRunE(cmd.Context(), cc.cfg, cc, cc.runner, ver, newPrinter(cmd))
 		},
 	}
 	cmd.Flags().String("version", "", "Target version (default: "+headscaleDefaultVersion+")")
@@ -643,7 +656,10 @@ func newServerHeadscaleUpgradeCmd() *cobra.Command {
 
 // headscaleUpgradeRunE is the testable implementation of "server headscale upgrade".
 // Sequence: check installed version → refuse downgrade → download + verify → swap binary → restart.
-func headscaleUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, targetVer string) error {
+func headscaleUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContext, runner shell.Runner, targetVer string, p Printer) error {
+	if p == nil {
+		p = newHumanPrinterStdout()
+	}
 	binPath := headscaleBinaryPath(cfg)
 
 	// Check installed version first (before download).
@@ -658,7 +674,13 @@ func headscaleUpgradeRunE(ctx context.Context, cfg *config.Config, cc *cmdContex
 	}
 
 	if cc.dryRun {
+		// The preview must be VISIBLE — slog alone is hidden at the default WARN
+		// level, leaving the user with silence + exit 0 (every other command
+		// prints a [plan] line).
 		slog.InfoContext(ctx, "headscale upgrade [dry-run]", "installed", installed, "target", targetVer)
+		printerInfo(p, fmt.Sprintf("[plan] headscale upgrade: installed %s → target %s", installed, targetVer))
+		printerInfo(p, "[plan] would download + checksum-verify the new binary, backup the DB, swap the binary, restart, and health-check")
+		printerInfo(p, "Re-run with --apply to execute.")
 		return nil
 	}
 
@@ -1138,9 +1160,13 @@ func ensureHeadscaleUser(ctx context.Context, baseURL, apiKey, userName string) 
 func mintPreAuthKey(ctx context.Context, baseURL, apiKey, userName string, expiry time.Duration) (string, error) {
 	expiryTime := time.Now().UTC().Add(expiry)
 	body := map[string]any{
-		"user":       userName,
-		"reusable":   false,
-		"ephemeral":  true,
+		"user":     userName,
+		"reusable": false,
+		// ephemeral MUST be false: Headscale deletes nodes joined with an
+		// ephemeral key as soon as they go offline, and phones/laptops go
+		// offline routinely. D-11 requires only an explicit expiry (below),
+		// not ephemerality.
+		"ephemeral":  false,
 		"expiration": expiryTime.Format(time.RFC3339),
 	}
 	bodyBytes, _ := json.Marshal(body)

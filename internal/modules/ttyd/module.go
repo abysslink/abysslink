@@ -73,18 +73,45 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 
 	slog.Debug("ttyd version", "output", strings.TrimSpace(res.Stdout))
 
+	// Surface the auth trade-off as a doctor finding, not just a log line:
+	// ttyd has no stdin credential path (only --credential on argv, which the
+	// no-secrets-on-argv rule forbids), so the abysslink-managed ttyd runs
+	// WITHOUT basic auth and the tailnet ACL is the only access control.
+	findings = append(findings, modules.Finding{
+		Module:   m.Name(),
+		Check:    "ttyd_no_auth",
+		Severity: modules.SeverityWarning,
+		Message: "ttyd runs without basic auth (credentials would leak on argv) — the tailnet ACL is the " +
+			"only access control for tcp/" + ttydPort + "; never expose this port beyond the tailnet",
+	})
+
 	// Check if ttyd is running and bound to the tailnet IP. We inspect each
 	// running ttyd invocation's argv: a ttyd started without an explicit
 	// `-i <addr>` binds 0.0.0.0 by default — the most common insecure case —
 	// and when -i IS present its value must not be a wildcard or loopback
 	// address (NET-10). Naive substring greps for "0.0.0.0"/"::" miss the
 	// default-bind case entirely and false-positive on IPv6 literals.
-	res, err = m.runner.Run(ctx, "pgrep", "-a", "ttyd")
+	res, err = m.runner.Run(ctx, "pgrep", m.pgrepListArgs()...)
 	if err == nil && res.ExitCode == 0 {
 		findings = append(findings, m.bindFindings(res.Stdout)...)
 	}
 
 	return findings, nil
+}
+
+// pgrepListArgs returns the pgrep argv (after the command name) that yields
+// one "PID full-argv" line per ttyd process on this platform. The flags
+// genuinely differ:
+//   - Linux (procps-ng): `-a/--list-full` prints PID + full command line
+//     (`-fl` prints only the process name since procps-ng 3.3).
+//   - macOS/BSD: `-a` means "include ancestors" and prints PIDs only — which
+//     made the NET-10 bind check dead code there; `-fl` prints PID + full
+//     argument list (and `-f` matches against it).
+func (m *Module) pgrepListArgs() []string {
+	if m.plat != nil && m.plat.OS() == "darwin" {
+		return []string{"-fl", "ttyd"}
+	}
+	return []string{"-a", "ttyd"}
 }
 
 // bindFindings parses `pgrep -a ttyd` output (one "PID argv..." line per
@@ -196,14 +223,19 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 		}
 	}
 
+	// Plan text MUST match what Apply actually does (no TLS, no basic auth):
+	// Apply installs a plain-HTTP ttyd service bound to the tailnet IP, with
+	// the tailnet (WireGuard) as the encrypted transport and the tailnet ACL
+	// as the only access control. The auth gap is surfaced as a doctor
+	// finding (ttyd_no_auth) in Detect.
 	actions = append(actions, modules.Action{
 		Module:      m.Name(),
-		Description: "configure ttyd with tailscale cert HTTPS bound to tailnet IP",
+		Description: "install ttyd service bound to tailnet IP only, plain HTTP on tcp/" + ttydPort + ", writable terminal (-W)",
 		Reversible:  true,
 	})
 	actions = append(actions, modules.Action{
 		Module:      m.Name(),
-		Description: "WARNING: ttyd basic-auth is required — do not expose without authentication",
+		Description: "WARNING: ttyd runs without basic auth or its own TLS — the tailnet ACL is the only access control; never expose tcp/" + ttydPort + " beyond the tailnet",
 		Reversible:  false,
 	})
 
@@ -212,8 +244,8 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 
 // Apply installs ttyd and runs it bound to the tailnet IP only. ttyd has no
 // stdin credential path (only --credential on argv, which would leak), so
-// access control is the tailnet ACL rather than basic auth — surfaced as a
-// warning. Never bind to 0.0.0.0.
+// access control is the tailnet ACL rather than basic auth — surfaced as the
+// ttyd_no_auth doctor finding in Detect. Never bind to 0.0.0.0.
 func (m *Module) Apply(ctx context.Context) error {
 	if !m.cfg.Modules.Ttyd.Enabled {
 		return nil
@@ -231,9 +263,15 @@ func (m *Module) Apply(ctx context.Context) error {
 		return fmt.Errorf("ttyd apply: %w", err)
 	}
 
+	// -W is an EXPLICIT decision: ttyd >= 1.7 starts read-only by default, so
+	// without it the browser terminal cannot type anything and the feature is
+	// useless for its purpose. Write access is acceptable because the listener
+	// is bound to the tailnet IP and gated by the tailnet ACL (the same trust
+	// boundary as ssh); the missing-basic-auth trade-off is surfaced by the
+	// ttyd_no_auth doctor finding.
 	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
 		Label:     "dev.abysslink.ttyd",
-		Args:      []string{"ttyd", "-i", ip, "-p", ttydPort, "bash"},
+		Args:      []string{"ttyd", "-W", "-i", ip, "-p", ttydPort, "bash"},
 		KeepAlive: true,
 		RunAtLoad: true,
 	}); err != nil {

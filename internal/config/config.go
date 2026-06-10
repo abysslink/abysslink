@@ -16,7 +16,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -34,6 +36,30 @@ import (
 // Defined here to avoid config→fleet→config import cycle (RESEARCH.md Pitfall 4).
 // Any change to this pattern MUST also be applied in internal/fleet/fanout.go:38.
 var safeHostnamePat = regexp.MustCompile(`^[a-z0-9][a-z0-9\-.]{0,252}[a-z0-9]$`)
+
+// safeUnixUserPat is the POSIX-portable username shape (useradd's default
+// NAME_REGEX): lowercase letter or underscore first, then up to 31 letters,
+// digits, underscores, or hyphens. identity.unix_user is interpolated into the
+// hardened sshd drop-in (`AllowUsers %s`) and the tailnet ACL users array, so
+// anything outside this charset — especially whitespace or newlines — would
+// inject extra sshd directives or AllowUsers entries (security review W3).
+var safeUnixUserPat = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+// ValidateUnixUser checks a UNIX username against the POSIX-portable pattern
+// used by validateIdentity. It is exported so argv/file-render call sites
+// (e.g. the ssh module's sshd drop-in writer) can re-check the value as a
+// defense-in-depth guard, mirroring the ValidateHostname pattern.
+//
+// Unlike ValidateHostname, an empty string is rejected: every caller of this
+// helper is about to interpolate the value somewhere a blank would be unsafe.
+func ValidateUnixUser(user string) error {
+	if !safeUnixUserPat.MatchString(user) {
+		return fmt.Errorf("unix user %q is not a safe username — "+
+			"must match %s (lowercase letters, digits, _ and -, no whitespace)",
+			user, safeUnixUserPat.String())
+	}
+	return nil
+}
 
 // Config is the top-level abysslink.yaml structure.
 type Config struct {
@@ -452,6 +478,11 @@ func Load(path string) (*Config, error) {
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
+		// An empty file yields io.EOF from the YAML decoder — give the user an
+		// actionable message instead of a bare decode error.
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("config: config file %s is empty — run `abysslink init` to generate one", path)
+		}
 		return nil, fmt.Errorf("config: decode %s: %w", path, err)
 	}
 	// Normalize: a v1 tailnet:-only config has no backend: stanza, so
@@ -461,8 +492,10 @@ func Load(path string) (*Config, error) {
 	}
 	// D-01 (fail-closed): validate before returning. A hand-edited YAML with an
 	// unsafe hostname or non-https NetBird URL must never reach argv call sites.
+	// The file path is included so the user knows WHICH config failed when
+	// several candidates exist (--config flag, $ABYSSLINK_CONFIG, default path).
 	if err := Validate(cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }
@@ -490,6 +523,9 @@ func LoadForRead(path string) (*Config, error) {
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("config: config file %s is empty — run `abysslink init` to generate one", path)
+		}
 		return nil, fmt.Errorf("config: decode %s: %w", path, err)
 	}
 	if cfg.Backend.Type == "" {
@@ -497,9 +533,10 @@ func LoadForRead(path string) (*Config, error) {
 	}
 	// Return the parsed config ALONGSIDE any validation error: a parse/decode
 	// failure is still fatal (nil config above), but a pure validation failure
-	// leaves a usable config for read-only rendering.
+	// leaves a usable config for read-only rendering. The path is included so
+	// the warn-and-continue log identifies which file failed validation.
 	if verr := Validate(cfg); verr != nil {
-		return cfg, verr
+		return cfg, fmt.Errorf("%s: %w", path, verr)
 	}
 	return cfg, nil
 }
@@ -645,6 +682,11 @@ func validateIdentity(cfg *Config) error {
 	}
 	if cfg.Identity.UnixUser == "" {
 		return fmt.Errorf("config: identity.unix_user is required")
+	}
+	// W3: unix_user flows into the sshd drop-in (`AllowUsers %s`) and the
+	// tailnet ACL — reject anything that could smuggle extra directives.
+	if err := ValidateUnixUser(cfg.Identity.UnixUser); err != nil {
+		return fmt.Errorf("config: identity.unix_user: %w", err)
 	}
 	if cfg.Tailnet.Hostname == "" {
 		return fmt.Errorf("config: tailnet.hostname is required")
