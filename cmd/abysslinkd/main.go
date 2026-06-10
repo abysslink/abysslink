@@ -30,6 +30,7 @@ import (
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/gate"
 	"github.com/abysslink/abysslink/internal/metrics"
 	notifymod "github.com/abysslink/abysslink/internal/modules"
 	notify "github.com/abysslink/abysslink/internal/modules/notify"
@@ -51,7 +52,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	runner := &shell.ExecRunner{}
+	// Base/gated runner split (D-38, D-40): module/consumer execs flow through
+	// the observe-only gate decorator; daemon-internal plumbing keeps the
+	// ungated base runner — see the D-40 comment at daemon.NewServer below.
+	base := &shell.ExecRunner{}
+	gated := gate.New(base)
 
 	cfg, err := config.Load(configPath())
 	if err != nil {
@@ -59,19 +64,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	kc, kerr := secrets.NewStore(ctx, runner)
+	kc, kerr := secrets.NewStore(ctx, gated)
 	if kerr != nil {
 		slog.Warn("abysslinkd: keychain backend unavailable", "err", kerr)
 		kc = nil
 	}
-	plat, perr := platformauto.New(runner)
+	plat, perr := platformauto.New(gated)
 	if perr != nil {
 		slog.Error("abysslinkd: platform init failed", "err", perr)
 		os.Exit(1)
 	}
 
-	nm := notify.New(notifymod.Deps{Cfg: cfg, Runner: runner, Keychain: kc, Platform: plat})
-	srv := daemon.NewServer(directNotifier{m: nm}, runner, cfg)
+	nm := notify.New(notifymod.Deps{Cfg: cfg, Runner: gated, Keychain: kc, Platform: plat})
+	// D-40: the daemon's internal watchers/probes (and the session registry in
+	// plan 27-07) use the ungated base runner so the Phase 30 enforcing gate can
+	// never deadlock the daemon on its own plumbing. The bypass is structural —
+	// visible right here in the wiring — and not runtime-toggleable.
+	srv := daemon.NewServer(directNotifier{m: nm}, base, cfg)
+	srv.SetExecCounter(gated.Count)
 
 	// Hourly tamper-evident anchor writer. When a keychain is available and the
 	// signed-audit path is reachable, the daemon refreshes the external anchor
@@ -88,7 +98,8 @@ func main() {
 	// inside StartMetricsServer (T-18-16): no caller-side nil-check that would
 	// skip wiring. The registry is a live in-memory sink when enabled, NoopRegistry
 	// otherwise so every metrics call is nil-safe.
-	bc, bcErr := backend.New(cfg, runner)
+	// base (D-40): the metrics tailnet-IP binding is a daemon-internal probe.
+	bc, bcErr := backend.New(cfg, base)
 	if bcErr != nil {
 		slog.Warn("abysslinkd: backend client unavailable; metrics binding degraded", "err", bcErr)
 	}
@@ -103,7 +114,9 @@ func main() {
 	// via the sibling CLI binary (never the daemon socket), and delivers an
 	// opaque-rig-id summary on the dedicated digest ntfy topic. The goroutine
 	// exits cleanly on ctx cancellation; a disabled digest launches no goroutine.
-	daemon.StartDigestScheduler(ctx, cfg, directNotifier{m: nm}, runner)
+	// base (D-40): the digest scheduler is daemon-internal plumbing (it execs
+	// the sibling CLI binary on a timer, like a watcher).
+	daemon.StartDigestScheduler(ctx, cfg, directNotifier{m: nm}, base)
 
 	// Opt-in browser dashboard (Phase 19, //go:build webui, default OFF). The
 	// base build links a no-op stub (start_webui_stub.go); the webui build wires

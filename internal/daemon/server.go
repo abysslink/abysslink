@@ -74,6 +74,10 @@ type Server struct {
 	socketPath string
 	startedAt  time.Time
 	ring       RingAdder // nil unless the webui build wires it via SetRing
+	// execCount reads the gate decorator's atomic exec counter (D-38). nil
+	// unless the composition root wires it via SetExecCounter; handleStatus
+	// reports 0 when unset (nil-safe).
+	execCount func() uint64
 }
 
 // NewServer returns a Server. notifier MUST be a direct backend (see Notifier).
@@ -91,6 +95,13 @@ func NewServer(notifier Notifier, runner shell.Runner, cfg *config.Config) *Serv
 // //go:build webui daemon entrypoint; in the base build the ring stays nil and
 // handleNotify skips the record (no-op, nil-safe).
 func (s *Server) SetRing(r RingAdder) { s.ring = r }
+
+// SetExecCounter injects the gate decorator's exec-counter accessor
+// (gate.Gated.Count) so GET /status can report gate_execs_observed — live
+// proof that the observe-only seam intercepts every module/consumer exec
+// (D-38). Called by the composition root before Run; nil-safe: when unset,
+// handleStatus reports 0.
+func (s *Server) SetExecCounter(fn func() uint64) { s.execCount = fn }
 
 // Run listens on the Unix socket and starts watchers until ctx is cancelled.
 // On cancellation it waits for the graceful shutdown (connection drain +
@@ -197,6 +208,11 @@ type daemonStatusResponse struct {
 	LastSeen   string              `json:"last_seen,omitempty"`
 	Uptime     string              `json:"uptime"`
 
+	// GateExecsObserved is live: it reads the gate decorator's atomic counter
+	// via SetExecCounter — the count of module/consumer execs the observe-only
+	// GatedRunner has intercepted (D-38); 0 when no gate is wired.
+	GateExecsObserved uint64 `json:"gate_execs_observed"`
+
 	// PostureComplete signals whether the DOCTOR summary is authoritative
 	// posture data. It is false this phase: the full doctor families live in
 	// internal/cli (a daemon→cli import would form a cycle, so the daemon cannot
@@ -259,6 +275,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// doctor summary as a genuine "0 fatal" all-clear.
 	reachable := s.resolveReachable(r.Context())
 
+	// Gate exec counter (D-38): live when the composition root wired
+	// SetExecCounter; 0 when no gate is present (nil-safe, never an error).
+	var gateExecs uint64
+	if s.execCount != nil {
+		gateExecs = s.execCount()
+	}
+
 	resp := daemonStatusResponse{
 		Version:    daemonVersion,
 		Backend:    backendType,
@@ -267,6 +290,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		LockStatus: lockStatus,            // authoritative: read from config.
 		Doctor:     daemonDoctorSummary{}, // STUB (OBS-07): zeroed counts, not a real all-clear.
 		Uptime:     time.Since(s.startedAt).Truncate(time.Second).String(),
+		// LIVE: the gate decorator's atomic exec counter via SetExecCounter (D-38).
+		GateExecsObserved: gateExecs,
 		// PostureComplete=false flags the DOCTOR summary as non-authoritative so
 		// consumers do not read the zeroed doctor summary as a genuine "0 fatal"
 		// all-clear on a security-posture endpoint (WR-05). Reachable is now real.

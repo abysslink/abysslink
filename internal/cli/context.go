@@ -25,6 +25,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/gate"
 	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/modules/acl"
@@ -55,10 +56,12 @@ import (
 )
 
 // newRunner is the factory used by loadCmdContext to construct the shell runner.
-// The default returns &shell.ExecRunner{}, which is byte-identical to the
-// previous inline literal. Tests override this var to inject a MockRunner
-// without changing production behavior.
-var newRunner = func() shell.Runner { return &shell.ExecRunner{} }
+// The default wraps &shell.ExecRunner{} in the observe-only gate decorator
+// (D-38): every module/consumer exec at the CLI composition root is recorded
+// (binary + hashes, never raw argv) and delegated verbatim — zero behavior
+// change this phase. Tests override this var to inject a MockRunner without
+// changing production behavior.
+var newRunner = func() shell.Runner { return gate.New(&shell.ExecRunner{}) }
 
 // cmdContext holds shared state for a command invocation.
 type cmdContext struct {
