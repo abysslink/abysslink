@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -393,6 +394,9 @@ func (a *netbirdAdapter) Devices(ctx context.Context) ([]Device, error) {
 // TagDevice updates the groups (tags) for a peer via PUT /api/peers/{id}.
 // Each tag name is mapped 1:1 to a NetBird group (D-07: Groups-as-tags).
 func (a *netbirdAdapter) TagDevice(ctx context.Context, id string, tags []string) error {
+	if err := validateResourceID("peer", id); err != nil {
+		return fmt.Errorf("netbird: tag peer: %w", err)
+	}
 	editor := newNetBirdEditor(a.doRequest)
 	groupIDs := make([]string, 0, len(tags))
 	for _, tag := range tags {
@@ -403,7 +407,7 @@ func (a *netbirdAdapter) TagDevice(ctx context.Context, id string, tags []string
 		groupIDs = append(groupIDs, gid)
 	}
 	body := map[string][]string{"groups": groupIDs}
-	resp, err := a.doRequest(ctx, http.MethodPut, "/api/peers/"+id, body)
+	resp, err := a.doRequest(ctx, http.MethodPut, "/api/peers/"+url.PathEscape(id), body)
 	if err != nil {
 		return fmt.Errorf("netbird: tag peer %s: %w", id, err)
 	}
@@ -416,7 +420,10 @@ func (a *netbirdAdapter) TagDevice(ctx context.Context, id string, tags []string
 
 // DeleteDevice removes a peer via DELETE /api/peers/{id}.
 func (a *netbirdAdapter) DeleteDevice(ctx context.Context, id string) error {
-	resp, err := a.doRequest(ctx, http.MethodDelete, "/api/peers/"+id, nil)
+	if err := validateResourceID("peer", id); err != nil {
+		return fmt.Errorf("netbird: delete peer: %w", err)
+	}
+	resp, err := a.doRequest(ctx, http.MethodDelete, "/api/peers/"+url.PathEscape(id), nil)
 	if err != nil {
 		return fmt.Errorf("netbird: delete peer %s: %w", id, err)
 	}

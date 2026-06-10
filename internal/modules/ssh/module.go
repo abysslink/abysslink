@@ -286,26 +286,8 @@ func (m *Module) Apply(ctx context.Context) error {
 				return fmt.Errorf("ssh apply: disable remote login exited %d: %s", res.ExitCode, res.Stderr)
 			}
 		case "sshd_running":
-			// Stop and disable sshd on Linux — Tailscale SSH handles auth.
-			// Try both unit names (distros differ); error only if both fail.
-			slog.Info("ssh apply: stopping sshd (Tailscale SSH mode)")
-			var disableErr error
-			for _, unit := range []string{"sshd", "ssh"} {
-				res, err := m.runner.Run(ctx, "sudo", "systemctl", "disable", "--now", unit)
-				if err == nil && res.Ok() {
-					disableErr = nil
-					break
-				}
-				if err != nil {
-					// Exec failure: res is the zero Result — report the real
-					// error, not a fabricated "exit 0" (review INFO).
-					disableErr = fmt.Errorf("systemctl disable %s: %w", unit, err)
-				} else {
-					disableErr = fmt.Errorf("systemctl disable %s: exit %d: %s", unit, res.ExitCode, strings.TrimSpace(res.Stderr))
-				}
-			}
-			if disableErr != nil {
-				return fmt.Errorf("ssh apply: could not disable sshd (tried sshd and ssh units): %w", disableErr)
+			if err := m.disableSSHDUnits(ctx); err != nil {
+				return err
 			}
 		case "fallback_config":
 			if err := m.installHardenedSSHD(ctx); err != nil {
@@ -315,6 +297,26 @@ func (m *Module) Apply(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// disableSSHDUnits stops and disables sshd on Linux — Tailscale SSH handles
+// auth. Both unit names are tried (distros differ); it errors only when both
+// fail, reporting the real exec error rather than a fabricated exit code.
+func (m *Module) disableSSHDUnits(ctx context.Context) error {
+	slog.Info("ssh apply: stopping sshd (Tailscale SSH mode)")
+	var disableErr error
+	for _, unit := range []string{"sshd", "ssh"} {
+		res, err := m.runner.Run(ctx, "sudo", "systemctl", "disable", "--now", unit)
+		if err == nil && res.Ok() {
+			return nil
+		}
+		if err != nil {
+			disableErr = fmt.Errorf("systemctl disable %s: %w", unit, err)
+		} else {
+			disableErr = fmt.Errorf("systemctl disable %s: exit %d: %s", unit, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+	}
+	return fmt.Errorf("ssh apply: could not disable sshd (tried sshd and ssh units): %w", disableErr)
 }
 
 // hardenedSSHDConfig returns the sshd drop-in for openssh-fallback mode. It

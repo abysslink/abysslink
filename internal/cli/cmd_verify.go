@@ -183,17 +183,18 @@ func runVerify(ctx context.Context, p Printer, runner shell.Runner, opts verifyO
 		res.SLSAOK = slsaProvenanceExists(ctx, checksumPath)
 	}
 
-	failed := !bundleOK || (binaryChecked && !binaryOK)
-	if opts.jsonOut {
-		p.PrintJSON(res)
-		if failed {
-			return &exitError{code: exitCodeError}
-		}
-		return nil
-	}
+	return emitVerifyResult(p, res, opts.jsonOut, verr, binErr)
+}
 
-	emitVerifyHuman(p, res, verr, binErr)
-	if failed {
+// emitVerifyResult renders the verification result (JSON or human) and maps
+// any bundle/binary failure to exit 1. Extracted from runVerify (gocyclo).
+func emitVerifyResult(p Printer, res verifyResult, jsonOut bool, verr, binErr error) error {
+	if jsonOut {
+		p.PrintJSON(res)
+	} else {
+		emitVerifyHuman(p, res, verr, binErr)
+	}
+	if !res.BundleOK || (res.BinaryChecked && !res.BinaryOK) {
 		return &exitError{code: exitCodeError}
 	}
 	return nil

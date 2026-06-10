@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -371,8 +372,11 @@ func (a *headscaleAdapter) Devices(ctx context.Context) ([]Device, error) {
 
 // TagDevice sets the ACL tags for a node via POST /api/v1/node/{id}/tags.
 func (a *headscaleAdapter) TagDevice(ctx context.Context, id string, tags []string) error {
+	if err := validateResourceID("node", id); err != nil {
+		return fmt.Errorf("headscale: tag node: %w", err)
+	}
 	body := map[string][]string{"tags": tags}
-	resp, err := a.doRequest(ctx, http.MethodPost, "/api/v1/node/"+id+"/tags", body)
+	resp, err := a.doRequest(ctx, http.MethodPost, "/api/v1/node/"+url.PathEscape(id)+"/tags", body)
 	if err != nil {
 		return fmt.Errorf("headscale: tag node %s: %w", id, err)
 	}
@@ -385,7 +389,10 @@ func (a *headscaleAdapter) TagDevice(ctx context.Context, id string, tags []stri
 
 // DeleteDevice removes a node via DELETE /api/v1/node/{id}.
 func (a *headscaleAdapter) DeleteDevice(ctx context.Context, id string) error {
-	resp, err := a.doRequest(ctx, http.MethodDelete, "/api/v1/node/"+id, nil)
+	if err := validateResourceID("node", id); err != nil {
+		return fmt.Errorf("headscale: delete node: %w", err)
+	}
+	resp, err := a.doRequest(ctx, http.MethodDelete, "/api/v1/node/"+url.PathEscape(id), nil)
 	if err != nil {
 		return fmt.Errorf("headscale: delete node %s: %w", id, err)
 	}
