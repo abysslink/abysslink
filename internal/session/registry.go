@@ -243,6 +243,58 @@ func (r *Registry) emit(t Transition) {
 	}
 }
 
+// transitionFrom builds a Transition from a pane record's full identity set.
+// IDs route; names/consumer are display metadata. Pane CONTENT never enters a
+// Transition (T-27-23) — the heuristic reduces it to a hash and a boolean.
+func transitionFrom(tt TransitionType, p *paneRecord, epoch uint64) Transition {
+	return Transition{
+		Type:        tt,
+		SessionID:   p.sessionID,
+		WindowID:    p.windowID,
+		PaneID:      p.paneID,
+		Epoch:       epoch,
+		Consumer:    p.consumer,
+		SessionName: p.sessionName,
+		WindowName:  p.windowName,
+	}
+}
+
+// setNeedsInput marks a pane needs_input, stamping NeedsInputSince from the
+// injected clock. Emission is edge-triggered: only the false→true edge emits
+// TransitionNeedsInput — repeated idle+prompt ticks are no-ops, never
+// level-triggered spam (and a hostile prompt-flapper is bounded by the edge
+// requirement plus the downstream 27-05 cooldown, T-27-24).
+func (r *Registry) setNeedsInput(paneID string) {
+	r.mu.Lock()
+	p, ok := r.panes[paneID]
+	if !ok || p.needsInput {
+		r.mu.Unlock()
+		return
+	}
+	p.needsInput = true
+	p.needsInputSince = r.now()
+	t := transitionFrom(TransitionNeedsInput, p, r.epoch)
+	r.mu.Unlock()
+	r.emit(t)
+}
+
+// clearNeedsInput clears a pane's needs_input state, recording why (output /
+// attach). Only the true→false edge emits TransitionCleared.
+func (r *Registry) clearNeedsInput(paneID, reason string) {
+	r.mu.Lock()
+	p, ok := r.panes[paneID]
+	if !ok || !p.needsInput {
+		r.mu.Unlock()
+		return
+	}
+	p.needsInput = false
+	p.needsInputSince = time.Time{}
+	t := transitionFrom(TransitionCleared, p, r.epoch)
+	r.mu.Unlock()
+	slog.Debug("session: needs_input cleared", "pane", paneID, "reason", reason)
+	r.emit(t)
+}
+
 // Snapshot returns a deep copy of the registry state: sessions, windows, and
 // panes ordered by numeric ID. Mutating the returned value never affects
 // registry state.
@@ -295,13 +347,29 @@ func (r *Registry) Snapshot() Snapshot {
 
 // syncPanes replaces the state tree from a full `list-panes -a` output — the
 // poll is the single source of truth (BACK-03). Heuristic fields
-// (needs_input and its timestamp) are preserved for panes whose ID persists
-// within the same epoch; after an epoch bump a recycled pane ID is a
-// different pane and starts clean (Pitfall 5). Malformed lines are skipped
-// with a debug log, never fatally (T-27-09).
+// (needs_input and its timestamp, content hash, idle window) are preserved
+// for panes whose ID persists within the same epoch; after an epoch bump a
+// recycled pane ID is a different pane and starts clean (Pitfall 5).
+// Malformed lines are skipped with a debug log, never fatally (T-27-09).
+//
+// D-04 attach-clear: a session whose attached count INCREASED since the
+// previous same-epoch poll clears needs_input for all its panes — a client
+// attaching means eyes on the session. Each clear restarts the pane's idle
+// window so the next heuristic tick does not instantly re-set a pane that is
+// still sitting at the same prompt. Cleared transitions are emitted after the
+// lock is released (emit never blocks regardless, T-27-11).
 func (r *Registry) syncPanes(lines []string) {
+	var cleared []Transition
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	// Previous per-session attached counts, same epoch only — counts from a
+	// dead server must never seed the comparison.
+	prevAttached := make(map[string]int)
+	for _, p := range r.panes {
+		if p.epoch == r.epoch {
+			prevAttached[p.sessionID] = p.attached
+		}
+	}
 
 	next := make(map[string]*paneRecord, len(lines))
 	for _, line := range lines {
@@ -319,6 +387,24 @@ func (r *Registry) syncPanes(lines []string) {
 		next[rec.paneID] = &rec
 	}
 	r.panes = next
+
+	for _, rec := range next {
+		prev, seen := prevAttached[rec.sessionID]
+		if !seen || rec.attached <= prev || !rec.needsInput {
+			continue
+		}
+		rec.needsInput = false
+		rec.needsInputSince = time.Time{}
+		rec.idleSince = r.now()
+		cleared = append(cleared, transitionFrom(TransitionCleared, rec, r.epoch))
+	}
+	r.mu.Unlock()
+
+	sort.Slice(cleared, func(i, j int) bool { return idNum(cleared[i].PaneID) < idNum(cleared[j].PaneID) })
+	for _, t := range cleared {
+		slog.Debug("session: needs_input cleared by client attach", "pane", t.PaneID)
+		r.emit(t)
+	}
 }
 
 // parsePaneLine parses one listPanesFormat line. Machine fields come first

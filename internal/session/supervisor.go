@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,6 +50,10 @@ const (
 // is cancelled, leaving no goroutines behind.
 func (r *Registry) Run(ctx context.Context) error {
 	backoff := backoffBase
+	// baselined is the watch.go idiom distinguishing "no baseline yet" (the
+	// first-ever attach: nothing can have been lost) from "a previous epoch
+	// existed" (a restart that may have killed needs_input panes — D-29).
+	baselined := false
 	for ctx.Err() == nil {
 		if !r.versionGate(ctx) {
 			r.sleep(ctx, backoff)
@@ -72,13 +77,23 @@ func (r *Registry) Run(ctx context.Context) error {
 		}
 
 		backoff = backoffBase
+		// D-29: capture the pre-disconnect needs_input set BEFORE the epoch
+		// bump — these panes died with the old server and keep their
+		// last-known identity and OLD epoch on the emitted transitions.
+		lost := r.lostNeedsInput()
 		r.bumpEpoch()
 		r.setStatus(StatusOK)
-		// TODO(plan 27-06, D-29): at this re-attach point, emit
-		// TransitionRestartLost for panes that were needs_input when the
-		// previous epoch died. The re-snapshot itself stays silent at
-		// this layer.
 		r.pollPanes(ctx)
+		// D-29: the re-snapshot itself is silent — the phone is notified
+		// iff panes were needs_input at restart time (someone was waiting
+		// on a now-dead pane). Never always, never never. The first-ever
+		// attach has no baseline and emits nothing.
+		if baselined {
+			for _, t := range lost {
+				r.emit(t)
+			}
+		}
+		baselined = true
 
 		// Heuristic poll loop: one goroutine per live attach, stopped (and
 		// WAITED for) on detach/ctx so heuristic state has exactly one
@@ -98,6 +113,23 @@ func (r *Registry) Run(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// lostNeedsInput snapshots the panes that are needs_input right now as
+// TransitionRestartLost transitions carrying their last-known identity and
+// the CURRENT (about-to-die) epoch — Run calls it before the re-attach epoch
+// bump (D-29). Returned in numeric pane-ID order for deterministic emission.
+func (r *Registry) lostNeedsInput() []Transition {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []Transition
+	for _, p := range r.panes {
+		if p.needsInput {
+			out = append(out, transitionFrom(TransitionRestartLost, p, r.epoch))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return idNum(out[i].PaneID) < idNum(out[j].PaneID) })
+	return out
 }
 
 // versionGate runs `tmux -V` and enforces the >= 3.2 floor BEFORE any attach

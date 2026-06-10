@@ -242,31 +242,3 @@ func (r *Registry) evalPane(ctx context.Context, paneID string) bool {
 	}
 	return false
 }
-
-// setNeedsInput marks a pane needs_input, stamping NeedsInputSince from the
-// injected clock. Already-set panes are a no-op (edge semantics — Transition
-// emission lands with plan-27-06 Task 2).
-func (r *Registry) setNeedsInput(paneID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	p, ok := r.panes[paneID]
-	if !ok || p.needsInput {
-		return
-	}
-	p.needsInput = true
-	p.needsInputSince = r.now()
-}
-
-// clearNeedsInput clears a pane's needs_input state, recording why (output /
-// attach). Already-clear panes are a no-op (edge semantics).
-func (r *Registry) clearNeedsInput(paneID, reason string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	p, ok := r.panes[paneID]
-	if !ok || !p.needsInput {
-		return
-	}
-	p.needsInput = false
-	p.needsInputSince = time.Time{}
-	slog.Debug("session: needs_input cleared", "pane", paneID, "reason", reason)
-}
