@@ -78,7 +78,8 @@ type Store struct {
 	loaded   bool
 	lastMod  time.Time
 	lastSize int64
-	caSigner ssh.Signer // lazily loaded/created from the keychain, cached
+	lastInfo os.FileInfo // for os.SameFile: the audit writer renames into place, so any out-of-process write yields a new inode
+	caSigner ssh.Signer  // lazily loaded/created from the keychain, cached
 }
 
 // New returns a Store over the records file at path. aud performs every file
@@ -109,7 +110,12 @@ func (s *Store) reloadIfChangedLocked() error {
 	if err != nil {
 		return fmt.Errorf("device: stat records file %s: %w", s.path, err)
 	}
-	if s.loaded && fi.ModTime().Equal(s.lastMod) && fi.Size() == s.lastSize {
+	// Unchanged only when the same inode (os.SameFile) AND same mtime/size:
+	// the audit writer commits via temp+rename, so an out-of-process write
+	// (CLI revoke/enroll while the daemon serves) always replaces the inode
+	// and is caught here even if mtime granularity and size happen to collide.
+	if s.loaded && s.lastInfo != nil && os.SameFile(fi, s.lastInfo) &&
+		fi.ModTime().Equal(s.lastMod) && fi.Size() == s.lastSize {
 		return nil
 	}
 
@@ -134,6 +140,7 @@ func (s *Store) reloadIfChangedLocked() error {
 	s.loaded = true
 	s.lastMod = fi.ModTime()
 	s.lastSize = fi.Size()
+	s.lastInfo = fi
 	return nil
 }
 
@@ -155,6 +162,7 @@ func (s *Store) saveLocked(f storeFile) error {
 	if fi, statErr := os.Stat(s.path); statErr == nil {
 		s.lastMod = fi.ModTime()
 		s.lastSize = fi.Size()
+		s.lastInfo = fi
 	}
 	return nil
 }

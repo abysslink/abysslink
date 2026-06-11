@@ -53,7 +53,11 @@ func (s *Store) VerifyBearer(presented string) (*Record, bool) {
 		if err != nil || len(stored) != sha256.Size {
 			continue
 		}
-		if subtle.ConstantTimeCompare(sum[:], stored) == 1 && found == nil {
+		// Run the compare on every candidate (no && short-circuit) so the
+		// per-iteration work does not change once a match is found; only the
+		// first match is recorded.
+		match := subtle.ConstantTimeCompare(sum[:], stored) == 1
+		if match && found == nil {
 			found = r
 		}
 	}

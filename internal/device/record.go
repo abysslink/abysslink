@@ -46,14 +46,14 @@ type Record struct {
 	// EnrolledAt is when the device was first enrolled; stable across Rotate.
 	EnrolledAt time.Time `json:"enrolled_at"`
 	// RotatedAt is when the device's credentials were last rotated; zero if never.
-	RotatedAt time.Time `json:"rotated_at,omitempty"`
+	RotatedAt time.Time `json:"rotated_at"`
 	// LastSeen is the last fetch/ack instant reported via TouchLastSeen;
 	// zero if the device has never checked in.
-	LastSeen time.Time `json:"last_seen,omitempty"`
+	LastSeen time.Time `json:"last_seen"`
 	// Revoked marks the device as permanently disabled.
 	Revoked bool `json:"revoked,omitempty"`
 	// RevokedAt is when the device was revoked; zero unless Revoked.
-	RevokedAt time.Time `json:"revoked_at,omitempty"`
+	RevokedAt time.Time `json:"revoked_at"`
 	// TLSClientCertFP is the cert-ready (DEVC-01) slot for a future mTLS
 	// client certificate fingerprint. Present in the schema now so the mTLS
 	// upgrade is not a schema break; always empty in Phase 28.

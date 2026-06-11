@@ -58,6 +58,19 @@ func TestGetContent_UnknownTokenMisses(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestGetContent_SingleUse(t *testing.T) {
+	cs := newContentStore(nil)
+	tok, _ := cs.mintContent("once", 30*time.Second)
+
+	body, ok := cs.getContent(tok)
+	require.True(t, ok, "first fetch must resolve")
+	assert.Equal(t, "once", body)
+
+	_, ok = cs.getContent(tok)
+	assert.False(t, ok, "a replayed token must serve nothing — tokens are single-use")
+	assert.Equal(t, 0, cs.len(), "consumed token must be removed")
+}
+
 func TestGetContent_ExpiryEnforced(t *testing.T) {
 	clk := newContentClock()
 	cs := newContentStore(clk.now)

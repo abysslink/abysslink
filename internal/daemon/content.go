@@ -95,8 +95,10 @@ func (c *contentStore) mintContent(body string, ttl time.Duration) (string, time
 }
 
 // getContent returns the body bound to token, or ("", false) when the token
-// is unknown or expired. Expired entries are pruned on every call so a lookup
-// can never serve a past-TTL body.
+// is unknown or expired. The token is consumed on a successful read: it is
+// deleted before returning so each minted token serves exactly one fetch
+// (true single-use — a replayed token within the TTL gets nothing). Expired
+// entries are pruned on every call so a lookup can never serve a past-TTL body.
 func (c *contentStore) getContent(token string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -105,6 +107,7 @@ func (c *contentStore) getContent(token string) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	delete(c.entries, token)
 	return e.body, true
 }
 
