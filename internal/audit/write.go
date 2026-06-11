@@ -16,6 +16,7 @@
 package audit
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,6 +62,15 @@ func (a *Audit) WriteFile(path string, content []byte, perm os.FileMode, dryRun 
 	}
 	defer releaseAuditLock(lockFD)
 
+	return a.writeFileLocked(path, content, perm)
+}
+
+// writeFileLocked is the append-before-write body of WriteFile WITHOUT lock
+// acquisition. It MUST be called with the cross-process audit flock already
+// held (WriteFile acquires it; Update acquires it before invoking the caller's
+// content function and then this). dryRun is not handled here — WriteFile
+// short-circuits dry runs before locking.
+func (a *Audit) writeFileLocked(path string, content []byte, perm os.FileMode) error {
 	// CORE-03: refuse to operate on a symlink target. Writing "through" a
 	// symlink would back up and replace a file outside the audited path.
 	// (See the doc comment for the residual check-then-act window.)
@@ -86,6 +96,40 @@ func (a *Audit) WriteFile(path string, content []byte, perm os.FileMode, dryRun 
 	}
 
 	return atomicWriteFile(path, content, perm)
+}
+
+// Update performs a lost-update-free, cross-process read-modify-write of path.
+// It acquires the SAME audit flock WriteFile uses, then calls content() — which
+// MUST read the CURRENT on-disk state of path (fresh, ignoring any in-memory
+// cache) and return the full new file bytes to write. While the lock is held no
+// other process running an audit-backed write to path can interleave, so the
+// read-modify-write content() performs cannot lose a concurrent update.
+//
+// content may return (nil, nil) to signal "no change" — Update then records and
+// writes nothing (no audit entry, no backup), which lets callers skip the write
+// for no-op mutations (already-revoked, rate-limited touch) while still holding
+// the lock for the freshness read. A non-nil error from content aborts with no
+// write. On a returned slice, Update records the audit entry and atomically
+// writes it under the held lock via writeFileLocked.
+//
+// This is the cross-process counterpart to an in-process compare-and-swap: the
+// reload and the write are one critical section, closing the lost-update window
+// that an in-process mutex alone leaves open between separate processes.
+func (a *Audit) Update(_ context.Context, path string, perm os.FileMode, content func() ([]byte, error)) error {
+	lockFD, lerr := acquireAuditLock(a.logPath)
+	if lerr != nil {
+		return fmt.Errorf("audit: acquire process lock: %w", lerr)
+	}
+	defer releaseAuditLock(lockFD)
+
+	data, err := content()
+	if err != nil {
+		return err
+	}
+	if data == nil {
+		return nil // caller signalled no change; nothing to write or record
+	}
+	return a.writeFileLocked(path, data, perm)
 }
 
 // atomicWriteFile writes content to path atomically and durably (R2-W4/E2):

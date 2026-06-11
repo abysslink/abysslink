@@ -122,6 +122,12 @@ type Server struct {
 	// contentResolver is the tailnet-IP seam; nil means the production
 	// backendIPResolver (tests inject a stub).
 	contentResolver tailnetIPResolver
+	// contentHostResolver is the MagicDNS-hostname seam used to ADVERTISE a
+	// TLS-verifiable fetch URL host; nil means the production
+	// backendHostResolver (tests inject a stub). A missing/non-ts.net hostname
+	// falls back to the bind IP (degraded, never fail-closed — see
+	// resolveContentAdvertiseHost).
+	contentHostResolver tailnetHostResolver
 	// content is the memory-first TTL'd token→body store.
 	content *contentStore
 	// contentWG tracks the content listener's shutdown drain so Run's
@@ -135,6 +141,12 @@ type Server struct {
 	contentHost   string
 	contentPort   int
 	contentStatus string
+	// contentAdvertiseHost is the host placed in the minted FetchRef URL: the
+	// node's *.ts.net MagicDNS name when available (so a TLS-verifying phone
+	// fetch verifies against the Tailscale-issued cert SAN), otherwise the bind
+	// IP as a degraded fallback. The listener still BINDS contentHost (the
+	// tailnet IP) regardless (Finding 2).
+	contentAdvertiseHost string
 }
 
 // NewServer returns a Server. notifier MUST be a direct backend (see Notifier).

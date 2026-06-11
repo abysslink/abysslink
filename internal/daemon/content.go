@@ -100,6 +100,16 @@ func (c *contentStore) mintContent(body string, ttl time.Duration) (string, time
 // (true single-use — a replayed token within the TTL gets nothing). Expired
 // entries are pruned on every call so a lookup can never serve a past-TTL body.
 func (c *contentStore) getContent(token string) (string, bool) {
+	return c.lookupContent(token, true)
+}
+
+// lookupContent is getContent with an explicit consume flag. It always does the
+// same work (lock + prune + map lookup) regardless of consume, so the handler
+// can run an identical lookup on both the authed and the auth-failed path
+// (Finding 3: no bearer-validity timing oracle from skipping the prune). When
+// consume is true the entry is deleted (single-use); when false the entry is
+// left intact — an auth-failed request must NEVER consume a valid token.
+func (c *contentStore) lookupContent(token string, consume bool) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pruneLocked(c.now())
@@ -107,7 +117,9 @@ func (c *contentStore) getContent(token string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	delete(c.entries, token)
+	if consume {
+		delete(c.entries, token)
+	}
 	return e.body, true
 }
 

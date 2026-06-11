@@ -144,38 +144,37 @@ func (s *Store) Enroll(ctx context.Context, name, kind string) (*Bundle, error) 
 		return nil, fmt.Errorf("device: kind must not be empty")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.reloadIfChangedLocked(); err != nil {
-		return nil, err
-	}
-	if s.findActiveLocked(name) >= 0 {
-		return nil, fmt.Errorf("device: enroll %q: %w", name, ErrExists)
-	}
-
-	f := s.file.clone()
-	m, err := s.mintLocked(ctx, name, &f)
+	var bundle *Bundle
+	err := s.update(ctx, func(f *storeFile) (bool, error) {
+		if findActiveIn(f, name) >= 0 {
+			return false, fmt.Errorf("device: enroll %q: %w", name, ErrExists)
+		}
+		m, err := s.mintLocked(ctx, name, f)
+		if err != nil {
+			return false, err
+		}
+		now := s.now().UTC()
+		rec := Record{
+			ID:            newID(now),
+			Name:          name,
+			Kind:          kind,
+			PushToken:     m.pushToken,
+			BearerSHA256:  m.bearerSHA,
+			SSHCertSerial: m.serial,
+			SSHPubKeyFP:   m.pubKeyFP,
+			CertNotAfter:  m.notAfter,
+			EnrolledAt:    now,
+		}
+		f.Devices = append(f.Devices, rec)
+		bundle = m.bundle(name)
+		slog.InfoContext(ctx, "device: enrolled",
+			"name", name, "kind", kind, "id", rec.ID, "cert_serial", m.serial)
+		return true, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	now := s.now().UTC()
-	f.Devices = append(f.Devices, Record{
-		ID:            newID(now),
-		Name:          name,
-		Kind:          kind,
-		PushToken:     m.pushToken,
-		BearerSHA256:  m.bearerSHA,
-		SSHCertSerial: m.serial,
-		SSHPubKeyFP:   m.pubKeyFP,
-		CertNotAfter:  m.notAfter,
-		EnrolledAt:    now,
-	})
-	if err := s.saveLocked(f); err != nil {
-		return nil, err
-	}
-	slog.InfoContext(ctx, "device: enrolled",
-		"name", name, "kind", kind, "id", f.Devices[len(f.Devices)-1].ID, "cert_serial", m.serial)
-	return m.bundle(name), nil
+	return bundle, nil
 }
 
 // Rotate atomically replaces the credentials of the active device named name:
@@ -189,35 +188,33 @@ func (s *Store) Rotate(ctx context.Context, name string) (*Bundle, error) {
 		return nil, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.reloadIfChangedLocked(); err != nil {
-		return nil, err
-	}
-	idx := s.findActiveLocked(name)
-	if idx < 0 {
-		return nil, fmt.Errorf("device: rotate %q: %w", name, ErrNotFound)
-	}
-
-	f := s.file.clone()
-	m, err := s.mintLocked(ctx, name, &f)
+	var bundle *Bundle
+	err := s.update(ctx, func(f *storeFile) (bool, error) {
+		idx := findActiveIn(f, name)
+		if idx < 0 {
+			return false, fmt.Errorf("device: rotate %q: %w", name, ErrNotFound)
+		}
+		m, err := s.mintLocked(ctx, name, f)
+		if err != nil {
+			return false, err
+		}
+		r := &f.Devices[idx]
+		f.RevokedSerials = append(f.RevokedSerials, r.SSHCertSerial)
+		r.PushToken = m.pushToken
+		r.BearerSHA256 = m.bearerSHA
+		r.SSHCertSerial = m.serial
+		r.SSHPubKeyFP = m.pubKeyFP
+		r.CertNotAfter = m.notAfter
+		r.RotatedAt = s.now().UTC()
+		bundle = m.bundle(name)
+		slog.InfoContext(ctx, "device: rotated credentials",
+			"name", name, "id", r.ID, "cert_serial", m.serial)
+		return true, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	r := &f.Devices[idx]
-	f.RevokedSerials = append(f.RevokedSerials, r.SSHCertSerial)
-	r.PushToken = m.pushToken
-	r.BearerSHA256 = m.bearerSHA
-	r.SSHCertSerial = m.serial
-	r.SSHPubKeyFP = m.pubKeyFP
-	r.CertNotAfter = m.notAfter
-	r.RotatedAt = s.now().UTC()
-	if err := s.saveLocked(f); err != nil {
-		return nil, err
-	}
-	slog.InfoContext(ctx, "device: rotated credentials",
-		"name", name, "id", r.ID, "cert_serial", m.serial)
-	return m.bundle(name), nil
+	return bundle, nil
 }
 
 // revokeAt marks r revoked at instant now, blanks its push token and bearer
@@ -239,28 +236,20 @@ func (s *Store) Revoke(ctx context.Context, name string) error {
 		return err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.reloadIfChangedLocked(); err != nil {
-		return err
-	}
-	idx := s.findActiveLocked(name)
-	if idx < 0 {
-		for i := range s.file.Devices {
-			if s.file.Devices[i].Name == name {
-				return nil // already revoked: no-op success
+	return s.update(ctx, func(f *storeFile) (bool, error) {
+		idx := findActiveIn(f, name)
+		if idx < 0 {
+			for i := range f.Devices {
+				if f.Devices[i].Name == name {
+					return false, nil // already revoked: no-op success
+				}
 			}
+			return false, fmt.Errorf("device: revoke %q: %w", name, ErrNotFound)
 		}
-		return fmt.Errorf("device: revoke %q: %w", name, ErrNotFound)
-	}
-
-	f := s.file.clone()
-	revokeAt(&f, &f.Devices[idx], s.now().UTC())
-	if err := s.saveLocked(f); err != nil {
-		return err
-	}
-	slog.InfoContext(ctx, "device: revoked", "name", name, "id", f.Devices[idx].ID)
-	return nil
+		revokeAt(f, &f.Devices[idx], s.now().UTC())
+		slog.InfoContext(ctx, "device: revoked", "name", name, "id", f.Devices[idx].ID)
+		return true, nil
+	})
 }
 
 // RevokeAll revokes every active device in ONE atomic file write (DEVC-03:
@@ -272,27 +261,24 @@ func (s *Store) RevokeAll(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.reloadIfChangedLocked(); err != nil {
-		return 0, err
-	}
-
-	f := s.file.clone()
-	now := s.now().UTC()
 	n := 0
-	for i := range f.Devices {
-		if f.Devices[i].active() {
-			revokeAt(&f, &f.Devices[i], now)
-			n++
+	err := s.update(ctx, func(f *storeFile) (bool, error) {
+		now := s.now().UTC()
+		n = 0
+		for i := range f.Devices {
+			if f.Devices[i].active() {
+				revokeAt(f, &f.Devices[i], now)
+				n++
+			}
 		}
-	}
-	if n == 0 {
-		return 0, nil
-	}
-	if err := s.saveLocked(f); err != nil {
+		if n == 0 {
+			return false, nil // nothing active: no write
+		}
+		slog.InfoContext(ctx, "device: revoked all devices", "count", n)
+		return true, nil
+	})
+	if err != nil {
 		return 0, err
 	}
-	slog.InfoContext(ctx, "device: revoked all devices", "count", n)
 	return n, nil
 }

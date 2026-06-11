@@ -30,6 +30,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,6 +194,73 @@ func TestHandleContent_Uniform404(t *testing.T) {
 	})
 }
 
+// TestHandleContent_ConstantWork404 asserts Finding 3: the bad-bearer,
+// unknown-token, and revoked-device branches all return a byte-identical 404
+// (same status, empty body, identical header set) — no bearer-validity timing
+// oracle — AND that an auth-failed request against a VALID token does not
+// consume (delete) it: the legitimate fetch must still succeed afterward.
+func TestHandleContent_ConstantWork404(t *testing.T) {
+	captureResp := func(resp *http.Response) (int, string, http.Header) {
+		t.Helper()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		// Drop headers httptest sets per-response (Date varies; Content-Length
+		// is a function of the body, which we assert separately).
+		h := resp.Header.Clone()
+		h.Del("Date")
+		h.Del("Content-Length")
+		return resp.StatusCode, string(body), h
+	}
+
+	s, fd, ts, _ := newContentTestServer(t)
+	validToken, _ := s.content.mintContent("the real body", time.Minute)
+
+	cases := []struct {
+		name   string
+		token  string
+		bearer string
+		setup  func()
+	}{
+		{name: "bad bearer", token: validToken, bearer: "ablk_b_wrong"},
+		{name: "unknown token", token: "ablk_c_nonexistent-token-xx", bearer: testBearer},
+		{name: "revoked device", token: validToken, bearer: testBearer, setup: func() { fd.bearer = "" }},
+	}
+
+	var refStatus int
+	var refBody string
+	var refHdr http.Header
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setup != nil {
+				tc.setup()
+				defer func() { fd.bearer = testBearer }()
+			}
+			status, body, hdr := captureResp(doContentGet(t, ts, tc.token, tc.bearer))
+			assert.Equal(t, http.StatusNotFound, status)
+			assert.Empty(t, body, "404 body must be empty (no oracle)")
+			if i == 0 {
+				refStatus, refBody, refHdr = status, body, hdr
+				return
+			}
+			assert.Equal(t, refStatus, status, "status must be byte-identical across auth-fail branches")
+			assert.Equal(t, refBody, body, "body must be byte-identical across auth-fail branches")
+			assert.Equal(t, refHdr, hdr, "header set must be identical across auth-fail branches")
+		})
+	}
+
+	// The bad-bearer and unknown-token attempts above ran against validToken
+	// (or a missing token) but must NOT have consumed validToken: the
+	// legitimate authed fetch still succeeds and returns the real body.
+	resp := doContentGet(t, ts, validToken, testBearer)
+	status, body, _ := captureResp(resp)
+	assert.Equal(t, http.StatusOK, status, "an auth-failed request must not consume the valid token")
+	assert.Equal(t, "the real body", body)
+	// Only the genuine success touched last-seen — the auth-failed attempts did not.
+	assert.Equal(t, []string{fd.rec.ID}, fd.touchedIDs(),
+		"only the genuine success may touch last-seen")
+}
+
 func TestHandleAck_HappyRecordsHashOnlyReceipt(t *testing.T) {
 	s, fd, ts, logPath := newContentTestServer(t)
 
@@ -254,13 +322,23 @@ func postNotifyV2(t *testing.T, s *Server, payload string) *httptest.ResponseRec
 	return rec
 }
 
-// markContentLive simulates a live content listener at host:port.
+// markContentLive simulates a live content listener that binds host:port and
+// advertises the same host in the minted fetch URL (the degraded fallback
+// case, where no MagicDNS name was resolved).
 func markContentLive(s *Server, host string, port int) {
+	markContentLiveAdvertising(s, host, host, port)
+}
+
+// markContentLiveAdvertising simulates a live content listener that BINDS
+// bindHost but ADVERTISES advertiseHost in the minted fetch URL (Finding 2:
+// e.g. binds the tailnet IP, advertises the *.ts.net MagicDNS name).
+func markContentLiveAdvertising(s *Server, bindHost, advertiseHost string, port int) {
 	s.contentMu.Lock()
 	s.contentLive = true
-	s.contentHost = host
+	s.contentHost = bindHost
+	s.contentAdvertiseHost = advertiseHost
 	s.contentPort = port
-	s.contentStatus = "listening on " + net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	s.contentStatus = "listening on " + net.JoinHostPort(bindHost, fmt.Sprintf("%d", port))
 	s.contentMu.Unlock()
 }
 
@@ -306,6 +384,132 @@ func TestMintFetchRef_URLPassesNotifyV2Validate(t *testing.T) {
 				Fetch: &notifyv2.FetchRef{URLTailnet: u, TTLSeconds: ttl},
 			}
 			assert.NoError(t, msg.Validate(), "minted FetchRef must pass the tailnet-host rule")
+		})
+	}
+}
+
+// TestMintFetchRef_AdvertisesMagicDNSHost asserts Finding 2: when the listener
+// resolved a *.ts.net MagicDNS name, the minted FetchRef URL host is that name
+// (so a TLS-verifying phone fetch verifies against the cert SAN), and the URL
+// still passes notifyv2.Validate — while the listener itself still BINDS the
+// tailnet IP.
+func TestMintFetchRef_AdvertisesMagicDNSHost(t *testing.T) {
+	cfg := config.Defaults()
+	s := NewServer(&captureNotifier{}, nil, cfg)
+	// Binds the tailnet IP, advertises the MagicDNS name.
+	markContentLiveAdvertising(s, "100.64.0.5", "myrig.tail1234.ts.net", 2587)
+
+	u, ttl, ok := s.mintFetchRef("body")
+	require.True(t, ok)
+
+	parsed, err := url.Parse(u)
+	require.NoError(t, err)
+	assert.Equal(t, "myrig.tail1234.ts.net", parsed.Hostname(),
+		"fetch URL host must be the advertised MagicDNS name, not the bind IP")
+
+	s.contentMu.Lock()
+	bindHost := s.contentHost
+	s.contentMu.Unlock()
+	assert.Equal(t, "100.64.0.5", bindHost, "the listener must still BIND the tailnet IP")
+
+	msg := notifyv2.Message{
+		V: 2, MsgID: testMsgID, Kind: notifyv2.KindCommandDone, Host: "rig-1", Title: "done",
+		Fetch: &notifyv2.FetchRef{URLTailnet: u, TTLSeconds: ttl},
+	}
+	assert.NoError(t, msg.Validate(), "a *.ts.net fetch host must pass the url_tailnet rule")
+}
+
+// TestMintFetchRef_FallsBackToBindIP asserts Finding 2's degraded path: when no
+// MagicDNS name is available, the advertised host falls back to the bind IP and
+// the URL still validates.
+func TestMintFetchRef_FallsBackToBindIP(t *testing.T) {
+	cfg := config.Defaults()
+	s := NewServer(&captureNotifier{}, nil, cfg)
+	// Advertise host == bind IP (the fallback markContentLive produces).
+	markContentLive(s, "100.64.0.5", 2587)
+
+	u, ttl, ok := s.mintFetchRef("body")
+	require.True(t, ok)
+
+	parsed, err := url.Parse(u)
+	require.NoError(t, err)
+	assert.Equal(t, "100.64.0.5", parsed.Hostname(), "fallback advertises the bind IP")
+
+	msg := notifyv2.Message{
+		V: 2, MsgID: testMsgID, Kind: notifyv2.KindCommandDone, Host: "rig-1", Title: "done",
+		Fetch: &notifyv2.FetchRef{URLTailnet: u, TTLSeconds: ttl},
+	}
+	assert.NoError(t, msg.Validate())
+}
+
+// TestResolveContentAdvertiseHost covers the seam directly: a *.ts.net name is
+// advertised, anything else (empty, non-ts.net, resolver error, nil resolver)
+// falls back to the bind IP — never fail-closed (Finding 2).
+func TestResolveContentAdvertiseHost(t *testing.T) {
+	s := NewServer(&captureNotifier{}, nil, config.Defaults())
+	const bindIP = "100.64.0.5"
+
+	cases := []struct {
+		name     string
+		resolver tailnetHostResolver
+		want     string
+	}{
+		{name: "magicdns name", resolver: stubHostResolver{host: "myrig.tail1234.ts.net"}, want: "myrig.tail1234.ts.net"},
+		{name: "trailing dot trimmed", resolver: stubHostResolver{host: "myrig.tail1234.ts.net."}, want: "myrig.tail1234.ts.net"},
+		{name: "empty hostname falls back", resolver: stubHostResolver{host: ""}, want: bindIP},
+		{name: "non-ts.net falls back", resolver: stubHostResolver{host: "myrig.example.com"}, want: bindIP},
+		{name: "resolver error falls back", resolver: stubHostResolver{err: errors.New("no localapi")}, want: bindIP},
+		{name: "nil resolver falls back", resolver: nil, want: bindIP},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := s.resolveContentAdvertiseHost(context.Background(), bindIP, tc.resolver)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestStartContentServer_AdvertisesHostBindsIP asserts the wiring end to end:
+// with a stub host resolver returning a *.ts.net name, the live listener binds
+// the resolved tailnet IP but advertises the MagicDNS name in mintFetchRef;
+// with the host resolver erroring, it falls back to the IP — binding the IP in
+// both cases (Finding 2).
+func TestStartContentServer_AdvertisesHostBindsIP(t *testing.T) {
+	cases := []struct {
+		name          string
+		hostResolver  tailnetHostResolver
+		wantAdvertise string
+	}{
+		{name: "magicdns advertised", hostResolver: stubHostResolver{host: "myrig.tail1234.ts.net"}, wantAdvertise: "myrig.tail1234.ts.net"},
+		{name: "fallback to ip", hostResolver: stubHostResolver{err: errors.New("no name")}, wantAdvertise: "127.0.0.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.ContentStore.Port = freePort(t)
+			s := NewServer(&captureNotifier{}, nil, cfg)
+			s.SetDeviceStore(&fakeDeviceStore{bearer: testBearer, rec: device.Record{ID: "id-1", Name: "phone"}})
+			s.SetAuditAppender(audit.New(filepath.Join(t.TempDir(), "audit.log")))
+			s.SetContentTLS(func(context.Context) (*tls.Config, error) { return selfSignedTLS(t), nil })
+			s.contentResolver = stubResolver{ip: "127.0.0.1"}
+			s.contentHostResolver = tc.hostResolver
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s.startContentServer(ctx)
+
+			s.contentMu.Lock()
+			live, bindHost, advertise := s.contentLive, s.contentHost, s.contentAdvertiseHost
+			s.contentMu.Unlock()
+			require.True(t, live, "listener must be live: %s", s.contentStoreStatus())
+			assert.Equal(t, "127.0.0.1", bindHost, "listener must bind the resolved tailnet IP in both cases")
+			assert.Equal(t, tc.wantAdvertise, advertise)
+
+			u, _, ok := s.mintFetchRef("body")
+			require.True(t, ok)
+			parsed, err := url.Parse(u)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantAdvertise, parsed.Hostname(), "minted URL host must be the advertise host")
 		})
 	}
 }
@@ -429,6 +633,15 @@ type stubResolver struct {
 }
 
 func (r stubResolver) IP(context.Context) (string, error) { return r.ip, r.err }
+
+// stubHostResolver injects a MagicDNS hostname (or an error) for the
+// advertise-host seam (Finding 2).
+type stubHostResolver struct {
+	host string
+	err  error
+}
+
+func (r stubHostResolver) Hostname(context.Context) (string, error) { return r.host, r.err }
 
 // selfSignedTLS returns a tls.Config with a fresh self-signed cert for
 // 127.0.0.1 (the injectable TLS seam for the listener test).

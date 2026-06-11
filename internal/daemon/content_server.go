@@ -94,6 +94,16 @@ type tailnetIPResolver interface {
 	IP(ctx context.Context) (string, error)
 }
 
+// tailnetHostResolver yields this node's MagicDNS hostname (e.g.
+// myrig.tail1234.ts.net). Seam so the advertise-host resolution is
+// unit-testable without a live backend (mirrors tailnetIPResolver). The
+// listener BINDS the tailnet IP regardless; this only affects the host placed
+// in the minted FetchRef URL so a TLS-verifying phone fetch verifies against
+// the Tailscale-issued *.ts.net cert SAN (Finding 2).
+type tailnetHostResolver interface {
+	Hostname(ctx context.Context) (string, error)
+}
+
 // backendIPResolver is the production resolver: backend.New → Client.IP, the
 // single source of truth for "what is this node's tailnet address" (the same
 // floor resolveMetricsAddr enforces, OBS-03). It never propagates a panic —
@@ -114,6 +124,29 @@ func (r backendIPResolver) IP(ctx context.Context) (ip string, err error) {
 		return "", fmt.Errorf("daemon: backend unavailable: %w", berr)
 	}
 	return b.IP(ctx)
+}
+
+// backendHostResolver is the production MagicDNS-hostname resolver: backend.New
+// → Client.Hostname, the same source the IP resolver uses. It never propagates
+// a panic — the backend localapi probe can panic when tailscaled is absent. A
+// missing hostname is not fatal here: the content listener still binds the IP
+// and only the advertised FetchRef URL host degrades (Finding 2).
+type backendHostResolver struct {
+	cfg    *config.Config
+	runner shell.Runner
+}
+
+func (r backendHostResolver) Hostname(ctx context.Context) (host string, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			host, err = "", fmt.Errorf("daemon: tailnet hostname probe panicked: %v", rec)
+		}
+	}()
+	b, berr := backend.New(r.cfg, r.runner)
+	if berr != nil || b == nil {
+		return "", fmt.Errorf("daemon: backend unavailable: %w", berr)
+	}
+	return b.Hostname(ctx)
 }
 
 // SetDeviceStore injects the enrolled-device registry consumed by the content
@@ -185,6 +218,48 @@ func (s *Server) resolveContentAddr(ctx context.Context, resolver tailnetIPResol
 	return tailnetIP, true
 }
 
+// resolveContentAdvertiseHost determines the host placed in the minted FetchRef
+// URL (Finding 2). It PREFERS the node's MagicDNS hostname when it is a
+// non-empty *.ts.net name, so a TLS-verifying phone fetch verifies against the
+// Tailscale-issued cert (which carries only the *.ts.net SAN, no tailnet-IP
+// SAN). When the hostname is unavailable or not a *.ts.net name it falls back
+// to the bind IP — DEGRADED, never fail-closed: the listener still binds the IP
+// and serves, only the advertised URL host differs (a phone may then need to
+// trust the IP, and the BACK-08 fallback title still covers a failed fetch).
+// Either result passes notifyv2.Validate's url_tailnet rule (a *.ts.net name,
+// a CGNAT IPv4, or a Tailscale ULA IPv6 are all accepted).
+// hostResolverOrDefault returns the injected MagicDNS-hostname seam, or the
+// production backendHostResolver when none was injected (same backend source
+// as the IP resolver).
+func (s *Server) hostResolverOrDefault() tailnetHostResolver {
+	if s.contentHostResolver != nil {
+		return s.contentHostResolver
+	}
+	return backendHostResolver{cfg: s.cfg, runner: s.runner}
+}
+
+func (s *Server) resolveContentAdvertiseHost(ctx context.Context, bindIP string, resolver tailnetHostResolver) string {
+	if resolver == nil {
+		return bindIP
+	}
+	host, err := resolver.Hostname(ctx)
+	if err != nil {
+		slog.Warn("daemon: content listener: MagicDNS hostname unavailable; advertising bind IP in fetch URL (degraded — a phone may need to trust the IP)",
+			"err", err, "bind_ip", bindIP)
+		return bindIP
+	}
+	host = strings.TrimSpace(host)
+	// Tailscale's GetCertificate issues a leaf for the FQDN; tolerate a
+	// trailing dot on the reported name so the advertised host matches the SAN.
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || !strings.HasSuffix(host, ".ts.net") {
+		slog.Warn("daemon: content listener: hostname is not a *.ts.net MagicDNS name; advertising bind IP in fetch URL (degraded)",
+			"hostname", host, "bind_ip", bindIP)
+		return bindIP
+	}
+	return host
+}
+
 // startContentServer resolves the tailnet-only bind address, builds the TLS
 // listener, and serves the content endpoints until ctx is cancelled
 // (BACK-06). Every precondition failure disables the listener with one honest
@@ -219,6 +294,11 @@ func (s *Server) startContentServer(ctx context.Context) {
 		s.disableContent("bind address could not be confirmed as the tailnet IP (BACK-06)")
 		return
 	}
+	// Resolve the advertise host (Finding 2): prefer the *.ts.net MagicDNS name
+	// so a TLS-verifying phone fetch verifies against the cert SAN. This NEVER
+	// fails the listener — a missing/non-ts.net hostname falls back to the bind
+	// IP (degraded). The listener still binds `host` (the tailnet IP) below.
+	advertiseHost := s.resolveContentAdvertiseHost(ctx, host, s.hostResolverOrDefault())
 	tlsCfg, err := s.contentTLS(ctx)
 	if err != nil || tlsCfg == nil {
 		s.disableContent("TLS material unavailable", "err", err)
@@ -246,6 +326,7 @@ func (s *Server) startContentServer(ctx context.Context) {
 	s.contentMu.Lock()
 	s.contentLive = true
 	s.contentHost = host
+	s.contentAdvertiseHost = advertiseHost
 	s.contentPort = port
 	s.contentStatus = "listening on " + net.JoinHostPort(host, strconv.Itoa(port))
 	s.contentMu.Unlock()
@@ -312,16 +393,24 @@ func (s *Server) verifyRequestBearer(r *http.Request) (*device.Record, bool) {
 // a UNIFORM 404 with an empty body — no oracle distinguishes "bad bearer"
 // from "bad token". Success returns the body as text/plain with
 // Cache-Control: no-store and touches the device's last-seen.
+//
+// Finding 3 (constant work): the token lookup runs on BOTH the authed and the
+// auth-failed path so a bad bearer cannot be distinguished from a good bearer
+// by skipping the store's lock+prune work (a — very low, 256-bit-bearer —
+// timing oracle for bearer validity). The lookup CONSUMES the token only when
+// auth succeeded: an auth-failed request never deletes a valid token
+// (preserving single-use for the legitimate fetch) and never touches last-seen
+// (an unauthenticated request must not move a device's last-seen — a different
+// leak). The 404 response is byte-identical (empty body, no headers) on every
+// failure branch.
 func (s *Server) handleContent(w http.ResponseWriter, r *http.Request) {
 	// A GET carries no meaningful body; cap it anyway (defense in depth).
 	r.Body = http.MaxBytesReader(w, r.Body, maxAckBody)
-	rec, ok := s.verifyRequestBearer(r)
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	body, ok := s.content.getContent(r.PathValue("token"))
-	if !ok {
+	rec, authed := s.verifyRequestBearer(r)
+	// Always run the lookup (constant work), but consume the token only when
+	// the bearer is valid — so an auth-failed request cannot burn a live token.
+	body, found := s.content.lookupContent(r.PathValue("token"), authed)
+	if !authed || !found {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -406,13 +495,18 @@ func AckReceiptHash(msgID, deviceID string) string {
 // wake unchanged, relying on the BACK-08 fallback title.
 func (s *Server) mintFetchRef(body string) (urlTailnet string, ttlSeconds int, ok bool) {
 	s.contentMu.Lock()
-	live, host, port := s.contentLive, s.contentHost, s.contentPort
+	live, advertiseHost, port := s.contentLive, s.contentAdvertiseHost, s.contentPort
 	s.contentMu.Unlock()
 	if !live {
 		return "", 0, false
 	}
+	// Advertise the MagicDNS *.ts.net host (Finding 2) so a TLS-verifying phone
+	// fetch verifies against the Tailscale-issued cert SAN; the listener still
+	// binds the tailnet IP. JoinHostPort keeps an IPv6-literal fallback host
+	// bracketed. A *.ts.net name, a CGNAT IPv4, or a Tailscale ULA IPv6 all pass
+	// notifyv2.Validate's url_tailnet rule.
 	ttl := s.cfg.ContentStore.EffectiveTTL()
 	token, _ := s.content.mintContent(body, ttl)
-	u := "https://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/content/" + token
+	u := "https://" + net.JoinHostPort(advertiseHost, strconv.Itoa(port)) + "/content/" + token
 	return u, int(ttl / time.Second), true
 }

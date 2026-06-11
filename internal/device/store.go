@@ -16,6 +16,7 @@
 package device
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,16 @@ type AuditWriter interface {
 	// WriteFile records the mutation in the audit log (SHA-256 of content
 	// only, never the content itself) and writes content to path atomically.
 	WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error
+
+	// Update runs a lost-update-free, cross-process read-modify-write of path
+	// under the same cross-process lock WriteFile uses. content is called with
+	// the lock held and MUST re-read the current on-disk state; the bytes it
+	// returns are recorded in the audit log and written atomically. content
+	// returning (nil, nil) means "no change" (nothing written or recorded).
+	// The device store routes every records-file mutation through this so a
+	// concurrent process (daemon TouchLastSeen vs. CLI revoke) cannot clobber
+	// the other's write — see Store.update.
+	Update(ctx context.Context, path string, perm os.FileMode, content func() ([]byte, error)) error
 }
 
 // Compile-time guard: the real audit writers must keep satisfying this
@@ -119,7 +130,26 @@ func (s *Store) reloadIfChangedLocked() error {
 		return nil
 	}
 
+	return s.loadFromDiskLocked()
+}
+
+// loadFromDiskLocked unconditionally reads, parses, and commits the records
+// file from disk into s.file, refreshing the change-detection fingerprint. It
+// IGNORES the mtime/size/inode cache — callers use it when they need the
+// CURRENT on-disk bytes regardless of what was last loaded (the locked
+// read-modify-write in update relies on this so a stale cache can never seed a
+// lost update). A missing file becomes an empty registry. Caller must hold
+// s.mu (and, for update's freshness guarantee, the cross-process audit flock).
+func (s *Store) loadFromDiskLocked() error {
 	data, err := os.ReadFile(s.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		s.file = newStoreFile()
+		s.loaded = true
+		s.lastInfo = nil
+		s.lastMod = time.Time{}
+		s.lastSize = 0
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("device: read records file %s: %w", s.path, err)
 	}
@@ -138,9 +168,11 @@ func (s *Store) reloadIfChangedLocked() error {
 	}
 	s.file = f
 	s.loaded = true
-	s.lastMod = fi.ModTime()
-	s.lastSize = fi.Size()
-	s.lastInfo = fi
+	if fi, statErr := os.Stat(s.path); statErr == nil {
+		s.lastMod = fi.ModTime()
+		s.lastSize = fi.Size()
+		s.lastInfo = fi
+	}
 	return nil
 }
 
@@ -167,15 +199,78 @@ func (s *Store) saveLocked(f storeFile) error {
 	return nil
 }
 
-// findActiveLocked returns the index of the active (non-revoked) record named
-// name, or -1. Caller must hold s.mu with the file loaded.
-func (s *Store) findActiveLocked(name string) int {
-	for i := range s.file.Devices {
-		if s.file.Devices[i].Name == name && s.file.Devices[i].active() {
+// update is the single cross-process-safe read-modify-write path for every
+// records-file mutation. It holds s.mu (in-process serialization) and routes
+// through s.aud.Update, which holds the cross-process audit flock for the whole
+// closure. Inside that closure update reloads the CURRENT on-disk file (fresh,
+// ignoring the change-detection cache), runs mutate on it, and — only when
+// mutate reports a change — returns the marshalled bytes for the audited write.
+//
+// This closes the lost-update race the in-process mutex alone left open: the
+// daemon's TouchLastSeen and the CLI's Revoke run in separate processes, so
+// without the flock-protected reload-then-write the later writer would clobber
+// the earlier one (e.g. a touch silently reverting a revoke). Because the
+// reload happens under the same flock the write commits under, mutate always
+// sees the latest state any other process committed.
+//
+// mutate receives the freshly loaded storeFile to inspect and mutate in place;
+// it returns changed=false to skip the write entirely (no-op mutations:
+// already-revoked, rate-limited touch, RevokeAll with nothing active). After a
+// successful write update refreshes the in-process cache from disk.
+func (s *Store) update(ctx context.Context, mutate func(f *storeFile) (changed bool, err error)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	err := s.aud.Update(ctx, s.path, recordsPerm, func() ([]byte, error) {
+		// Under the cross-process audit flock: read the CURRENT bytes from
+		// disk, ignoring the mtime/size cache, so no stale in-memory state can
+		// seed a lost update.
+		if lerr := s.loadFromDiskLocked(); lerr != nil {
+			return nil, lerr
+		}
+		f := s.file.clone()
+		changed, merr := mutate(&f)
+		if merr != nil {
+			return nil, merr
+		}
+		if !changed {
+			return nil, nil // signal "no change" to Update: no write, no audit entry
+		}
+		data, merr := json.MarshalIndent(f, "", "  ")
+		if merr != nil {
+			return nil, fmt.Errorf("device: marshal records file: %w", merr)
+		}
+		return append(data, '\n'), nil
+	})
+	if err != nil {
+		return err
+	}
+	// Refresh the in-process cache from the just-written (or unchanged) file so
+	// subsequent reads on this Store see the committed state and a fresh
+	// fingerprint. A reload failure here is non-fatal: the next read path will
+	// retry, and VerifyBearer reloads on its own and fails closed.
+	if rerr := s.loadFromDiskLocked(); rerr != nil {
+		return fmt.Errorf("device: refresh cache after write %s: %w", s.path, rerr)
+	}
+	return nil
+}
+
+// findActiveIn returns the index of the active (non-revoked) record named name
+// within f, or -1.
+func findActiveIn(f *storeFile, name string) int {
+	for i := range f.Devices {
+		if f.Devices[i].Name == name && f.Devices[i].active() {
 			return i
 		}
 	}
 	return -1
+}
+
+// findActiveLocked returns the index of the active (non-revoked) record named
+// name in the in-memory file, or -1. Caller must hold s.mu with the file
+// loaded.
+func (s *Store) findActiveLocked(name string) int {
+	return findActiveIn(&s.file, name)
 }
 
 // DefaultPath returns the canonical devices.json location,

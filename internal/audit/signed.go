@@ -288,6 +288,58 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 	}
 	defer unlock()
 
+	return a.writeFileLocked(ctx, path, content, perm)
+}
+
+// Update performs a lost-update-free, cross-process read-modify-write of path
+// for the signed writer — the SignedAudit counterpart of *Audit.Update. It
+// acquires a.mu then the OS flock (the SAME mutex-then-flock order WriteFile
+// uses, so no ABBA deadlock can form between a concurrent WriteFile and an
+// Update in the same process), calls content() under both locks — which MUST
+// read the CURRENT on-disk state of path and return the full new bytes — then
+// records the signed chain entry (backup + write-intent), refreshes the
+// anchor/counter, and atomically writes, all under the held locks.
+//
+// content may return (nil, nil) for "no change": Update then writes and records
+// nothing, having still held the lock across the freshness read. A non-nil
+// error aborts with no write. Dry runs are NOT supported here — the device
+// store only calls Update for real mutations.
+func (a *SignedAudit) Update(_ context.Context, path string, perm os.FileMode, content func() ([]byte, error)) error {
+	ctx := context.Background()
+
+	a.mu.Lock()
+	lockFD, err := acquireAuditLock(a.logPath)
+	if err != nil {
+		a.mu.Unlock()
+		return fmt.Errorf("audit: acquire process lock: %w", err)
+	}
+	unlocked := false
+	unlock := func() {
+		if unlocked {
+			return
+		}
+		unlocked = true
+		releaseAuditLock(lockFD)
+		a.mu.Unlock()
+	}
+	defer unlock()
+
+	data, derr := content()
+	if derr != nil {
+		return derr
+	}
+	if data == nil {
+		return nil // caller signalled no change
+	}
+	return a.writeFileLocked(ctx, path, data, perm)
+}
+
+// writeFileLocked is the signed backup+append+anchor+write body of WriteFile
+// WITHOUT lock acquisition. It MUST be called with a.mu AND the OS flock held
+// (WriteFile and Update both establish that before calling). It records the
+// backup and write-intent chain entries, refreshes the anchor/counter, and
+// atomically writes content to path.
+func (a *SignedAudit) writeFileLocked(ctx context.Context, path string, content []byte, perm os.FileMode) error {
 	// R2-W5/R2-12: the key is fetched (or lazily generated) under the flock.
 	key, kerr := a.ensureKeyLocked(ctx)
 	if kerr != nil {
@@ -312,7 +364,9 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 		// per-entry anchor/counter refresh (backupNoRefresh). backupNoRefresh ALSO
 		// creates the physical .bak under this flock with the exact stamp recorded
 		// in the chain entry — there is no separate unlocked backup write (CR-01).
-		if bErr := a.backupNoRefresh(ctx, path, dryRun); bErr != nil {
+		// dryRun is always false here: WriteFile short-circuits dry runs before
+		// locking, and Update is only called for real mutations.
+		if bErr := a.backupNoRefresh(ctx, path, false); bErr != nil {
 			return fmt.Errorf("audit: backup before write %s: %w", path, bErr)
 		}
 		entryCount++
@@ -320,7 +374,7 @@ func (a *SignedAudit) WriteFile(path string, content []byte, perm os.FileMode, d
 
 	// Record write-intent entry without per-entry anchor/counter refresh.
 	diffHash := sha256.Sum256(content)
-	if wErr := a.appendNoRefresh(ctx, SignInput{Title: "write", DiffHash: diffHash}, path, dryRun); wErr != nil {
+	if wErr := a.appendNoRefresh(ctx, SignInput{Title: "write", DiffHash: diffHash}, path, false); wErr != nil {
 		return wErr
 	}
 	entryCount++

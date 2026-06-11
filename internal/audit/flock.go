@@ -18,10 +18,40 @@
 package audit
 
 import (
+	"context"
 	"fmt"
 
 	"golang.org/x/sys/unix"
 )
+
+// WithAppendLock runs fn while holding the SAME cross-process advisory flock
+// that WriteFile / Append take — the exclusive lock on the sibling
+// "<logPath>.lock" file. It lets a caller perform a multi-step
+// read-modify-write (reload-from-disk, mutate, write) that is atomic with
+// respect to any other process's audit-backed write to files governed by the
+// same audit log.
+//
+// CAUTION: the flock is NOT re-entrant (each acquisition opens a fresh fd and
+// LOCK_EX blocks on a second hold from the same process). fn therefore MUST NOT
+// call any audit method that re-acquires the lock — WriteFile, Append, etc. all
+// do. Use the *Locked write paths (e.g. *Audit.UpdateLocked is invoked for you
+// by Update) inside fn, or write the file directly. The intended pattern is to
+// go through Update, which acquires this lock, calls back for the fresh content,
+// then records the audit entry and writes — all under the single held lock.
+//
+// ctx is honoured before the (potentially blocking) lock acquisition; once the
+// lock is held fn runs to completion and the lock is always released.
+func WithAppendLock(ctx context.Context, logPath string, fn func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	lockFD, err := acquireAuditLock(logPath)
+	if err != nil {
+		return fmt.Errorf("audit: acquire process lock: %w", err)
+	}
+	defer releaseAuditLock(lockFD)
+	return fn()
+}
 
 // acquireAuditLock opens (or creates) a sibling .lock file beside logPath and
 // acquires an exclusive OS advisory flock on it. The caller MUST call
