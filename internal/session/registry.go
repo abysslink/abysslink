@@ -467,7 +467,7 @@ func normalizeConsumer(cmd string) string {
 	var b strings.Builder
 	for _, c := range strings.ToLower(cmd) {
 		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
-			b.WriteByte(byte(c))
+			b.WriteByte(byte(c)) // #nosec G115 -- c is guarded to ASCII a-z/0-9/_/- above; rune->byte cannot truncate
 		}
 		if b.Len() == 32 {
 			break

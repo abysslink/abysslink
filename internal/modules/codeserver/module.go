@@ -321,6 +321,9 @@ func (m *Module) writeConfigIfNeeded(cfgPath, ip, pw string) error {
 	if err != nil {
 		return fmt.Errorf("code-server apply: hash password: %w", err)
 	}
+	// #nosec G117 -- only the argon2id hashed-password is ever marshaled; the
+	// Password field exists to DETECT legacy plaintext configs on read and is
+	// always empty (omitempty) on write.
 	data, err := yaml.Marshal(codeServerConfig{
 		BindAddr:       bindAddr,
 		Auth:           "password",

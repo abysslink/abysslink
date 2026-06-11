@@ -13,8 +13,15 @@ description = "Abysslink false positives: deliberate test fixtures and git-ignor
 
 # .mine/ is git-ignored local scratch (absent from CI checkout); only seen by
 # local filesystem scans. Listed so `gitleaks dir .` matches CI behaviour.
+#
+# internal/notifyv2/testdata/secrets.txt holds deliberate FAKE key=value
+# fixtures (hunter22, deadbeefcafe...) that abysslink's OWN secret-scanner
+# tests (notifyv2 Validate, conformance audit-log checks) assert are detected;
+# gitleaks flagging them blocks every PR that touches the fixture.
 paths = [
   '''\.mine/''',
+  '''internal/notifyv2/testdata/secrets\.txt''',
+  '''internal/notifyv2/validate_test\.go''',
 ]
 
 # Deliberately fake Tailnet Lock disablement keys used in unit tests. Matched
