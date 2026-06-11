@@ -16,7 +16,9 @@
 package backend
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -32,3 +34,20 @@ const backendHTTPTimeout = 30 * time.Second
 // TLS: the default transport uses the system TLS root store with full
 // verification. InsecureSkipVerify is NEVER set (T-12-02-04 / T-13-02-04).
 var backendHTTPClient = &http.Client{Timeout: backendHTTPTimeout}
+
+// validateResourceID rejects obviously-invalid control-plane resource IDs
+// (node/peer/policy IDs) before they are interpolated into a request path.
+// It is a defence-in-depth complement to url.PathEscape: an empty id, or one
+// containing a path separator or path-traversal segment, is never a legitimate
+// Headscale/NetBird resource id and is rejected outright. This is the same
+// WR-01 pattern applied to posture-check IDs in netbird_posture.go — a crafted
+// id like "x/../policies/y" must not be able to retarget a DELETE or PUT.
+func validateResourceID(kind, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("%s id is empty", kind)
+	}
+	if strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("%s id %q contains an illegal path segment", kind, id)
+	}
+	return nil
+}

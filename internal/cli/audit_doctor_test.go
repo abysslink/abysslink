@@ -43,7 +43,7 @@ func findingByCheck(findings []modules.Finding, check string) *modules.Finding {
 func TestAuditDoctor_KeychainNil(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")
-	findings := auditDoctorFindings(context.Background(), logPath, nil)
+	findings := auditDoctorFindings(logPath, nil)
 	f := findingByCheck(findings, "audit-keychain")
 	require.NotNil(t, f, "audit-keychain finding must be present when kc is nil")
 	assert.Equal(t, modules.SeverityFatal, f.Severity)
@@ -53,7 +53,7 @@ func TestAuditDoctor_AnchorAgeWarnWhenMissing(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")
 	kc := secrets.NewMockStore()
-	findings := auditDoctorFindings(context.Background(), logPath, kc)
+	findings := auditDoctorFindings(logPath, kc)
 	f := findingByCheck(findings, "audit-anchor-age")
 	require.NotNil(t, f, "missing anchor should produce an anchor-age WARN")
 	assert.Equal(t, modules.SeverityWarning, f.Severity)
@@ -73,7 +73,7 @@ func TestAuditDoctor_AnchorAgeWarnWhenStale(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "audit.anchor.json"), data, 0o600))
 
-	findings := auditDoctorFindings(context.Background(), logPath, secrets.NewMockStore())
+	findings := auditDoctorFindings(logPath, secrets.NewMockStore())
 	f := findingByCheck(findings, "audit-anchor-age")
 	require.NotNil(t, f)
 	assert.Equal(t, modules.SeverityWarning, f.Severity)
@@ -95,7 +95,7 @@ func TestAuditDoctor_AnchorAgeWarnWhenUnparseable(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "audit.anchor.json"), data, 0o600))
 
-	findings := auditDoctorFindings(context.Background(), logPath, secrets.NewMockStore())
+	findings := auditDoctorFindings(logPath, secrets.NewMockStore())
 	f := findingByCheck(findings, "audit-anchor-age")
 	require.NotNil(t, f, "unparseable anchor time must produce an anchor-age finding")
 	assert.Equal(t, modules.SeverityWarning, f.Severity)
@@ -116,7 +116,7 @@ func TestAuditDoctor_CountVsAnchorFatal(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "audit.anchor.json"), data, 0o600))
 
-	findings := auditDoctorFindings(context.Background(), logPath, secrets.NewMockStore())
+	findings := auditDoctorFindings(logPath, secrets.NewMockStore())
 	f := findingByCheck(findings, "audit-count-vs-anchor")
 	require.NotNil(t, f, "count < anchor.EntryCount must be FATAL")
 	assert.Equal(t, modules.SeverityFatal, f.Severity)
@@ -130,11 +130,13 @@ func TestAuditDoctor_ForgedAnchorFatal(t *testing.T) {
 	logPath := filepath.Join(dir, "audit.log")
 	kc := secrets.NewMockStore()
 
-	// Build a real signed log + anchor first.
+	// Build a real signed log + anchor first. dryRun must be false: since
+	// CORE-08, dry-run writes append nothing and never generate the HMAC key,
+	// so a dry-run-only setup leaves no key for WriteAnchor to sign with.
 	sa, err := audit.NewSigned(logPath, kc)
 	require.NoError(t, err)
 	for i := 0; i < 3; i++ {
-		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, true))
+		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, false))
 	}
 	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
 
@@ -147,7 +149,7 @@ func TestAuditDoctor_ForgedAnchorFatal(t *testing.T) {
 	bad, _ := json.Marshal(a)
 	require.NoError(t, os.WriteFile(anchorFile, bad, 0o600))
 
-	findings := auditDoctorFindings(context.Background(), logPath, kc)
+	findings := auditDoctorFindings(logPath, kc)
 	f := findingByCheck(findings, "audit-count-vs-anchor")
 	require.NotNil(t, f, "forged anchor HMAC must be FATAL even when counts match")
 	assert.Equal(t, modules.SeverityFatal, f.Severity)
@@ -164,11 +166,12 @@ func TestAuditDoctor_ValidAnchorNoFinding(t *testing.T) {
 	sa, err := audit.NewSigned(logPath, kc)
 	require.NoError(t, err)
 	for i := 0; i < 3; i++ {
-		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, true))
+		// dryRun=false: see TestAuditDoctor_ForgedAnchorFatal (CORE-08).
+		require.NoError(t, sa.WriteFile(filepath.Join(dir, "f"), []byte{byte(i)}, 0o600, false))
 	}
 	require.NoError(t, audit.WriteAnchor(context.Background(), logPath, kc))
 
-	findings := auditDoctorFindings(context.Background(), logPath, kc)
+	findings := auditDoctorFindings(logPath, kc)
 	assert.Nil(t, findingByCheck(findings, "audit-count-vs-anchor"),
 		"a valid signed anchor with matching count must not flag truncation")
 }

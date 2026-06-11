@@ -18,19 +18,19 @@
 package sandbox
 
 // This file is the Linux Landlock implementation, gated behind //go:build linux
-// (the FIRST non-blank line above — CRITICAL: any go-landlock import must stay
-// in a linux-tagged file or the macOS build breaks).
+// (the FIRST non-blank line above — CRITICAL: any future go-landlock import
+// must stay in a linux-tagged file or the macOS build breaks).
 //
-// License note: go-landlock pulls one transitive dep,
-// kernel.org/pub/linux/libs/security/libcap/psx, which is LGPLv2+. This is
-// acceptable per the project depguard (only AGPL is banned); LGPLv2+ explicitly
-// permits use by Apache-2.0-licensed software. See NOTICE.
+// License note: go-landlock (currently unused — see applyLandlockProfile)
+// pulls one transitive dep, kernel.org/pub/linux/libs/security/libcap/psx,
+// which is LGPLv2+. This is acceptable per the project depguard (only AGPL is
+// banned); LGPLv2+ explicitly permits use by Apache-2.0-licensed software.
+// See NOTICE.
 
 import (
 	"context"
 	"log/slog"
 
-	"github.com/landlock-lsm/go-landlock/landlock"
 	"golang.org/x/sys/unix"
 )
 
@@ -53,24 +53,28 @@ func isLandlockSupported() bool {
 	return errno == 0 && int(abi) >= 1
 }
 
-// applyLandlockProfile applies a minimal Landlock profile to the current
-// process. It uses BestEffort() so kernels < 5.13 degrade gracefully (no error)
-// rather than failing closed. The concrete path rules are operator-configured
-// out of band; this module currently applies an empty (advisory no-op) profile.
+// applyLandlockProfile applies the Landlock profile for the current process.
 //
-// Logging is truthful about enforcement (WR-03): it probes Landlock support
-// first and only claims isolation when the kernel actually enforces it. On an
-// unsupported kernel (< 5.13) BestEffort applies nothing, so it logs a WARN
-// stating Landlock is NOT enforced rather than a misleading "applied" message.
-// Returns any error from the kernel.
+// CRITICAL: this function must NEVER call landlock.V1.RestrictPaths() with an
+// empty rule set. There is no such thing as an "advisory empty profile": a
+// Landlock ruleset with zero rules is an enforced DENY-ALL filesystem
+// restriction applied irreversibly to the live abysslink process. On any
+// kernel >= 5.13 that would break every subsequent filesystem operation in the
+// same `up --apply` run (later modules' audit writes, backups, the audit log
+// itself). See the isLandlockSupported doc comment above for the same trap in
+// probe form.
+//
+// No path rules are currently configurable, so this is a documented no-op that
+// only reports (truthfully, WR-03) whether the kernel could enforce a future
+// non-empty profile. When operator-configured path rules land, build the
+// ruleset here and return early — with a log — if the rule set is empty.
 func applyLandlockProfile(_ context.Context) error {
 	if !isLandlockSupported() {
 		slog.Warn("sandbox: Landlock NOT enforced (kernel < 5.13 required); no process isolation applied")
 		return nil
 	}
-	if err := landlock.V1.BestEffort().RestrictPaths(); err != nil {
-		return err
-	}
-	slog.Info("sandbox: Landlock process isolation applied (BestEffort, empty advisory profile)")
+	// Zero rules configured: skip entirely. Applying an empty ruleset would be
+	// deny-all for the abysslink process itself, not isolation for services.
+	slog.Info("sandbox: no Landlock path rules configured — skipping ruleset application (an empty ruleset would deny all filesystem access to abysslink itself)")
 	return nil
 }

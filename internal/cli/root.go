@@ -29,19 +29,51 @@ import (
 )
 
 // Execute builds the root command, wires all subcommands, and runs the CLI.
-// Returns 0 on success, 1 on error.
+// Returns 0 on success, 1 on error, or the code carried by an exitError.
 func Execute(ctx context.Context) int {
 	rootCmd := buildRootCmd()
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		var ee *exitError
 		if errors.As(err, &ee) {
-			// Message already printed by the command; just return the code.
+			if ee.err == nil {
+				// Message already printed by the command; just return the code.
+				return ee.ExitCode()
+			}
+			// Fail-closed gates carry their message here so it is rendered
+			// through the same central path as every other error.
+			printCLIError(rootCmd, ee.err)
 			return ee.ExitCode()
 		}
-		slog.Error("abysslink error", "err", err)
+		printCLIError(rootCmd, err)
 		return 1
 	}
 	return 0
+}
+
+// printCLIError renders a terminal command error for the user. Human mode
+// prints "Error: <first line>" plus any continuation lines (e.g. cobra's
+// multi-line "Did you mean this?" suggestion) verbatim to stderr; JSON mode
+// emits a single {"error": "..."} object so machine consumers never have to
+// parse slog records. The raw slog record is kept only under --verbose for
+// troubleshooting (UX review #2).
+func printCLIError(rootCmd *cobra.Command, err error) {
+	jsonOut, _ := rootCmd.PersistentFlags().GetBool("json")
+	verbose, _ := rootCmd.PersistentFlags().GetBool("verbose")
+	if verbose {
+		slog.Error("abysslink error", "err", err)
+	}
+
+	if jsonOut {
+		NewJSONPrinterTo(rootCmd.OutOrStdout(), rootCmd.ErrOrStderr()).Error(err.Error())
+		return
+	}
+
+	p := NewHumanPrinterTo(rootCmd.OutOrStdout(), rootCmd.ErrOrStderr())
+	lines := strings.Split(strings.TrimRight(err.Error(), "\n"), "\n")
+	p.Error("Error: " + lines[0])
+	for _, l := range lines[1:] {
+		p.Error(l)
+	}
 }
 
 func buildRootCmd() *cobra.Command {
@@ -123,6 +155,7 @@ Run 'abysslink <command> --help' for details on any command.`,
 		newDaemonCmd(),
 		newServerCmd(),
 		newRigCmd(),
+		newDeviceCmd(),
 	}
 	for _, c := range opsCmds {
 		c.GroupID = "ops"
@@ -152,7 +185,41 @@ Run 'abysslink <command> --help' for details on any command.`,
 		root.AddCommand(c)
 	}
 
+	// UX review #3: unknown/missing nested subcommands must error (exit 1),
+	// not print parent help with exit 0. Applied to every parent below the
+	// root; bare `abysslink` keeps cobra's conventional help-on-no-args.
+	for _, c := range root.Commands() {
+		enforceSubcommandErrors(c)
+	}
+
 	return root
+}
+
+// enforceSubcommandErrors walks the command tree and gives every parent
+// command (a command that only groups subcommands and has no Run/RunE of its
+// own) a RunE that fails on a missing or unknown subcommand instead of
+// printing help and exiting 0. Suggestions mirror cobra's root-level
+// "Did you mean this?" behaviour so `abysslink rotate ntfy` points at
+// `ntfy-creds` (UX review #3).
+func enforceSubcommandErrors(cmd *cobra.Command) {
+	for _, c := range cmd.Commands() {
+		enforceSubcommandErrors(c)
+	}
+	if !cmd.HasSubCommands() || cmd.Run != nil || cmd.RunE != nil {
+		return
+	}
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("missing subcommand for %q\n\nRun '%s --help' to see available subcommands",
+				cmd.CommandPath(), cmd.CommandPath())
+		}
+		msg := fmt.Sprintf("unknown subcommand %q for %q", args[0], cmd.CommandPath())
+		if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+			msg += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
+		}
+		msg += fmt.Sprintf("\n\nRun '%s --help' to see available subcommands", cmd.CommandPath())
+		return errors.New(msg)
+	}
 }
 
 // rigTargets is the resolved fleet-targeting selection from the persistent
@@ -199,10 +266,17 @@ func resolveRigTargets(cmd *cobra.Command, enrolled []config.RigConfig) (rigTarg
 	return rigTargets{}, fmt.Errorf("--rig %q: unknown rig; enrolled rigs: %s", rigName, strings.Join(names, ", "))
 }
 
+// defaultConfigPath returns the default abysslink.yaml location. When neither
+// XDG_CONFIG_HOME nor the home directory can be resolved it returns "" — the
+// caller (loadCmdContext) turns that into an explicit error rather than
+// silently resolving a relative ".config/..." path against the cwd (I4).
 func defaultConfigPath() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "abysslink", "abysslink.yaml")
 	}
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
 	return filepath.Join(home, ".config", "abysslink", "abysslink.yaml")
 }

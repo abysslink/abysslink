@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,7 +98,11 @@ func TestVerify_SigMismatch(t *testing.T) {
 
 func TestVerify_LegacyEntriesSkipped(t *testing.T) {
 	dir := t.TempDir()
-	kc := seededStore(t)
+	// R2-C2: a genuine legacy log means no HMAC key was ever created — use an
+	// EMPTY store. (A keychain that DOES hold the key plus an all-legacy log
+	// with no anchor is now the log-replacement attack and must FAIL — see
+	// TestVerify_AnchorDeletionWithKeyFails.)
+	kc := secrets.NewMockStore()
 	logPath := filepath.Join(dir, "audit.log")
 
 	// Write two legacy unsigned entries (no prev_hash/sig) via the plain Audit.
@@ -157,7 +162,8 @@ func TestVerify_TailStripDowngradeRejected(t *testing.T) {
 // preserving backward compatibility after the CR-01 contiguous-prefix fix.
 func TestVerify_PureLegacyLogStillVerifies(t *testing.T) {
 	dir := t.TempDir()
-	kc := seededStore(t)
+	// Genuine pre-chain legacy state: no HMAC key in the keychain (R2-C2).
+	kc := secrets.NewMockStore()
 	logPath := filepath.Join(dir, "audit.log")
 
 	legacy := audit.New(logPath)
@@ -407,7 +413,8 @@ func TestVerify_GenuineTruncation_Mismatch(t *testing.T) {
 // was never recorded", not a spurious "mismatch" alarm.
 func TestVerify_NoCounter_Unknown(t *testing.T) {
 	dir := t.TempDir()
-	kc := seededStore(t)
+	// Genuine pre-AUD-02 legacy state: no HMAC key, no counter (R2-C2).
+	kc := secrets.NewMockStore()
 	logPath := filepath.Join(dir, "audit.log")
 
 	ctx := context.Background()

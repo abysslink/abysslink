@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -436,6 +437,263 @@ func TestValidateServerURLHostname(t *testing.T) {
 			cfg := validBackendBaseConfig()
 			cfg.Backend.Type = tc.backendType
 			cfg.Server.Headscale.ServerURL = tc.serverURL
+			err := config.Validate(cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errSubstr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestSessionRegistryConfigRoundTrip verifies that a YAML document with a
+// session_registry: section (Phase 27, BACK-03, D-01/D-05/D-07/D-08) loads,
+// validates, and exposes every knob.
+func TestSessionRegistryConfigRoundTrip(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.yaml")
+	require.NoError(t, err)
+	doc := string(base) + `
+session_registry:
+  enabled: true
+  ignore_sessions:
+    - logs
+  idle_secs: 12
+  poll_active_secs: 3
+  poll_idle_secs: 20
+  prompt_regex: "READY\\$$"
+  cooldown_secs: 120
+`
+	dir := t.TempDir()
+	p := filepath.Join(dir, "session.yaml")
+	require.NoError(t, os.WriteFile(p, []byte(doc), 0o600))
+
+	cfg, err := config.Load(p)
+	require.NoError(t, err)
+	assert.True(t, cfg.SessionRegistry.Enabled)
+	assert.Equal(t, []string{"logs"}, cfg.SessionRegistry.IgnoreSessions)
+	assert.Equal(t, 12, cfg.SessionRegistry.IdleSecs)
+	assert.Equal(t, 3, cfg.SessionRegistry.PollActiveSecs)
+	assert.Equal(t, 20, cfg.SessionRegistry.PollIdleSecs)
+	assert.Equal(t, `READY\$$`, cfg.SessionRegistry.PromptRegex)
+	assert.Equal(t, 120, cfg.SessionRegistry.CooldownSecs)
+}
+
+// TestSessionRegistryConfigInvalidPromptRegex verifies that an uncompilable
+// prompt_regex is rejected with an error naming the field (T-27-12: user
+// regex is compiled with regexp.Compile, never MustCompile).
+func TestSessionRegistryConfigInvalidPromptRegex(t *testing.T) {
+	cfg := validBackendBaseConfig()
+	cfg.SessionRegistry.PromptRegex = "(["
+	err := config.Validate(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session_registry.prompt_regex")
+}
+
+// TestSessionRegistryConfigZeroValueValid verifies zero-value-means-default
+// semantics: an all-zero SessionRegistry passes validation (compiled-in
+// defaults apply downstream in the registry/daemon accessors).
+func TestSessionRegistryConfigZeroValueValid(t *testing.T) {
+	cfg := validBackendBaseConfig()
+	cfg.SessionRegistry = config.SessionRegistry{}
+	require.NoError(t, config.Validate(cfg))
+}
+
+// TestSessionRegistryConfigDefaultEnabled verifies the registry defaults ON
+// (the Watch defaults pattern — observe-only, no destructive surface).
+func TestSessionRegistryConfigDefaultEnabled(t *testing.T) {
+	cfg := config.Defaults()
+	assert.True(t, cfg.SessionRegistry.Enabled)
+	assert.Zero(t, cfg.SessionRegistry.IdleSecs, "timing knobs default to zero = compiled-in default")
+	assert.Zero(t, cfg.SessionRegistry.CooldownSecs)
+}
+
+// TestValidate_UnixUser covers the W3 charset validation: identity.unix_user
+// is interpolated into the hardened sshd drop-in (`AllowUsers %s`) and the
+// tailnet ACL, so anything outside the POSIX-portable username shape must be
+// rejected at config-load time.
+func TestValidate_UnixUser(t *testing.T) {
+	mkCfg := func(user string) *config.Config {
+		cfg := config.Defaults()
+		cfg.Identity.Email = "a@b.com"
+		cfg.Identity.UnixUser = user
+		cfg.Tailnet.Hostname = "host"
+		return cfg
+	}
+
+	valid := []string{"alice", "_svc", "a", "me-2", "dev_user", "u0123456789012345678901234567890"}
+	for _, u := range valid {
+		assert.NoError(t, config.Validate(mkCfg(u)), "unix_user %q must be accepted", u)
+	}
+
+	invalid := []string{
+		"me\nPasswordAuthentication yes", // newline → sshd directive injection (W3)
+		"alice bob",                      // whitespace → extra AllowUsers entry
+		"Alice",                          // uppercase
+		"1user",                          // leading digit
+		"-user",                          // leading dash
+		"user!",                          // shell metacharacter
+		"a234567890123456789012345678901234567890", // > 32 chars
+	}
+	for _, u := range invalid {
+		err := config.Validate(mkCfg(u))
+		require.Error(t, err, "unix_user %q must be rejected", u)
+		assert.Contains(t, err.Error(), "unix_user")
+	}
+}
+
+// TestLoad_RejectsUnixUserNewlineInjection is the end-to-end W3 test: a YAML
+// file carrying a newline-embedded unix_user (legal YAML!) must fail Load —
+// it would otherwise inject arbitrary directives into the hardened sshd config.
+func TestLoad_RejectsUnixUserNewlineInjection(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "inject.yaml")
+	content := "version: 1\n" +
+		"identity:\n" +
+		"  email: you@example.com\n" +
+		"  unix_user: \"me\\nPasswordAuthentication yes\"\n" +
+		"tailnet:\n" +
+		"  hostname: mac-dev\n"
+	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+
+	_, err := config.Load(p)
+	require.Error(t, err, "newline-in-unix_user must be rejected at load time (W3)")
+	assert.Contains(t, err.Error(), "unix_user")
+}
+
+func TestValidateUnixUser_Exported(t *testing.T) {
+	assert.NoError(t, config.ValidateUnixUser("alice"))
+	assert.Error(t, config.ValidateUnixUser(""), "empty user must be rejected at use sites")
+	assert.Error(t, config.ValidateUnixUser("me\nX yes"))
+}
+
+// TestLoad_EmptyFile asserts the actionable empty-config message (review INFO).
+func TestLoad_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "empty.yaml")
+	require.NoError(t, os.WriteFile(p, nil, 0o600))
+
+	_, err := config.Load(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is empty")
+	assert.Contains(t, err.Error(), "abysslink init")
+	assert.Contains(t, err.Error(), p, "the message must say WHICH file is empty")
+
+	_, err = config.LoadForRead(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "abysslink init")
+}
+
+// TestLoad_ValidationErrorIncludesPath asserts validation failures name the
+// offending file (review INFO) — users may have several config candidates.
+func TestLoad_ValidationErrorIncludesPath(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "bad.yaml")
+	content := "version: 1\nidentity:\n  email: nope\n  unix_user: you\ntailnet:\n  hostname: mac-dev\n"
+	require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+
+	_, err := config.Load(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), p, "Load validation error must include the file path")
+
+	cfg, verr := config.LoadForRead(p)
+	require.Error(t, verr)
+	require.NotNil(t, cfg, "LoadForRead returns the parsed config alongside the validation error")
+	assert.Contains(t, verr.Error(), p, "LoadForRead validation error must include the file path")
+}
+
+// TestContentStoreDefaults asserts the Phase 28 content-store defaults
+// (BACK-06): enabled by default, port 2587, TTL 600s.
+func TestContentStoreDefaults(t *testing.T) {
+	cfg := config.Defaults()
+	assert.True(t, cfg.ContentStore.Enabled, "content store must default ON")
+	assert.Equal(t, 2587, cfg.ContentStore.Port)
+	assert.Equal(t, 600, cfg.ContentStore.TTLSeconds)
+	assert.Empty(t, cfg.ContentStore.BindAddr)
+	assert.Equal(t, 2587, cfg.ContentStore.EffectivePort())
+	assert.Equal(t, 600*time.Second, cfg.ContentStore.EffectiveTTL())
+}
+
+// TestContentStoreEffectiveZeroValues asserts the zero-means-default idiom.
+func TestContentStoreEffectiveZeroValues(t *testing.T) {
+	var cs config.ContentStoreConfig
+	assert.Equal(t, config.DefaultContentStorePort, cs.EffectivePort())
+	assert.Equal(t, time.Duration(config.DefaultContentTTLSeconds)*time.Second, cs.EffectiveTTL())
+}
+
+func TestValidateContentStore(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*config.Config)
+		wantErr   bool
+		errSubstr string
+	}{
+		{name: "defaults valid", mutate: func(*config.Config) {}},
+		{
+			name:      "rejects wildcard bind 0.0.0.0",
+			mutate:    func(c *config.Config) { c.ContentStore.BindAddr = "0.0.0.0" },
+			wantErr:   true,
+			errSubstr: "BACK-06",
+		},
+		{
+			name:      "rejects wildcard bind ::",
+			mutate:    func(c *config.Config) { c.ContentStore.BindAddr = "::" },
+			wantErr:   true,
+			errSubstr: "BACK-06",
+		},
+		{
+			name:      "rejects DNS-name bind",
+			mutate:    func(c *config.Config) { c.ContentStore.BindAddr = "rig.example.ts.net" },
+			wantErr:   true,
+			errSubstr: "literal IP",
+		},
+		{
+			name:      "rejects host:port bind (literal IP only)",
+			mutate:    func(c *config.Config) { c.ContentStore.BindAddr = "100.64.0.1:2587" },
+			wantErr:   true,
+			errSubstr: "literal IP",
+		},
+		{
+			name:   "accepts literal tailnet IPv4",
+			mutate: func(c *config.Config) { c.ContentStore.BindAddr = "100.64.0.1" },
+		},
+		{
+			name:   "accepts literal tailnet IPv6 ULA",
+			mutate: func(c *config.Config) { c.ContentStore.BindAddr = "fd7a:115c:a1e0::1234" },
+		},
+		{
+			name:      "rejects ttl below floor",
+			mutate:    func(c *config.Config) { c.ContentStore.TTLSeconds = 29 },
+			wantErr:   true,
+			errSubstr: "ttl_seconds",
+		},
+		{
+			name:      "rejects ttl above ceiling",
+			mutate:    func(c *config.Config) { c.ContentStore.TTLSeconds = 3601 },
+			wantErr:   true,
+			errSubstr: "ttl_seconds",
+		},
+		{name: "accepts ttl floor", mutate: func(c *config.Config) { c.ContentStore.TTLSeconds = 30 }},
+		{name: "accepts ttl ceiling", mutate: func(c *config.Config) { c.ContentStore.TTLSeconds = 3600 }},
+		{name: "accepts ttl zero (default)", mutate: func(c *config.Config) { c.ContentStore.TTLSeconds = 0 }},
+		{
+			name:      "rejects out-of-range port",
+			mutate:    func(c *config.Config) { c.ContentStore.Port = 70000 },
+			wantErr:   true,
+			errSubstr: "content_store.port",
+		},
+		{
+			name:      "rejects negative port",
+			mutate:    func(c *config.Config) { c.ContentStore.Port = -1 },
+			wantErr:   true,
+			errSubstr: "content_store.port",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validObsBaseConfig()
+			tc.mutate(cfg)
 			err := config.Validate(cfg)
 			if tc.wantErr {
 				require.Error(t, err)

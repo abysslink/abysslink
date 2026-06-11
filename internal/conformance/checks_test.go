@@ -58,6 +58,49 @@ func TestCheckNoSecretsInAuditLog_SecretLeak(t *testing.T) {
 	assert.Error(t, err, "audit log with leaked token should fail")
 }
 
+// TestCheckNoSecretsInAuditLog_BareTokens asserts that bare provider-prefixed
+// token values leak-check positive even with no key= / key: shape around
+// them. Tokens are assembled at runtime so no literal token sits in source.
+func TestCheckNoSecretsInAuditLog_BareTokens(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		token string
+	}{
+		{"tailscale auth key", "tskey-auth-" + "kFGiAS1CNTRL-Xq8r2vZx9w"},
+		{"github classic token", "ghp_" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2"},
+		{"github fine-grained token", "github_pat_" + "9zY8xW7vU6tS5rQ4pO3nM2lK1jI0h"},
+		{"aws access key id", "AKIA" + "IOSFODNN" + "7EXAMPLE"},
+		{"slack token", "xoxb-" + "123456789012-abcdefghijklmnop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			logPath := filepath.Join(dir, "audit.log")
+			line := `{"time":"2026-01-01T00:00:00Z","op":"write","note":"` + tc.token + `"}` + "\n"
+			require.NoError(t, os.WriteFile(logPath, []byte(line), 0o600))
+
+			err := conformance.CheckNoSecretsInAuditLog(ctx, logPath)
+			assert.Error(t, err, "bare token must be flagged as a leak")
+		})
+	}
+}
+
+// TestCheckNoSecretsInAuditLog_BareTokenFalsePositives guards the bare-token
+// patterns against over-matching: ULIDs, content hashes, and ordinary
+// hostnames must not trip the leak check.
+func TestCheckNoSecretsInAuditLog_BareTokenFalsePositives(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	clean := `{"msg_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","hash":"deadbeefcafe0123456789abcdef0123456789abcdef0123456789abcdef0123","host":"rig-1"}` + "\n" +
+		`{"note":"tmux task ghosted, see pane %3"}` + "\n"
+	require.NoError(t, os.WriteFile(logPath, []byte(clean), 0o600))
+
+	err := conformance.CheckNoSecretsInAuditLog(ctx, logPath)
+	assert.NoError(t, err, "non-secret identifiers must not trip the bare-token patterns")
+}
+
 func TestCheckBinarySize_UnderLimit(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

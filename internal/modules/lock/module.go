@@ -75,14 +75,15 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 
 	slog.Debug("lock detect", "lock_enabled", status.Enabled, "cfg_enabled", m.cfg.Tailnet.Lock.Enabled)
 
-	if m.cfg.Tailnet.Lock.Enabled && !status.Enabled {
+	switch {
+	case m.cfg.Tailnet.Lock.Enabled && !status.Enabled:
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "lock_enabled",
 			Severity: modules.SeverityWarning,
 			Message:  "config requires Tailnet Lock but it is not enabled on this tailnet",
 		})
-	} else if status.Enabled {
+	case status.Enabled:
 		// Emit explicit OK so "check ran and passed" is distinguishable from
 		// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
 		findings = append(findings, modules.Finding{
@@ -90,6 +91,18 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 			Check:    "lock_enabled",
 			Severity: modules.SeverityOK,
 			Message:  "lock_enabled: Tailnet Lock is enabled on this tailnet",
+		})
+	default:
+		// Lock disabled in config AND off on the tailnet: Tailnet Lock is an
+		// on-by-default control, so its disablement must at least be VISIBLE in
+		// doctor output rather than silently fail-open (review INFO). The check
+		// name is distinct from "lock_enabled" so Plan/Apply take no action.
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "lock_disabled",
+			Severity: modules.SeverityWarning,
+			Message: "Tailnet Lock is disabled (tailnet.lock.enabled=false) — lock is on by default; " +
+				"running without it lets a compromised coordination server add devices to your tailnet",
 		})
 	}
 

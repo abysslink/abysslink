@@ -16,6 +16,7 @@
 package audit
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,7 +45,8 @@ import (
 //
 // CORE-07: the audit entry is appended BEFORE the physical write (matching
 // SignedAudit). A crash between the append and the rename leaves recorded
-// intent without the effect — never an unrecorded mutation.
+// intent without the effect — never an unrecorded mutation. The append is
+// fsynced (R2-W4) so a crash cannot persist the rename while losing the entry.
 func (a *Audit) WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error {
 	if dryRun {
 		return a.Append("write", path, content, true)
@@ -60,6 +62,15 @@ func (a *Audit) WriteFile(path string, content []byte, perm os.FileMode, dryRun 
 	}
 	defer releaseAuditLock(lockFD)
 
+	return a.writeFileLocked(path, content, perm)
+}
+
+// writeFileLocked is the append-before-write body of WriteFile WITHOUT lock
+// acquisition. It MUST be called with the cross-process audit flock already
+// held (WriteFile acquires it; Update acquires it before invoking the caller's
+// content function and then this). dryRun is not handled here — WriteFile
+// short-circuits dry runs before locking.
+func (a *Audit) writeFileLocked(path string, content []byte, perm os.FileMode) error {
 	// CORE-03: refuse to operate on a symlink target. Writing "through" a
 	// symlink would back up and replace a file outside the audited path.
 	// (See the doc comment for the residual check-then-act window.)
@@ -71,7 +82,9 @@ func (a *Audit) WriteFile(path string, content []byte, perm os.FileMode, dryRun 
 
 	// CORE-07: append-before-write. Record the intent first so a crash after
 	// this point leaves an audit record of the (possibly incomplete) mutation.
-	if err := a.Append("write", path, content, false); err != nil {
+	// appendLocked is chain-aware (R2-C1): it signs when the log carries an
+	// active signed chain, keeping the unsigned writer from bricking Verify.
+	if err := a.appendLocked("write", path, content, false); err != nil {
 		return err
 	}
 
@@ -82,30 +95,130 @@ func (a *Audit) WriteFile(path string, content []byte, perm os.FileMode, dryRun 
 		}
 	}
 
-	// CORE-03: unique, O_EXCL-created temp in the target's directory (rename
-	// stays on one device; no predictable temp name to clobber or pre-link).
+	return atomicWriteFile(path, content, perm)
+}
+
+// Update performs a lost-update-free, cross-process read-modify-write of path.
+// It acquires the SAME audit flock WriteFile uses, then calls content() — which
+// MUST read the CURRENT on-disk state of path (fresh, ignoring any in-memory
+// cache) and return the full new file bytes to write. While the lock is held no
+// other process running an audit-backed write to path can interleave, so the
+// read-modify-write content() performs cannot lose a concurrent update.
+//
+// content may return (nil, nil) to signal "no change" — Update then records and
+// writes nothing (no audit entry, no backup), which lets callers skip the write
+// for no-op mutations (already-revoked, rate-limited touch) while still holding
+// the lock for the freshness read. A non-nil error from content aborts with no
+// write. On a returned slice, Update records the audit entry and atomically
+// writes it under the held lock via writeFileLocked.
+//
+// This is the cross-process counterpart to an in-process compare-and-swap: the
+// reload and the write are one critical section, closing the lost-update window
+// that an in-process mutex alone leaves open between separate processes.
+func (a *Audit) Update(_ context.Context, path string, perm os.FileMode, content func() ([]byte, error)) error {
+	lockFD, lerr := acquireAuditLock(a.logPath)
+	if lerr != nil {
+		return fmt.Errorf("audit: acquire process lock: %w", lerr)
+	}
+	defer releaseAuditLock(lockFD)
+
+	data, err := content()
+	if err != nil {
+		return err
+	}
+	if data == nil {
+		return nil // caller signalled no change; nothing to write or record
+	}
+	return a.writeFileLocked(path, data, perm)
+}
+
+// atomicWriteFile writes content to path atomically and durably (R2-W4/E2):
+// a unique O_EXCL temp in path's directory (so the rename stays on one device
+// and no predictable temp name can be pre-linked), fsync, chmod, rename, then
+// a best-effort fsync of the directory. This is the single shared
+// temp/chmod/rename implementation for every physical write in this package.
+func atomicWriteFile(path string, content []byte, perm os.FileMode) error {
 	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.abysslink.tmp")
 	if err != nil {
 		return fmt.Errorf("audit: create temp for %s: %w", path, err)
 	}
-	tmp := tmpFile.Name()
-	_, werr := tmpFile.Write(content)
-	if cerr := tmpFile.Close(); werr == nil {
-		werr = cerr
+	if _, werr := tmpFile.Write(content); werr != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+		return fmt.Errorf("audit: write temp %s: %w", tmpFile.Name(), werr)
 	}
-	if werr != nil {
+	return finalizeTemp(tmpFile, path, perm)
+}
+
+// finalizeTemp fsyncs and closes tmpFile, chmods it to perm, renames it over
+// path, and best-effort-fsyncs the containing directory. On any error the temp
+// file is removed. tmpFile must live in path's directory.
+func finalizeTemp(tmpFile *os.File, path string, perm os.FileMode) error {
+	tmp := tmpFile.Name()
+	// R2-W4: sync the temp before the rename so a crash cannot promote an
+	// empty/truncated file into place.
+	serr := tmpFile.Sync()
+	if cerr := tmpFile.Close(); serr == nil {
+		serr = cerr
+	}
+	if serr != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("audit: write temp %s: %w", tmp, werr)
+		return fmt.Errorf("audit: sync temp %s: %w", tmp, serr)
 	}
 	if cerr := os.Chmod(tmp, perm); cerr != nil { //nolint:gosec // perm supplied by caller; tmp is os.CreateTemp-derived, app-controlled
 		_ = os.Remove(tmp)
 		return fmt.Errorf("audit: chmod temp %s: %w", tmp, cerr)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if rerr := os.Rename(tmp, path); rerr != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("audit: rename %s → %s: %w", tmp, path, err)
+		return fmt.Errorf("audit: rename %s → %s: %w", tmp, path, rerr)
+	}
+	syncDir(filepath.Dir(path))
+	return nil
+}
+
+// syncDir best-effort-fsyncs a directory so a just-completed rename survives a
+// crash. Failures are ignored: not every filesystem supports directory fsync,
+// and the rename itself already succeeded.
+func syncDir(dir string) {
+	d, err := os.Open(dir) //nolint:gosec // dir is derived from an app-controlled target path
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
+}
+
+// appendLineSynced opens logPath in append mode, writes line, and fsyncs before
+// closing (R2-W4: the audit protocol's append-before-write ordering is only
+// crash-safe if the appended intent entry is durable).
+func appendLineSynced(logPath string, line []byte) error {
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: logPath is the internal audit-log path set at construction, not user-controlled
+	if err != nil {
+		return fmt.Errorf("audit: open log %s: %w", logPath, err)
+	}
+	if _, werr := f.Write(line); werr != nil {
+		_ = f.Close()
+		return fmt.Errorf("audit: write log: %w", werr)
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		return fmt.Errorf("audit: sync log: %w", serr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return fmt.Errorf("audit: close log: %w", cerr)
 	}
 	return nil
+}
+
+// sourceMode returns path's permission bits, or 0600 when they cannot be read.
+// Used to carry a file's mode into its backup (and back out at restore time)
+// so a restore never silently flips a 0644 unit file to 0600 (R2-W3).
+func sourceMode(path string) os.FileMode {
+	if fi, err := os.Stat(path); err == nil {
+		return fi.Mode().Perm()
+	}
+	return 0o600
 }
 
 // DefaultLogPath returns the canonical audit-log path under XDG_STATE_HOME

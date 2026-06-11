@@ -124,18 +124,22 @@ func policyIDFrom(p string) string {
 func serveNBPeers(w http.ResponseWriter) {
 	peers := []map[string]any{
 		{
-			"id":           "peer-1",
-			"name":         "test-laptop",
-			"hostname":     "test-laptop.local",
-			"ip_addresses": []string{"100.64.0.1", "fd00::1"},
-			"groups":       []string{"group-all"},
+			"id":        "peer-1",
+			"name":      "test-laptop",
+			"hostname":  "test-laptop.local",
+			"dns_label": "test-laptop.netbird.cloud",
+			"ip":        "100.64.0.1",
+			"connected": true,
+			"groups":    []map[string]any{{"id": "group-all", "name": "All"}},
 		},
 		{
-			"id":           "peer-2",
-			"name":         "test-phone",
-			"hostname":     "test-phone.local",
-			"ip_addresses": []string{"100.64.0.2"},
-			"groups":       []string{"group-all"},
+			"id":        "peer-2",
+			"name":      "test-phone",
+			"hostname":  "test-phone.local",
+			"dns_label": "test-phone.netbird.cloud",
+			"ip":        "100.64.0.2",
+			"connected": false,
+			"groups":    []map[string]any{{"id": "group-all", "name": "All"}},
 		},
 	}
 	writeJSON(w, peers)

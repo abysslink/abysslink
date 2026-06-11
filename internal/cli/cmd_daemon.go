@@ -24,6 +24,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/platform"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
 )
 
@@ -139,7 +140,11 @@ func reachable(ok bool) string {
 }
 
 // daemonServiceSpec builds the launchd/systemd spec for abysslinkd, resolving
-// the daemon binary next to the running abysslink binary.
+// the daemon binary next to the running abysslink binary. The service spec
+// always carries an ABSOLUTE path: a bare "abysslinkd" would defer PATH
+// resolution to launchd/systemd start time — a hijack/footgun surface (the
+// service manager's PATH is not the user's), so a daemon that cannot be
+// resolved NOW is a clear error instead.
 func daemonServiceSpec() (platform.ServiceSpec, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -147,7 +152,12 @@ func daemonServiceSpec() (platform.ServiceSpec, error) {
 	}
 	binPath := filepath.Join(filepath.Dir(exe), "abysslinkd")
 	if _, statErr := os.Stat(binPath); statErr != nil {
-		binPath = "abysslinkd" // fall back to PATH lookup at service start
+		resolved, lookErr := shell.ResolvePath("abysslinkd")
+		if lookErr != nil {
+			return platform.ServiceSpec{}, fmt.Errorf(
+				"abysslinkd not found next to %s and not on PATH — install abysslinkd before enabling the daemon: %w", exe, lookErr)
+		}
+		binPath = resolved
 	}
 
 	stateDir := abysslinkStateDir()

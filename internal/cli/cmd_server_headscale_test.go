@@ -54,7 +54,7 @@ func TestServerHeadscaleInitTLSGateRejects(t *testing.T) {
 
 	cc := &cmdContext{cfg: cfg, runner: mr, dryRun: false, apply: true}
 
-	err := headscaleInitRunE(context.Background(), cfg, cc, mr)
+	err := headscaleInitRunE(context.Background(), cfg, cc, mr, NewHumanPrinterTo(&strings.Builder{}, &strings.Builder{}))
 	require.Error(t, err, "init must return error when TLS cert is missing")
 	assert.Contains(t, strings.ToLower(err.Error()), "tls", "error must mention tls gate")
 	// Verify no runner calls were made (no download started).
@@ -72,7 +72,7 @@ func TestServerHeadscaleInitTLSGateRejectsACMEMissingHostname(t *testing.T) {
 
 	cc := &cmdContext{cfg: cfg, runner: mr, dryRun: false, apply: true}
 
-	err := headscaleInitRunE(context.Background(), cfg, cc, mr)
+	err := headscaleInitRunE(context.Background(), cfg, cc, mr, NewHumanPrinterTo(&strings.Builder{}, &strings.Builder{}))
 	require.Error(t, err, "init must return error when ACME hostname is empty")
 	assert.Contains(t, strings.ToLower(err.Error()), "tls", "error must mention tls")
 	assert.True(t, mr.Done(), "runner must not be called before TLS gate rejects")
@@ -94,7 +94,7 @@ func TestServerHeadscaleInitDryRunMutatesNothing(t *testing.T) {
 	// 1. Call ValidateHeadscaleTLS (TLS gate — ACME+hostname passes)
 	// 2. Log the plan
 	// 3. Return nil without any runner calls (no download)
-	err := headscaleInitRunE(context.Background(), cfg, cc, mr)
+	err := headscaleInitRunE(context.Background(), cfg, cc, mr, NewHumanPrinterTo(&strings.Builder{}, &strings.Builder{}))
 	require.NoError(t, err, "init --dry-run must succeed with valid TLS config")
 	// No runner calls should have been made for downloads/binary writes.
 	assert.True(t, mr.Done(), "dry-run must not invoke runner for mutations")
@@ -117,7 +117,7 @@ func TestServerHeadscaleUpgradeRefusesDowngrade(t *testing.T) {
 		runner: mr,
 		apply:  true,
 		dryRun: false,
-	}, mr, "v0.25.0")
+	}, mr, "v0.25.0", NewHumanPrinterTo(&strings.Builder{}, &strings.Builder{}))
 
 	require.Error(t, err, "upgrade must refuse downgrade")
 	assert.Contains(t, strings.ToLower(err.Error()), "downgrade",
@@ -180,9 +180,6 @@ func TestServerHeadscaleInitAPIKeyBootstrap(t *testing.T) {
 		Result: shell.Result{Stdout: "SomeAPIKey1234567890\n", ExitCode: 0},
 	})
 
-	cfg := config.Defaults()
-	cfg.Server.Headscale.BinaryPath = "/usr/local/bin/headscale"
-
 	// Mock keychain: no entry exists → Get returns error.
 	mockKC := &mockKeychainStore{entries: map[string]string{}}
 
@@ -193,7 +190,7 @@ func TestServerHeadscaleInitAPIKeyBootstrap(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	key, err := ensureAPIKey(ctx, cfg, mr, mockKC, "/usr/local/bin/headscale", srv.URL)
+	key, err := ensureAPIKey(ctx, mr, mockKC, "/usr/local/bin/headscale", srv.URL)
 	require.NoError(t, err, "API key bootstrap must succeed")
 	assert.Equal(t, "SomeAPIKey1234567890", key, "returned key must match runner output")
 
@@ -684,4 +681,70 @@ func (m *mockKeychainStore) Get(_ context.Context, service, account string) (str
 func (m *mockKeychainStore) Delete(_ context.Context, service, account string) error {
 	delete(m.entries, service+"/"+account)
 	return nil
+}
+
+// TestInstallHeadscaleLinux_DryRunRunsNoSystemctl covers W5: under dryRun the
+// systemctl daemon-reload/enable/start mutations must NOT run (the unit write
+// already honored dryRun; the service start did not).
+func TestInstallHeadscaleLinux_DryRunRunsNoSystemctl(t *testing.T) {
+	mr := shell.NewMockRunner() // zero scripted calls — any call fails the assertion below
+	var out strings.Builder
+	p := NewHumanPrinterTo(&out, &out)
+
+	err := installHeadscaleLinux(context.Background(), mr, p,
+		"/usr/local/bin/headscale", "/etc/headscale/config.yaml", true /*dryRun*/)
+	require.NoError(t, err, "dry-run install must succeed without mutating")
+
+	assert.Empty(t, mr.RecordedCalls(), "dry-run must not invoke systemctl")
+	assert.Contains(t, out.String(), "[plan]", "dry-run must print a plan preview")
+	assert.Contains(t, out.String(), "systemctl", "the plan must name the gated systemctl steps")
+}
+
+// TestHeadscaleUpgradeDryRunPrintsPlan covers W6: `server headscale upgrade`
+// in dry-run mode must print a visible [plan] preview — slog alone is hidden
+// at the default level, leaving the user with silence + exit 0.
+func TestHeadscaleUpgradeDryRunPrintsPlan(t *testing.T) {
+	mr := shell.NewMockRunner(shell.Call{
+		Result: shell.Result{Stdout: "headscale version v0.27.0\n", ExitCode: 0},
+	})
+	cfg := config.Defaults()
+	cfg.Server.Headscale.BinaryPath = "/usr/local/bin/headscale"
+
+	var out strings.Builder
+	p := NewHumanPrinterTo(&out, &out)
+	err := headscaleUpgradeRunE(context.Background(), cfg, &cmdContext{
+		cfg:    cfg,
+		runner: mr,
+		dryRun: true,
+	}, mr, "v0.28.0", p)
+	require.NoError(t, err)
+
+	assert.Contains(t, out.String(), "[plan]", "dry-run upgrade must print a visible plan")
+	assert.Contains(t, out.String(), "v0.27.0", "the plan must show the installed version")
+	assert.Contains(t, out.String(), "v0.28.0", "the plan must show the target version")
+	assert.Contains(t, out.String(), "--apply", "the plan must point at --apply")
+}
+
+// TestMintPreAuthKeyNotEphemeral covers W14: the pre-auth key must be minted
+// with ephemeral:false — Headscale deletes nodes joined with an ephemeral key
+// as soon as they go offline, and phones/laptops go offline routinely. D-11
+// requires only the explicit expiry.
+func TestMintPreAuthKeyNotEphemeral(t *testing.T) {
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"preAuthKey": map[string]any{"key": "k123"},
+		})
+	}))
+	defer srv.Close()
+
+	_, err := mintPreAuthKey(context.Background(), srv.URL, "apikey", "abysslink", time.Hour)
+	require.NoError(t, err)
+
+	require.Contains(t, captured, "ephemeral")
+	assert.Equal(t, false, captured["ephemeral"],
+		"pre-auth key must NOT be ephemeral (nodes would vanish when they go offline)")
+	assert.Contains(t, captured, "expiration", "the explicit D-11 expiry must remain")
 }

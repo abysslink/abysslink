@@ -203,12 +203,22 @@ func (m *Module) applyAdmin(ctx context.Context, aclMgr backend.ACLManager, owne
 // clipboard, and opens the admin editor for the user to paste and save.
 func (m *Module) applyManual(ctx context.Context, aclMgr backend.ACLManager, owner, user, checkPeriod string) error {
 	desired := aclMgr.DefaultACL(owner, user)
+	checkPeriodWarning := ""
 	if checkPeriod != "" && checkPeriod != "12h" {
-		editor, err := aclMgr.NewACLEditor(desired)
-		if err == nil {
-			if err := editor.EnsureSSHRule(owner, user, checkPeriod); err == nil {
-				desired = editor.Bytes()
-			}
+		editor, edErr := aclMgr.NewACLEditor(desired)
+		if edErr == nil {
+			edErr = editor.EnsureSSHRule(owner, user, checkPeriod)
+		}
+		if edErr != nil {
+			// Falling back to the 12h default is the safe direction, but the
+			// user configured a different period — never swallow the mismatch:
+			// log it AND surface it in the manual-step notice.
+			slog.Warn("acl apply: could not apply the configured checkPeriod to the generated ACL; falling back to the 12h default",
+				"configured", checkPeriod, "err", edErr)
+			checkPeriodWarning = "     WARNING: your configured mobile.ssh_check_period (" + checkPeriod +
+				") could not be applied — the generated ACL uses the 12h default.\n"
+		} else {
+			desired = editor.Bytes()
 		}
 	}
 
@@ -237,6 +247,7 @@ func (m *Module) applyManual(ctx context.Context, aclMgr backend.ACLManager, own
 	} else {
 		notice += "     Could not copy to clipboard — paste from: " + genPath + "\n"
 	}
+	notice += checkPeriodWarning
 	notice += "     Press [Enter] to open the Tailscale ACL editor, then paste and Save.\n"
 	notice += "     URL: " + aclEditorURL + "\n"
 
@@ -313,14 +324,31 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 			Message:  fmt.Sprintf("backend %q has no ACL management support — cannot verify ACL", m.cfg.Backend.Type),
 		}}, nil
 	}
+
+	// Align with Apply's NET-01 gate: Apply refuses a >12h (or malformed)
+	// checkPeriod without explicit consent, so Verify must not silently bless
+	// an extended period in its drift baseline. The drift check still runs
+	// (read-only), but the discrepancy is surfaced as a WARN finding.
+	var findings []modules.Finding
+	if err := enforceCheckPeriodCeiling(m.cfg.Mobile.SSHCheckPeriod, m.acceptCheckPeriodExt); err != nil {
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "checkperiod_ceiling",
+			Severity: modules.SeverityWarning,
+			Message: fmt.Sprintf("mobile.ssh_check_period %q exceeds the 12h security default (or is malformed) "+
+				"without --accept-checkperiod-extension — `abysslink up --apply` will refuse it: %v",
+				m.cfg.Mobile.SSHCheckPeriod, err),
+		})
+	}
+
 	cur, _, err := aclMgr.GetACL(ctx)
 	if err != nil {
-		return []modules.Finding{{
+		return append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "acl_reachable",
 			Severity: modules.SeverityWarning,
 			Message:  fmt.Sprintf("could not pull ACL to verify: %v", err),
-		}}, nil
+		}), nil
 	}
 	editor, err := aclMgr.NewACLEditor(cur)
 	if err != nil {
@@ -331,21 +359,21 @@ func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
 		return nil, fmt.Errorf("acl verify: %w", err)
 	}
 	if !bytes.Equal(before, editor.Bytes()) {
-		return []modules.Finding{{
+		return append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "acl_drift",
 			Severity: modules.SeverityWarning,
 			Message:  "tailnet ACL is missing the abysslink mobile→laptop grant or SSH rule; run `abysslink up --apply`",
-		}}, nil
+		}), nil
 	}
 	// Emit explicit OK so "check ran and passed" is distinguishable from
 	// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
-	return []modules.Finding{{
+	return append(findings, modules.Finding{
 		Module:   m.Name(),
 		Check:    "acl_drift",
 		Severity: modules.SeverityOK,
 		Message:  "acl_drift: tailnet ACL matches the required abysslink grant and SSH rule",
-	}}, nil
+	}), nil
 }
 
 // Repair re-applies the ACL.

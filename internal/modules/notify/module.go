@@ -16,11 +16,14 @@
 package notify
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"regexp"
@@ -32,6 +35,7 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 )
@@ -72,7 +76,6 @@ func defaultHealthProbe(ctx context.Context, url string) error {
 
 const (
 	ntfyHealthPath = "/v1/health"
-	ntfyMsgPath    = "/v1/message"
 	httpTimeout    = 5 * time.Second
 
 	keychainService = "abysslink"
@@ -280,11 +283,30 @@ type SendOptions struct {
 	// Topic overrides the config default_topic (URL path segment). Empty =
 	// use the configured default.
 	Topic string
+	// Click maps to the ntfy X-Click header; opens the URL on tap; empty =
+	// omit the header (D-16: the dispatcher composes an ssh:// deep link).
+	Click string
 }
 
 // validTopicRe constrains a topic override to the ntfy topic charset so a
 // hostile value can never alter the request path ("../", query strings, etc.).
 var validTopicRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// resolveTopic picks the effective topic (override → configured default →
+// "rig") and rejects anything outside the ntfy topic charset.
+func (m *Module) resolveTopic(opts SendOptions) (string, error) {
+	topic := opts.Topic
+	if topic == "" {
+		topic = m.cfg.Modules.Notify.DefaultTopic
+	}
+	if topic == "" {
+		topic = "rig"
+	}
+	if !validTopicRe.MatchString(topic) {
+		return "", fmt.Errorf("notify send: invalid topic %q: only [A-Za-z0-9_-] (max 64 chars) allowed", topic)
+	}
+	return topic, nil
+}
 
 // Send sends a notification via the configured ntfy backend.
 // It tries the abysslinkd Unix socket first (fast path, no process startup),
@@ -306,18 +328,139 @@ func (m *Module) SendWithOptions(ctx context.Context, title, body string, opts S
 	// carries title+body only, so routing an option-bearing message through it
 	// would silently drop priority/tags/topic (the CLI-04 bug, relocated).
 	if opts == (SendOptions{}) {
-		if err := daemon.NewClient().Send(ctx, daemon.NotifyRequest{
+		dc := daemon.NewClient()
+		err := dc.Send(ctx, daemon.NotifyRequest{
 			Title: title,
 			Body:  body,
 			Topic: m.cfg.Modules.Notify.DefaultTopic,
-		}); err == nil {
+		})
+		// One-shot client: drop the keep-alive unix conn so long-lived
+		// consumers do not leak a conn + readLoop/writeLoop pair per send.
+		dc.CloseIdleConnections()
+		switch {
+		case err == nil:
 			slog.Debug("notify.Send: delivered via abysslinkd socket")
 			return nil
+		case !errors.Is(err, daemon.ErrUnreachable):
+			// The daemon is up and REJECTED the request (e.g. its policy said
+			// no). Surface it — a direct fallback here would bypass daemon
+			// policy, mirroring the v2 SendMessage contract.
+			return err
 		}
 	}
 
-	// Fall back to direct ntfy POST (always used when options are present).
+	// Fall back to direct ntfy POST (used when options are present or the
+	// daemon is unreachable at the transport level).
 	return m.SendDirectWithOptions(ctx, title, body, opts)
+}
+
+// errDaemonUnreachable marks a dial-phase daemon-socket failure — the daemon
+// never received the request — and is the ONLY condition that triggers the
+// validated direct-render fallback in SendMessage. A reachable daemon that
+// REJECTS a message (non-2xx) is deliberately not this error — rejections
+// surface to the caller (no silent drop, no policy bypass via fallback) — and
+// neither is a post-dial failure such as a client deadline expiring while the
+// daemon delivers (a fallback re-send there would duplicate the notification).
+var errDaemonUnreachable = errors.New("notify v2: daemon unreachable")
+
+// SendMessage delivers a v2 notifyv2.Message. It prefers the abysslinkd
+// socket — the daemon owns policy (cooldown/flood ceiling), registry
+// display-name enrichment, and click composition — and falls back to a
+// validated direct render + ntfy POST only when the daemon is unreachable, so
+// notifications survive a dead daemon (BACK-05).
+//
+// Fallback invariants: msg.Validate() runs client-side too (the no-bypass
+// D-17 gate), the rendered note is delivered to the same per-rig topic as
+// every other send (D-20), and Click stays empty — the daemon owns click
+// composition (D-16).
+func (m *Module) SendMessage(ctx context.Context, msg notifyv2.Message) error {
+	if !m.cfg.Modules.Notify.Enabled {
+		slog.Debug("notify.SendMessage: module disabled, skipping")
+		return nil
+	}
+
+	body, err := json.Marshal(msg) // the wire struct's JSON tags are the contract
+	if err != nil {
+		return fmt.Errorf("notify v2: marshal message: %w", err)
+	}
+
+	err = postV2ToDaemon(ctx, body)
+	switch {
+	case err == nil:
+		slog.Debug("notify.SendMessage: delivered via abysslinkd socket", "msg_id", msg.MsgID)
+		return nil
+	case !errors.Is(err, errDaemonUnreachable):
+		// The daemon is up and rejected the message (e.g. 422 from Validate).
+		// Surface it — falling back would bypass daemon policy and hide the bug.
+		return err
+	}
+
+	// Daemon unreachable: validated direct-render fallback.
+	if verr := msg.Validate(); verr != nil {
+		return fmt.Errorf("notify v2 fallback: %w", verr)
+	}
+	note := notifyv2.Render(msg, notifyv2.RenderOpts{})
+	return m.SendDirectWithOptions(ctx, note.Title, note.Body, SendOptions{
+		Priority: note.Priority,
+		Tags:     note.Tags,
+		// Click deliberately empty: the daemon owns click composition (D-16).
+	})
+}
+
+// postV2ToDaemon POSTs raw v2 JSON to the daemon socket /notify — the same
+// socket fast path Send uses (daemon.SocketPath + a unix-dialing transport).
+// ONLY dial-phase failures (no socket path, dial refused, missing file) wrap
+// errDaemonUnreachable — the daemon never received the request, so a direct
+// fallback cannot double-deliver. A post-dial failure (notably the client's
+// 2s deadline expiring while the daemon's synchronous ~5s ntfy leg runs) means
+// the daemon HAS the request: classifying it unreachable would make the caller
+// fall back and re-send while the daemon retries the same note — duplicate
+// delivery. An HTTP-level non-2xx is a daemon rejection carrying the response
+// body text.
+func postV2ToDaemon(ctx context.Context, body []byte) error {
+	sp := daemon.SocketPath()
+	if sp == "" {
+		return fmt.Errorf("%w: no socket path", errDaemonUnreachable)
+	}
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				conn, derr := (&net.Dialer{}).DialContext(ctx, "unix", sp)
+				if derr != nil {
+					// Tag dial-phase failures so Do errors can be classified.
+					return nil, fmt.Errorf("%w: %w", errDaemonUnreachable, derr)
+				}
+				return conn, nil
+			},
+		},
+	}
+	// One-shot client: drop the keep-alive unix conn so long-lived consumers
+	// do not leak a conn + readLoop/writeLoop pair per send.
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/notify", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("notify v2: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		if errors.Is(err, errDaemonUnreachable) {
+			return fmt.Errorf("notify v2: %w", err)
+		}
+		// Post-dial failure: the daemon received the request. NOT unreachable —
+		// surfacing instead of falling back prevents duplicate delivery.
+		return fmt.Errorf("notify v2: daemon request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // errcheck: response body close error is non-actionable; best-effort cleanup
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("notify v2: daemon rejected message: HTTP %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 // SendDirect sends a notification directly to the ntfy HTTP API, bypassing the
@@ -331,15 +474,9 @@ func (m *Module) SendDirect(ctx context.Context, title, body string) error {
 // (priority, tags, topic override — CLI-04). ntfy semantics: X-Priority and
 // X-Tags headers; the topic is the URL path segment.
 func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, opts SendOptions) error {
-	topic := opts.Topic
-	if topic == "" {
-		topic = m.cfg.Modules.Notify.DefaultTopic
-	}
-	if topic == "" {
-		topic = "rig"
-	}
-	if !validTopicRe.MatchString(topic) {
-		return fmt.Errorf("notify send: invalid topic %q: only [A-Za-z0-9_-] (max 64 chars) allowed", topic)
+	topic, err := m.resolveTopic(opts)
+	if err != nil {
+		return err
 	}
 
 	url := fmt.Sprintf("%s/%s", m.baseURL(ctx), topic)
@@ -347,13 +484,16 @@ func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, 
 	if err != nil {
 		return fmt.Errorf("notify send: create request: %w", err)
 	}
-	req.Header.Set("X-Title", title)
+	req.Header.Set("X-Title", encodeNtfyHeader(title))
 	req.Header.Set("Content-Type", "text/plain")
 	if opts.Priority != "" {
 		req.Header.Set("X-Priority", opts.Priority)
 	}
 	if opts.Tags != "" {
 		req.Header.Set("X-Tags", opts.Tags)
+	}
+	if opts.Click != "" {
+		req.Header.Set("X-Click", opts.Click)
 	}
 
 	// Attach basic auth from keychain if credentials are configured.
@@ -381,6 +521,23 @@ func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, 
 		return fmt.Errorf("notify send: ntfy returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
-	slog.Info("notification sent", "title", title, "topic", topic)
+	// Metadata only: the title is caller-supplied content and must never land
+	// in logs verbatim (no secrets on observable surfaces — AUD-04).
+	slog.Info("notification sent", "title_len", len(title), "topic", topic)
 	return nil
+}
+
+// encodeNtfyHeader returns s unchanged when it is pure printable ASCII;
+// otherwise it RFC 2047 Q-encodes it (UTF-8) for the X-Title header. Every v2
+// title contains " · " (U+00B7) by construction, raw non-ASCII header bytes
+// are ntfy-server-version-dependent, and a control byte would make Go's HTTP
+// transport reject the request on every (re)try; ntfy decodes RFC 2047
+// encoded words server-side.
+func encodeNtfyHeader(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return mime.QEncoding.Encode("utf-8", s)
+		}
+	}
+	return s
 }

@@ -55,7 +55,7 @@ var auditDefaultLogPath = audit.DefaultLogPath
 //
 // T-17-10: error messages describe the failure class only; key material is never
 // logged. T-17-13: a brand-new install with no anchor emits WARN, never FATAL.
-func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.KeychainStore) []modules.Finding {
+func auditDoctorFindings(logPath string, kc secrets.KeychainStore) []modules.Finding {
 	var findings []modules.Finding
 
 	// Check 1 — audit-keychain (FATAL when the signed path cannot reach the keychain).
@@ -77,7 +77,17 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 
 	anchor, err := audit.ReadAnchor(logPath)
 	if err != nil {
+		// W6 (fail-closed): an unreadable/unparseable anchor is itself a tamper
+		// signal — an attacker who corrupts audit.anchor.json must not be able
+		// to suppress the FATAL truncation/forgery detection by making this
+		// path return early with only a slog line.
 		slog.Warn("doctor: read audit anchor failed", "err", err)
+		findings = append(findings, modules.Finding{
+			Module:   "audit",
+			Check:    "audit-anchor-age",
+			Severity: modules.SeverityFatal,
+			Message:  "audit anchor is unreadable — possible tampering (AUD-02); inspect audit.anchor.json",
+		})
 		return findings
 	}
 
@@ -138,7 +148,15 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 		}
 		anchorOK, verr := audit.VerifyAnchor(logPath, kc)
 		if verr != nil {
+			// W6 (fail-closed): a verification ERROR must not read as "anchor
+			// fine" — emit a finding instead of silently skipping the check.
 			slog.Warn("doctor: verify audit anchor failed", "err", verr)
+			findings = append(findings, modules.Finding{
+				Module:   "audit",
+				Check:    "audit-count-vs-anchor",
+				Severity: modules.SeverityFatal,
+				Message:  "audit anchor could not be verified — possible tampering (AUD-02); HMAC verification failed to run",
+			})
 			return findings
 		}
 		if !anchorOK {
@@ -152,7 +170,15 @@ func auditDoctorFindings(ctx context.Context, logPath string, kc secrets.Keychai
 		}
 		entries, rerr := audit.ReadLog(logPath)
 		if rerr != nil {
+			// W6 (fail-closed): an unreadable log means truncation detection
+			// cannot run — report it, never skip silently.
 			slog.Warn("doctor: read audit log failed", "err", rerr)
+			findings = append(findings, modules.Finding{
+				Module:   "audit",
+				Check:    "audit-count-vs-anchor",
+				Severity: modules.SeverityFatal,
+				Message:  "audit log is unreadable — truncation detection cannot run (AUD-02)",
+			})
 			return findings
 		}
 		if int64(len(entries)) < anchor.EntryCount {
@@ -538,7 +564,7 @@ func doctorHumanOutput(p Printer, findings []modules.Finding) (hasFatal, hasWarn
 }
 
 func newDoctorCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Exhaustive verification of all modules and security posture",
 		Long: `Run exhaustive checks across all Abysslink modules and report
@@ -565,15 +591,7 @@ Exit codes:
 			}
 
 			p := newPrinter(cmd)
-
-			if !cc.jsonOut {
-				header := styleBold.Render("abysslink doctor") + "  " + styleMuted.Render("health check")
-				printerInfo(p, styleHeaderBox.Render(header))
-				printerInfo(p, "")
-				emitSecurityNote(p, cc.jsonOut, "doctor-not-full-audit") // §7 note 11
-				emitSecurityNote(p, cc.jsonOut, "no-funnel")             // §7 note 8
-				printerInfo(p, "")
-			}
+			printDoctorHeader(p, cc)
 
 			deps, err := buildDeps(ctx, cc)
 			if err != nil {
@@ -606,6 +624,11 @@ Exit codes:
 				if fanErr != nil && strictFlag {
 					return &exitError{code: exitCodeFatal}
 				}
+			} else if rt.fanOut && !cc.jsonOut {
+				// --all-rigs with zero enrolled rigs: say so instead of
+				// silently degrading to local-only output (U3).
+				printerInfo(p, "  No rigs enrolled — showing local findings only. Enroll one with "+styleCode.Render("abysslink rig add")+".")
+				printerInfo(p, "")
 			}
 
 			// CLI-06: exit codes must be identical in JSON and human mode —
@@ -644,6 +667,32 @@ Exit codes:
 			return doctorExitErr(hasFatal, hasWarn)
 		},
 	}
+	cmd.Flags().Bool("offline", false,
+		"Skip checks that need the network (supply-chain artifact downloads); they report WARN instead")
+	return cmd
+}
+
+// printDoctorHeader renders the doctor header box, the not-initialised banner
+// for a fresh machine (U10), and the standing security notes. No output under
+// --json. Extracted from the RunE to keep its gocyclo below the ceiling.
+func printDoctorHeader(p Printer, cc *cmdContext) {
+	if cc.jsonOut {
+		return
+	}
+	header := styleBold.Render("abysslink doctor") + "  " + styleMuted.Render("health check")
+	printerInfo(p, styleHeaderBox.Render(header))
+	printerInfo(p, "")
+	// Fresh machine: tell the user to init before anything else — the checks
+	// below would otherwise recommend `up --apply` on a box that has never
+	// been initialised (U10).
+	if cc.cfgMissing {
+		printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("No abysslink.yaml found — this machine is not initialised."))
+		printerInfo(p, "  "+styleMuted.Render("Run ")+styleCode.Render("abysslink init")+styleMuted.Render(" first; checks below reflect built-in defaults."))
+		printerInfo(p, "")
+	}
+	emitSecurityNote(p, cc.jsonOut, "doctor-not-full-audit") // §7 note 11
+	emitSecurityNote(p, cc.jsonOut, "no-funnel")             // §7 note 8
+	printerInfo(p, "")
 }
 
 // doctorExitErr maps the severity flags to the documented doctor exit-code
@@ -667,15 +716,24 @@ func appendBackendAndFleetFindings(ctx context.Context, cc *cmdContext, kc fleet
 	if cc.cfg.Backend.Type == "headscale" {
 		doReq := backend.NewHeadscaleDoRequest(cc.cfg, cc.runner)
 		hsFindingsRaw, hsErr := backend.HeadscaleDoctorChecks(ctx, cc.cfg, cc.runner, doReq)
-		if hsErr == nil {
-			for _, hf := range hsFindingsRaw {
-				findings = append(findings, modules.Finding{
-					Module:   hf.Module,
-					Check:    hf.Check,
-					Severity: modules.Severity(hf.Severity),
-					Message:  hf.Message,
-				})
-			}
+		if hsErr != nil {
+			// W5 (fail-open fix): a headscale backend whose checks cannot run
+			// must not report a clean doctor — surface the failure as a WARN
+			// finding, mirroring the doctor-core pattern.
+			findings = append(findings, modules.Finding{
+				Module:   "headscale",
+				Check:    "hs-checks-failed",
+				Severity: modules.SeverityWarning,
+				Message:  fmt.Sprintf("headscale doctor checks could not run — backend posture unverified: %v", hsErr),
+			})
+		}
+		for _, hf := range hsFindingsRaw {
+			findings = append(findings, modules.Finding{
+				Module:   hf.Module,
+				Check:    hf.Check,
+				Severity: modules.Severity(hf.Severity),
+				Message:  hf.Message,
+			})
 		}
 	}
 
@@ -822,6 +880,7 @@ func findingFix(check string) string {
 		"nb-version": "Upgrade netbird-server to >= v0.57.0 (CVE-2025-10678 fix): abysslink server netbird upgrade --binary-path /path/to/new-binary --apply",
 		// Version-floor checks (DOC-04) — keyed by versionFloor.checkID from cmd_doctor_versions.go.
 		"ntfy-version": "Upgrade ntfy to >= 2.21 (CVE-2026-39087 fix): see https://github.com/binwiederhier/ntfy/releases — stop container, pull new image, restart; or: brew upgrade ntfy",
+		"tmux-version": "Upgrade tmux to >= 3.2 for session-typed notifications (D-27): brew upgrade tmux  (or your distro package manager); the daemon runs fine without it",
 		"nb-zitadel":   "Remove the default ZITADEL admin account: run the ZITADEL cleanup script to delete zitadel-admin@ user",
 		"nb-mgmt-bind": "Set metricsListenAddress: 127.0.0.1:9090 in NetBird config.yaml to prevent public metrics exposure",
 		"nb-key-type":  "Revoke reusable or expired setup keys via the NetBird dashboard; re-mint one-off keys with explicit expiry",
@@ -864,6 +923,26 @@ func supplyChainFindings(ctx context.Context, runner shell.Runner, ver, bundleOv
 	}
 }
 
+// supplyChainFindingsOffline is the `doctor --offline` variant: the networked
+// cosign-bundle download is skipped (honest WARN, never a false green) while
+// the purely local SLSA provenance check still runs (W8/E2).
+func supplyChainFindingsOffline() []modules.Finding {
+	return []modules.Finding{
+		{
+			Module:   "supply",
+			Check:    "supply-cosign-bundle",
+			Severity: modules.SeverityWarning,
+			Message:  "skipped — doctor ran with --offline (network checks disabled); run without --offline to verify the release bundle",
+		},
+		supplySLSASourceCheck(),
+	}
+}
+
+// supplyNetworkTimeout caps the release-artifact downloads in the doctor path.
+// downloadFile's own 5-minute client timeout is sized for `upgrade`; a doctor
+// run on a blackholed network must not stall for minutes per artifact (W8).
+const supplyNetworkTimeout = 10 * time.Second
+
 // supplyCosignBundleCheck verifies the installed release's cosign v3 bundle.
 func supplyCosignBundleCheck(ctx context.Context, runner shell.Runner, ver, bundleOverride string) modules.Finding {
 	const check = "supply-cosign-bundle"
@@ -890,10 +969,15 @@ func supplyCosignBundleCheck(ctx context.Context, runner shell.Runner, ver, bund
 		baseURL := fmt.Sprintf("https://github.com/%s/releases/download/v%s", upgradeRepo, bare)
 		checksumPath = filepath.Join(tmpDir, checksumName)
 		bundlePath = filepath.Join(tmpDir, checksumName+".bundle")
-		if err := downloadFile(ctx, baseURL+"/"+checksumName, checksumPath); err != nil {
+		// W8: cap each download at supplyNetworkTimeout — downloadFile honours
+		// context cancellation, so a blackholed network degrades to a WARN in
+		// seconds instead of stalling doctor for minutes.
+		dlCtx, cancel := context.WithTimeout(ctx, supplyNetworkTimeout)
+		defer cancel()
+		if err := downloadFile(dlCtx, baseURL+"/"+checksumName, checksumPath); err != nil {
 			return supplyBundleWarn(check, fmt.Errorf("download checksums: %w", err))
 		}
-		if err := downloadFile(ctx, baseURL+"/"+checksumName+".bundle", bundlePath); err != nil {
+		if err := downloadFile(dlCtx, baseURL+"/"+checksumName+".bundle", bundlePath); err != nil {
 			return supplyBundleWarn(check, fmt.Errorf("download bundle: %w", err))
 		}
 	} else {

@@ -102,19 +102,27 @@ func (m *Module) detectDarwin(ctx context.Context) []modules.Finding {
 		return findings
 	}
 
-	output := strings.TrimSpace(res.Stdout)
-	slog.Debug("ssh detect darwin", "remote_login", output)
+	// systemsetup may print extra note lines (Full Disk Access warnings etc.)
+	// on stdout, so a fuzzy substring match would misread an error message as
+	// state. Only the exact "Remote Login: On"/"Remote Login: Off" line is
+	// trusted; anything else — including a non-zero exit — is unknown (W4).
+	state := parseRemoteLogin(res.Stdout)
+	if !res.Ok() {
+		state = remoteLoginUnknown
+	}
+	slog.Debug("ssh detect darwin", "remote_login", state, "exit_code", res.ExitCode)
 
 	if m.cfg.Modules.SSH.Mode == "tailscale" {
-		// When using Tailscale SSH, Remote Login (openssh daemon) should be off.
-		if strings.Contains(strings.ToLower(output), "on") {
+		switch state {
+		case remoteLoginOn:
+			// When using Tailscale SSH, Remote Login (openssh daemon) should be off.
 			findings = append(findings, modules.Finding{
 				Module:   m.Name(),
 				Check:    "remote_login",
 				Severity: modules.SeverityWarning,
 				Message:  "Remote Login is On — when mode=tailscale, macOS sshd should be disabled",
 			})
-		} else {
+		case remoteLoginOff:
 			// Emit explicit OK so "check ran and passed" is distinguishable from
 			// "check never ran" in the threat-model tri-state (D-03 / DOC-01).
 			findings = append(findings, modules.Finding{
@@ -123,10 +131,43 @@ func (m *Module) detectDarwin(ctx context.Context) []modules.Finding {
 				Severity: modules.SeverityOK,
 				Message:  "remote_login: Remote Login (sshd) is correctly off — Tailscale SSH is the active transport",
 			})
+		default:
+			// Unknown state: WARN but take NO action. The check name is distinct
+			// from "remote_login" so neither Plan nor Apply maps it to the
+			// `systemsetup -setremotelogin off` mutation.
+			findings = append(findings, modules.Finding{
+				Module:   m.Name(),
+				Check:    "remote_login_unknown",
+				Severity: modules.SeverityWarning,
+				Message: "could not determine macOS Remote Login state from systemsetup output — " +
+					"check System Settings → General → Sharing → Remote Login manually",
+			})
 		}
 	}
 
 	return findings
+}
+
+// Remote Login states parsed from `systemsetup -getremotelogin`.
+const (
+	remoteLoginUnknown = "unknown"
+	remoteLoginOn      = "on"
+	remoteLoginOff     = "off"
+)
+
+// parseRemoteLogin scans systemsetup output line-by-line for the exact
+// "Remote Login: On" / "Remote Login: Off" status line. Any other content
+// (permission notes, error text) yields remoteLoginUnknown.
+func parseRemoteLogin(stdout string) string {
+	for _, line := range strings.Split(stdout, "\n") {
+		switch strings.TrimSpace(line) {
+		case "Remote Login: On":
+			return remoteLoginOn
+		case "Remote Login: Off":
+			return remoteLoginOff
+		}
+	}
+	return remoteLoginUnknown
 }
 
 // detectLinux checks if sshd is running on Linux.
@@ -245,20 +286,8 @@ func (m *Module) Apply(ctx context.Context) error {
 				return fmt.Errorf("ssh apply: disable remote login exited %d: %s", res.ExitCode, res.Stderr)
 			}
 		case "sshd_running":
-			// Stop and disable sshd on Linux — Tailscale SSH handles auth.
-			// Try both unit names (distros differ); error only if both fail.
-			slog.Info("ssh apply: stopping sshd (Tailscale SSH mode)")
-			var disableErr error
-			for _, unit := range []string{"sshd", "ssh"} {
-				res, err := m.runner.Run(ctx, "sudo", "systemctl", "disable", "--now", unit)
-				if err == nil && res.ExitCode == 0 {
-					disableErr = nil
-					break
-				}
-				disableErr = fmt.Errorf("systemctl disable %s: exit %d: %s", unit, res.ExitCode, strings.TrimSpace(res.Stderr))
-			}
-			if disableErr != nil {
-				return fmt.Errorf("ssh apply: could not disable sshd (tried sshd and ssh units): %w", disableErr)
+			if err := m.disableSSHDUnits(ctx); err != nil {
+				return err
 			}
 		case "fallback_config":
 			if err := m.installHardenedSSHD(ctx); err != nil {
@@ -268,6 +297,26 @@ func (m *Module) Apply(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// disableSSHDUnits stops and disables sshd on Linux — Tailscale SSH handles
+// auth. Both unit names are tried (distros differ); it errors only when both
+// fail, reporting the real exec error rather than a fabricated exit code.
+func (m *Module) disableSSHDUnits(ctx context.Context) error {
+	slog.Info("ssh apply: stopping sshd (Tailscale SSH mode)")
+	var disableErr error
+	for _, unit := range []string{"sshd", "ssh"} {
+		res, err := m.runner.Run(ctx, "sudo", "systemctl", "disable", "--now", unit)
+		if err == nil && res.Ok() {
+			return nil
+		}
+		if err != nil {
+			disableErr = fmt.Errorf("systemctl disable %s: %w", unit, err)
+		} else {
+			disableErr = fmt.Errorf("systemctl disable %s: exit %d: %s", unit, res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+	}
+	return fmt.Errorf("ssh apply: could not disable sshd (tried sshd and ssh units): %w", disableErr)
 }
 
 // hardenedSSHDConfig returns the sshd drop-in for openssh-fallback mode. It
@@ -288,9 +337,19 @@ AllowUsers %s
 
 // installHardenedSSHD renders the hardened config, records it in the audit log,
 // installs it as root, validates it with `sshd -t`, and reloads sshd. The
-// config is validated BEFORE reload so a bad config never takes effect.
+// config is validated BEFORE reload so a bad config never takes effect, and an
+// invalid drop-in is removed again so the NEXT sshd restart (reboot, package
+// upgrade) cannot fail to start either (W2 — deferred remote lockout).
 func (m *Module) installHardenedSSHD(ctx context.Context) error {
-	content := hardenedSSHDConfig(m.sshUser())
+	user := m.sshUser()
+	// Defense in depth (W3): config.Validate already rejects unsafe unix_user
+	// values at load time, but this value is interpolated into a root-owned
+	// sshd config ("AllowUsers %s") and may also come from $USER via the
+	// fallback — never render a name that could smuggle extra directives.
+	if err := config.ValidateUnixUser(user); err != nil {
+		return fmt.Errorf("ssh apply: refusing to render sshd config: %w", err)
+	}
+	content := hardenedSSHDConfig(user)
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -311,14 +370,35 @@ func (m *Module) installHardenedSSHD(ctx context.Context) error {
 		return fmt.Errorf("ssh apply: install config exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 
-	// Validate before reloading — never activate a broken sshd config.
+	// Validate before reloading — never activate a broken sshd config. On
+	// failure the freshly-installed drop-in MUST be removed again: leaving it
+	// in place would make sshd fail to start on the next restart/reboot, which
+	// is exactly the remote lockout this validation exists to prevent (W2).
 	if res, err := m.runner.Run(ctx, "sudo", "sshd", "-t"); err != nil {
-		return fmt.Errorf("ssh apply: validate sshd config: %w", err)
-	} else if res.ExitCode != 0 {
-		return fmt.Errorf("ssh apply: sshd config invalid, not reloading: %s", strings.TrimSpace(res.Stderr))
+		return m.rollbackDropIn(ctx, fmt.Errorf("ssh apply: validate sshd config: %w", err))
+	} else if !res.Ok() {
+		return m.rollbackDropIn(ctx, fmt.Errorf("ssh apply: sshd config invalid, not reloading: %s", strings.TrimSpace(res.Stderr)))
 	}
 
 	return m.reloadSSHD(ctx)
+}
+
+// rollbackDropIn removes the just-installed sshd drop-in after a failed
+// `sshd -t` validation so a broken config never survives to the next sshd
+// restart. It returns cause, annotated with the rollback outcome.
+func (m *Module) rollbackDropIn(ctx context.Context, cause error) error {
+	slog.Warn("ssh apply: sshd validation failed — removing the drop-in so the next sshd restart stays bootable",
+		"path", sshdDropInPath, "cause", cause)
+	res, err := m.runner.Run(ctx, "sudo", "rm", "-f", sshdDropInPath)
+	if err != nil {
+		return fmt.Errorf("%w (ROLLBACK FAILED: could not remove %s: %v — remove it manually before the next sshd restart)",
+			cause, sshdDropInPath, err)
+	}
+	if !res.Ok() {
+		return fmt.Errorf("%w (ROLLBACK FAILED: rm %s exited %d: %s — remove it manually before the next sshd restart)",
+			cause, sshdDropInPath, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return fmt.Errorf("%w (the invalid drop-in %s was removed again — sshd keeps its previous config)", cause, sshdDropInPath)
 }
 
 // reloadSSHD reloads the sshd daemon using the appropriate mechanism for the

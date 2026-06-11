@@ -173,11 +173,53 @@ func TestCheckFirewall_WarnWhenDisabled(t *testing.T) {
 	assert.Equal(t, "firewall", findings[0].Check)
 }
 
-func TestCheckFirewall_NilWhenEnabled(t *testing.T) {
+func TestCheckFirewall_OKWhenEnabled(t *testing.T) {
 	json := `{"SPFirewallDataType":[{"spfw_global_state":"enabled"}]}`
 	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: json}})
 	m := &Module{runner: r}
 	findings, err := checkFirewall(context.Background(), m)
 	require.NoError(t, err)
-	assert.Empty(t, findings)
+	require.Len(t, findings, 1, "enabled firewall must emit an explicit OK finding (tri-state)")
+	assert.Equal(t, "firewall", findings[0].Check)
+	assert.Equal(t, modules.SeverityOK, findings[0].Severity)
+}
+
+// TestCheckFirewall_UnknownOnProbeFailure asserts that probe failures are NOT
+// silent: exec error, non-zero exit, and garbage JSON each emit an explicit
+// UNKNOWN WARNING finding (review INFO — consistency with filevault tri-state).
+func TestCheckFirewall_UnknownOnProbeFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		call shell.Call
+	}{
+		{"exec_error", shell.Call{Err: fmt.Errorf("exec: system_profiler not found")}},
+		{"non_zero_exit", shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "boom"}}},
+		{"garbage_json", shell.Call{Result: shell.Result{Stdout: "not json"}}},
+		{"no_entries", shell.Call{Result: shell.Result{Stdout: `{"SPFirewallDataType":[]}`}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := shell.NewMockRunner(tc.call)
+			m := &Module{runner: r}
+			findings, err := checkFirewall(context.Background(), m)
+			require.NoError(t, err)
+			require.Len(t, findings, 1, "probe failure must emit an explicit finding, not silence")
+			assert.Equal(t, "firewall", findings[0].Check)
+			assert.Equal(t, modules.SeverityWarning, findings[0].Severity)
+			assert.Contains(t, findings[0].Message, "UNKNOWN")
+		})
+	}
+}
+
+// TestCheckFileVault_UnknownOnNonZeroExit asserts the fdesetup exit code is
+// checked: error output must never be parsed as encryption state (review INFO).
+func TestCheckFileVault_UnknownOnNonZeroExit(t *testing.T) {
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "fdesetup: error"}})
+	m := &Module{runner: r}
+	findings, err := checkFileVault(context.Background(), m)
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+	assert.Equal(t, "filevault", findings[0].Check)
+	assert.Equal(t, modules.SeverityFatal, findings[0].Severity)
+	assert.Contains(t, findings[0].Message, "disk-encryption state is UNKNOWN")
 }

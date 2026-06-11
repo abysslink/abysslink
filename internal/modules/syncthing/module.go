@@ -17,8 +17,10 @@ package syncthing
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -87,19 +89,79 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		return findings, nil
 	}
 
-	content := string(data)
-	if strings.Contains(content, "<address>0.0.0.0:") ||
-		strings.Contains(content, "<address>*:") ||
-		strings.Contains(content, "<address>::") {
+	gui, err := parseGUIConfig(data)
+	if err != nil {
+		slog.Warn("syncthing detect: cannot parse config XML", "path", cfgPath, "err", err)
+		return findings, nil
+	}
+
+	// Parse the GUI <address> instead of substring-matching: the old
+	// `Contains("<address>::")` check false-positived on the IPv6 loopback
+	// `::1` and any v6 literal starting with "::".
+	if guiAddrWildcard(gui.Address) {
 		findings = append(findings, modules.Finding{
 			Module:   m.Name(),
 			Check:    "gui_bind_tailnet",
 			Severity: modules.SeverityWarning,
-			Message:  fmt.Sprintf("syncthing GUI is bound to all interfaces — must bind to tailnet IP only (%s)", cfgPath),
+			Message:  fmt.Sprintf("syncthing GUI is bound to all interfaces (%q) — must bind to tailnet IP only (%s)", gui.Address, cfgPath),
+		})
+	}
+
+	// The GUI ships with no password: on the tailnet that means any tailnet
+	// peer reaching :8384 has full GUI/API control. The tailnet ACL is the
+	// outer boundary, but the missing credential deserves a doctor warning,
+	// not just an apply-time log note.
+	if gui.Password == "" {
+		findings = append(findings, modules.Finding{
+			Module:   m.Name(),
+			Check:    "gui_password",
+			Severity: modules.SeverityWarning,
+			Message:  fmt.Sprintf("syncthing GUI has no password set — set one in the GUI settings (Actions → Settings → GUI); the tailnet ACL is the only access control (%s)", cfgPath),
 		})
 	}
 
 	return findings, nil
+}
+
+// syncthingGUIConfig is the subset of syncthing's config.xml <gui> element the
+// module inspects.
+type syncthingGUIConfig struct {
+	Address  string `xml:"address"`
+	User     string `xml:"user"`
+	Password string `xml:"password"`
+}
+
+// parseGUIConfig extracts the <gui> element from a syncthing config.xml.
+func parseGUIConfig(data []byte) (syncthingGUIConfig, error) {
+	var cfg struct {
+		GUI syncthingGUIConfig `xml:"gui"`
+	}
+	if err := xml.Unmarshal(data, &cfg); err != nil {
+		return syncthingGUIConfig{}, err
+	}
+	return cfg.GUI, nil
+}
+
+// guiAddrWildcard reports whether a syncthing GUI listen address binds all
+// interfaces: "*", an empty host (":8384"), or an unspecified IP
+// (0.0.0.0 / :: / [::]). Loopback and specific addresses are NOT wildcards.
+func guiAddrWildcard(addr string) bool {
+	if addr == "" {
+		return false // no address element — syncthing default (127.0.0.1) applies
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port or malformed — evaluate the whole string as the host.
+		host = addr
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if host == "" || host == "*" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsUnspecified()
+	}
+	return false
 }
 
 // Plan computes the actions needed.

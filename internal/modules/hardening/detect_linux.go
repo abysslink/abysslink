@@ -125,33 +125,48 @@ func checkLUKS(ctx context.Context, m *Module) ([]modules.Finding, error) {
 	}}, nil
 }
 
-// isHomeEncrypted returns true if the block device tree that mounts home
-// has a "crypt" type ancestor (i.e., LUKS).
+// isHomeEncrypted returns true if the filesystem that actually hosts home —
+// the device with the LONGEST mountpoint that is an ancestor of home — has a
+// "crypt" type ancestor (i.e., LUKS) in its device chain.
+//
+// The longest-match rule matters (W5): with a LUKS root (/) and a separate
+// PLAINTEXT /home partition, "/" also covers $HOME, so testing "any covering
+// mount is crypt" would pass while the user's actual data sits unencrypted.
+// Only the deepest covering mountpoint reflects where home really lives.
 func isHomeEncrypted(home string, devices []lsblkDevice) bool {
+	best := mountMatch{}
 	for _, dev := range devices {
-		if deviceContainsHome(home, dev, false) {
-			return true
-		}
+		findHomeMount(home, dev, false, &best)
 	}
-	return false
+	return best.found && best.crypt
 }
 
-// deviceContainsHome recurses through the device tree. parentIsCrypt tracks
-// whether any ancestor in the chain has type == "crypt".
-func deviceContainsHome(home string, dev lsblkDevice, parentIsCrypt bool) bool {
+// mountMatch tracks the deepest mountpoint covering home seen so far and
+// whether that device's chain contains a crypt ancestor.
+type mountMatch struct {
+	found      bool
+	mountpoint string
+	crypt      bool
+}
+
+// findHomeMount recurses through the device tree. parentIsCrypt tracks whether
+// any ancestor in the chain has type == "crypt". Every device whose mountpoint
+// covers home is a candidate; the one with the longest (deepest) mountpoint
+// wins because that is the filesystem home actually resides on.
+func findHomeMount(home string, dev lsblkDevice, parentIsCrypt bool, best *mountMatch) {
 	isCrypt := parentIsCrypt || strings.EqualFold(dev.Type, "crypt")
 
 	if dev.MountPoint != "" && isUnderPath(home, dev.MountPoint) {
-		return isCrypt
-	}
-
-	for _, child := range dev.Children {
-		if deviceContainsHome(home, child, isCrypt) {
-			return true
+		if !best.found || len(filepath.Clean(dev.MountPoint)) > len(filepath.Clean(best.mountpoint)) {
+			best.found = true
+			best.mountpoint = dev.MountPoint
+			best.crypt = isCrypt
 		}
 	}
 
-	return false
+	for _, child := range dev.Children {
+		findHomeMount(home, child, isCrypt, best)
+	}
 }
 
 // isUnderPath returns true if target is at or under base.

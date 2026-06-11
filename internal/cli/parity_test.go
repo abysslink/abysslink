@@ -62,6 +62,10 @@ func (n *noopRunner) RunWithEnv(_ context.Context, _ map[string]string, _ string
 	return shell.Result{ExitCode: 1}, nil
 }
 
+func (n *noopRunner) RunStream(_ context.Context, _ string, _ ...string) (*shell.Stream, error) {
+	return nil, errors.New("runstream: not supported by this fake")
+}
+
 // TestUpDryRunParity captures the byte-for-byte `abysslink up --dry-run` output
 // on the pre-refactor tree as a golden fixture (internal/cli/testdata/up_dryrun_v1.golden).
 //

@@ -132,3 +132,43 @@ func TestUpgradeVerifyCosignBlobV3(t *testing.T) {
 	assert.Contains(t, calls[0].Args, "--bundle")
 	assert.Contains(t, calls[0].Args, "--offline")
 }
+
+// TestVerifyBundleOverrideSkipsBinaryCheck covers W9: in --bundle (offline/
+// test) mode no release artifacts are downloaded, so the binary self-check is
+// reported as SKIPPED — visibly, never as a silent pass.
+func TestVerifyBundleOverrideSkipsBinaryCheck(t *testing.T) {
+	bundlePath := setupVerifyFixture(t, "9.9.9")
+	runner := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "Verified OK"}})
+
+	var out bytes.Buffer
+	p := NewJSONPrinterTo(&out, &out)
+	err := runVerify(context.Background(), p, runner, verifyOpts{
+		version:        "9.9.9",
+		bundleOverride: bundlePath,
+		jsonOut:        true,
+	})
+	require.NoError(t, err)
+
+	var res verifyResult
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(out.Bytes()), &res))
+	assert.True(t, res.BundleOK)
+	assert.False(t, res.BinaryChecked, "bundle-override mode must not claim the binary was checked")
+	assert.False(t, res.BinaryOK)
+}
+
+// TestVerifyHumanOutputReportsBinarySkip asserts the human summary makes the
+// skipped self-check visible (no overclaiming "verified" for the binary).
+func TestVerifyHumanOutputReportsBinarySkip(t *testing.T) {
+	bundlePath := setupVerifyFixture(t, "9.9.9")
+	runner := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "Verified OK"}})
+
+	var out bytes.Buffer
+	p := NewHumanPrinterTo(&out, &out)
+	err := runVerify(context.Background(), p, runner, verifyOpts{
+		version:        "9.9.9",
+		bundleOverride: bundlePath,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "binary self-check skipped",
+		"the human summary must state the binary was NOT checked in --bundle mode")
+}

@@ -96,35 +96,31 @@ func newUpCmd() *cobra.Command {
 				return fmt.Errorf("up: %w", planErr)
 			}
 
-			printPlanDetail(p, actions, findings, cc.dryRun, cc.explain)
+			printUpPlan(p, actions, findings, cc)
 
 			// All fail-closed gates in one block to keep cyclomatic complexity low.
 			if !cc.dryRun {
 				if err := applyTimeGates(cmd, p, cc, findings); err != nil {
-					return err
+					// W2: fail-closed gates are the documented "2 — Fatal" exit
+					// class; a plain error would map to exit 1 in Execute.
+					return &exitError{code: exitCodeFatal, err: err}
 				}
 			}
 
 			// Pass 2 — Apply phase (only if not dry-run).
 			var applyFindings []modules.Finding
 			var applyErr error
-			var applyElapsed time.Duration
 			if !cc.dryRun {
 				var aborted bool
-				applyFindings, applyElapsed, aborted, applyErr = runApply(ctx, cmd, p, r, actions, cc)
+				var infraErr error
+				applyFindings, aborted, applyErr, infraErr = runUpApplyPhase(ctx, cmd, p, r, actions, cc)
 				if aborted {
 					// User explicitly declined ConfirmBlast — "Aborted." already
-					// printed inside runApply. Skip all success/next-steps output.
+					// printed inside the apply phase. Skip all further output.
 					return nil
 				}
-				printFinalSummary(p, actions, applyFindings, applyElapsed)
-
-				// F-59: replay manual steps modules deferred during Apply.
-				// MUST run only after the live apply table is fully closed —
-				// this is the single terminal owner now. Not reached on the
-				// abort path (returned above).
-				if flushErr := flushManualSteps(ctx, cc, p); flushErr != nil {
-					return fmt.Errorf("up: manual steps: %w", flushErr)
+				if infraErr != nil {
+					return infraErr
 				}
 			}
 
@@ -148,6 +144,50 @@ func newUpCmd() *cobra.Command {
 	cmd.Flags().Bool("accept-no-sshcheck", false,
 		"Acknowledge SSHCheck degradation on NetBird backend (persisted to abysslink.yaml — only required once)")
 	return cmd
+}
+
+// printUpPlan renders the human plan detail and, under --json, additionally
+// emits one structured record per planned action so dry-run plans are
+// scriptable (E1) — the prose {"msg": …} lines are not machine-parseable.
+func printUpPlan(p Printer, actions []modules.Action, findings []modules.Finding, cc *cmdContext) {
+	printPlanDetail(p, actions, findings, cc.dryRun, cc.explain)
+	if cc.jsonOut {
+		p.PrintJSON(buildPlanRecords(actions))
+	}
+}
+
+// runUpApplyPhase runs the post-gate apply phase: ConfirmBlast + ApplyAll
+// (runApply), deferred NetBird consent persistence (I1), the honest final
+// summary (U7), and the F-59 manual-step replay. Extracted from the RunE to
+// keep its gocyclo below the ceiling.
+//
+// Returns:
+//   - aborted: the user declined ConfirmBlast or quit the live table — the
+//     caller stops with no further output.
+//   - applyErr: a module apply failure; the caller still prints next steps and
+//     then surfaces it.
+//   - infraErr: a consent-persist or manual-step failure to return immediately.
+func runUpApplyPhase(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Runner, actions []modules.Action, cc *cmdContext) (findings []modules.Finding, aborted bool, applyErr error, infraErr error) {
+	findings, elapsed, aborted, applyErr := runApply(ctx, cmd, p, r, actions, cc)
+	if aborted {
+		return nil, true, nil, nil
+	}
+
+	// I1: persist the NetBird --accept-no-sshcheck consent only AFTER the
+	// user confirmed the blast prompt — never before.
+	if perr := persistNetbirdConsent(cmd, cc); perr != nil {
+		return findings, false, applyErr, perr
+	}
+
+	printFinalSummary(p, actions, findings, elapsed, applyErr)
+
+	// F-59: replay manual steps modules deferred during Apply. MUST run only
+	// after the live apply table is fully closed — this is the single
+	// terminal owner now. Not reached on the abort path (returned above).
+	if flushErr := flushManualSteps(ctx, cc, p); flushErr != nil {
+		return findings, false, applyErr, fmt.Errorf("up: manual steps: %w", flushErr)
+	}
+	return findings, false, applyErr, nil
 }
 
 // printUpHeader renders the `abysslink up` header box: a preview-only warning
@@ -191,20 +231,61 @@ func netbirdSSHCheckGate(ctx context.Context, cmd *cobra.Command, cc *cmdContext
 
 	acceptFlag, _ := cmd.Flags().GetBool("accept-no-sshcheck")
 	if !acceptFlag {
-		// Refuse: emit the mandatory D-04 degradation message.
-		return fmt.Errorf("%s", warnSSHCheckFull)
+		// Refuse: emit the mandatory D-04 degradation message. This is a
+		// fail-closed gate → documented exit code 2 (W2).
+		return &exitError{code: exitCodeFatal, err: fmt.Errorf("%s", warnSSHCheckFull)}
 	}
 
-	// Flag is set but not yet persisted — write it now.
+	// Flag is set but not yet persisted. Record the acknowledgment in memory
+	// only — the config write happens AFTER the user confirms the blast prompt
+	// (persistNetbirdConsent), so declining the apply leaves nothing persisted (I1).
 	cc.cfg.Server.NetBird.AcceptNoSSHCheck = true
-	slog.Info("netbird: AcceptNoSSHCheck acknowledged; persisting to config")
+	cc.persistAcceptNoSSHCheck = true
+	slog.Info("netbird: AcceptNoSSHCheck acknowledged; will persist after confirmation")
+	_ = ctx // context available for future extension
+	return nil
+}
 
+// persistNetbirdConsent writes the in-memory AcceptNoSSHCheck acknowledgment
+// to abysslink.yaml. Called only after ConfirmBlast was accepted (I1): consent
+// recorded at confirmation time, never on a declined run.
+func persistNetbirdConsent(cmd *cobra.Command, cc *cmdContext) error {
+	if !cc.persistAcceptNoSSHCheck {
+		return nil
+	}
+	cc.persistAcceptNoSSHCheck = false
 	configPath := resolveConfigPath(cmd)
 	if err := config.Write(configPath, cc.cfg); err != nil {
 		return fmt.Errorf("up: persist AcceptNoSSHCheck: %w", err)
 	}
-	_ = ctx // context available for future extension
+	slog.Info("netbird: AcceptNoSSHCheck persisted to config")
 	return nil
+}
+
+// planRecord is the JSON record emitted per planned action under `up --json`
+// (E1). Fields mirror modules.Action with stable lowercase names.
+type planRecord struct {
+	Module      string `json:"module"`
+	Description string `json:"description"`
+	Explain     string `json:"explain,omitempty"`
+	Reversible  bool   `json:"reversible"`
+}
+
+// buildPlanRecords converts the deduplicated planned actions to JSON-safe
+// records. Always returns a non-nil slice so `--json` emits [] (not null)
+// for an already-converged system.
+func buildPlanRecords(actions []modules.Action) []planRecord {
+	unique := uniqueActions(actions)
+	records := make([]planRecord, 0, len(unique))
+	for _, a := range unique {
+		records = append(records, planRecord{
+			Module:      a.Module,
+			Description: a.Description,
+			Explain:     a.Explain,
+			Reversible:  a.Reversible,
+		})
+	}
+	return records
 }
 
 // runScan runs the Plan phase for all modules, choosing between an animated live
@@ -352,7 +433,9 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	if len(sudoLines) > 0 {
 		sb.WriteString("sudo required for:\n")
 		for _, l := range sudoLines {
-			sb.WriteString("  " + l + "\n")
+			sb.WriteString("  ")
+			sb.WriteString(l)
+			sb.WriteString("\n")
 		}
 	}
 	summary := strings.TrimRight(sb.String(), "\n")
@@ -382,6 +465,7 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	// does not race with the interactive subprocess for stdin. See
 	// applyAnimationEnabled for the full rationale.
 	animate := applyAnimationEnabled(cc.jsonOut, sudoLines, interactiveLines)
+	start := time.Now()
 	if animate {
 		applyFindings, applyErr := runApplyAnimated(ctx, r)
 		if errors.Is(applyErr, errUserAborted) {
@@ -390,11 +474,11 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 			printerInfo(p, "  Aborted.")
 			return nil, 0, true, nil
 		}
-		return applyFindings, 0, false, applyErr
+		// U7: report the real wall-clock apply time, not a hardcoded zero.
+		return applyFindings, time.Since(start), false, applyErr
 	}
 
 	// Plain path.
-	start := time.Now()
 	applyFindings, applyErr := r.ApplyAll(ctx, func(evt modules.ModuleEvent) {
 		printerInfo(p, applyRowStr(evt))
 	})
@@ -540,18 +624,27 @@ func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []mo
 }
 
 // requireTailscaleDaemon ensures tailscaled is running before apply.
-// If the daemon is down it starts it automatically (same as `abysslink init` does)
-// and polls up to 15 s. The tailscale module's Apply handles `tailscale up`
-// (browser auth) interactively — this function only starts the daemon socket.
+// If the daemon is genuinely down it starts it automatically (same as
+// `abysslink init` does) and polls up to 15 s. The tailscale module's Apply
+// handles `tailscale up` (browser auth) interactively — this function only
+// starts the daemon socket.
+//
+// W3: the probe is probeTailscaleDaemon, NOT a bare exit-code check. A
+// logged-out daemon exits non-zero with the socket up; restarting it would
+// drop every live tailnet session — including the phone SSH session the user
+// may be running `up` from. Only a genuinely unreachable socket triggers the
+// restart, and the output says so. "Logged out" is handled by the tailscale
+// module's needs_login next-step, not here.
+//
 // ctx and runner are injected (CLI-10): the caller's signal-cancellable context
 // propagates and tests can substitute a MockRunner.
 func requireTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner) error {
-	if res, err := runner.Run(ctx, "tailscale", "status"); err == nil && res.ExitCode == 0 {
-		return nil // already running
+	if probeTailscaleDaemon(ctx, runner) {
+		return nil // daemon socket reachable (running, possibly logged out) — never restart a live daemon
 	}
 
 	printerInfo(p, "")
-	printerInfo(p, "  "+iconWarnStr()+"  tailscaled not running — starting...")
+	printerInfo(p, "  "+iconWarnStr()+"  tailscaled is not running (socket unreachable) — starting it...")
 
 	plat, err := platformauto.New(runner)
 	if err != nil {
@@ -618,6 +711,15 @@ func diskEncryptionBlockers(findings []modules.Finding) []modules.Finding {
 // distinguish a genuinely-unknown disk-encryption state (cannot be determined)
 // from a known-off state (disk is confirmed unencrypted). Plan 04 gates on this
 // substring to refuse --force-unsafe for unknown-state FATALs (D-05).
+//
+// KNOWN LIMITATION (review W10): keying a security gate off a message substring
+// is fragile; a structured field (a distinct Check name such as
+// "filevault-unknown", or an explicit State field on modules.Finding) would be
+// robust. The emitting side lives in internal/modules/hardening — outside this
+// package — and both sides document the marker as a stable cross-package
+// contract, so migrating it requires a coordinated change to the hardening
+// module's detect_darwin.go/detect_linux.go emitters. Tracked for the modules
+// owner; do not change only one side.
 const unknownDiskEncryptionMarker = "disk-encryption state is UNKNOWN"
 
 // diskEncryptionGate applies the gate logic over a pre-filtered blocker slice
@@ -767,14 +869,19 @@ func printNextSteps(p Printer, findings []modules.Finding, cfg *config.Config) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleBold.Render("Next steps") + "\n\n")
+	sb.WriteString(styleBold.Render("Next steps"))
+	sb.WriteString("\n\n")
 	for i, s := range steps {
-		sb.WriteString(s.title + "\n\n")
+		sb.WriteString(s.title)
+		sb.WriteString("\n\n")
 		for _, l := range s.lines {
-			sb.WriteString(l + "\n")
+			sb.WriteString(l)
+			sb.WriteString("\n")
 		}
 		if i < len(steps)-1 {
-			sb.WriteString("\n" + styleMuted.Render(strings.Repeat("─", 48)) + "\n\n")
+			sb.WriteString("\n")
+			sb.WriteString(styleMuted.Render(strings.Repeat("─", 48)))
+			sb.WriteString("\n\n")
 		}
 	}
 
@@ -794,25 +901,33 @@ func printSuccessSummary(p Printer, cfg *config.Config) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleSuccess.Render("✓  Your rig is ready") + "\n\n")
-	sb.WriteString(styleBold.Render("Connect from your phone:") + "\n")
+	sb.WriteString(styleSuccess.Render("✓  Your rig is ready"))
+	sb.WriteString("\n\n")
+	sb.WriteString(styleBold.Render("Connect from your phone:"))
+	sb.WriteString("\n")
 
-	if cfg.Modules.Mosh.Enabled && cfg.Modules.Tmux.Enabled {
-		sb.WriteString("  " + styleCode.Render(fmt.Sprintf("mosh %s -- tmux new -A -s main", hostname)) + "\n")
-	} else if cfg.Modules.Tmux.Enabled {
-		sb.WriteString("  " + styleCode.Render(fmt.Sprintf("ssh %s -t tmux new -A -s main", hostname)) + "\n")
-	} else {
-		sb.WriteString("  " + styleCode.Render(fmt.Sprintf("ssh %s", hostname)) + "\n")
+	var connect string
+	switch {
+	case cfg.Modules.Mosh.Enabled && cfg.Modules.Tmux.Enabled:
+		connect = fmt.Sprintf("mosh %s -- tmux new -A -s main", hostname)
+	case cfg.Modules.Tmux.Enabled:
+		connect = fmt.Sprintf("ssh %s -t tmux new -A -s main", hostname)
+	default:
+		connect = fmt.Sprintf("ssh %s", hostname)
 	}
+	sb.WriteString("  ")
+	sb.WriteString(styleCode.Render(connect))
+	sb.WriteString("\n")
 
-	sb.WriteString("\n" + styleMuted.Render("Next: pair your phone →  ") +
-		styleCode.Render("abysslink enroll phone"))
+	sb.WriteString("\n")
+	sb.WriteString(styleMuted.Render("Next: pair your phone →  "))
+	sb.WriteString(styleCode.Render("abysslink enroll phone"))
 
 	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(boxBorder()).
 		BorderForeground(colorGreen).
 		Padding(1, 2).
-		Width(54)
+		Width(boxWidth())
 	printerInfo(p, style.Render(strings.TrimRight(sb.String(), "\n")))
 	printerInfo(p, "")
 }

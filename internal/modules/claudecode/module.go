@@ -18,6 +18,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -36,13 +37,46 @@ const anthropicKeyEnv = "ANTHROPIC_API_KEY"
 
 // notifyHookCommand fires when Claude Code is waiting for input — the primary
 // "buzz my phone" trigger.
-const notifyHookCommand = `abysslink notify "Claude needs you" "waiting for input"`
+var notifyHookCommand = hookBinary() + ` notify "Claude needs you" "waiting for input"`
+
+// stopHookCommand fires when a Claude Code session ends.
+var stopHookCommand = hookBinary() + ` notify "Claude stopped" "Session ended"`
 
 const (
-	stopHookCommand = `abysslink notify "Claude stopped" "Session ended"`
 	keychainService = "abysslink"
 	keychainAccount = "anthropic-api-key"
 )
+
+// hookBinary returns the binary token to embed in the hook command lines.
+// Claude Code's hook environment frequently lacks the user's interactive PATH,
+// so a bare "abysslink" silently fails — and a silent hook failure means no
+// phone buzz, the module's core promise. Prefer the absolute path of the
+// running binary; resolveHookBinary documents when we fall back to the bare name.
+func hookBinary() string {
+	exe, err := os.Executable()
+	return resolveHookBinary(exe, err)
+}
+
+// resolveHookBinary picks the hook command binary token from os.Executable()'s
+// result. Split out for testability. The absolute path is used only when it is
+// actually the abysslink binary (base name "abysslink" — under `go test` the
+// executable is the test binary) AND it is shell-safe to embed unquoted (no
+// whitespace or quote characters); otherwise fall back to the bare name and
+// rely on PATH. The "abysslink notify" substring that hook detection/removal
+// keys on is preserved either way ("…/abysslink notify" contains it).
+func resolveHookBinary(exe string, err error) string {
+	const fallback = "abysslink"
+	if err != nil || exe == "" {
+		return fallback
+	}
+	if filepath.Base(exe) != "abysslink" {
+		return fallback
+	}
+	if strings.ContainsAny(exe, " \t\n\"'\\$&;|<>()`") {
+		return fallback
+	}
+	return exe
+}
 
 // Module implements the claudecode optional module.
 // It writes ~/.claude/settings.json hooks that call `abysslink notify`.
@@ -52,11 +86,12 @@ type Module struct {
 	runner   shell.Runner
 	cfg      *config.Config
 	keychain secrets.KeychainStore
+	audit    audit.AuditWriter
 }
 
 // New returns a new claudecode Module.
 func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, keychain: d.Keychain}
+	return &Module{runner: d.Runner, cfg: d.Cfg, keychain: d.Keychain, audit: d.Audit}
 }
 
 // Name returns the canonical module name.
@@ -90,20 +125,24 @@ func (m *Module) detectKeychainState(ctx context.Context) []modules.Finding {
 		return nil
 	}
 	v, err := m.keychain.Get(ctx, keychainService, keychainAccount)
-	if err != nil || v == "" {
-		// Distinguish: key was never stored vs key is locked after reboot.
-		check, msg := "api_key_present",
-			"Anthropic API key is not in the keychain — set ANTHROPIC_API_KEY and re-run `abysslink up --apply` to store it"
-		if err != nil {
-			check, msg = "api_key_keychain",
-				"Anthropic API key not readable from the keychain (unset, or the login keychain is locked after reboot — unlock it at the console)"
-		}
-		return []modules.Finding{{
-			Module: "claudecode", Check: check,
-			Severity: modules.SeverityWarning, Message: msg,
-		}}
+	if err == nil && v != "" {
+		return nil
 	}
-	return nil
+
+	// Distinguish: key was never stored vs keychain not readable. Every
+	// KeychainStore.Get returns a wrapped secrets.ErrNotFound for a missing
+	// item, so a bare err != nil check would misreport "never stored" as
+	// "keychain locked" and make the api_key_present branch unreachable (W7).
+	check, msg := "api_key_present",
+		"Anthropic API key is not in the keychain — set ANTHROPIC_API_KEY and re-run `abysslink up --apply` to store it"
+	if err != nil && !errors.Is(err, secrets.ErrNotFound) {
+		check, msg = "api_key_keychain",
+			"Anthropic API key not readable from the keychain (the login keychain may be locked after reboot — unlock it at the console)"
+	}
+	return []modules.Finding{{
+		Module: "claudecode", Check: check,
+		Severity: modules.SeverityWarning, Message: msg,
+	}}
 }
 
 // detectSettingsFile checks that ~/.claude/ exists and settings.json is readable.
@@ -290,6 +329,7 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	}
 
 	var actions []modules.Action
+	mergePlanned := false // several findings map to ONE merge action — dedupe (UX)
 	for _, f := range findings {
 		switch f.Check {
 		case "claude_dir_exists":
@@ -300,6 +340,10 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 			})
 		case "settings_json_exists", "settings_json_readable",
 			"stop_hook_configured", "notification_hook_configured":
+			if mergePlanned {
+				continue
+			}
+			mergePlanned = true
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
 				Description: "merge abysslink notify hooks into ~/.claude/settings.json (preserves existing hooks)",
@@ -318,7 +362,18 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 
 // Apply writes or merges ~/.claude/settings.json with the abysslink notify hooks
 // and stores the Anthropic API key in the keychain.
+//
+// It MUST gate on ClaudeCode.Enabled (C3): Runner.ApplyAll calls Apply on every
+// module regardless of planned actions, so without this gate a disabled module
+// would still install hooks into ~/.claude/settings.json — silently undoing
+// `abysslink disable claudecode` on the next `up --apply` and mutating a file
+// the dry-run preview never showed.
 func (m *Module) Apply(ctx context.Context) error {
+	if !m.cfg.ClaudeCode.Enabled {
+		slog.Debug("claudecode module disabled, skipping apply")
+		return nil
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("claudecode: home dir: %w", err)
@@ -365,12 +420,13 @@ func (m *Module) Apply(ctx context.Context) error {
 	data = append(data, '\n')
 
 	// Back up any existing file, write atomically, and record the mutation in
-	// the central audit log (hash only — never the settings body).
-	logPath, err := audit.DefaultLogPath()
-	if err != nil {
-		return fmt.Errorf("claudecode: audit log path: %w", err)
+	// the central audit log (hash only — never the settings body). The writer
+	// is the injected modules.Deps.Audit — never constructed inline — so tests
+	// can capture mutations and SignedAudit injection works (review INFO).
+	if m.audit == nil {
+		return fmt.Errorf("claudecode: audit not available")
 	}
-	if err := audit.New(logPath).WriteFile(settingsPath, data, 0o600, false); err != nil {
+	if err := m.audit.WriteFile(settingsPath, data, 0o600, false); err != nil {
 		return fmt.Errorf("claudecode: write settings.json: %w", err)
 	}
 
@@ -457,11 +513,10 @@ func (m *Module) RemoveHooks(ctx context.Context, dryRun bool) ([]string, error)
 	}
 	data = append(data, '\n')
 
-	logPath, err := audit.DefaultLogPath()
-	if err != nil {
-		return nil, fmt.Errorf("claudecode: audit log path: %w", err)
+	if m.audit == nil {
+		return nil, fmt.Errorf("claudecode: audit not available")
 	}
-	if err := audit.New(logPath).WriteFile(settingsPath, data, 0o600, dryRun); err != nil {
+	if err := m.audit.WriteFile(settingsPath, data, 0o600, dryRun); err != nil {
 		return nil, fmt.Errorf("claudecode: write settings.json: %w", err)
 	}
 

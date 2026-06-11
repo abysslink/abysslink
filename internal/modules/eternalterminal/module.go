@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -32,10 +33,31 @@ import (
 const (
 	etACLPort = "tcp/2022"
 
-	// Service unit paths per platform.
-	systemdServicePath = "/etc/systemd/system/etserver.service"
-	launchdPlistPath   = "/Library/LaunchDaemons/com.etserver.etserver.plist"
+	// etServiceLabel is the USER-level service unit Apply installs via
+	// platform.ServiceInstall. Detect must look for exactly this unit (W5):
+	// checking system paths (/etc/systemd/system, /Library/LaunchDaemons)
+	// that Apply never writes made the warning permanent.
+	etServiceLabel = "dev.abysslink.etserver"
 )
+
+// etServiceUnitPath returns the path platform.ServiceInstall writes for
+// etServiceLabel on this OS ("" for unsupported platforms):
+//   - linux:  ~/.config/systemd/user/<label>.service
+//   - darwin: ~/Library/LaunchAgents/<label>.plist
+func etServiceUnitPath(goos string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("home dir: %w", err)
+	}
+	switch goos {
+	case "linux":
+		return filepath.Join(home, ".config", "systemd", "user", etServiceLabel+".service"), nil
+	case "darwin":
+		return filepath.Join(home, "Library", "LaunchAgents", etServiceLabel+".plist"), nil
+	default:
+		return "", nil
+	}
+}
 
 // Module implements the eternal-terminal optional module.
 // It installs the ET client and server, and wires the ACL for tcp/2022.
@@ -100,33 +122,35 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 	return findings, nil
 }
 
-// detectServiceUnit checks whether a platform service unit for etserver is installed.
+// detectServiceUnit checks whether the user-level service unit Apply manages
+// (etServiceLabel via platform.ServiceInstall) is installed. It must inspect
+// the SAME unit Apply writes — Detect previously checked system unit paths
+// Apply never touches, so the warning persisted forever after a successful
+// Apply (W5).
 func (m *Module) detectServiceUnit(_ context.Context) *modules.Finding {
-	switch runtime.GOOS {
-	case "linux":
-		if _, err := os.Stat(systemdServicePath); os.IsNotExist(err) {
-			return &modules.Finding{
-				Module:   m.Name(),
-				Check:    "et_service_unit_installed",
-				Severity: modules.SeverityWarning,
-				Message:  fmt.Sprintf("etserver systemd service unit not found at %s", systemdServicePath),
-			}
+	unitPath, err := etServiceUnitPath(runtime.GOOS)
+	if err != nil {
+		return &modules.Finding{
+			Module:   m.Name(),
+			Check:    "et_service_unit_installed",
+			Severity: modules.SeverityWarning,
+			Message:  fmt.Sprintf("cannot resolve etserver service unit path: %v", err),
 		}
-	case "darwin":
-		if _, err := os.Stat(launchdPlistPath); os.IsNotExist(err) {
-			return &modules.Finding{
-				Module:   m.Name(),
-				Check:    "et_service_unit_installed",
-				Severity: modules.SeverityWarning,
-				Message:  fmt.Sprintf("etserver launchd plist not found at %s", launchdPlistPath),
-			}
-		}
-	default:
+	}
+	if unitPath == "" {
 		return &modules.Finding{
 			Module:   m.Name(),
 			Check:    "et_service_unit_installed",
 			Severity: modules.SeverityWarning,
 			Message:  fmt.Sprintf("unsupported platform %q — cannot verify etserver service unit", runtime.GOOS),
+		}
+	}
+	if _, err := os.Stat(unitPath); os.IsNotExist(err) {
+		return &modules.Finding{
+			Module:   m.Name(),
+			Check:    "et_service_unit_installed",
+			Severity: modules.SeverityWarning,
+			Message:  fmt.Sprintf("etserver service unit (%s) not found at %s", etServiceLabel, unitPath),
 		}
 	}
 	return nil
@@ -184,7 +208,12 @@ func (m *Module) Apply(ctx context.Context) error {
 		return nil
 	}
 
-	if res, err := m.runner.Run(ctx, "et", "--version"); err != nil || res.ExitCode != 0 {
+	// Gate the install on BOTH binaries: the service below runs `etserver`,
+	// so a present client (`et`) with a missing server must still trigger the
+	// package install — otherwise we register a service pointing at a
+	// nonexistent binary (W5b). The check short-circuits: when `et` is
+	// already missing there is no need to probe `etserver`.
+	if !m.binaryPresent(ctx, "et") || !m.binaryPresent(ctx, "etserver") {
 		slog.Info("eternal-terminal apply: installing eternal-terminal")
 		if err := m.plat.InstallPackage(ctx, "eternal-terminal"); err != nil {
 			return fmt.Errorf("eternal-terminal apply: install: %w", err)
@@ -192,7 +221,7 @@ func (m *Module) Apply(ctx context.Context) error {
 	}
 
 	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
-		Label:     "dev.abysslink.etserver",
+		Label:     etServiceLabel,
 		Args:      []string{"etserver", "--port", "2022"},
 		KeepAlive: true,
 		RunAtLoad: true,
@@ -203,9 +232,19 @@ func (m *Module) Apply(ctx context.Context) error {
 	return nil
 }
 
-// Verify re-runs Detect to confirm eternal-terminal is correctly installed.
-func (m *Module) Verify(ctx context.Context) ([]modules.Finding, error) {
-	return m.Detect(ctx)
+// binaryPresent reports whether `name --version` runs successfully.
+func (m *Module) binaryPresent(ctx context.Context, name string) bool {
+	res, err := m.runner.Run(ctx, name, "--version")
+	return err == nil && res.Ok()
+}
+
+// Verify is a no-op for the eternal-terminal module — all checks run in Detect.
+// Pitfall 4 (Doctor double-emission): do NOT call Detect here — runner.Doctor
+// calls both Detect and Verify, so re-running Detect would double-emit every
+// Detect finding per doctor pass (NET-18). Verify adds no new information
+// beyond Detect; returning nil avoids the duplication (mirrors ssh/ntfy).
+func (m *Module) Verify(_ context.Context) ([]modules.Finding, error) {
+	return nil, nil
 }
 
 // Repair re-runs Apply.

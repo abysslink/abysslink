@@ -48,7 +48,9 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 }
 
 // ExecRunner is the production Runner that invokes real binaries via os/exec.
-// This is the only file in the codebase allowed to import os/exec.
+// internal/shell is the only PACKAGE in the codebase allowed to import
+// os/exec (CLAUDE.md hard rule); within it, this file and stream.go are the
+// importers.
 type ExecRunner struct{}
 
 // Run executes name with args, captures stdout and stderr, and returns the
@@ -63,8 +65,7 @@ func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (Resu
 
 	err := cmd.Run()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			return Result{
 				Stdout:   stdout.String(),
 				Stderr:   stderr.String(),
@@ -120,8 +121,7 @@ func (r *ExecRunner) RunWithEnv(ctx context.Context, env map[string]string, name
 
 	err := cmd.Run()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			return Result{
 				Stdout:   stdout.String(),
 				Stderr:   stderr.String(),
@@ -148,8 +148,7 @@ func (r *ExecRunner) RunWithStdin(ctx context.Context, stdin io.Reader, name str
 
 	err := cmd.Run()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			return Result{
 				Stdout:   stdout.String(),
 				Stderr:   stderr.String(),
@@ -175,4 +174,14 @@ func (r *ExecRunner) RunWithStdin(ctx context.Context, stdin io.Reader, name str
 func LookPath(binary string) bool {
 	_, err := exec.LookPath(binary)
 	return err == nil
+}
+
+// ResolvePath resolves name to an absolute binary path via exec.LookPath.
+// It is a package-level function, not a Runner method, because it is a
+// filesystem probe rather than a subprocess execution. It exists so that
+// internal/gate (plan 27-04) can resolve binary paths for the D-39 closure
+// hash without importing os/exec — the CLAUDE.md hard rule reserves os/exec
+// for internal/shell alone.
+func ResolvePath(name string) (string, error) {
+	return exec.LookPath(name)
 }

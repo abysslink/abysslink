@@ -311,10 +311,53 @@ func TestSecDiskEncryption(t *testing.T) {
 		f := secDiskEncryptionCheck(ctx, fakeDiskPlatform{state: platform.DiskUnencrypted})
 		assert.Equal(t, modules.SeverityFatal, f.Severity)
 	})
-	t.Run("unknown", func(t *testing.T) {
+	t.Run("unknown is fatal-consistent with the up gate", func(t *testing.T) {
+		// W10: `up` treats UNKNOWN as a non-overridable blocker (even with
+		// --force-unsafe, D-05) — doctor must not under-report it as WARN.
 		f := secDiskEncryptionCheck(ctx, fakeDiskPlatform{state: platform.DiskUnknown})
-		assert.Equal(t, modules.SeverityWarning, f.Severity)
+		assert.Equal(t, modules.SeverityFatal, f.Severity)
+		assert.Contains(t, f.Message, "UNKNOWN")
 	})
+	t.Run("probe error is fatal-consistent with the up gate", func(t *testing.T) {
+		f := secDiskEncryptionCheck(ctx, fakeDiskPlatform{state: platform.DiskUnknown, err: assert.AnError})
+		assert.Equal(t, modules.SeverityFatal, f.Severity)
+	})
+	t.Run("nil platform is fatal-consistent with the up gate", func(t *testing.T) {
+		f := secDiskEncryptionCheck(ctx, nil)
+		assert.Equal(t, modules.SeverityFatal, f.Severity)
+	})
+}
+
+// TestSecBinarySignedAlias_ReusesPrecomputedSupplyFindings is the W8 regression
+// test: when the caller passes pre-computed supply findings, secDoctorFindings
+// must alias them for sec-binary-signed instead of re-running the (networked)
+// cosign bundle check a second time.
+func TestSecBinarySignedAlias_ReusesPrecomputedSupplyFindings(t *testing.T) {
+	ctx := context.Background()
+	cc := &cmdContext{cfg: config.Defaults(), runner: shell.NewMockRunner()}
+	deps := modules.Deps{Platform: fakeDiskPlatform{state: platform.DiskEncrypted}}
+
+	supply := []modules.Finding{{
+		Module:   "supply",
+		Check:    "supply-cosign-bundle",
+		Severity: modules.SeverityWarning,
+		Message:  "precomputed-sentinel-message",
+	}}
+
+	findings := secDoctorFindings(ctx, cc, deps, false, nil, nil, nil, supply)
+	require.Len(t, findings, 18, "supply alias must keep the 18-check roster")
+	var got *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "sec-binary-signed" {
+			got = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, got, "sec-binary-signed must be present")
+	assert.Equal(t, "sec", got.Module)
+	assert.Equal(t, modules.SeverityWarning, got.Severity)
+	assert.Equal(t, "precomputed-sentinel-message", got.Message,
+		"alias must carry the precomputed finding, not a fresh check run")
 }
 
 func TestSecAliasChecks(t *testing.T) {

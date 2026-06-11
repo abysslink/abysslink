@@ -87,7 +87,7 @@ var allSecurityNotes = []securityNote{
 		lines: []string{
 			"Abysslink writes a backup before every file change.",
 			"Run: abysslink backup ls    to see the backup history.",
-			"Run: abysslink backup restore <id>   to undo a specific change.",
+			"Run: abysslink backup restore <path>   to undo a specific change.",
 			"Run: abysslink uninstall    to reverse the entire setup.",
 		},
 	},

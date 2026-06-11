@@ -72,6 +72,19 @@ func checkFileVault(ctx context.Context, m *Module) ([]modules.Finding, error) {
 		}}, nil
 	}
 
+	if !res.Ok() {
+		// DOC-02: non-zero exit → state unknown → fail closed (mirrors the
+		// lsblk treatment on Linux). Never parse error output as state.
+		slog.Warn("hardening detect: fdesetup exited non-zero", "exit_code", res.ExitCode, "stderr", res.Stderr)
+		return []modules.Finding{{
+			Module:   m.Name(),
+			Check:    "filevault",
+			Severity: modules.SeverityFatal,
+			Message: "disk-encryption state is UNKNOWN: fdesetup exited with a non-zero status — " +
+				"verify FileVault status manually in System Settings → Privacy & Security → FileVault",
+		}}, nil
+	}
+
 	output := strings.TrimSpace(res.Stdout)
 	slog.Debug("filevault status", "output", output)
 
@@ -135,26 +148,46 @@ type firewallJSON struct {
 }
 
 // checkFirewall checks the macOS Application Firewall state.
+//
+// Probe failures (exec error, non-zero exit, unparseable JSON) are NOT silent:
+// they emit an explicit UNKNOWN finding so "check could not run" is
+// distinguishable from "check ran and passed" — consistent with the filevault
+// tri-state treatment in this file (review INFO). The firewall is advisory
+// (abysslink never auto-enables it), so UNKNOWN is a WARNING, not FATAL.
 func checkFirewall(ctx context.Context, m *Module) ([]modules.Finding, error) {
-	res, err := m.runner.Run(ctx, "system_profiler", "SPFirewallDataType", "-json")
-	if err != nil {
-		// system_profiler may not be available in CI; don't hard-fail.
-		slog.Warn("hardening detect: system_profiler failed", "error", err)
-		return nil, nil
+	unknown := func(reason string) []modules.Finding {
+		return []modules.Finding{{
+			Module:   m.Name(),
+			Check:    "firewall",
+			Severity: modules.SeverityWarning,
+			Message: "Application Firewall state is UNKNOWN: " + reason + " — " +
+				"verify it manually in System Settings → Network → Firewall",
+		}}
 	}
 
-	if res.ExitCode != 0 {
+	res, err := m.runner.Run(ctx, "system_profiler", "SPFirewallDataType", "-json")
+	if err != nil {
+		// system_profiler may not be available in CI; don't hard-fail, but say so.
+		slog.Warn("hardening detect: system_profiler failed", "error", err)
+		return unknown("system_profiler is unavailable or failed to run"), nil
+	}
+
+	if !res.Ok() {
 		slog.Warn("hardening detect: system_profiler exited non-zero", "stderr", res.Stderr)
-		return nil, nil
+		return unknown("system_profiler exited with a non-zero status"), nil
 	}
 
 	var fw firewallJSON
 	if err := json.Unmarshal([]byte(res.Stdout), &fw); err != nil {
 		slog.Warn("hardening detect: could not parse firewall JSON", "error", err)
-		return nil, nil
+		return unknown("system_profiler returned unparseable JSON"), nil
 	}
 
 	slog.Debug("firewall state", "data", fw.SPFirewallDataType)
+
+	if len(fw.SPFirewallDataType) == 0 {
+		return unknown("system_profiler reported no firewall data"), nil
+	}
 
 	for _, entry := range fw.SPFirewallDataType {
 		state := strings.ToLower(entry.SpfwGlobalState)
@@ -169,5 +202,11 @@ func checkFirewall(ctx context.Context, m *Module) ([]modules.Finding, error) {
 		}
 	}
 
-	return nil, nil
+	// DOC-01: explicit OK so "ran and passed" is visible in the tri-state.
+	return []modules.Finding{{
+		Module:   m.Name(),
+		Check:    "firewall",
+		Severity: modules.SeverityOK,
+		Message:  "Application Firewall is enabled",
+	}}, nil
 }

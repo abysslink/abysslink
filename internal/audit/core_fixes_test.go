@@ -68,8 +68,11 @@ func TestNewSigned_FailsClosedOnUnavailableKeychain(t *testing.T) {
 	assert.Zero(t, kc.setCalls, "fail-closed: NewSigned must NOT overwrite the HMAC key on a transient keychain error")
 }
 
-// TestNewSigned_GeneratesOnlyOnNotFound proves the CORE-04 counterpart: a
-// definitive "key absent" (ErrNotFound) still auto-generates and stores a key.
+// TestNewSigned_GeneratesOnlyOnNotFound proves the CORE-04 counterpart with
+// the R2-12 lazy-creation refinement: a definitive "key absent" (ErrNotFound)
+// still succeeds, but generation is DEFERRED to the first mutating Append —
+// construction (a read path: doctor, status, verify wiring) must never write
+// to the keychain.
 func TestNewSigned_GeneratesOnlyOnNotFound(t *testing.T) {
 	kc := secrets.NewMockStore() // Get on empty store wraps ErrNotFound
 	logPath := filepath.Join(t.TempDir(), "audit.log")
@@ -78,9 +81,14 @@ func TestNewSigned_GeneratesOnlyOnNotFound(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, sa)
 
-	// The generated key must now be retrievable.
+	// R2-12: construction alone must NOT have created the key.
 	_, gerr := kc.Get(context.Background(), "abysslink", "audit-hmac")
-	assert.NoError(t, gerr, "HMAC key must have been generated and stored")
+	assert.Error(t, gerr, "NewSigned must not generate the HMAC key on a read path")
+
+	// The first mutating Append generates and stores the key (under the flock).
+	require.NoError(t, sa.Append(context.Background(), audit.SignInput{Title: "write"}, "/etc/a", false))
+	_, gerr = kc.Get(context.Background(), "abysslink", "audit-hmac")
+	assert.NoError(t, gerr, "HMAC key must be generated on the first mutating Append")
 }
 
 // TestWriteFile_RefusesSymlinkTarget proves CORE-03: the unsigned WriteFile

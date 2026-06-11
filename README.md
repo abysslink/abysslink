@@ -102,19 +102,19 @@ The mesh-VPN model means **your phone and laptop talk directly to each other.** 
 ### Session resilience
 
 - **mosh + tmux** — `mosh` (UDP roaming transport) keeps the session alive as your phone hops wifi↔cell, sleeps, or loses signal; `tmux` + `tmux-resurrect` persist the session across disconnects and reboots. Reconnect hours later, exactly where you left off.
-- **Fleet-aware** — enroll multiple laptops as named *rigs* (`abysslink enroll rig`) and fan commands out with `--rig <name>` / `--all-rigs`. Wake a sleeping rig over the LAN with `abysslink wol`.
+- **Fleet-aware** — enroll multiple laptops as named *rigs* (`abysslink enroll rig`) and fan commands out with `--rig <name>` / `--all-rigs`. Wake a sleeping rig over the LAN with `abysslink wol <rig>`.
 
 ### Notifications & observability
 
 - **Self-hosted push** — a built-in [ntfy](https://ntfy.sh) server bound **exclusively to the tailnet IP** (never `0.0.0.0`). Notifications go phone → your laptop → phone; no Pushover, no Telegram, no third party ever sees the content. The admin password lives in the OS keychain.
 - **Watchers** — `abysslink watch` fires a push when a tmux pane goes idle (a prompt is waiting), a log file matches a regex, or an HTTP endpoint changes status. Run by the `abysslinkd` daemon.
-- **AI-agent integration (opt-in)** — `abysslink claudecode` wires Claude Code's Stop/Notification hooks into the generic `notify` module so your phone buzzes the moment the agent needs you. Any other agent, build, or long-running job plugs into the same `notify`/`watch` core. *This is the only agent-aware code in the tree.*
+- **AI-agent integration (opt-in)** — `abysslink enable claudecode --apply` (then `abysslink up --apply`) wires Claude Code's Stop/Notification hooks into the generic `notify` module so your phone buzzes the moment the agent needs you; `abysslink claudecode disable` unwires them. Any other agent, build, or long-running job plugs into the same `notify`/`watch` core. *This is the only agent-aware code in the tree.*
 - **Metrics & digests (opt-in)** — Prometheus metrics on a tailnet-only listener, plus a scheduled daily ntfy security-posture digest.
 
 ### Safety & auditability
 
 - **Dry-run is the default** — every system-mutating command prints its plan and changes nothing until you add `--apply`. `--explain` annotates each planned action with its rationale.
-- **Backup + tamper-evident audit log on every mutation** — Abysslink never touches a file without first backing it up and appending a hash-chained, optionally-signed audit entry (`internal/audit`). Verify the chain with `abysslink audit verify`; undo anything with `abysslink backup restore <timestamp>`.
+- **Backup + tamper-evident audit log on every mutation** — Abysslink never touches a file without first backing it up and appending a hash-chained, optionally-signed audit entry (`internal/audit`). Verify the chain with `abysslink audit verify`; undo anything with `abysslink backup restore <path>`.
 - **Reversible by design** — `abysslink repair` auto-fixes doctor findings; `abysslink uninstall` reverses every change Abysslink ever made, restoring files from backups.
 
 ### Security hardening
@@ -216,7 +216,8 @@ abysslink up
 abysslink up --apply
 
 # 4. Pair your phone — mints a tagged auth key and shows an ANSI QR code
-abysslink enroll phone
+#    (dry-run by default too: --apply does the actual pairing)
+abysslink enroll phone --apply
 
 # 5. Deep health check — exits 0 (ok) / 1 (warn) / 2 (fatal)
 abysslink doctor
@@ -250,11 +251,11 @@ abysslink repair                  # auto-fix what doctor flagged
 ### Drive terminals & notifications
 
 ```bash
-abysslink enroll phone                    # pair a phone (QR + poll for join)
+abysslink enroll phone --apply            # pair a phone (QR + poll for join)
 abysslink notify "deploy done" "v1.2.3"   # one-off push
 abysslink notify -- npm run build         # push when the wrapped command exits
-abysslink watch add --pane main           # buzz when a tmux pane goes idle at a prompt
-abysslink claudecode                      # wire an AI agent's hooks → notify (opt-in)
+abysslink watch add --pane 0 --apply      # buzz when a tmux pane goes idle at a prompt
+abysslink enable claudecode --apply       # opt in: AI-agent hooks → notify (wired on next `up --apply`)
 ```
 
 ### Audit, back up, recover
@@ -263,7 +264,7 @@ abysslink claudecode                      # wire an AI agent's hooks → notify 
 abysslink logs                            # tail the audit log (filter by age/module)
 abysslink audit verify                    # verify the tamper-evident chain
 abysslink backup ls                       # list every file Abysslink changed
-abysslink backup restore 2026-01-15T14:30:00   # undo a change
+abysslink backup restore /etc/ssh/sshd_config --apply   # undo a change to a file
 ```
 
 ### Manage the network
@@ -272,7 +273,7 @@ abysslink backup restore 2026-01-15T14:30:00   # undo a change
 abysslink acl diff                        # preview ACL changes (HuJSON)
 abysslink acl push --apply                # converge the tailnet policy
 abysslink lock status                     # Tailnet Lock state
-abysslink rotate ntfy --apply             # rotate the ntfy admin password + keychain
+abysslink rotate ntfy-creds --apply       # rotate the ntfy admin password + keychain
 ```
 
 ### Self-hosted control plane (advanced)

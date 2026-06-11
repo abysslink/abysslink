@@ -16,7 +16,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -80,8 +79,10 @@ func newLogsCmd() *cobra.Command {
 				}
 				shown++
 				if jsonOut {
-					line, _ := json.Marshal(e)
-					printerInfo(p, string(line))
+					// PrintJSON emits the entry as a single typed JSON object —
+					// marshalling first and routing through Print would wrap it
+					// as {"msg":"{\"time\":...}"} (double-encoded).
+					p.PrintJSON(e)
 					continue
 				}
 				dry := ""

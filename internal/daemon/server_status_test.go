@@ -32,6 +32,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/notifyv2"
 )
 
 // stubNotifier is a no-op Notifier for the status server tests.
@@ -39,11 +40,14 @@ type stubNotifier struct{}
 
 func (stubNotifier) Send(_ context.Context, _, _ string) error { return nil }
 
+func (stubNotifier) SendNote(_ context.Context, _ notifyv2.RenderedNote) error { return nil }
+
 // startStatusServer spins up a daemon Server on a temp socket and returns an
-// HTTP client wired to that socket plus a cancel func.
+// HTTP client wired to that socket plus a cancel func. Optional configure
+// funcs run against the Server before it starts (e.g. SetExecCounter).
 // The socket dir comes from shortRuntimeDir (daemon_test.go): macOS limits Unix
 // socket paths to ~104 bytes and t.TempDir() under /var/folders exceeds it.
-func startStatusServer(t *testing.T, cfg *config.Config) (*http.Client, context.CancelFunc) {
+func startStatusServer(t *testing.T, cfg *config.Config, configure ...func(*daemon.Server)) (*http.Client, context.CancelFunc) {
 	t.Helper()
 	dir := shortRuntimeDir(t)
 	sock := filepath.Join(dir, "abysslinkd.sock")
@@ -52,6 +56,9 @@ func startStatusServer(t *testing.T, cfg *config.Config) (*http.Client, context.
 	_ = os.Remove(sock)
 
 	srv := daemon.NewServer(stubNotifier{}, nil, cfg)
+	for _, fn := range configure {
+		fn(srv)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Run(ctx) }()
 
@@ -175,6 +182,49 @@ func TestDaemonStatus_PostureCompleteStub(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(body, &out))
 	assert.False(t, out.PostureComplete, "posture_complete must be false while doctor wiring is a stub (WR-05)")
+}
+
+// TestDaemonStatus_GateExecCounter: /status exposes the gate decorator's live
+// exec counter via SetExecCounter — the proof that the observe-only seam
+// intercepts every module/consumer exec before Phase 30 makes it load-bearing.
+func TestDaemonStatus_GateExecCounter(t *testing.T) {
+	client, cancel := startStatusServer(t, statusCfg(), func(srv *daemon.Server) {
+		srv.SetExecCounter(func() uint64 { return 7 })
+	})
+	defer cancel()
+
+	resp := doStatus(t, client, http.MethodGet)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(body), `"gate_execs_observed"`, "counter field must be present")
+
+	var out struct {
+		GateExecsObserved uint64 `json:"gate_execs_observed"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	assert.Equal(t, uint64(7), out.GateExecsObserved, "field must reflect the injected counter")
+}
+
+// TestDaemonStatus_GateExecCounterUnset: with no counter wired the field is
+// present and zero — never an error, never omitted-vs-crash ambiguity.
+func TestDaemonStatus_GateExecCounterUnset(t *testing.T) {
+	client, cancel := startStatusServer(t, statusCfg())
+	defer cancel()
+
+	resp := doStatus(t, client, http.MethodGet)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(body), `"gate_execs_observed"`, "field must be present even when no gate is wired")
+
+	var out struct {
+		GateExecsObserved uint64 `json:"gate_execs_observed"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	assert.Zero(t, out.GateExecsObserved, "nil-safe default is 0, not a crash")
 }
 
 func TestDaemonStatus_ContentType(t *testing.T) {

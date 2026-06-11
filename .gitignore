@@ -44,3 +44,8 @@ coverage.html
 
 # nix build output
 /result
+
+# locally built binaries
+/abysslink-conformance
+/abysslink
+/abysslinkd

@@ -24,9 +24,13 @@ import (
 
 // TestRunInitFormDefaultsTailscale asserts that when autoYes=true (non-interactive),
 // runInitForm produces a config with Backend.Type == "tailscale" — the default path
-// is unchanged by the headscale extension.
+// is unchanged by the headscale extension. Email and hostname are supplied via
+// flags because headless init now fails fast without them (C1/C2).
 func TestRunInitFormDefaultsTailscale(t *testing.T) {
-	cfg, err := runInitForm(nil, true)
+	cmd := newInitCmd()
+	require.NoError(t, cmd.Flags().Set("email", "test@example.com"))
+	require.NoError(t, cmd.Flags().Set("hostname", "test-rig"))
+	cfg, err := runInitForm(cmd, true)
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, "tailscale", cfg.Backend.Type,

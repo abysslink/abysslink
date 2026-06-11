@@ -326,12 +326,22 @@ func isPartial(r *http.Request) bool {
 	return r.Header.Get("HX-Request") == "true"
 }
 
+// setDynamicHTMLHeaders sets the response headers shared by every dynamically
+// rendered view: HTML content type plus `Cache-Control: no-store` — the views
+// carry live security-posture data (doctor findings, audit trail, fleet
+// status) that must never be served from a browser/proxy cache.
+func setDynamicHTMLHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+}
+
 // render writes either the full page (base.html) or just the "content" block,
 // depending on whether the request is an htmx partial. A render failure is
 // logged via slog and answered with the styled error view (no stack trace to
 // the client).
 func (h *Handlers) render(w http.ResponseWriter, r *http.Request, tmpl *template.Template, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setDynamicHTMLHeaders(w)
 	name := "base.html"
 	if isPartial(r) {
 		name = "content"
@@ -350,7 +360,7 @@ func (h *Handlers) render(w http.ResponseWriter, r *http.Request, tmpl *template
 // can never loop. The body carries only approved copy — never a stack trace or
 // internal detail (V7 error-handling posture).
 func (h *Handlers) renderError(w http.ResponseWriter, r *http.Request, status int, heading, message string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setDynamicHTMLHeaders(w)
 	w.WriteHeader(status)
 	name := "base.html"
 	if isPartial(r) {
@@ -373,7 +383,7 @@ func (h *Handlers) handleRoot(w http.ResponseWriter, r *http.Request) {
 // full page, not even the view's content wrapper). htmx swaps it outerHTML
 // every 10s.
 func (h *Handlers) handleStatusFragment(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setDynamicHTMLHeaders(w)
 	if err := h.statusTmpl.ExecuteTemplate(w, "status-panel", h.buildStatusData(r)); err != nil {
 		slog.Error("webui: render failed", "template", "status-panel", "err", err)
 		h.renderError(w, r, http.StatusInternalServerError, "Something went wrong",
@@ -480,7 +490,7 @@ func (h *Handlers) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 	// A pagination request (page > 1) appends only the <li> rows.
 	if page > 1 {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		setDynamicHTMLHeaders(w)
 		if rerr := h.auditTmpl.ExecuteTemplate(w, "audit-rows", data); rerr != nil {
 			slog.Error("webui: render failed", "template", "audit-rows", "err", rerr)
 			h.renderError(w, r, http.StatusInternalServerError, "Something went wrong",
@@ -518,7 +528,7 @@ func (h *Handlers) handleNotify(w http.ResponseWriter, r *http.Request) {
 // request is same-origin (gated by CrossOriginProtection). Full dispatch is deferred to
 // Phase 20+; for now it acknowledges the request without sending.
 func (h *Handlers) handleNotifyPost(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setDynamicHTMLHeaders(w)
 	w.WriteHeader(http.StatusNotImplemented)
 	_, _ = w.Write([]byte("notify dispatch is not implemented in this phase"))
 }

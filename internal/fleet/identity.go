@@ -19,8 +19,10 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash"
 )
 
 // RigService returns the per-rig keychain service name for a given rig name.
@@ -45,18 +47,24 @@ func GenerateSigningKey() (string, error) {
 	return hex.EncodeToString(key), nil
 }
 
-// SignRigMessage computes an HMAC-SHA256 signature over the canonical string
+// SignRigMessage computes an HMAC-SHA256 signature over the four canonical
+// fields, in order:
 //
-//	rigName + "." + ts + "." + title + "." + message
+//	rigName, ts, title, message
 //
-// where ts is an epoch-seconds timestamp string and title is the notification
-// subject (X-Title header). The hexKey parameter is the hex-encoded 32-byte
-// signing key returned by GenerateSigningKey (or retrieved from the OS keychain).
+// each written as a length-prefixed field (big-endian uint64 byte length,
+// then the bytes — the internal/gate writeField idiom), where ts is an
+// epoch-seconds timestamp string and title is the notification subject
+// (X-Title header). The hexKey parameter is the hex-encoded 32-byte signing
+// key returned by GenerateSigningKey (or retrieved from the OS keychain).
 // The signature is returned as a lowercase-hex string.
 //
-// Security: uses crypto/hmac — never hand-rolled MAC (T-14-02). The canonical
-// string format ensures the verifier can reconstruct the signed payload given
-// the same four components (Pitfall 6: timestamp must be transmitted alongside
+// Security: uses crypto/hmac — never hand-rolled MAC (T-14-02). Length
+// prefixes make the field join unambiguous: a plain delimiter join would let
+// a relay shift bytes across the title/message boundary (e.g. when a title
+// contains the delimiter) without breaking the signature. The canonical
+// format ensures the verifier can reconstruct the signed payload given the
+// same four components (Pitfall 6: timestamp must be transmitted alongside
 // the signature so the receiver can recompute — see D-NI-03).
 //
 // WR-02: title is included so a relay cannot alter X-Title (the displayed subject
@@ -67,14 +75,24 @@ func SignRigMessage(hexKey, rigName, ts, title, message string) (string, error) 
 		return "", fmt.Errorf("fleet: sign: decode key: %w", err)
 	}
 	mac := hmac.New(sha256.New, keyBytes)
-	_, _ = mac.Write([]byte(rigName + "." + ts + "." + title + "." + message))
+	for _, field := range []string{rigName, ts, title, message} {
+		writeRigField(mac, field)
+	}
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
-// VerifyRigMessage recomputes the HMAC-SHA256 over
-//
-//	rigName + "." + ts + "." + title + "." + message
-//
+// writeRigField writes one length-prefixed field (big-endian uint64 byte
+// length, then the bytes) into h, mirroring internal/gate's writeField.
+// hash.Hash Write never returns an error.
+func writeRigField(h hash.Hash, field string) {
+	var lenBuf [8]byte
+	binary.BigEndian.PutUint64(lenBuf[:], uint64(len(field)))
+	_, _ = h.Write(lenBuf[:])
+	_, _ = h.Write([]byte(field))
+}
+
+// VerifyRigMessage recomputes the HMAC-SHA256 over the same length-prefixed
+// canonical fields (rigName, ts, title, message — see SignRigMessage)
 // and compares it against sigHex using hmac.Equal (constant-time comparison,
 // T-14-02). Returns true only when the signature matches exactly.
 //

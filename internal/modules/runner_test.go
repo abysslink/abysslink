@@ -206,8 +206,12 @@ func TestRunner_Doctor(t *testing.T) {
 // the failing module's ModuleEvent.
 func TestRunner_ApplyAll_ErrorEmitsFatalFinding(t *testing.T) {
 	boom := fmt.Errorf("launchctl bootstrap failed")
-	bad := &fakeModule{name: "bad-mod", applyErr: boom}
-	good := &fakeModule{name: "good-mod"}
+	// Both modules plan one action: ApplyAll now skips zero-action modules
+	// (apply must never exceed the dry-run preview), so the fixtures must
+	// plan work for Apply to be attempted at all.
+	act := []modules.Action{{Module: "x", Description: "test action"}}
+	bad := &fakeModule{name: "bad-mod", applyErr: boom, actions: act}
+	good := &fakeModule{name: "good-mod", actions: act}
 
 	runner, err := modules.NewRunner([]modules.Module{bad, good}, minimalCfg())
 	require.NoError(t, err)

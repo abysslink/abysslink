@@ -67,8 +67,8 @@ func newInitCmd() *cobra.Command {
 		Example: `  # Interactive wizard — creates abysslink.yaml and runs the 8-stage journey
   abysslink init
 
-  # Non-interactive (CI / scripted) — accept all defaults
-  abysslink init --yes
+  # Non-interactive (CI / scripted) — accept all defaults; --email is required
+  abysslink init --yes --email you@example.com
 
   # Resume a previously interrupted setup
   abysslink init --resume`,
@@ -77,70 +77,62 @@ func newInitCmd() *cobra.Command {
 			p := newPrinter(cmd)
 			autoYes, _ := cmd.Flags().GetBool("yes")
 			resume, _ := cmd.Flags().GetBool("resume")
-
-			// Non-interactive check: under --yes/--json/non-TTY the journey runs headless.
-			// interactive() is the canonical predicate (T-10-16).
 			jsonOut, _ := cmd.Flags().GetBool("json")
-			autoYes = autoYes || !interactive(autoYes, jsonOut)
+
+			// Fail-closed consent gate (W1): a non-interactive session (pipe,
+			// CI, --json) must NEVER self-promote to auto-yes — init installs
+			// packages and runs sudo mutations. Explicit --yes is required.
+			if !autoYes && !interactive(false, jsonOut) {
+				return fmt.Errorf("init: %w (init installs packages and changes system settings; non-interactive runs need explicit consent)", errMissingInput("yes"))
+			}
 
 			header := styleBold.Render("abysslink init") + "  " + styleMuted.Render("first-run setup")
 			printerInfo(p, styleHeaderBox.Render(header))
 			printerInfo(p, "")
 
-			runner := &shell.ExecRunner{}
+			// D-38: route every init exec through the gate-decorated runner
+			// (and the newRunner test seam) — never a raw ExecRunner.
+			runner := newRunner()
 			plat, err := platformauto.New(runner)
 			if err != nil {
 				return fmt.Errorf("init: platform detection: %w", err)
 			}
 
-			// Config form and write — must happen before the journey stages run so
-			// that stage 3 (Converge) and subsequent stages have a config to work with.
-			toolStatus := runToolCheck(ctx, p, runner)
-			printerInfo(p, "")
-
-			if err := ensureTailscale(ctx, p, runner, plat, toolStatus, autoYes); err != nil {
-				return err
-			}
-			if err := runSecurityFixes(ctx, p, runner, plat, autoYes); err != nil {
-				return err
-			}
-
-			cfg, err := runInitForm(cmd, autoYes)
-			if err != nil {
-				return err
-			}
-
-			if err := installModuleTools(ctx, p, runner, plat, cfg, toolStatus, autoYes); err != nil {
-				return err
-			}
-
 			configPath := resolveConfigPath(cmd)
-			ok, err := previewAndConfirmConfig(ctx, p, cfg, autoYes)
-			if err != nil {
-				return fmt.Errorf("init: config preview: %w", err)
-			}
-			if !ok {
-				printerInfo(p, "  Aborted — no config written.")
-				return nil
-			}
-
-			if err := config.Write(configPath, cfg); err != nil {
-				return fmt.Errorf("init: write config: %w", err)
-			}
-
-			printerInfo(p, "")
-			printerInfo(p, fmt.Sprintf("  %s  Config written to %s", iconDoneStr(), styleCode.Render(configPath)))
-			printerInfo(p, "")
-
-			// Journey orchestration: run the 8-stage guided flow.
-			stateDir := abysslinkStateDir()
-			stateFile := stateDir + "/" + journeyStageFile
+			stateFile := abysslinkStateDir() + "/" + journeyStageFile
 			resumeFrom := 0
 			if resume {
 				resumeFrom, _ = readJourneyState(stateFile)
-				if resumeFrom > 0 {
-					printerInfo(p, fmt.Sprintf("  %s  Resuming from stage %d...", iconDoneStr(), resumeFrom+1))
+			}
+
+			// --resume with completed wizard state: when at least one journey
+			// stage finished AND the config it wrote still loads, skip the
+			// already-completed wizard stages (tool check, security fixes,
+			// form, config write) and continue the journey directly (U9).
+			var cfg *config.Config
+			skipWizard := false
+			if resumeFrom > 0 {
+				if loaded, lerr := config.Load(configPath); lerr == nil {
+					cfg = loaded
+					skipWizard = true
+					printerInfo(p, fmt.Sprintf("  %s  Resuming from stage %d — existing config at %s reused.",
+						iconDoneStr(), resumeFrom+1, styleCode.Render(configPath)))
 					printerInfo(p, "")
+				} else {
+					printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render(
+						"Resume state found but config could not be loaded — re-running the setup wizard."))
+					printerInfo(p, "")
+				}
+			}
+
+			if !skipWizard {
+				cfg, err = runInitWizard(ctx, cmd, p, runner, plat, configPath, autoYes)
+				if err != nil {
+					return err
+				}
+				if cfg == nil {
+					// User declined the config write — wizard aborted cleanly.
+					return nil
 				}
 			}
 
@@ -158,7 +150,62 @@ func newInitCmd() *cobra.Command {
 	}
 	cmd.Flags().Bool("yes", false, "Non-interactive: accept defaults and install missing tools automatically")
 	cmd.Flags().Bool("resume", false, "Continue from the last completed stage (reads journey-state.json)")
+	cmd.Flags().String("email", "", "Account email written to the config (required with --yes; env ABYSSLINK_EMAIL also accepted)")
+	cmd.Flags().String("hostname", "", "Rig hostname written to the config (default: sanitized OS hostname)")
 	return cmd
+}
+
+// runInitWizard runs the pre-journey wizard stages: tool check, tailscale
+// install/start, security fixes, the config form, module tool installs, and
+// the config preview + write. Returns the written config, or (nil, nil) when
+// the user declined the config write. Extracted from the RunE so --resume can
+// skip it wholesale when the journey state and config already exist (U9).
+func runInitWizard(ctx context.Context, cmd *cobra.Command, p Printer, runner shell.Runner, plat platform.Platform, configPath string, autoYes bool) (*config.Config, error) {
+	// Config form and write — must happen before the journey stages run so
+	// that stage 3 (Converge) and subsequent stages have a config to work with.
+	toolStatus := runToolCheck(ctx, p, runner)
+	printerInfo(p, "")
+
+	if err := ensureTailscale(ctx, p, runner, plat, toolStatus, autoYes); err != nil {
+		return nil, err
+	}
+	if err := runSecurityFixes(ctx, p, runner, plat, autoYes); err != nil {
+		return nil, err
+	}
+
+	cfg, err := runInitForm(cmd, autoYes)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := installModuleTools(ctx, p, runner, plat, cfg, toolStatus, autoYes); err != nil {
+		return nil, err
+	}
+
+	ok, err := previewAndConfirmConfig(ctx, p, cfg, configPath, autoYes)
+	if err != nil {
+		return nil, fmt.Errorf("init: config preview: %w", err)
+	}
+	if !ok {
+		printerInfo(p, "  Aborted — no config written.")
+		return nil, nil
+	}
+
+	// Validate-before-write guard (C1/C2): never write a config that
+	// config.Load would reject — that bricks every subsequent command until
+	// the user hand-edits the YAML the wizard exists to generate.
+	if verr := config.Validate(cfg); verr != nil {
+		return nil, fmt.Errorf("init: refusing to write a config that `abysslink` cannot load: %w", verr)
+	}
+
+	if err := config.Write(configPath, cfg); err != nil {
+		return nil, fmt.Errorf("init: write config: %w", err)
+	}
+
+	printerInfo(p, "")
+	printerInfo(p, fmt.Sprintf("  %s  Config written to %s", iconDoneStr(), styleCode.Render(configPath)))
+	printerInfo(p, "")
+	return cfg, nil
 }
 
 // ensureTailscaleAccount confirms the user has a Tailscale account before proceeding.
@@ -729,8 +776,70 @@ func promptBackendServerURL(cmd *cobra.Command, r *initFormResult) error {
 	return nil
 }
 
-// runInitForm runs the interactive questionnaire and returns the resulting Config.
-func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
+// sanitizeHostname lowercases h and strips every character outside the
+// DNS-safe set enforced by config.Load (safeHostnamePat: [a-z0-9-.], lowercase
+// only). Underscores and spaces become hyphens; leading/trailing hyphens and
+// dots are trimmed. macOS's os.Hostname() default (e.g.
+// "Mohans-MacBook-Pro.local") would otherwise pre-fill a value that bricks
+// every later command at config.Load (C1).
+func sanitizeHostname(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	var b strings.Builder
+	for _, r := range h {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		case r == '_' || r == ' ':
+			b.WriteByte('-')
+		}
+	}
+	return strings.Trim(b.String(), "-.")
+}
+
+// validateInitHostname is the inline form validator for the hostname input.
+// It mirrors the config.Load rules so the wizard can never collect a value
+// the config loader would later reject (C1).
+func validateInitHostname(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("hostname is required")
+	}
+	if s != strings.ToLower(s) {
+		return fmt.Errorf("hostname must be lowercase (try %q)", sanitizeHostname(s))
+	}
+	if err := config.ValidateHostname(s); err != nil {
+		return fmt.Errorf("only a-z, 0-9, hyphens and dots are allowed (try %q)", sanitizeHostname(s))
+	}
+	return nil
+}
+
+// initEmailFromFlags resolves the headless email source: --email flag first,
+// ABYSSLINK_EMAIL env second (C2). cmd may be nil (direct test callers).
+func initEmailFromFlags(cmd *cobra.Command) string {
+	if cmd != nil {
+		if email, _ := cmd.Flags().GetString("email"); email != "" {
+			return email
+		}
+	}
+	return os.Getenv("ABYSSLINK_EMAIL")
+}
+
+// initHostnameFromFlags returns the --hostname flag value, or "" when unset or
+// cmd is nil (direct test callers).
+func initHostnameFromFlags(cmd *cobra.Command) string {
+	if cmd == nil {
+		return ""
+	}
+	h, _ := cmd.Flags().GetString("hostname")
+	return h
+}
+
+// initFormPrefill builds the initFormResult defaults: module toggles, email
+// from --email/ABYSSLINK_EMAIL, and the hostname pre-fill sanitized to the
+// lowercase DNS-safe set config.Load enforces — never a default the loader
+// rejects (C1). Under autoYes it applies the headless fail-fast guards (C2):
+// no config that config.Load would reject is ever produced.
+func initFormPrefill(cmd *cobra.Command, autoYes bool) (initFormResult, error) {
 	r := initFormResult{
 		enableSSH:   true,
 		enableTmux:  true,
@@ -739,7 +848,34 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 		ntfyPort:    2586,
 		backendType: "tailscale", // default — changed to "headscale" or "netbird" when user selects it
 	}
-	r.hostname, _ = os.Hostname()
+	r.email = initEmailFromFlags(cmd)
+	if h := initHostnameFromFlags(cmd); h != "" {
+		r.hostname = sanitizeHostname(h)
+	} else {
+		osHost, _ := os.Hostname()
+		r.hostname = sanitizeHostname(osHost)
+	}
+
+	if autoYes {
+		if r.email == "" {
+			return r, fmt.Errorf("init --yes: an account email is required in non-interactive mode — pass --email <addr> or set ABYSSLINK_EMAIL (a config without identity.email cannot be loaded)")
+		}
+		if err := validateInitHostname(r.hostname); err != nil {
+			return r, fmt.Errorf("init --yes: cannot derive a valid rig hostname from the OS (%v) — pass --hostname <name>", err)
+		}
+	}
+	if r.email != "" && !strings.Contains(r.email, "@") {
+		return r, fmt.Errorf("init: email %q is not a valid email address", r.email)
+	}
+	return r, nil
+}
+
+// runInitForm runs the interactive questionnaire and returns the resulting Config.
+func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
+	r, err := initFormPrefill(cmd, autoYes)
+	if err != nil {
+		return nil, err
+	}
 
 	if !autoYes {
 		form := huh.NewForm(
@@ -750,14 +886,16 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 					Options(
 						huh.NewOption("Tailscale (cloud, requires account)", "tailscale"),
 						huh.NewOption("Headscale (self-hosted)", "headscale"),
-						huh.NewOption("NetBird (self-hosted NetBird control plane (REST-only, SSHCheck degradation — see docs))", "netbird"),
+						huh.NewOption("NetBird (self-hosted, REST-only — SSHCheck degradation, see docs)", "netbird"),
 					).
 					Value(&r.backendType),
 			),
 			huh.NewGroup(
+				// Backend-neutral wording (U8): headscale/netbird users have no
+				// "Tailscale account"; the email is the config identity.
 				huh.NewInput().
-					Title("Tailscale account email").
-					Description("The email you signed into Tailscale with").
+					Title("Account email").
+					Description("The email you sign in to your control plane with (Tailscale, Headscale, or NetBird)").
 					Value(&r.email).
 					Validate(func(s string) error {
 						if !strings.Contains(s, "@") {
@@ -767,8 +905,9 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 					}),
 				huh.NewInput().
 					Title("Rig hostname").
-					Description("This machine's Tailscale hostname (pre-filled from OS)").
-					Value(&r.hostname),
+					Description("This machine's tailnet hostname (pre-filled from OS, lowercase a-z0-9-.)").
+					Value(&r.hostname).
+					Validate(validateInitHostname),
 			),
 			huh.NewGroup(
 				huh.NewConfirm().
@@ -836,11 +975,15 @@ func currentUnixUser() string {
 // Under autoYes the preview is still printed so the user can see exactly what
 // will be written, but the confirm prompt is skipped.
 //
+// configPath is shown in the confirmation so the prompt says exactly what the
+// action is — writing one YAML file — instead of the "Apply N change(s)? This
+// will modify your system." blast warning, which misdescribes it (U12).
+//
 // Config contains only email, hostname, module toggles, and safe defaults.
 // Secrets (API keys, tokens) live exclusively in the OS keychain and are never
 // marshalled here — callers must not route the returned yaml through slog or
 // audit (it contains no secrets but the output is also not auditable by value).
-func previewAndConfirmConfig(ctx context.Context, p Printer, cfg *config.Config, autoYes bool) (bool, error) {
+func previewAndConfirmConfig(ctx context.Context, p Printer, cfg *config.Config, configPath string, autoYes bool) (bool, error) {
 	data, err := config.Marshal(cfg)
 	if err != nil {
 		return false, fmt.Errorf("marshal config for preview: %w", err)
@@ -866,37 +1009,9 @@ func previewAndConfirmConfig(ctx context.Context, p Printer, cfg *config.Config,
 		return false, nil
 	}
 
-	count := countEnabledModules(cfg)
-	ok, err := tui.ConfirmBlast(ctx, "Write this config?", count, autoYes)
+	ok, err := tui.Confirm(ctx, fmt.Sprintf("Write config to %s?", configPath), autoYes)
 	if err != nil {
 		return false, err
 	}
 	return ok, nil
-}
-
-// countEnabledModules counts the number of modules that are enabled in cfg.
-func countEnabledModules(cfg *config.Config) int {
-	n := 0
-	if cfg.Modules.SSH.Enabled {
-		n++
-	}
-	if cfg.Modules.Tmux.Enabled {
-		n++
-	}
-	if cfg.Modules.Mosh.Enabled {
-		n++
-	}
-	if cfg.Modules.Ntfy.Enabled {
-		n++
-	}
-	if cfg.Modules.Watch.Enabled {
-		n++
-	}
-	if cfg.Modules.Notify.Enabled {
-		n++
-	}
-	if cfg.ClaudeCode.Enabled {
-		n++
-	}
-	return n
 }

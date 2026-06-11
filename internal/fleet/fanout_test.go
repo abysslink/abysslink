@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -60,10 +61,16 @@ func newHostnameRunner(m map[string]hostEntry) *hostnameDispatchRunner {
 }
 
 func (h *hostnameDispatchRunner) Run(_ context.Context, _ string, args ...string) (shell.Result, error) {
-	// args[0] is the SSH hostname (rig.Hostname passed as first arg by FanOut).
+	// The SSH hostname is the first argv token that is not an -o option pair
+	// (FanOut prepends -o BatchMode=yes -o ConnectTimeout=5).
 	hostname := ""
-	if len(args) > 0 {
-		hostname = args[0]
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-o" {
+			i++ // skip the option value
+			continue
+		}
+		hostname = args[i]
+		break
 	}
 	if v, ok := h.responses[hostname]; ok {
 		return v.res, v.err
@@ -81,6 +88,10 @@ func (h *hostnameDispatchRunner) RunInteractive(_ context.Context, _ string, _ .
 
 func (h *hostnameDispatchRunner) RunWithEnv(_ context.Context, _ map[string]string, _ string, args ...string) (shell.Result, error) {
 	return h.Run(context.Background(), "", args...)
+}
+
+func (h *hostnameDispatchRunner) RunStream(_ context.Context, _ string, _ ...string) (*shell.Stream, error) {
+	return nil, errors.New("runstream: not supported by this fake")
 }
 
 // TestFanOut_UnreachableContinues verifies SC-2: one offline rig does not abort
@@ -108,6 +119,99 @@ func TestFanOut_UnreachableContinues(t *testing.T) {
 
 	assert.True(t, results[2].Reachable, "rig2 should be reachable")
 	assert.Equal(t, `{"tailscale":"up"}`, results[2].Stdout)
+}
+
+// recordingRunner wraps hostnameDispatchRunner and records every Run argv so
+// tests can assert on the SSH options FanOut builds.
+type recordingRunner struct {
+	*hostnameDispatchRunner
+	mu    sync.Mutex
+	argvs [][]string
+}
+
+func (r *recordingRunner) Run(ctx context.Context, name string, args ...string) (shell.Result, error) {
+	r.mu.Lock()
+	r.argvs = append(r.argvs, append([]string{name}, args...))
+	r.mu.Unlock()
+	return r.hostnameDispatchRunner.Run(ctx, name, args...)
+}
+
+// TestFanOut_RemoteNonZeroExitIsReachable is the C1 regression test: a remote
+// `abysslink doctor --json` that exits 1 (WARN findings, CLI-06) over a
+// HEALTHY ssh transport must be reported degraded-but-reachable — stdout kept,
+// Reachable=true, exit code recorded — never UNREACHABLE.
+func TestFanOut_RemoteNonZeroExitIsReachable(t *testing.T) {
+	rigs := makeRigs("warn-rig", "fatal-rig")
+
+	const findingsJSON = `{"findings":[{"module":"tmux","severity":1}]}`
+	runner := newHostnameRunner(map[string]hostEntry{
+		// doctor exits 1 on WARN, 2 on FATAL — both with valid JSON on stdout.
+		"warn-rig.example.ts.net":  {res: shell.Result{Stdout: findingsJSON, ExitCode: 1}},
+		"fatal-rig.example.ts.net": {res: shell.Result{Stdout: findingsJSON, ExitCode: 2}},
+	})
+
+	results, err := FanOut(context.Background(), runner, rigs, 5*time.Second, false, []string{"doctor", "--json"})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+
+	assert.True(t, results[0].Reachable, "remote exit 1 (WARN) must be degraded-but-reachable")
+	assert.Equal(t, findingsJSON, results[0].Stdout, "stdout must be preserved for DecodeFindings")
+	assert.Equal(t, 1, results[0].ExitCode)
+
+	assert.True(t, results[1].Reachable, "remote exit 2 (FATAL) must be degraded-but-reachable")
+	assert.Equal(t, findingsJSON, results[1].Stdout)
+	assert.Equal(t, 2, results[1].ExitCode)
+}
+
+// TestFanOut_SSH255IsUnreachable verifies that ssh's own transport failure code
+// (255) marks the rig UNREACHABLE even when Run returns no Go error.
+func TestFanOut_SSH255IsUnreachable(t *testing.T) {
+	rigs := makeRigs("dead-rig")
+	runner := newHostnameRunner(map[string]hostEntry{
+		"dead-rig.example.ts.net": {res: shell.Result{ExitCode: 255, Stderr: "ssh: connect to host: Connection refused"}},
+	})
+
+	results, err := FanOut(context.Background(), runner, rigs, 5*time.Second, false, []string{"status", "--json"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.False(t, results[0].Reachable, "ssh exit 255 is a transport failure → UNREACHABLE")
+}
+
+// TestFanOut_StrictNilErrNoNilWrap is the W8 regression test: strict mode with
+// an ssh-255 failure (err == nil) must produce a useful error carrying the exit
+// code and stderr — never "%!w(<nil>)" from wrapping a nil error.
+func TestFanOut_StrictNilErrNoNilWrap(t *testing.T) {
+	rigs := makeRigs("dead-rig")
+	runner := newHostnameRunner(map[string]hostEntry{
+		"dead-rig.example.ts.net": {res: shell.Result{ExitCode: 255, Stderr: "Connection timed out"}},
+	})
+
+	_, err := FanOut(context.Background(), runner, rigs, 5*time.Second, true, []string{"status", "--json"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "%!w", "must never wrap a nil error")
+	assert.Contains(t, err.Error(), "255", "strict error must carry the ssh exit code")
+	assert.Contains(t, err.Error(), "Connection timed out", "strict error must carry ssh stderr")
+}
+
+// TestFanOut_SSHArgvHasBatchModeAndConnectTimeout verifies the ssh argv carries
+// the fail-fast, never-prompt options before the hostname.
+func TestFanOut_SSHArgvHasBatchModeAndConnectTimeout(t *testing.T) {
+	rigs := makeRigs("rig0")
+	rr := &recordingRunner{hostnameDispatchRunner: newHostnameRunner(map[string]hostEntry{
+		"rig0.example.ts.net": {res: shell.Result{Stdout: "{}", ExitCode: 0}},
+	})}
+
+	_, err := FanOut(context.Background(), rr, rigs, 5*time.Second, false, []string{"status", "--json"})
+	require.NoError(t, err)
+	require.Len(t, rr.argvs, 1)
+
+	argv := rr.argvs[0]
+	assert.Equal(t, []string{
+		"ssh",
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=5",
+		"rig0.example.ts.net", "abysslink", "status", "--json",
+	}, argv, "ssh options must precede the hostname; never touch askpass, fail fast")
 }
 
 // TestFanOut_StrictFailsFast verifies that --strict turns any UNREACHABLE rig
@@ -149,6 +253,10 @@ func (b *blockingRunner) RunInteractive(ctx context.Context, _ string, _ ...stri
 
 func (b *blockingRunner) RunWithEnv(ctx context.Context, _ map[string]string, name string, args ...string) (shell.Result, error) {
 	return b.Run(ctx, name, args...)
+}
+
+func (b *blockingRunner) RunStream(_ context.Context, _ string, _ ...string) (*shell.Stream, error) {
+	return nil, errors.New("runstream: not supported by this fake")
 }
 
 // TestFanOut_PerRigTimeout verifies that a blocking rig is cancelled by the

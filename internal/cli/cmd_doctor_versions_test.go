@@ -99,6 +99,23 @@ func TestVersionFloor_NtfyExecError_Warn(t *testing.T) {
 	assert.Equal(t, modules.SeverityWarning, found.Severity, "exec error must yield WARN (fail-honest)")
 }
 
+// TestVersionFloor_NonZeroExit_Warn verifies that a binary exiting non-zero
+// yields SeverityWarning even when its output contains a parseable N.N token
+// that meets the floor. ExecRunner normalizes non-zero exits to (Result, nil),
+// so without an explicit ExitCode check this would be a silent SeverityOK pass
+// (fail-honest ladder violation).
+func TestVersionFloor_NonZeroExit_Warn(t *testing.T) {
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "ntfy version 2.21.0\n", ExitCode: 1}},
+	)
+	findings := versionFloorFindings(context.Background(), runner)
+	found := findFloorFinding(findings, "ntfy-version")
+	require.NotNil(t, found, "ntfy-version finding must be present on non-zero exit")
+	assert.Equal(t, modules.SeverityWarning, found.Severity,
+		"a failing probe must yield WARN even if its output parses to an at-floor version (never a silent pass)")
+	assert.Contains(t, found.Message, "exited 1", "the message must name the non-zero exit code")
+}
+
 // TestVersionFloor_NtfyUnparseable_Warn verifies that unparseable output yields
 // SeverityWarning (fail-honest).
 func TestVersionFloor_NtfyUnparseable_Warn(t *testing.T) {
@@ -126,4 +143,91 @@ func TestVersionFloor_NoNewSemverComparator(t *testing.T) {
 	// The grep assertion is captured in the plan verification step; this test
 	// documents the design constraint.
 	t.Log("D-09 compliance: versionFloorFindings reuses package cli semverLT — no new comparator")
+}
+
+// ── D-27: tmux >= 3.2 capability floor (WARN, not FATAL) ─────────────────────
+
+// findFloorFinding returns the finding with the given check ID.
+func findFloorFinding(findings []modules.Finding, checkID string) *modules.Finding {
+	for i := range findings {
+		if findings[i].Check == checkID {
+			return &findings[i]
+		}
+	}
+	return nil
+}
+
+// scriptedFloorRunner scripts one probe result per versionFloors row, in table
+// order (ntfy first, then tmux).
+func scriptedFloorRunner(calls ...shell.Call) shell.Runner {
+	return shell.NewMockRunner(calls...)
+}
+
+// TestTmuxVersionFloor_Below_Warn verifies tmux 3.1c yields WARN (not FATAL —
+// the registry is optional, D-27) with a message naming the found version, the
+// 3.2 floor, and what degrades (session identity in notifications).
+func TestTmuxVersionFloor_Below_Warn(t *testing.T) {
+	runner := scriptedFloorRunner(
+		shell.Call{Result: shell.Result{Stdout: "ntfy version 2.21.0\n", ExitCode: 0}},
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.1c\n", ExitCode: 0}},
+	)
+	findings := versionFloorFindings(context.Background(), runner)
+	found := findFloorFinding(findings, "tmux-version")
+	require.NotNil(t, found, "tmux-version finding must be present")
+	assert.Equal(t, modules.SeverityWarning, found.Severity, "tmux below 3.2 must WARN, never FATAL (D-27)")
+	assert.Contains(t, found.Message, "3.1", "the found version must be named")
+	assert.Contains(t, found.Message, "3.2", "the 3.2 floor must be named")
+	assert.Contains(t, found.Message, "session", "the message must say what degrades (session registry/identity)")
+}
+
+// TestTmuxVersionFloor_LetterSuffix_OK verifies that the tmux "3.6b" release
+// format parses (letter suffix stripped, mirroring modules/tmux
+// parseTmuxVersion) and passes the 3.2 floor.
+func TestTmuxVersionFloor_LetterSuffix_OK(t *testing.T) {
+	runner := scriptedFloorRunner(
+		shell.Call{Result: shell.Result{Stdout: "ntfy version 2.21.0\n", ExitCode: 0}},
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n", ExitCode: 0}},
+	)
+	findings := versionFloorFindings(context.Background(), runner)
+	found := findFloorFinding(findings, "tmux-version")
+	require.NotNil(t, found, "tmux-version finding must be present")
+	assert.Equal(t, modules.SeverityOK, found.Severity, "tmux 3.6b is >= 3.2 — the letter suffix must not parse to 3.0")
+}
+
+// TestTmuxVersionFloor_BinaryMissing_Warn verifies the fail-honest ladder: a
+// missing tmux binary WARNs (the registry is optional — D-27), never a silent
+// pass and never a FATAL.
+func TestTmuxVersionFloor_BinaryMissing_Warn(t *testing.T) {
+	runner := scriptedFloorRunner(
+		shell.Call{Result: shell.Result{Stdout: "ntfy version 2.21.0\n", ExitCode: 0}},
+		shell.Call{Err: assert.AnError}, // tmux binary absent
+	)
+	findings := versionFloorFindings(context.Background(), runner)
+	found := findFloorFinding(findings, "tmux-version")
+	require.NotNil(t, found, "tmux-version finding must be present even when the binary is absent")
+	assert.Equal(t, modules.SeverityWarning, found.Severity, "missing tmux must WARN per the fail-honest ladder")
+}
+
+// TestVersionFloor_ExistingRowsKeepFatal is the regression guard on the new
+// severity field: the zero value must preserve FATAL behavior for every
+// pre-existing CVE row in the table.
+func TestVersionFloor_ExistingRowsKeepFatal(t *testing.T) {
+	for _, f := range versionFloors {
+		if f.checkID == "tmux-version" {
+			assert.Equal(t, floorSevWarn, f.severity, "the tmux capability floor must be WARN severity (D-27)")
+			continue
+		}
+		assert.Equal(t, floorSevFatal, f.severity,
+			"CVE row %q must keep FATAL severity (zero-value default)", f.checkID)
+	}
+
+	// Behavioral: ntfy below floor is still FATAL with the severity field present.
+	runner := scriptedFloorRunner(
+		shell.Call{Result: shell.Result{Stdout: "ntfy version 2.20.0\n", ExitCode: 0}},
+		shell.Call{Result: shell.Result{Stdout: "tmux 3.6b\n", ExitCode: 0}},
+	)
+	findings := versionFloorFindings(context.Background(), runner)
+	found := findFloorFinding(findings, "ntfy-version")
+	require.NotNil(t, found)
+	assert.Equal(t, modules.SeverityFatal, found.Severity, "ntfy below floor must stay FATAL")
 }

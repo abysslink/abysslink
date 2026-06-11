@@ -18,13 +18,18 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/spf13/cobra"
@@ -32,6 +37,12 @@ import (
 
 // statusReport is the JSON-serialisable status summary.
 // RigName is populated only on fleet fan-out results (rig_name field, FLEET-02).
+//
+// WakeSent/AckReceived/ContentStore/Devices are the BACK-07/DEVC-04 fields
+// passed through from abysslinkd's GET /status. They are optional — an older
+// daemon (or an unreachable one) simply omits them, never errors. Devices is
+// also populated from the local device store when the daemon is unreachable
+// (CLI-side fallback so a daemon-less setup still shows enrollment state).
 type statusReport struct {
 	RigName      string `json:"rig_name,omitempty"` // populated by --all-rigs fan-out
 	Tailscale    string `json:"tailscale"`
@@ -42,6 +53,120 @@ type statusReport struct {
 	Ntfy         string `json:"ntfy"`
 	DiskEncrypt  string `json:"disk_encrypt"`
 	Timestamp    string `json:"timestamp"`
+
+	// BACK-07: notification wake/ack counters from the daemon (nil = unknown).
+	WakeSent    *uint64 `json:"wake_sent,omitempty"`
+	AckReceived *uint64 `json:"ack_received,omitempty"`
+	// ContentStore is passed through verbatim (raw JSON) — its shape belongs
+	// to the daemon; the CLI renders it best-effort and never validates it.
+	ContentStore json.RawMessage `json:"content_store,omitempty"`
+	// Devices is the enrolled-device summary (DEVC-04).
+	Devices []statusDeviceEntry `json:"devices,omitempty"`
+}
+
+// statusDeviceEntry is one device row in the status output. Mirrors the
+// daemon's /status devices element {name,last_seen,stale,revoked}; last_seen
+// is RFC3339 or empty for "never".
+type statusDeviceEntry struct {
+	Name     string `json:"name"`
+	LastSeen string `json:"last_seen,omitempty"`
+	Stale    bool   `json:"stale,omitempty"`
+	Revoked  bool   `json:"revoked,omitempty"`
+}
+
+// statusDaemonExtras is the subset of abysslinkd's GET /status response the
+// CLI consumes for BACK-07/DEVC-04. Every field is optional: an older daemon
+// that does not emit them decodes to nils, and unknown extra fields in the
+// response are ignored — the CLI must keep working against both daemon
+// generations (defensive decode).
+type statusDaemonExtras struct {
+	WakeSent     *uint64             `json:"wake_sent,omitempty"`
+	AckReceived  *uint64             `json:"ack_received,omitempty"`
+	ContentStore json.RawMessage     `json:"content_store,omitempty"`
+	Devices      []statusDeviceEntry `json:"devices,omitempty"`
+}
+
+// fetchDaemonStatus GETs /status from the local abysslinkd over its Unix
+// socket and decodes the BACK-07/DEVC-04 fields. A package var so tests can
+// inject canned daemon responses (same seam pattern as newRunner). Any error
+// means "daemon unreachable" to the caller — never fatal for `status`.
+var fetchDaemonStatus = func(ctx context.Context) (*statusDaemonExtras, error) { //nolint:gochecknoglobals // test seam, mirrors newRunner
+	sp := daemon.SocketPath()
+	if sp == "" {
+		return nil, errors.New("status: daemon socket path unavailable")
+	}
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sp)
+			},
+		},
+	}
+	defer client.CloseIdleConnections()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/status", nil)
+	if err != nil {
+		return nil, fmt.Errorf("status: build daemon request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("status: daemon unreachable: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status: daemon /status returned HTTP %d", resp.StatusCode)
+	}
+	var ex statusDaemonExtras
+	if err := json.NewDecoder(resp.Body).Decode(&ex); err != nil {
+		return nil, fmt.Errorf("status: decode daemon /status: %w", err)
+	}
+	return &ex, nil
+}
+
+// applyStatusExtras merges the daemon's BACK-07/DEVC-04 fields into rep.
+// Daemon reachable: pass the fields through (absent fields stay omitted — an
+// older daemon must not break `status`). Daemon unreachable: keep the current
+// behavior for the counters (omitted) and fall back to reading the device
+// list straight from the local device store, so enrollment state is visible
+// even when abysslinkd is not running (DEVC-04 CLI-side fallback).
+func applyStatusExtras(rep *statusReport, extras *statusDaemonExtras, fetchErr error) {
+	if fetchErr != nil || extras == nil {
+		rep.Devices = localDeviceEntries()
+		return
+	}
+	rep.WakeSent = extras.WakeSent
+	rep.AckReceived = extras.AckReceived
+	rep.ContentStore = extras.ContentStore
+	rep.Devices = extras.Devices
+}
+
+// localDeviceEntries reads the enrolled-device list directly from the local
+// device store (read-only — List/Stale never write). Any failure, including a
+// missing store file, yields nil so the section is simply omitted.
+func localDeviceEntries() []statusDeviceEntry {
+	path, err := deviceStorePath()
+	if err != nil {
+		return nil
+	}
+	st := device.New(path, nil, nil, nil) // read-only: no audit writer or keychain needed
+	recs := st.List()
+	if len(recs) == 0 {
+		return nil
+	}
+	staleIDs := make(map[string]bool)
+	for _, r := range st.Stale(deviceStaleWindow) {
+		staleIDs[r.ID] = true
+	}
+	out := make([]statusDeviceEntry, 0, len(recs))
+	for _, r := range recs {
+		e := statusDeviceEntry{Name: r.Name, Stale: staleIDs[r.ID], Revoked: r.Revoked}
+		if !r.LastSeen.IsZero() {
+			e.LastSeen = r.LastSeen.UTC().Format(time.RFC3339)
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func newStatusCmd() *cobra.Command {
@@ -62,6 +187,13 @@ func newStatusCmd() *cobra.Command {
 
 			p := newPrinter(cmd)
 
+			// Fresh machine: no config exists yet. Say so instead of rendering
+			// a green dashboard built from Defaults (U10).
+			if cc.cfgMissing {
+				printStatusNotInitialised(p, cc.jsonOut)
+				return nil
+			}
+
 			// Read persistent fan-out flags (registered in Plan 03 / root.go).
 			strict, _ := cmd.Flags().GetBool("strict")
 
@@ -71,7 +203,13 @@ func newStatusCmd() *cobra.Command {
 			if rigErr != nil {
 				return rigErr
 			}
-			if rt.fanOut && len(rt.rigs) > 0 {
+			if rt.fanOut {
+				// --all-rigs with zero enrolled rigs must say so, not silently
+				// degrade to local-only output (U3).
+				if len(rt.rigs) == 0 {
+					printStatusNoRigs(p, cc.jsonOut)
+					return nil
+				}
 				return statusRigs(ctx, cc, p, strict, rt.rigs)
 			}
 
@@ -125,8 +263,17 @@ func newStatusCmd() *cobra.Command {
 				TailnetLock:  lockStatus,
 				Ntfy:         ntfyStatus,
 				DiskEncrypt:  diskEncrypt,
-				Timestamp:    time.Now().Format("2006-01-02 15:04"),
+				// RFC3339 UTC — the same format the fleet fan-out rows use, so
+				// JSON consumers parse exactly one timestamp format (U5).
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			}
+
+			// BACK-07/DEVC-04: merge the daemon's wake/ack counters, content
+			// store state, and device list — defensively (an older or
+			// unreachable daemon degrades to omission + local-store fallback,
+			// never an error).
+			extras, exErr := fetchDaemonStatus(ctx)
+			applyStatusExtras(&rep, extras, exErr)
 
 			if cc.jsonOut {
 				// Emit a typed, ANSI-free record via PrintJSON (T-10-18).
@@ -135,14 +282,43 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			printStatusPanel(p, rep)
+			renderStatusExtras(p, rep, time.Now())
 			return nil
 		},
 	}
 }
 
+// printStatusNotInitialised renders the "not initialised — run init" banner
+// for a machine with no abysslink.yaml (U10). JSON mode emits a structured
+// record so scripts can detect the state.
+func printStatusNotInitialised(p Printer, jsonOut bool) {
+	if jsonOut {
+		p.PrintJSON(map[string]string{
+			"status": "not-initialised",
+			"hint":   "run `abysslink init` to create abysslink.yaml",
+		})
+		return
+	}
+	printerInfo(p, "")
+	printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("Abysslink is not initialised on this machine."))
+	printerInfo(p, "  "+styleMuted.Render("Run ")+styleCode.Render("abysslink init")+styleMuted.Render(" to set it up."))
+	printerInfo(p, "")
+}
+
+// printStatusNoRigs renders the empty-fleet notice for --all-rigs (U3). JSON
+// mode emits [] so list consumers get a stable empty-list encoding.
+func printStatusNoRigs(p Printer, jsonOut bool) {
+	if jsonOut {
+		p.PrintJSON([]statusReport{})
+		return
+	}
+	printerInfo(p, "  No rigs enrolled — enroll one with "+styleCode.Render("abysslink rig add")+".")
+}
+
 // statusAllRigs fans out `abysslink status --json` to every enrolled rig and
 // aggregates the results into a per-rig slice. Offline rigs appear as UNREACHABLE
-// rows (SC-2); --strict maps to exit 1 when any rig is offline (T-14-21).
+// rows (SC-2); --strict maps to exit 2 when any rig is offline (T-14-21,
+// matches root --help and the exitCodeFatal return below).
 func statusAllRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool) error {
 	return statusRigs(ctx, cc, p, strict, cc.cfg.Rigs)
 }
@@ -267,23 +443,45 @@ func diskEncryptionStatus(ctx context.Context, r shell.Runner) string {
 	}
 }
 
+// statusRowState classifies a status panel row for icon rendering.
+type statusRowState int
+
+const (
+	rowOK      statusRowState = iota // green — feature healthy/enabled
+	rowBad                           // red — feature expected but failing
+	rowNeutral                       // muted — feature deliberately disabled (U4)
+)
+
 // statusRow renders one row of the status panel.
-func statusRow(label, value string, ok bool) string {
+func statusRow(label, value string, state statusRowState) string {
 	var icon string
-	if ok {
+	switch state {
+	case rowOK:
 		icon = iconOKStr()
-	} else {
+	case rowNeutral:
+		icon = iconNeutralStr()
+	default:
 		icon = iconFatalStr()
 	}
 	lbl := styleMuted.Render(fmt.Sprintf("%-18s", label))
 	return fmt.Sprintf("  %s  %s  %s", icon, lbl, styleBold.Render(value))
 }
 
+// statusRowStateFor maps a status value to its row state. "disabled" is a
+// deliberate user choice and renders neutral, never as a red failure (U4).
+func statusRowStateFor(s string) statusRowState {
+	switch s {
+	case "running", "enabled", "encrypted":
+		return rowOK
+	case "disabled":
+		return rowNeutral
+	default:
+		return rowBad
+	}
+}
+
 // printStatusPanel renders the styled status box.
 func printStatusPanel(p Printer, rep statusReport) {
-	isOK := func(s string) bool {
-		return s == "running" || s == "enabled" || s == "encrypted"
-	}
 
 	hostnameLabel := rep.Tailscale
 	if rep.Hostname != "" || rep.TailscaleIP != "" {
@@ -298,14 +496,117 @@ func printStatusPanel(p Printer, rep statusReport) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleBold.Render("Abysslink Status") + "\n\n")
-	sb.WriteString(statusRow("Tailscale", hostnameLabel, isOK(rep.Tailscale)) + "\n")
-	sb.WriteString(statusRow("Tailscale SSH", rep.TailscaleSSH, isOK(rep.TailscaleSSH)) + "\n")
-	sb.WriteString(statusRow("Tailnet Lock", rep.TailnetLock, isOK(rep.TailnetLock)) + "\n")
-	sb.WriteString(statusRow("ntfy", rep.Ntfy, isOK(rep.Ntfy)) + "\n")
-	sb.WriteString(statusRow("Disk Encryption", rep.DiskEncrypt, isOK(rep.DiskEncrypt)) + "\n")
-	sb.WriteString("\n" + styleMuted.Render(rep.Timestamp))
+	sb.WriteString(styleBold.Render("Abysslink Status"))
+	sb.WriteString("\n\n")
+	for _, row := range []string{
+		statusRow("Tailscale", hostnameLabel, statusRowStateFor(rep.Tailscale)),
+		statusRow("Tailscale SSH", rep.TailscaleSSH, statusRowStateFor(rep.TailscaleSSH)),
+		statusRow("Tailnet Lock", rep.TailnetLock, statusRowStateFor(rep.TailnetLock)),
+		statusRow("ntfy", rep.Ntfy, statusRowStateFor(rep.Ntfy)),
+		statusRow("Disk Encryption", rep.DiskEncrypt, statusRowStateFor(rep.DiskEncrypt)),
+	} {
+		sb.WriteString(row)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(styleMuted.Render(rep.Timestamp))
 
 	printerInfo(p, styleStatusBox.Render(strings.TrimRight(sb.String(), "\n")))
 	printerInfo(p, "")
+}
+
+// renderStatusExtras prints the human-readable BACK-07/DEVC-04 section under
+// the status panel: notification wake/ack counters, content store state, and
+// the device list with stale (⚠) and revoked flags. Every sub-section is
+// omitted when its data is absent (older daemon / nothing enrolled).
+func renderStatusExtras(p Printer, rep statusReport, now time.Time) {
+	printed := false
+	if rep.WakeSent != nil || rep.AckReceived != nil {
+		printerInfo(p, fmt.Sprintf("  notifications: %d wakes sent · %d acks received",
+			derefUint64(rep.WakeSent), derefUint64(rep.AckReceived)))
+		printed = true
+	}
+	if cs := contentStoreLabel(rep.ContentStore); cs != "" {
+		printerInfo(p, "  content store: "+cs)
+		printed = true
+	}
+	if len(rep.Devices) > 0 {
+		printerInfo(p, "  devices:")
+		for _, d := range rep.Devices {
+			printerInfo(p, "    "+statusDeviceLine(d, now))
+		}
+		printed = true
+	}
+	if printed {
+		printerInfo(p, "")
+	}
+}
+
+// derefUint64 returns *v, or 0 for nil.
+func derefUint64(v *uint64) uint64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+// contentStoreLabel renders the daemon's content_store field best-effort: a
+// JSON string is shown bare; any other shape is shown as raw compact JSON.
+func contentStoreLabel(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
+}
+
+// statusDeviceLine renders one device row: revoked wins over stale; stale rows
+// are flagged with ⚠ and the time since last check-in (DEVC-04).
+func statusDeviceLine(d statusDeviceEntry, now time.Time) string {
+	switch {
+	case d.Revoked:
+		return d.Name + "  " + styleMuted.Render("revoked")
+	case d.Stale && d.LastSeen == "":
+		return d.Name + "  " + styleWarn.Render("⚠ stale — never checked in")
+	case d.Stale:
+		return d.Name + "  " + styleWarn.Render("⚠ stale — last seen "+lastSeenLabel(d.LastSeen, now))
+	default:
+		return d.Name + "  " + styleMuted.Render("last seen "+lastSeenLabel(d.LastSeen, now))
+	}
+}
+
+// lastSeenLabel humanizes an RFC3339 last-seen stamp relative to now; an
+// empty stamp is "never" and an unparseable one is shown verbatim (defensive:
+// the value comes from the daemon, not from this process).
+func lastSeenLabel(lastSeen string, now time.Time) string {
+	if lastSeen == "" {
+		return "never"
+	}
+	t, err := time.Parse(time.RFC3339, lastSeen)
+	if err != nil {
+		return lastSeen
+	}
+	return humanizeSince(now, t)
+}
+
+// humanizeSince renders the elapsed time since t as "just now" / "Nm ago" /
+// "Nh ago" / "Nd ago".
+func humanizeSince(now, t time.Time) string {
+	d := now.Sub(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }

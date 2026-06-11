@@ -31,10 +31,21 @@ import (
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
-// minMajor and minMinor define the minimum acceptable tmux version.
+// minMajor and minMinor define the minimum acceptable tmux version. The floor
+// is 3.2 — the same capability floor `abysslink doctor` advertises for
+// session-typed notifications (D-27/BACK-03); keeping the two in sync avoids
+// two sources of truth for the same question.
 const (
 	minMajor = 3
-	minMinor = 0
+	minMinor = 2
+)
+
+// TPM (tmux plugin manager) is cloned pinned to a release tag, never floating
+// HEAD: an unpinned clone of a third-party repo that tmux executes on every
+// start is a supply-chain hole.
+const (
+	tpmRepoURL = "https://github.com/tmux-plugins/tpm"
+	tpmVersion = "v3.1.0"
 )
 
 // Module implements the tmux module.
@@ -232,14 +243,15 @@ func (m *Module) bootstrapTPM(ctx context.Context) error {
 		return nil
 	}
 
-	slog.Info("tmux apply: installing TPM (tmux plugin manager)", "dir", tpmDir)
+	slog.Info("tmux apply: installing TPM (tmux plugin manager)", "dir", tpmDir, "version", tpmVersion)
 	// -c credential.helper= disables the OS credential helper so git never
 	// prompts for a password — TPM is a public repo and needs no auth.
-	// --depth 1 keeps the clone fast and small.
+	// --depth 1 keeps the clone fast and small; --branch <tag> pins the clone
+	// to a released version instead of floating HEAD (supply chain).
 	res, err := m.runner.RunWithEnv(ctx,
 		map[string]string{"GIT_TERMINAL_PROMPT": "0"},
 		"git", "-c", "credential.helper=",
-		"clone", "--depth", "1", "https://github.com/tmux-plugins/tpm", tpmDir)
+		"clone", "--depth", "1", "--branch", tpmVersion, tpmRepoURL, tpmDir)
 	if err != nil {
 		return fmt.Errorf("git clone tpm: %w", err)
 	}

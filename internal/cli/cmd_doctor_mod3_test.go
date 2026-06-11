@@ -34,13 +34,15 @@ func upsnapEnabledCfg() *config.Config {
 	return cfg
 }
 
-// TestDoctorWolApplyGate_Fatal verifies the wol-apply-gate FATAL finding is
-// present when upsnap is enabled.
-func TestDoctorWolApplyGate_Fatal(t *testing.T) {
+// TestDoctorWolApplyGate_Warn verifies the wol-apply-gate advisory is present
+// when upsnap is enabled and is graded WARN — a pure structural advisory must
+// never make a healthy rig exit 2 forever (review W7).
+func TestDoctorWolApplyGate_Warn(t *testing.T) {
 	findings := mod3DoctorFindings(context.Background(), upsnapEnabledCfg(), shell.NewMockRunner())
 	f, ok := findFinding(findings, "wol-apply-gate")
 	require.True(t, ok, "wol-apply-gate must be present when upsnap is enabled")
-	assert.Equal(t, modules.SeverityFatal, f.Severity)
+	assert.Equal(t, modules.SeverityWarning, f.Severity,
+		"unconditional advisory must be WARN, not FATAL (W7)")
 }
 
 // TestDoctorUpSnapBind_Warn verifies the upsnap-bind WARN finding is present.
@@ -81,13 +83,14 @@ func asciinemaEnabledCfg() *config.Config {
 	return cfg
 }
 
-// TestDoctorAtuinBind_Fatal verifies the atuin-bind FATAL finding is present
-// when atuin is enabled.
-func TestDoctorAtuinBind_Fatal(t *testing.T) {
+// TestDoctorAtuinBind_Warn verifies the atuin-bind advisory is present when
+// atuin is enabled and is graded WARN (structural advisory, review W7).
+func TestDoctorAtuinBind_Warn(t *testing.T) {
 	findings := mod3DoctorFindings(context.Background(), atuinEnabledCfg(), shell.NewMockRunner())
 	f, ok := findFinding(findings, "atuin-bind")
 	require.True(t, ok, "atuin-bind must be present when atuin is enabled")
-	assert.Equal(t, modules.SeverityFatal, f.Severity)
+	assert.Equal(t, modules.SeverityWarning, f.Severity,
+		"unconditional advisory must be WARN, not FATAL (W7)")
 }
 
 // TestDoctorAtuinKeyBackedUp_Warn verifies the atuin-key-backed-up WARN finding
@@ -124,13 +127,31 @@ func TestDoctorSandboxLandlockSupported_Warn(t *testing.T) {
 	}
 }
 
-// TestDoctorAsciinemaRecWarning_Fatal verifies the asciinema-rec-warning FATAL
-// finding is present when asciinema is enabled.
-func TestDoctorAsciinemaRecWarning_Fatal(t *testing.T) {
+// TestDoctorAsciinemaRecWarning_Warn verifies the asciinema-rec-warning
+// advisory is present when asciinema is enabled and is graded WARN
+// (structural advisory, review W7).
+func TestDoctorAsciinemaRecWarning_Warn(t *testing.T) {
 	findings := mod3DoctorFindings(context.Background(), asciinemaEnabledCfg(), shell.NewMockRunner())
 	f, ok := findFinding(findings, "asciinema-rec-warning")
 	require.True(t, ok, "asciinema-rec-warning must be present when asciinema is enabled")
-	assert.Equal(t, modules.SeverityFatal, f.Severity)
+	assert.Equal(t, modules.SeverityWarning, f.Severity,
+		"unconditional advisory must be WARN, not FATAL (W7)")
+}
+
+// TestDoctorMod3_NoFatalsForHealthyEnabledModules is the W7 regression test:
+// enabling upsnap/atuin/asciinema on a healthy rig must not introduce any
+// FATAL finding (doctor would otherwise permanently exit 2).
+func TestDoctorMod3_NoFatalsForHealthyEnabledModules(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Modules.Upsnap.Enabled = true
+	cfg.Modules.Atuin.Enabled = true
+	cfg.Modules.Asciinema.Enabled = true
+	findings := mod3DoctorFindings(context.Background(), cfg, shell.NewMockRunner())
+	require.NotEmpty(t, findings)
+	for _, f := range findings {
+		assert.NotEqual(t, modules.SeverityFatal, f.Severity,
+			"mod3 advisory %q must not be FATAL on a healthy rig (W7)", f.Check)
+	}
 }
 
 // netbirdBackendCfg returns a config with the NetBird backend selected.

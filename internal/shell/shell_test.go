@@ -93,3 +93,12 @@ func TestMockRunner_ScriptedError(t *testing.T) {
 	_, err := m.Run(context.Background(), "cmd")
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
+
+// TestResultOk verifies the Ok() helper: it is the single idiom callers use to
+// distinguish a successful exit from a non-zero exit that Run reports with a
+// nil error (the ignored-ExitCode bug class).
+func TestResultOk(t *testing.T) {
+	assert.True(t, shell.Result{ExitCode: 0}.Ok(), "exit 0 is Ok")
+	assert.False(t, shell.Result{ExitCode: 1}.Ok(), "exit 1 is not Ok")
+	assert.False(t, shell.Result{ExitCode: 255}.Ok(), "exit 255 is not Ok")
+}

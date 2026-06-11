@@ -253,14 +253,13 @@ func runAuditAggregate(ctx context.Context, cc *cmdContext, p Printer, logPath s
 	if opts.format == "json" {
 		verifyP = stderrOnlyPrinter{inner: p}
 	}
-	if err := runAuditVerify(ctx, verifyP, logPath, kc); err != nil {
-		var ee *exitError
-		if errors.As(err, &ee) && ee.ExitCode() == exitCodeFatal {
-			return err // CHAIN BROKEN — propagate exit 2 immediately.
-		}
-		// A non-fatal chain result (e.g. exit 1 when kc==nil: chain walked but
-		// signatures unauthenticated) does not abort the aggregate — the posture
-		// findings still matter. Fall through and let the roll-up decide.
+	// degradedCode records a non-fatal verify result (exit 1: kc==nil walk or
+	// CounterStatus "unknown") so the final exit code can never roll back to 0
+	// purely on the strength of the findings (WR-02/AUD-02: a skipped HMAC or
+	// tail-truncation check is not a clean result).
+	degradedCode, fatalErr := auditVerifyStepCode(ctx, verifyP, logPath, kc)
+	if fatalErr != nil {
+		return fatalErr // CHAIN BROKEN — propagate exit 2 immediately.
 	}
 
 	// 2. Obtain deps with graceful degradation (mirrors cmd_doctor.go).
@@ -284,17 +283,47 @@ func runAuditAggregate(ctx context.Context, cc *cmdContext, p Printer, logPath s
 	// 6. --format=json: emit a machine-parseable JSON array and roll up.
 	if opts.format == "json" {
 		p.PrintJSON(buildDoctorFindings(allFindings))
-		return exitCodeToError(aggregateExitCode(allFindings))
+		return exitCodeToError(maxExitCode(degradedCode, aggregateExitCode(allFindings)))
 	}
 
-	// 7. Human output + severity roll-up.
+	// 7. Human output + severity roll-up (never below the degraded verify code).
 	if len(allFindings) == 0 {
 		printerInfo(p, "All checks passed — security posture is clean.")
-		return nil
+		return exitCodeToError(degradedCode)
 	}
 	doctorHumanOutput(p, allFindings)
 	printerInfo(p, doctorSeverityCounts(allFindings))
-	return exitCodeToError(aggregateExitCode(allFindings))
+	return exitCodeToError(maxExitCode(degradedCode, aggregateExitCode(allFindings)))
+}
+
+// maxExitCode returns the more severe of two roll-up exit codes.
+func maxExitCode(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// auditVerifyStepCode runs the chain-verify step for the aggregate and maps
+// its outcome: a FATAL chain break is returned as fatalErr (the aggregate
+// aborts with exit 2 immediately); any non-fatal degradation (kc==nil walk,
+// CounterStatus "unknown", parse/IO failure) is returned as a degraded exit
+// code that the aggregate roll-up must never undercut (WR-02/AUD-02).
+func auditVerifyStepCode(ctx context.Context, p Printer, logPath string, kc audit.KeychainStore) (degraded int, fatalErr error) {
+	err := runAuditVerify(ctx, p, logPath, kc)
+	if err == nil {
+		return exitCodeOK, nil
+	}
+	var ee *exitError
+	switch {
+	case errors.As(err, &ee) && ee.ExitCode() == exitCodeFatal:
+		return exitCodeFatal, err
+	case errors.As(err, &ee):
+		return ee.ExitCode(), nil
+	default:
+		// Parse/IO failure in the verify step: still a degraded posture.
+		return exitCodeError, nil
+	}
 }
 
 // collectAggregateFindings runs every doctor finding source exactly once and
@@ -320,7 +349,7 @@ func collectAggregateFindings(ctx context.Context, cc *cmdContext, deps modules.
 	all = append(all, supplyChainFindings(ctx, cc.runner, version, "")...)
 
 	// Audit posture (Phase 17) — captured for the sec-audit-anchor-age alias.
-	auditFinds := auditDoctorFindings(ctx, logPath, deps.Keychain)
+	auditFinds := auditDoctorFindings(logPath, deps.Keychain)
 	all = append(all, auditFinds...)
 
 	// Metrics posture (Phase 18) — captured for the sec-metrics-bind alias.

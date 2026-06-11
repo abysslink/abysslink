@@ -29,8 +29,11 @@ import (
 )
 
 // secretPatterns are regexes that, if matched in the audit log, indicate a
-// secret has leaked. Each pattern matches a key-name followed by a value that
-// looks like a secret (long hex/alphanumeric string or any non-empty value).
+// secret has leaked. Two families: key[=:]value shapes (a secret-ish key name
+// followed by a value), and bare provider-prefixed token values that need no
+// surrounding key. Bare patterns are anchored to documented provider prefixes
+// and kept conservative — deliberately no generic bare-hex/base64 pattern,
+// which would drown the scan in false positives (ULIDs, content hashes).
 var secretPatterns = []*regexp.Regexp{
 	// "secret": <hex or base64, >20 chars>
 	regexp.MustCompile(`(?i)"?secret"?\s*[=:]\s*["']?[a-fA-F0-9+/]{20,}`),
@@ -40,6 +43,26 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)"?password"?\s*[=:]\s*["']?.{3,}`),
 	// "api_key" or "apikey": <anything non-empty>
 	regexp.MustCompile(`(?i)"?api[_-]?key"?\s*[=:]\s*["']?.{8,}`),
+	// Bare Tailscale keys: tskey-auth-…, tskey-api-…, tskey-client-…,
+	// tskey-scan-…, tskey-disablement-… (no key= prefix required).
+	regexp.MustCompile(`\btskey-[a-z]+-[A-Za-z0-9_-]{6,}`),
+	// Bare GitHub tokens: classic ghp_/gho_/ghu_/ghs_/ghr_ …
+	regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b`),
+	// … and fine-grained github_pat_….
+	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}\b`),
+	// Bare AWS access key IDs.
+	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+	// Bare Slack tokens: xoxb-/xoxa-/xoxp-/xoxr-/xoxs-….
+	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
+}
+
+// SecretPatterns returns the canonical secret-shape regexes shared by every
+// secret scan in the binary (SPEC §4.3: single source of truth for "what looks
+// like a secret"). The audit-log leak check above and notifyv2's Message
+// Validate() both consult this exact slice — do not copy the patterns
+// elsewhere. Callers must treat the returned slice as read-only.
+func SecretPatterns() []*regexp.Regexp {
+	return secretPatterns
 }
 
 // telemetryPackages are import paths whose presence in .go source files
@@ -193,7 +216,7 @@ func CheckDefaultsMatchThreatModel(_ context.Context, cfgDefaults interface {
 // CheckNtfyConfigBindAddr verifies that a generated ntfy server config does not
 // bind to all interfaces. Rejects 0.0.0.0 or a bare :port (no IP prefix).
 func CheckNtfyConfigBindAddr(_ context.Context, configContent string) error {
-	for _, line := range strings.Split(configContent, "\n") {
+	for line := range strings.SplitSeq(configContent, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "listen-http:") {
 			continue

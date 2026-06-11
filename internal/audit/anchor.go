@@ -107,13 +107,25 @@ func WriteAnchorLocked(ctx context.Context, logPath string, kc KeychainStore) er
 		return fmt.Errorf("audit: acquire process lock: %w", err)
 	}
 	defer releaseAuditLock(lockFD)
+	// R2-12: HMAC-key creation is lazy (first mutating Append). Before any
+	// signed entry exists there is no key — and nothing to anchor — so the
+	// standalone refresh is a silent no-op rather than an hourly error. Any
+	// OTHER key-fetch failure (keychain locked/unavailable) still propagates.
+	if _, kerr := fetchHMACKey(ctx, kc); kerr != nil {
+		if errors.Is(kerr, secrets.ErrNotFound) {
+			return nil
+		}
+		return kerr
+	}
 	return WriteAnchor(ctx, logPath, kc)
 }
 
 // WriteAnchor writes an HMAC-signed anchor beside logPath, atomically (temp +
 // rename, mode 0600). It fetches the HMAC key via the package-private
-// fetchHMACKey helper — it MUST NOT construct a *SignedAudit, which would
-// auto-generate/rotate the key and break the chain.
+// fetchHMACKey helper — it MUST NOT construct a *SignedAudit, which could
+// trigger key generation and break the chain. Callers that already hold the
+// key (SignedAudit's cached copy — R2-12) use writeAnchorWithKey directly to
+// avoid a redundant keychain subprocess per append.
 //
 // CALLER LOCKING: WriteAnchor itself does NOT take the flock. Callers that
 // append (WriteFile/Append) invoke it while already holding the append flock;
@@ -125,7 +137,12 @@ func WriteAnchor(ctx context.Context, logPath string, kc KeychainStore) error {
 	if err != nil {
 		return err
 	}
+	return writeAnchorWithKey(ctx, logPath, key)
+}
 
+// writeAnchorWithKey is WriteAnchor with the HMAC key supplied by the caller
+// (SignedAudit's in-memory cache). Locking contract is identical to WriteAnchor.
+func writeAnchorWithKey(_ context.Context, logPath string, key []byte) error {
 	// WR-06: read the log in a SINGLE pass so EntryCount and LastHash describe the
 	// SAME log state. The previous two-read form (ReadLog + readLastNonEmptyLine)
 	// could observe a concurrent append between the reads and emit an anchor whose
@@ -158,32 +175,11 @@ func WriteAnchor(ctx context.Context, logPath string, kc KeychainStore) error {
 		return fmt.Errorf("audit: marshal anchor: %w", err)
 	}
 
+	// Shared atomic temp/chmod/rename/fsync helper (R2-E2): unique os.CreateTemp
+	// name per concurrent caller, same-directory rename, durable before rename.
 	path := anchorPath(logPath)
-	// Use os.CreateTemp for a unique tmp path per concurrent caller — a shared
-	// static ".abysslink.tmp" suffix races when two goroutines both call
-	// WriteAnchor (AUD-02 per-Append anchor makes this routine now). The tmp
-	// file is created in the same directory as the anchor so the rename is
-	// always within the same filesystem (cross-device rename would fail).
-	f, ferr := os.CreateTemp(filepath.Dir(path), "audit.anchor.*.tmp")
-	if ferr != nil {
-		return fmt.Errorf("audit: create temp anchor: %w", ferr)
-	}
-	tmp := f.Name()
-	_, werr := f.Write(data)
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("audit: write temp anchor %s: %w", tmp, werr)
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil { //nolint:gosec // G304: tmp is derived from os.CreateTemp; path is app-controlled
-		_ = os.Remove(tmp)
-		return fmt.Errorf("audit: chmod temp anchor %s: %w", tmp, err)
-	}
-	if rerr := os.Rename(tmp, path); rerr != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("audit: rename anchor %s → %s: %w", tmp, path, rerr)
+	if werr := atomicWriteFile(path, data, 0o600); werr != nil {
+		return fmt.Errorf("audit: write anchor: %w", werr)
 	}
 	return nil
 }

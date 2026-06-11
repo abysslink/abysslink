@@ -43,7 +43,7 @@ As of v3.0.0, the threat surface has expanded to include per-backend trust model
 
 - Control plane: Tailscale SaaS (trusted by default); mitigated by Tailnet Lock.
 - Tailnet Lock: required by default; disablement secrets printed once, never stored.
-- ACL policies: enforced by Tailscale control plane; `abysslink acl apply` pushes via admin API.
+- ACL policies: enforced by Tailscale control plane; `abysslink acl push --apply` pushes via admin API.
 
 ### Threat Rows (Tailscale-specific)
 

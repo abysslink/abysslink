@@ -1,7 +1,7 @@
-╭──────────────────────────────────────────────────────╮
-│  abysslink up  preview only — run with --apply to    │
-│  make changes                                        │
-╰──────────────────────────────────────────────────────╯
++------------------------------------------------------+
+|  abysslink up  preview only — run with --apply to    |
+|  make changes                                        |
++------------------------------------------------------+
 
   ◌  Scanning 20 modules...
   →  tailscale         1 change: install tailscale
@@ -37,14 +37,14 @@
   →  watch         configure pane watchers
 
   Run   abysslink up --apply   to apply 8 changes.
-╭──────────────────────────────────────────────────────╮
-│                                                      │
-│  Next steps                                          │
-│                                                      │
-│  Tailscale is not installed                          │
-│                                                      │
-│  Install from:  https://tailscale.com/download       │
-│  Then re-run:  abysslink up --apply                  │
-│                                                      │
-╰──────────────────────────────────────────────────────╯
++------------------------------------------------------+
+|                                                      |
+|  Next steps                                          |
+|                                                      |
+|  Tailscale is not installed                          |
+|                                                      |
+|  Install from:  https://tailscale.com/download       |
+|  Then re-run:  abysslink up --apply                  |
+|                                                      |
++------------------------------------------------------+
 

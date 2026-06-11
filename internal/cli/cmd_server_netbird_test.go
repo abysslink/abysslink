@@ -131,7 +131,7 @@ func TestServerNetBirdInitDryRun(t *testing.T) {
 	_ = p
 	cc := &cmdContext{cfg: cfg, runner: runner, dryRun: true, apply: false}
 
-	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "")
+	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "", NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{}))
 	require.NoError(t, err)
 }
 
@@ -148,7 +148,7 @@ func TestServerNetBirdInitLinuxMissingBinaryPath(t *testing.T) {
 	runner := shell.NewMockRunner()
 	cc := &cmdContext{cfg: cfg, runner: runner, dryRun: false, apply: true}
 
-	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "")
+	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "", NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{}))
 	require.Error(t, err)
 	errMsg := err.Error()
 	assert.Contains(t, errMsg, "--binary-path required on Linux")
@@ -172,7 +172,7 @@ func TestServerNetBirdInitLinuxVersionBelowFloor(t *testing.T) {
 	)
 	cc := &cmdContext{cfg: cfg, runner: runner, dryRun: false, apply: true}
 
-	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "/path/to/old-netbird-server")
+	err := netbirdInitRunE(context.Background(), cfg, cc, runner, "/path/to/old-netbird-server", NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{}))
 	require.Error(t, err)
 	errMsg := err.Error()
 	assert.Contains(t, errMsg, "below minimum floor")
@@ -268,6 +268,8 @@ func TestServerNetBirdStatusSSHCheckWarn(t *testing.T) {
 		)
 	} else {
 		runner = shell.NewMockRunner(
+			// docker info (detectContainerRuntime — no longer hardcoded docker)
+			shell.Call{Result: shell.Result{Stdout: "", ExitCode: 0}},
 			// docker ps
 			shell.Call{Result: shell.Result{Stdout: "", ExitCode: 0}},
 		)
@@ -309,4 +311,74 @@ func TestServerNetbird_BoundedRead(t *testing.T) {
 	err := runNetBirdZitadelProbe(context.Background(), srv.URL, p)
 	require.Error(t, err, "oversized response body must return an error")
 	assert.Contains(t, err.Error(), "exceeded", "error must mention 'exceeded' for bounded-read violation")
+}
+
+// TestEnsureNetbirdServiceUser covers the useradd error handling: exit 9
+// ("username already in use") is the idempotent re-init path; any other
+// non-zero exit must surface instead of being silently swallowed.
+func TestEnsureNetbirdServiceUser(t *testing.T) {
+	t.Run("created", func(t *testing.T) {
+		runner := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 0}})
+		require.NoError(t, ensureNetbirdServiceUser(context.Background(), runner))
+	})
+	t.Run("already_exists_is_idempotent", func(t *testing.T) {
+		runner := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 9}})
+		require.NoError(t, ensureNetbirdServiceUser(context.Background(), runner))
+	})
+	t.Run("real_failure_surfaces", func(t *testing.T) {
+		runner := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "useradd: permission denied"}})
+		err := ensureNetbirdServiceUser(context.Background(), runner)
+		require.Error(t, err, "a real useradd failure must not be swallowed")
+		assert.Contains(t, err.Error(), "permission denied")
+	})
+	t.Run("exec_error_surfaces", func(t *testing.T) {
+		runner := shell.NewMockRunner(shell.Call{Err: errors.New("useradd: not found")})
+		err := ensureNetbirdServiceUser(context.Background(), runner)
+		require.Error(t, err)
+	})
+}
+
+// TestNetbirdUpgradeMacOS_PullBeforeStop covers W3: a failed image pull must
+// leave the running container UNTOUCHED — stop/rm before a failed pull would
+// destroy the control plane with no rollback.
+func TestNetbirdUpgradeMacOS_PullBeforeStop(t *testing.T) {
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},   // docker info (detect)
+		shell.Call{Err: errors.New("registry timeout")}, // docker pull → FAILS
+	)
+	p := NewHumanPrinterTo(&bytes.Buffer{}, &bytes.Buffer{})
+
+	err := netbirdUpgradeMacOS(context.Background(), runner, p)
+	require.Error(t, err, "a failed pull must abort the upgrade")
+	assert.Contains(t, err.Error(), "left untouched")
+
+	// The running container must never have been stopped or removed.
+	for _, call := range runner.RecordedCalls() {
+		if len(call.Args) > 0 {
+			assert.NotEqual(t, "stop", call.Args[0], "stop must not run before a successful pull")
+			assert.NotEqual(t, "rm", call.Args[0], "rm must not run before a successful pull")
+		}
+	}
+}
+
+// TestNetbirdServiceIsActive_DarwinUsesDetectedRuntime covers W4: the darwin
+// status probe must use the detected container runtime (docker/podman/colima),
+// not a hardcoded `docker` (podman/colima users saw "inactive" forever).
+func TestNetbirdServiceIsActive_DarwinUsesDetectedRuntime(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only probe")
+	}
+	runner := shell.NewMockRunner(
+		shell.Call{Err: errors.New("docker not installed")},                       // docker info → fail
+		shell.Call{Result: shell.Result{ExitCode: 0}},                             // podman info → ok
+		shell.Call{Result: shell.Result{Stdout: "netbird-server\n", ExitCode: 0}}, // podman ps
+	)
+
+	active := netbirdServiceIsActive(context.Background(), runner)
+	assert.True(t, active, "a running container under podman must report active")
+
+	calls := runner.RecordedCalls()
+	require.GreaterOrEqual(t, len(calls), 3)
+	last := calls[len(calls)-1]
+	assert.Equal(t, "podman", last.Name, "the ps probe must use the DETECTED runtime")
 }

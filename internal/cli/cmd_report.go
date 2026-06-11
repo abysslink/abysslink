@@ -189,7 +189,7 @@ func collectReportFindings(ctx context.Context, cc *cmdContext) ([]modules.Findi
 	// Audit posture (Phase 17) — captured for the sec-audit-anchor-age alias.
 	var auditFinds []modules.Finding
 	if logPath, lpErr := auditDefaultLogPath(); lpErr == nil {
-		auditFinds = auditDoctorFindings(ctx, logPath, deps.Keychain)
+		auditFinds = auditDoctorFindings(logPath, deps.Keychain)
 		findings = append(findings, auditFinds...)
 	} else {
 		slog.Warn("report: audit log path unavailable; skipping audit checks", "err", lpErr)

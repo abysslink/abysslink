@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -115,16 +116,27 @@ func (a *headscaleAdapter) listNodes(ctx context.Context, op string) ([]hsNode, 
 // name/givenName (NET-07). Returns a clear error when the local node is not
 // found — never an arbitrary other machine's entry.
 func (a *headscaleAdapter) localNode(nodes []hsNode) (*hsNode, error) {
-	candidates := localNodeCandidates(a.cfg.Tailnet.Hostname)
-	for i := range nodes {
-		if matchesLocalNode(candidates, nodes[i].Name, nodes[i].GivenName) {
-			return &nodes[i], nil
+	matches := findLocalNodes(a.cfg.Tailnet.Hostname, len(nodes), func(i int) []string {
+		return []string{nodes[i].Name, nodes[i].GivenName}
+	})
+	switch len(matches) {
+	case 1:
+		return &nodes[matches[0]], nil
+	case 0:
+		return nil, fmt.Errorf(
+			"headscale: local node not found among %d enrolled node(s) (looked for %v) — "+
+				"set tailnet.hostname in abysslink.yaml to this machine's enrolled name, or enroll first (abysslink up)",
+			len(nodes), localNodeCandidates(a.cfg.Tailnet.Hostname))
+	default:
+		names := make([]string, 0, len(matches))
+		for _, i := range matches {
+			names = append(names, nodes[i].Name)
 		}
+		return nil, fmt.Errorf(
+			"headscale: local node is ambiguous — %d enrolled nodes match (%s); "+
+				"set tailnet.hostname in abysslink.yaml to this machine's exact enrolled name",
+			len(matches), strings.Join(names, ", "))
 	}
-	return nil, fmt.Errorf(
-		"headscale: local node not found among %d enrolled node(s) (looked for %v) — "+
-			"set tailnet.hostname in abysslink.yaml to this machine's enrolled name, or enroll first (abysslink up)",
-		len(nodes), candidates)
 }
 
 // Status returns a synthetic Status for the Headscale backend.
@@ -360,8 +372,11 @@ func (a *headscaleAdapter) Devices(ctx context.Context) ([]Device, error) {
 
 // TagDevice sets the ACL tags for a node via POST /api/v1/node/{id}/tags.
 func (a *headscaleAdapter) TagDevice(ctx context.Context, id string, tags []string) error {
+	if err := validateResourceID("node", id); err != nil {
+		return fmt.Errorf("headscale: tag node: %w", err)
+	}
 	body := map[string][]string{"tags": tags}
-	resp, err := a.doRequest(ctx, http.MethodPost, "/api/v1/node/"+id+"/tags", body)
+	resp, err := a.doRequest(ctx, http.MethodPost, "/api/v1/node/"+url.PathEscape(id)+"/tags", body)
 	if err != nil {
 		return fmt.Errorf("headscale: tag node %s: %w", id, err)
 	}
@@ -374,7 +389,10 @@ func (a *headscaleAdapter) TagDevice(ctx context.Context, id string, tags []stri
 
 // DeleteDevice removes a node via DELETE /api/v1/node/{id}.
 func (a *headscaleAdapter) DeleteDevice(ctx context.Context, id string) error {
-	resp, err := a.doRequest(ctx, http.MethodDelete, "/api/v1/node/"+id, nil)
+	if err := validateResourceID("node", id); err != nil {
+		return fmt.Errorf("headscale: delete node: %w", err)
+	}
+	resp, err := a.doRequest(ctx, http.MethodDelete, "/api/v1/node/"+url.PathEscape(id), nil)
 	if err != nil {
 		return fmt.Errorf("headscale: delete node %s: %w", id, err)
 	}

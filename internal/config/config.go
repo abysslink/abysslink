@@ -16,7 +16,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -34,6 +36,30 @@ import (
 // Defined here to avoid config→fleet→config import cycle (RESEARCH.md Pitfall 4).
 // Any change to this pattern MUST also be applied in internal/fleet/fanout.go:38.
 var safeHostnamePat = regexp.MustCompile(`^[a-z0-9][a-z0-9\-.]{0,252}[a-z0-9]$`)
+
+// safeUnixUserPat is the POSIX-portable username shape (useradd's default
+// NAME_REGEX): lowercase letter or underscore first, then up to 31 letters,
+// digits, underscores, or hyphens. identity.unix_user is interpolated into the
+// hardened sshd drop-in (`AllowUsers %s`) and the tailnet ACL users array, so
+// anything outside this charset — especially whitespace or newlines — would
+// inject extra sshd directives or AllowUsers entries (security review W3).
+var safeUnixUserPat = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+// ValidateUnixUser checks a UNIX username against the POSIX-portable pattern
+// used by validateIdentity. It is exported so argv/file-render call sites
+// (e.g. the ssh module's sshd drop-in writer) can re-check the value as a
+// defense-in-depth guard, mirroring the ValidateHostname pattern.
+//
+// Unlike ValidateHostname, an empty string is rejected: every caller of this
+// helper is about to interpolate the value somewhere a blank would be unsafe.
+func ValidateUnixUser(user string) error {
+	if !safeUnixUserPat.MatchString(user) {
+		return fmt.Errorf("unix user %q is not a safe username — "+
+			"must match %s (lowercase letters, digits, _ and -, no whitespace)",
+			user, safeUnixUserPat.String())
+	}
+	return nil
+}
 
 // Config is the top-level abysslink.yaml structure.
 type Config struct {
@@ -53,6 +79,113 @@ type Config struct {
 	Observability Observability `yaml:"observability"`
 
 	WebUI WebUIConfig `yaml:"webui"`
+
+	SessionRegistry SessionRegistry `yaml:"session_registry"`
+
+	ContentStore ContentStoreConfig `yaml:"content_store"`
+}
+
+// Content-store defaults and bounds (Phase 28, BACK-06). The TTL bounds are a
+// hard floor/ceiling enforced by ValidateContentStore: below 30s a phone on a
+// flaky link cannot fetch before expiry; above 3600s bodies linger in daemon
+// memory far past their usefulness.
+const (
+	// DefaultContentStorePort is the tailnet HTTPS content listener port used
+	// when content_store.port is unset.
+	DefaultContentStorePort = 2587
+	// DefaultContentTTLSeconds is the token lifetime when content_store.ttl_seconds is unset.
+	DefaultContentTTLSeconds = 600
+	// MinContentTTLSeconds is the ttl_seconds floor.
+	MinContentTTLSeconds = 30
+	// MaxContentTTLSeconds is the ttl_seconds ceiling.
+	MaxContentTTLSeconds = 3600
+)
+
+// ContentStoreConfig configures the Phase 28 tailnet-only HTTPS content store
+// served by abysslinkd (BACK-06): token-keyed, TTL'd, memory-first bodies
+// fetched by enrolled devices at GET /content/{token}.
+//
+// BindAddr, when set, MUST be a literal IP and is additionally required at
+// runtime to equal the backend-resolved tailnet IP (the same fail-closed floor
+// as observability.metrics.bind_addr, OBS-03) — never 0.0.0.0 or ::. An empty
+// BindAddr binds the resolved tailnet IP directly.
+type ContentStoreConfig struct {
+	// Enabled defaults to true (set in Defaults). Setting it false disables
+	// the content listener; wakes then carry only the fallback title (BACK-08).
+	Enabled bool `yaml:"enabled"`
+	// Port is the HTTPS listen port. Zero means DefaultContentStorePort (2587).
+	Port int `yaml:"port,omitempty"`
+	// TTLSeconds is the content-token lifetime. Zero means
+	// DefaultContentTTLSeconds (600); non-zero values are clamped to
+	// [30, 3600] by validation (rejected, not silently clamped).
+	TTLSeconds int `yaml:"ttl_seconds,omitempty"`
+	// BindAddr optionally pins the bind IP. Must be a literal, non-wildcard
+	// IP; at runtime it must equal the backend-resolved tailnet IP.
+	BindAddr string `yaml:"bind_addr,omitempty"`
+}
+
+// EffectivePort returns the configured content-store port or the default 2587.
+func (c ContentStoreConfig) EffectivePort() int {
+	if c.Port > 0 {
+		return c.Port
+	}
+	return DefaultContentStorePort
+}
+
+// EffectiveTTL returns the configured token TTL or the default 600s. Values
+// outside the validated [30s, 3600s] range cannot reach here through Load
+// (ValidateContentStore rejects them), but a programmatically-built config is
+// still clamped defensively so the store never mints unbounded tokens.
+func (c ContentStoreConfig) EffectiveTTL() time.Duration {
+	if c.TTLSeconds == 0 {
+		return DefaultContentTTLSeconds * time.Second
+	}
+	ttl := c.TTLSeconds
+	if ttl < MinContentTTLSeconds {
+		ttl = MinContentTTLSeconds
+	}
+	if ttl > MaxContentTTLSeconds {
+		ttl = MaxContentTTLSeconds
+	}
+	return time.Duration(ttl) * time.Second
+}
+
+// SessionRegistry configures the daemon-side tmux session registry (Phase 27,
+// BACK-03): the tmux -CC control-mode attach, the list-panes poll cadence,
+// and the needs_input heuristic knobs. Every timing field follows the
+// zero-value-means-default idiom (the WatchModule pattern): 0 uses the
+// compiled-in default noted on the field.
+type SessionRegistry struct {
+	Enabled bool `yaml:"enabled"`
+
+	// IgnoreSessions lists session display names exempted from the
+	// needs_input heuristic (D-07, key path session_registry.ignore_sessions).
+	// Display names are acceptable here — it is user config, never routing.
+	IgnoreSessions []string `yaml:"ignore_sessions,omitempty"`
+
+	// IdleSecs is the no-output threshold before a prompt-shaped pane is
+	// considered needs_input. Zero means the compiled-in default 30; the
+	// registry clamps values below the 10s floor up to 10 (D-01).
+	IdleSecs int `yaml:"idle_secs,omitempty"`
+
+	// PollActiveSecs is the list-panes poll cadence while any pane is
+	// active. Zero means the compiled-in default 5 (D-05).
+	PollActiveSecs int `yaml:"poll_active_secs,omitempty"`
+
+	// PollIdleSecs is the backed-off poll cadence when all panes are idle.
+	// Zero means the compiled-in default 15 (D-05).
+	PollIdleSecs int `yaml:"poll_idle_secs,omitempty"`
+
+	// PromptRegex optionally extends the built-in prompt sentinel set
+	// (D-02). It must compile (validated at load — T-27-12); empty means
+	// sentinels only.
+	PromptRegex string `yaml:"prompt_regex,omitempty"`
+
+	// CooldownSecs is the per-(pane, kind) re-notify suppression window.
+	// Zero means the compiled-in default 300 (D-08). Declared here so every
+	// registry knob lives in one section; consumed by the daemon dispatcher
+	// (plan 27-05).
+	CooldownSecs int `yaml:"cooldown_secs,omitempty"`
 }
 
 // WebUIConfig configures the opt-in (//go:build webui, default OFF) browser
@@ -395,6 +528,12 @@ func Defaults() *Config {
 			ReadOnly: true,
 			Port:     8443,
 		},
+		SessionRegistry: SessionRegistry{Enabled: true},
+		ContentStore: ContentStoreConfig{
+			Enabled:    true,
+			Port:       DefaultContentStorePort,
+			TTLSeconds: DefaultContentTTLSeconds,
+		},
 	}
 }
 
@@ -411,6 +550,11 @@ func Load(path string) (*Config, error) {
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
+		// An empty file yields io.EOF from the YAML decoder — give the user an
+		// actionable message instead of a bare decode error.
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("config: config file %s is empty — run `abysslink init` to generate one", path)
+		}
 		return nil, fmt.Errorf("config: decode %s: %w", path, err)
 	}
 	// Normalize: a v1 tailnet:-only config has no backend: stanza, so
@@ -420,8 +564,10 @@ func Load(path string) (*Config, error) {
 	}
 	// D-01 (fail-closed): validate before returning. A hand-edited YAML with an
 	// unsafe hostname or non-https NetBird URL must never reach argv call sites.
+	// The file path is included so the user knows WHICH config failed when
+	// several candidates exist (--config flag, $ABYSSLINK_CONFIG, default path).
 	if err := Validate(cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }
@@ -449,6 +595,9 @@ func LoadForRead(path string) (*Config, error) {
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("config: config file %s is empty — run `abysslink init` to generate one", path)
+		}
 		return nil, fmt.Errorf("config: decode %s: %w", path, err)
 	}
 	if cfg.Backend.Type == "" {
@@ -456,9 +605,10 @@ func LoadForRead(path string) (*Config, error) {
 	}
 	// Return the parsed config ALONGSIDE any validation error: a parse/decode
 	// failure is still fatal (nil config above), but a pure validation failure
-	// leaves a usable config for read-only rendering.
+	// leaves a usable config for read-only rendering. The path is included so
+	// the warn-and-continue log identifies which file failed validation.
 	if verr := Validate(cfg); verr != nil {
-		return cfg, verr
+		return cfg, fmt.Errorf("%s: %w", path, verr)
 	}
 	return cfg, nil
 }
@@ -529,17 +679,17 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("config: claudecode.notify_on.stop_after %q must be at least 30s to avoid chatty notifications", cfg.ClaudeCode.NotifyOn.StopAfter)
 		}
 	}
-	if err := validateBackend(cfg); err != nil {
-		return err
-	}
-	if err := ValidateObservability(cfg); err != nil {
-		return err
-	}
-	if err := ValidateWebUI(cfg); err != nil {
-		return err
-	}
-	if err := validateWatchPanes(cfg); err != nil {
-		return err
+	for _, validate := range []func(*Config) error{
+		validateBackend,
+		ValidateObservability,
+		ValidateWebUI,
+		validateWatchPanes,
+		validateSessionRegistry,
+		ValidateContentStore,
+	} {
+		if err := validate(cfg); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -606,6 +756,11 @@ func validateIdentity(cfg *Config) error {
 	if cfg.Identity.UnixUser == "" {
 		return fmt.Errorf("config: identity.unix_user is required")
 	}
+	// W3: unix_user flows into the sshd drop-in (`AllowUsers %s`) and the
+	// tailnet ACL — reject anything that could smuggle extra directives.
+	if err := ValidateUnixUser(cfg.Identity.UnixUser); err != nil {
+		return fmt.Errorf("config: identity.unix_user: %w", err)
+	}
 	if cfg.Tailnet.Hostname == "" {
 		return fmt.Errorf("config: tailnet.hostname is required")
 	}
@@ -636,6 +791,40 @@ func ValidateObservability(cfg *Config) error {
 	// "unset" (the daemon defaults to 08:00); 0 means midnight and is valid.
 	if h := cfg.Observability.Digest.Hour; h != nil && (*h < 0 || *h > 23) {
 		return fmt.Errorf("config: observability.digest.hour %d must be between 0 and 23", *h)
+	}
+	return nil
+}
+
+// ValidateContentStore enforces the BACK-06 bind floor on the content-store
+// section at the config layer:
+//
+//   - bind_addr, when set, must be a literal IP (no host:port, no DNS name —
+//     the runtime floor compares it against the backend-resolved tailnet IP,
+//     which is always a literal IP) and must not be unspecified (0.0.0.0/::,
+//     which would expose notification bodies on every interface).
+//   - port, when set, must be a valid TCP port.
+//   - ttl_seconds, when set, must sit within [30, 3600] (floor: a phone on a
+//     flaky link needs time to fetch; ceiling: bodies must not linger in
+//     daemon memory).
+//
+// It is exported so the daemon re-enforces the floor at the point the content
+// listener starts (mirroring ValidateObservability / CR-02), independent of
+// the Load-time Validate.
+func ValidateContentStore(cfg *Config) error {
+	if addr := cfg.ContentStore.BindAddr; addr != "" {
+		if IsUnspecifiedBindAddr(addr) {
+			return fmt.Errorf("config: content_store.bind_addr %q must not be 0.0.0.0 or :: — the content store must bind to the tailnet IP only (BACK-06)", addr)
+		}
+		if net.ParseIP(addr) == nil {
+			return fmt.Errorf("config: content_store.bind_addr %q must be a literal IP address (no port, no DNS name) — it is matched against the backend-resolved tailnet IP at runtime (BACK-06)", addr)
+		}
+	}
+	if p := cfg.ContentStore.Port; p < 0 || p > 65535 {
+		return fmt.Errorf("config: content_store.port %d must be between 1 and 65535 (0 means default %d)", p, DefaultContentStorePort)
+	}
+	if ttl := cfg.ContentStore.TTLSeconds; ttl != 0 && (ttl < MinContentTTLSeconds || ttl > MaxContentTTLSeconds) {
+		return fmt.Errorf("config: content_store.ttl_seconds %d must be between %d and %d (0 means default %d)",
+			ttl, MinContentTTLSeconds, MaxContentTTLSeconds, DefaultContentTTLSeconds)
 	}
 	return nil
 }
@@ -752,6 +941,23 @@ func validateWatchPanes(cfg *Config) error {
 			return fmt.Errorf("config: modules.watch.panes element %q is not a valid pane name — "+
 				"only [a-z0-9] and internal hyphens/dots allowed, no leading dash (A8/NET-03)", pane)
 		}
+	}
+	return nil
+}
+
+// validateSessionRegistry enforces that session_registry.prompt_regex
+// compiles (T-27-12). User-supplied regex is compiled with regexp.Compile —
+// never MustCompile — and rejected with a named-field error; Go's RE2 engine
+// has no catastrophic backtracking, so a pattern that compiles is always safe
+// to evaluate against pane content. The zero-value section is valid: every
+// timing knob defaults downstream (the validateWatchPanes/WatchModule idiom).
+func validateSessionRegistry(cfg *Config) error {
+	if cfg.SessionRegistry.PromptRegex == "" {
+		return nil
+	}
+	if _, err := regexp.Compile(cfg.SessionRegistry.PromptRegex); err != nil {
+		return fmt.Errorf("config: session_registry.prompt_regex %q does not compile: %w",
+			cfg.SessionRegistry.PromptRegex, err)
 	}
 	return nil
 }

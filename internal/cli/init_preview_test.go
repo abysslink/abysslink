@@ -18,6 +18,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,7 @@ func TestPreviewAndConfirmConfig_AutoYesWritesConfig(t *testing.T) {
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
 
-	ok, err := previewAndConfirmConfig(context.Background(), p, cfg, true)
+	ok, err := previewAndConfirmConfig(context.Background(), p, cfg, "/tmp/abysslink-test.yaml", true)
 	require.NoError(t, err)
 	assert.True(t, ok, "autoYes=true must return true without prompting")
 	// Preview is printed even under --yes so the user can see what was written.
@@ -57,7 +58,7 @@ func TestPreviewAndConfirmConfig_ContainsYAMLKey(t *testing.T) {
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
 
-	_, err := previewAndConfirmConfig(context.Background(), p, cfg, true)
+	_, err := previewAndConfirmConfig(context.Background(), p, cfg, "/tmp/abysslink-test.yaml", true)
 	require.NoError(t, err)
 
 	out := buf.String()
@@ -80,7 +81,7 @@ func TestPreviewAndConfirmConfig_NoSecretInPreview(t *testing.T) {
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
 
-	_, err := previewAndConfirmConfig(context.Background(), p, cfg, true)
+	_, err := previewAndConfirmConfig(context.Background(), p, cfg, "/tmp/abysslink-test.yaml", true)
 	require.NoError(t, err)
 
 	out := buf.String()
@@ -122,7 +123,7 @@ func TestInitWritesConfig_WithAutoYes(t *testing.T) {
 
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
-	ok, err := previewAndConfirmConfig(context.Background(), p, cfg, true)
+	ok, err := previewAndConfirmConfig(context.Background(), p, cfg, "/tmp/abysslink-test.yaml", true)
 	require.NoError(t, err)
 	assert.True(t, ok)
 }
@@ -147,7 +148,7 @@ func TestInitPreviewDeclined_ConfigNotWritten(t *testing.T) {
 	p := &testPrinter{out: &buf}
 
 	// Non-interactive call (stdin is not a TTY in tests): function must not hang.
-	ok, err := previewAndConfirmConfig(context.Background(), p, cfg, false)
+	ok, err := previewAndConfirmConfig(context.Background(), p, cfg, "/tmp/abysslink-test.yaml", false)
 	// Either declined (false) or an error — the file must not be written regardless.
 	if err == nil && ok {
 		// Only write if ok is true — this is the contract; if ok=true and no error,
@@ -167,9 +168,9 @@ type testPrinter struct {
 	out *bytes.Buffer
 }
 
-func (p *testPrinter) Print(msg string)         { p.out.WriteString(msg + "\n") }
-func (p *testPrinter) Printv(key, value string) { p.out.WriteString(key + ": " + value + "\n") }
-func (p *testPrinter) Error(msg string)         { p.out.WriteString(msg + "\n") }
+func (p *testPrinter) Print(msg string)         { fmt.Fprintln(p.out, msg) }
+func (p *testPrinter) Printv(key, value string) { fmt.Fprintf(p.out, "%s: %s\n", key, value) }
+func (p *testPrinter) Error(msg string)         { fmt.Fprintln(p.out, msg) }
 func (p *testPrinter) PrintJSON(_ any)          {}
 
 // Verify testPrinter satisfies the Printer interface at compile time.

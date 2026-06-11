@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -37,13 +38,25 @@ var safeRigName = regexp.MustCompile(`^[a-z0-9-]+$`)
 // strings, leading/trailing hyphens or dots, and any shell-special characters.
 var safeHostname = regexp.MustCompile(`^[a-z0-9][a-z0-9\-.]{0,252}[a-z0-9]$`)
 
+// sshTransportExitCode is the exit code ssh itself returns when the transport
+// fails (connection refused, timeout, auth failure, DNS error). Any OTHER
+// non-zero exit code came from the REMOTE command — e.g. `abysslink doctor
+// --json` intentionally exits 1 on WARN and 2 on FATAL findings (CLI-06) —
+// and the rig is still very much reachable with valid stdout.
+const sshTransportExitCode = 255
+
 // RigResult is the per-rig outcome from a FanOut call.
 // UNREACHABLE is represented as Reachable=false — it is a result VALUE, not a
 // returned error, so sibling rigs keep running (SC-2 / Pitfall 1).
+//
+// Reachable means the SSH TRANSPORT succeeded — the remote abysslink command
+// may still have exited non-zero (degraded-but-reachable, T-14-06); its exit
+// code is recorded in ExitCode and its stdout is preserved for decoding.
 type RigResult struct {
 	Rig       config.RigConfig
 	Reachable bool
 	Stdout    string // raw stdout from remote `abysslink <subcmd> --json`
+	ExitCode  int    // remote command's exit code (0 unless Reachable)
 	Err       error  // transport / timeout error; kept for caller inspection
 }
 
@@ -95,24 +108,44 @@ func FanOut(
 			rctx, cancel := context.WithTimeout(gctx, perRigTimeout)
 			defer cancel()
 
-			// Build the SSH argv: ssh <hostname> abysslink <subArgs...>
+			// Build the SSH argv: ssh -o BatchMode=yes -o ConnectTimeout=5
+			// <hostname> abysslink <subArgs...>. BatchMode prevents ssh from
+			// ever blocking on an askpass/password prompt; ConnectTimeout
+			// fails fast on a dead host instead of eating the per-rig budget.
 			// CLAUDE.md: never sh -c; always discrete argv tokens (T-14-04).
-			args := append([]string{rig.Hostname, "abysslink"}, subArgs...)
+			args := append([]string{
+				"-o", "BatchMode=yes",
+				"-o", "ConnectTimeout=5",
+				rig.Hostname, "abysslink",
+			}, subArgs...)
 			res, err := runner.Run(rctx, "ssh", args...)
 
-			if err != nil || res.ExitCode != 0 {
-				results[i] = RigResult{Rig: rig, Reachable: false, Err: err}
+			// Only a transport-level failure marks the rig UNREACHABLE:
+			// either Run itself errored (exec/ctx failure) or ssh exited 255
+			// (its own connection/auth failure code). Any other non-zero exit
+			// is the REMOTE command's — `doctor --json` exits 1/2 BY DESIGN
+			// on WARN/FATAL findings — so the rig is degraded-but-reachable
+			// and its stdout must be kept for decoding (T-14-06).
+			if err != nil || res.ExitCode == sshTransportExitCode {
+				results[i] = RigResult{Rig: rig, Reachable: false, ExitCode: res.ExitCode, Err: err}
 
 				if strict {
 					// Return an error to errgroup — this cancels gctx and
 					// aborts all remaining in-flight rigs (fail-fast).
-					return fmt.Errorf("rig %q unreachable: %w", rig.Name, err)
+					// err may be nil here (ssh exited 255 without a Go
+					// error); never wrap a nil err (%!w(<nil>)) — surface
+					// the exit code and stderr instead.
+					if err != nil {
+						return fmt.Errorf("rig %q unreachable: %w", rig.Name, err)
+					}
+					return fmt.Errorf("rig %q unreachable: ssh exited %d: %s",
+						rig.Name, res.ExitCode, strings.TrimSpace(res.Stderr))
 				}
 				// SC-2: return nil so the errgroup does NOT cancel siblings.
 				return nil
 			}
 
-			results[i] = RigResult{Rig: rig, Reachable: true, Stdout: res.Stdout}
+			results[i] = RigResult{Rig: rig, Reachable: true, Stdout: res.Stdout, ExitCode: res.ExitCode}
 			return nil
 		})
 	}

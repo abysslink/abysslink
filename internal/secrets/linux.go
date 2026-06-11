@@ -20,6 +20,7 @@ package secrets
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/shell"
@@ -32,19 +33,25 @@ const (
 
 // LinuxStore implements KeychainStore using either libsecret (`secret-tool`)
 // or `pass` (the standard Unix password manager), whichever is available.
-// Detection happens at construction time via `which`; the chosen backend is
-// used for all subsequent operations.
+// Detection happens at construction time via an in-process PATH lookup; the
+// chosen backend is used for all subsequent operations.
 type LinuxStore struct {
 	runner  shell.Runner
 	backend string // "secret-tool" or "pass"
 }
 
+// lookPath probes PATH for a binary. It is exec.LookPath (an in-process PATH
+// scan — no subprocess is spawned, so the "all external commands go through
+// shell.Runner" rule is not implicated) rather than shelling out to `which`,
+// which is not guaranteed to exist on minimal distros (R2-I8). A variable so
+// tests can stub backend availability.
+var lookPath = exec.LookPath
+
 // NewLinuxStore detects the available keychain backend and returns a LinuxStore.
 // Returns an error if neither secret-tool nor pass is found on PATH.
-func NewLinuxStore(ctx context.Context, runner shell.Runner) (*LinuxStore, error) {
+func NewLinuxStore(_ context.Context, runner shell.Runner) (*LinuxStore, error) {
 	for _, b := range []string{backendSecretTool, backendPass} {
-		res, err := runner.Run(ctx, "which", b)
-		if err == nil && res.ExitCode == 0 {
+		if _, err := lookPath(b); err == nil {
 			return &LinuxStore{runner: runner, backend: b}, nil
 		}
 	}

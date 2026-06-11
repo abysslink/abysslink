@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"testing"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -85,9 +86,14 @@ func nextFireAtFrom(now time.Time, hour, minute int) time.Duration {
 // logs a warning and returns an error so the caller skips the send (no panic).
 //
 // The ABYSSLINK_TEST_EXE_DIR env var overrides the executable directory in
-// tests only; production never sets it, so the real os.Executable() path wins.
+// tests ONLY: it is honoured exclusively when the process is a `go test`
+// binary (testing.Testing()), so a production daemon can never have its
+// exec path redirected via the environment (R2-I11).
 func resolveAbysslink() (string, error) {
-	exeDir := os.Getenv("ABYSSLINK_TEST_EXE_DIR")
+	var exeDir string
+	if testing.Testing() {
+		exeDir = os.Getenv("ABYSSLINK_TEST_EXE_DIR")
+	}
 	if exeDir == "" {
 		exePath, err := os.Executable()
 		if err == nil {

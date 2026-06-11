@@ -45,16 +45,31 @@ func (p *Platform) Distro() platform.Distro { return platform.DistroUnknown }
 // PackageManager returns PkgBrew.
 func (p *Platform) PackageManager() platform.PackageManager { return platform.PkgBrew }
 
-// InstallPackage installs a Homebrew package.
+// InstallPackage installs a Homebrew package. A brew failure (package not
+// found, network down) exits non-zero with err == nil from shell.Runner — the
+// exit code MUST be checked or modules proceed to configure binaries that were
+// never installed (C4).
 func (p *Platform) InstallPackage(ctx context.Context, name string) error {
-	_, err := p.runner.Run(ctx, "brew", "install", name)
-	return err
+	res, err := p.runner.Run(ctx, "brew", "install", name)
+	if err != nil {
+		return err
+	}
+	if !res.Ok() {
+		return fmt.Errorf("brew install %s exited %d: %s", name, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return nil
 }
 
 // RemovePackage uninstalls a Homebrew package.
 func (p *Platform) RemovePackage(ctx context.Context, name string) error {
-	_, err := p.runner.Run(ctx, "brew", "uninstall", name)
-	return err
+	res, err := p.runner.Run(ctx, "brew", "uninstall", name)
+	if err != nil {
+		return err
+	}
+	if !res.Ok() {
+		return fmt.Errorf("brew uninstall %s exited %d: %s", name, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return nil
 }
 
 // DiskEncryptionStatus reports FileVault status via fdesetup.
@@ -73,11 +88,21 @@ func (p *Platform) DiskEncryptionStatus(ctx context.Context) (platform.DiskState
 func (p *Platform) Firewall() platform.FirewallController { return &darwinFirewall{runner: p.runner} }
 
 // KeepAwake prevents system or display sleep using caffeinate.
+//
+// BLOCKING semantics (mirrors the linux KeepAwakeSystem implementation):
+// System/Display run `caffeinate` which holds the assertion and BLOCKS until
+// ctx is cancelled — cancellation of the same ctx is the release mechanism.
+// KeepAwakeOff is therefore a no-op: there is no cross-process way to release
+// an assertion held by a previous caffeinate; the previous `caffeinate -s -t 0`
+// "off" spawned a new caffeinate that exited immediately and released nothing.
+//
+// TODO: if a non-blocking on/off pair is ever needed, manage a long-lived
+// caffeinate process handle (start/kill) or use pmset assertions instead.
 func (p *Platform) KeepAwake(ctx context.Context, mode platform.KeepAwakeMode) error {
 	switch mode {
 	case platform.KeepAwakeOff:
-		_, err := p.runner.Run(ctx, "caffeinate", "-s", "-t", "0")
-		return err
+		// No-op by design: "on" is released by cancelling the ctx passed to it.
+		return nil
 	case platform.KeepAwakeDisplay:
 		_, err := p.runner.Run(ctx, "caffeinate", "-d")
 		return err

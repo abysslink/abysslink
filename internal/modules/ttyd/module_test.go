@@ -32,9 +32,15 @@ import (
 type mockPlatform struct {
 	serviceInstallErr error
 	installedSpec     platform.ServiceSpec
+	os                string // OS() return value; empty → "test"
 }
 
-func (p *mockPlatform) OS() string                                       { return "test" }
+func (p *mockPlatform) OS() string {
+	if p.os != "" {
+		return p.os
+	}
+	return "test"
+}
 func (p *mockPlatform) Distro() platform.Distro                          { return platform.DistroUnknown }
 func (p *mockPlatform) PackageManager() platform.PackageManager          { return "" }
 func (p *mockPlatform) InstallPackage(_ context.Context, _ string) error { return nil }
@@ -162,6 +168,95 @@ func TestApply_BindsTailnetIP(t *testing.T) {
 		}
 	}
 	assert.True(t, hasIP, "service args must include the tailnet IP %q", tailnetIP)
+
+	// -W is the explicit writable decision: ttyd >= 1.7 is read-only by
+	// default, which would make the browser terminal unusable.
+	assert.Contains(t, spec.Args, "-W", "ttyd must be started writable (-W)")
+}
+
+// TestDetect_PgrepArgsPerPlatform is the W2 regression test: `pgrep -a` means
+// "include ancestors" on macOS and prints PIDs only, which silently disabled
+// the NET-10 bind check there. The argv must be `-fl` on darwin and `-a`
+// (procps-ng --list-full) elsewhere — both yield "PID full-argv" lines.
+func TestDetect_PgrepArgsPerPlatform(t *testing.T) {
+	cases := []struct {
+		os       string
+		wantArgs []string
+	}{
+		{"darwin", []string{"-fl", "ttyd"}},
+		{"linux", []string{"-a", "ttyd"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.os, func(t *testing.T) {
+			r := shell.NewMockRunner(
+				// ttyd --version → installed
+				shell.Call{Result: shell.Result{Stdout: "ttyd version 1.7.7\n"}},
+				// pgrep → one wildcard-bound process
+				shell.Call{Result: shell.Result{Stdout: "1234 /usr/local/bin/ttyd -p 7681 bash\n", ExitCode: 0}},
+			)
+			m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: &mockPlatform{os: tc.os}})
+			findings, err := m.Detect(context.Background())
+			require.NoError(t, err)
+			require.True(t, r.Done())
+
+			calls := r.RecordedCalls()
+			require.Len(t, calls, 2)
+			assert.Equal(t, "pgrep", calls[1].Name)
+			assert.Equal(t, tc.wantArgs, calls[1].Args)
+
+			// The bind check must actually fire on the wildcard process.
+			var bindFound bool
+			for _, f := range findings {
+				if f.Check == "ttyd_bind_tailnet" {
+					bindFound = true
+				}
+			}
+			assert.True(t, bindFound, "NET-10 bind finding must fire on %s", tc.os)
+		})
+	}
+}
+
+// TestDetect_Installed_EmitsNoAuthWarning: the basic-auth gap is a permanent
+// trade-off (no stdin credential path in ttyd) and must surface as a doctor
+// finding, not only a log line (W3).
+func TestDetect_Installed_EmitsNoAuthWarning(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "ttyd version 1.7.7\n"}},
+		// pgrep → no ttyd processes running
+		shell.Call{Result: shell.Result{ExitCode: 1}},
+	)
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: &mockPlatform{os: "linux"}})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+
+	var noAuth *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "ttyd_no_auth" {
+			noAuth = &findings[i]
+		}
+	}
+	require.NotNil(t, noAuth, "installed ttyd must emit the ttyd_no_auth doctor warning")
+	assert.Equal(t, modules.SeverityWarning, noAuth.Severity)
+	assert.Contains(t, noAuth.Message, "tailnet ACL")
+}
+
+// TestPlan_DescriptionsMatchApply: Plan must not promise TLS or basic auth —
+// Apply configures neither (W3: the old text claimed "tailscale cert HTTPS"
+// and "basic-auth is required").
+func TestPlan_DescriptionsMatchApply(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{Stdout: "ttyd version 1.7.7\n"}},
+		shell.Call{Result: shell.Result{ExitCode: 1}}, // pgrep: nothing running
+	)
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: &mockPlatform{os: "linux"}})
+	actions, err := m.Plan(context.Background(), false)
+	require.NoError(t, err)
+	require.NotEmpty(t, actions)
+
+	for _, a := range actions {
+		assert.NotContains(t, a.Description, "HTTPS", "Plan must not promise TLS Apply never configures")
+		assert.NotContains(t, a.Description, "basic-auth is required", "Plan must not promise auth Apply never configures")
+	}
 }
 
 // TestBindFindings is the NET-10 matrix: a running ttyd must be flagged when

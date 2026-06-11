@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -118,15 +119,15 @@ func verifyBackupHash(content []byte, chainEntry *Entry, cleanBak string) error 
 	return nil
 }
 
-// atomicRestoreWrite writes content to dst via a tmp+rename sequence (0o600).
-func atomicRestoreWrite(cleanDst string, content []byte) error {
-	tmp := cleanDst + ".tmp"
-	if werr := os.WriteFile(tmp, content, 0o600); werr != nil { //nolint:gosec // G304: tmp is an internally-derived restore temp path; 0o600 enforces owner-only perms
-		return fmt.Errorf("audit: restore write tmp %s: %w", tmp, werr)
-	}
-	if rerr := os.Rename(tmp, cleanDst); rerr != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("audit: restore rename %s → %s: %w", tmp, cleanDst, rerr)
+// atomicRestoreWrite writes content to dst with the given permission bits via
+// the shared atomic temp/rename helper. R2-W3: the temp is os.CreateTemp-unique
+// (the old predictable dst+".tmp" could be pre-planted as a symlink and written
+// through by os.WriteFile's O_CREATE|O_TRUNC), and mode is the backup's
+// recorded permission bits so a restore no longer forces 0600 onto originals
+// that were 0644.
+func atomicRestoreWrite(cleanDst string, content []byte, mode os.FileMode) error {
+	if werr := atomicWriteFile(cleanDst, content, mode); werr != nil {
+		return fmt.Errorf("audit: restore write %s: %w", cleanDst, werr)
 	}
 	return nil
 }
@@ -155,7 +156,7 @@ func restoreChainVerified(dst, backupPath, wantHash string) error {
 	if HashOf(content) != wantHash {
 		return fmt.Errorf("audit: reverse refused: backup %q content does not match signed chain entry hash (backup modified or planted)", cleanBak)
 	}
-	return atomicRestoreWrite(cleanDst, content)
+	return atomicRestoreWrite(cleanDst, content, sourceMode(cleanBak))
 }
 
 // RestoreGated is the AUD-01 chain-verified restore path. It refuses to write
@@ -203,9 +204,17 @@ func RestoreGated(ctx context.Context, dst, backupPath string, sa *SignedAudit, 
 		if verr := verifyBackupHash(content, chainEntry, cleanBak); verr != nil {
 			return verr
 		}
+		// Rule 8 / R2-fix-9: the chain-verified restore is itself a file
+		// mutation — record the intent BEFORE the write (append-before-write).
+		// Best-effort: a restore is a recovery path and must not be blocked by
+		// an unwritable log; failures are surfaced via slog.
+		diffHash := sha256.Sum256(content)
+		if aerr := sa.Append(ctx, SignInput{Title: "restore", DiffHash: diffHash}, cleanDst, false); aerr != nil {
+			slog.Warn("audit: failed to record chain-verified restore in audit log", "dst", cleanDst, "err", aerr)
+		}
 	}
 
-	if werr := atomicRestoreWrite(cleanDst, content); werr != nil {
+	if werr := atomicRestoreWrite(cleanDst, content, sourceMode(cleanBak)); werr != nil {
 		return werr
 	}
 
@@ -308,14 +317,25 @@ func Reverse(logPath string, dryRun bool) ([]ReverseAction, error) {
 		return nil, err
 	}
 
+	// Rule 8 / R2-fix-9: reversal mutations (restores and deletions) are file
+	// mutations like any other and get audit entries. The writer is the
+	// chain-aware *Audit (R2-C1), so entries are signed when the log carries an
+	// active chain. Entries are best-effort: reversal is the operator's
+	// recovery path and must not be blocked by an unwritable audit log.
+	w := New(logPath)
+
 	for i := range plan {
 		a := &plan[i]
 		switch a.Action {
 		case "restore":
-			reverseRestore(a, dryRun)
+			reverseRestore(w, a, dryRun)
 		case "delete":
 			if dryRun {
 				continue
+			}
+			// Record the deletion intent before removing (append-before-write).
+			if aerr := w.Append("delete", a.Target, nil, false); aerr != nil {
+				slog.Warn("audit: failed to record reverse deletion in audit log", "target", a.Target, "err", aerr)
 			}
 			if rerr := os.Remove(a.Target); rerr != nil && !os.IsNotExist(rerr) {
 				a.Err = rerr
@@ -327,8 +347,9 @@ func Reverse(logPath string, dryRun bool) ([]ReverseAction, error) {
 
 // reverseRestore executes (or dry-runs) a single "restore" action in place,
 // recording the result hash and any error on a. Chain-attested backups
-// (a.ChainHash != "") are hash-verified before restoring (CORE-06).
-func reverseRestore(a *ReverseAction, dryRun bool) {
+// (a.ChainHash != "") are hash-verified before restoring (CORE-06). On a real
+// run the restore is recorded in the audit log via w (best-effort, Rule 8).
+func reverseRestore(w *Audit, a *ReverseAction, dryRun bool) {
 	if dryRun {
 		if content, rerr := os.ReadFile(a.Backup); rerr == nil { //nolint:gosec // G304: a.Backup is a path from a trusted audit-log entry written by abysslink, not user input
 			a.Hash = HashOf(content)
@@ -339,6 +360,14 @@ func reverseRestore(a *ReverseAction, dryRun bool) {
 			}
 		}
 		return
+	}
+	// Rule 8 / R2-fix-9: record the restore intent before mutating the target.
+	// The hash records the backup content being restored. Best-effort — see
+	// Reverse for the rationale.
+	if content, rerr := os.ReadFile(a.Backup); rerr == nil { //nolint:gosec // G304: a.Backup is a path from a trusted audit-log entry written by abysslink, not user input
+		if aerr := w.Append("restore", a.Target, content, false); aerr != nil {
+			slog.Warn("audit: failed to record reverse restore in audit log", "target", a.Target, "err", aerr)
+		}
 	}
 	// CORE-06: when the backup is chain-attested, verify its content hash
 	// against the signed chain entry in the same read that feeds the restore

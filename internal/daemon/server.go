@@ -16,24 +16,39 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/metrics"
+	"github.com/abysslink/abysslink/internal/notifyv2"
+	"github.com/abysslink/abysslink/internal/session"
 	"github.com/abysslink/abysslink/internal/shell"
 )
+
+// SessionSource is the daemon-side view of the tmux session registry: the
+// one method GET /sessions needs. It is a small daemon-owned interface (not
+// the concrete *session.Registry) so tests can wire a fake and the daemon
+// imports internal/session only for the Snapshot types (one-way, no cycle).
+type SessionSource interface {
+	Snapshot() session.Snapshot
+}
 
 // daemonVersion is the abysslinkd build version reported by GET /status. It
 // defaults to "dev"; Plan 04 wires the real value from the build ldflag.
@@ -50,6 +65,13 @@ const (
 	paneIdleInterval = 30 * time.Second
 	paneCoolOff      = 5 * time.Minute
 	readHeaderTO     = 5 * time.Second
+	// idleTO closes keep-alive connections that have sat idle so one-shot
+	// clients that skip CloseIdleConnections cannot pin conns (and their
+	// readLoop/writeLoop goroutines) on the daemon forever.
+	idleTO = 60 * time.Second
+	// socketProbeTimeout bounds the pre-listen liveness dial that prevents a
+	// second daemon instance from stealing a live daemon's socket.
+	socketProbeTimeout = 500 * time.Millisecond
 )
 
 // promptRegex matches common shell/REPL prompt-shaped trailing lines.
@@ -74,16 +96,71 @@ type Server struct {
 	socketPath string
 	startedAt  time.Time
 	ring       RingAdder // nil unless the webui build wires it via SetRing
+	// execCount reads the gate decorator's atomic exec counter (D-38). nil
+	// unless the composition root wires it via SetExecCounter; handleStatus
+	// reports 0 when unset (nil-safe).
+	execCount func() uint64
+	// dispatch is the v2 policy engine (cooldown, flood ceiling, retry —
+	// plan 27-05); its retry loop is started by Run.
+	dispatch *dispatcher
+	// hostname is the cached short hostname used to enrich v2 messages with
+	// an empty host field (computed once at NewServer).
+	hostname string
+	// sessionSource is the tmux session registry view served by GET /sessions
+	// (plan 27-07). nil unless the composition root wires it via
+	// SetSessionRegistry; handleSessions then reports "registry: disabled"
+	// (nil-safe, never an error).
+	sessionSource SessionSource
+
+	// Phase 28 content listener state (BACK-06/BACK-07). devices, auditApp,
+	// and contentTLS are injected by the composition root (SetDeviceStore /
+	// SetAuditAppender / SetContentTLS); a missing dependency disables the
+	// content listener (fail closed) while the daemon keeps running.
+	devices    DeviceStore
+	auditApp   AuditAppender
+	contentTLS ContentTLSProvider
+	// contentResolver is the tailnet-IP seam; nil means the production
+	// backendIPResolver (tests inject a stub).
+	contentResolver tailnetIPResolver
+	// contentHostResolver is the MagicDNS-hostname seam used to ADVERTISE a
+	// TLS-verifiable fetch URL host; nil means the production
+	// backendHostResolver (tests inject a stub). A missing/non-ts.net hostname
+	// falls back to the bind IP (degraded, never fail-closed — see
+	// resolveContentAdvertiseHost).
+	contentHostResolver tailnetHostResolver
+	// content is the memory-first TTL'd token→body store.
+	content *contentStore
+	// contentWG tracks the content listener's shutdown drain so Run's
+	// graceful-shutdown path can wait for it (clean shutdown drains).
+	contentWG sync.WaitGroup
+	// ackReceived counts BACK-07 ack receipts (memory-only, reset on restart).
+	ackReceived atomic.Uint64
+
+	contentMu     sync.Mutex
+	contentLive   bool
+	contentHost   string
+	contentPort   int
+	contentStatus string
+	// contentAdvertiseHost is the host placed in the minted FetchRef URL: the
+	// node's *.ts.net MagicDNS name when available (so a TLS-verifying phone
+	// fetch verifies against the Tailscale-issued cert SAN), otherwise the bind
+	// IP as a degraded fallback. The listener still BINDS contentHost (the
+	// tailnet IP) regardless (Finding 2).
+	contentAdvertiseHost string
 }
 
 // NewServer returns a Server. notifier MUST be a direct backend (see Notifier).
 func NewServer(notifier Notifier, runner shell.Runner, cfg *config.Config) *Server {
 	return &Server{
-		notifier:   notifier,
-		runner:     runner,
-		cfg:        cfg,
-		socketPath: SocketPath(),
-		startedAt:  time.Now(),
+		notifier:      notifier,
+		runner:        runner,
+		cfg:           cfg,
+		socketPath:    SocketPath(),
+		startedAt:     time.Now(),
+		dispatch:      newDispatcher(notifier, cfg),
+		hostname:      notifyv2.ShortHostname(),
+		content:       newContentStore(nil),
+		contentStatus: "disabled: content listener not started",
 	}
 }
 
@@ -91,6 +168,19 @@ func NewServer(notifier Notifier, runner shell.Runner, cfg *config.Config) *Serv
 // //go:build webui daemon entrypoint; in the base build the ring stays nil and
 // handleNotify skips the record (no-op, nil-safe).
 func (s *Server) SetRing(r RingAdder) { s.ring = r }
+
+// SetExecCounter injects the gate decorator's exec-counter accessor
+// (gate.Gated.Count) so GET /status can report gate_execs_observed — live
+// proof that the observe-only seam intercepts every module/consumer exec
+// (D-38). Called by the composition root before Run; nil-safe: when unset,
+// handleStatus reports 0.
+func (s *Server) SetExecCounter(fn func() uint64) { s.execCount = fn }
+
+// SetSessionRegistry injects the tmux session registry served by GET
+// /sessions (BACK-04). Called by the composition root when
+// session_registry.enabled is true; nil-safe: when unset (or set to nil),
+// handleSessions reports "registry: disabled" with an empty sessions list.
+func (s *Server) SetSessionRegistry(src SessionSource) { s.sessionSource = src }
 
 // Run listens on the Unix socket and starts watchers until ctx is cancelled.
 // On cancellation it waits for the graceful shutdown (connection drain +
@@ -101,8 +191,8 @@ func (s *Server) Run(ctx context.Context) error {
 		// SocketPath failed closed (NET-13: socket dir verification failed).
 		return fmt.Errorf("daemon: no usable socket path (socket directory verification failed — see prior log)")
 	}
-	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("daemon: clear stale socket: %w", err)
+	if err := ensureSocketFree(s.socketPath); err != nil {
+		return err
 	}
 	ln, err := net.Listen("unix", s.socketPath)
 	if err != nil {
@@ -117,26 +207,45 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/notify", s.handleNotify)
 	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/sessions", s.handleSessions)
 
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO, IdleTimeout: idleTO}
 
 	s.startWatchers(ctx)
+	// v2 dispatch retry loop (D-28); exits on ctx cancellation.
+	go s.dispatch.run(ctx)
+	// Tailnet-only HTTPS content listener (BACK-06). Launched async because
+	// the bind resolution probes the backend; every failure path disables the
+	// listener (fail closed) while this socket keeps serving.
+	go s.startContentServer(ctx)
 
 	// Graceful-shutdown goroutine: by the time srv.Shutdown runs, ctx is
 	// already Done, so the drain needs a context detached from that
 	// cancellation (WithoutCancel keeps ctx values) plus its own timeout.
+	// runCtx exists so a real Serve() error — where ctx is still live — can
+	// also wake this goroutine for the NET-14 cleanup (drain + socket removal)
+	// instead of leaking it and the socket file.
+	runCtx, stopShutdown := context.WithCancel(ctx)
+	defer stopShutdown()
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
-		<-ctx.Done()
+		<-runCtx.Done()
 		shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 		_ = os.Remove(s.socketPath)
+		// Wait for the content listener's own drain (BACK-06): its shutdown
+		// goroutine registered with contentWG when the listener went live.
+		s.contentWG.Wait()
 	}()
 
 	slog.Info("abysslinkd listening", "socket", s.socketPath)
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// A real Serve error: trigger the shutdown goroutine and wait for it so
+		// the socket file is removed and the goroutine stopped (NET-14).
+		stopShutdown()
+		<-shutdownDone
 		return fmt.Errorf("daemon: serve: %w", err)
 	}
 	// Serve returned ErrServerClosed, which only srv.Shutdown (in the goroutine
@@ -144,6 +253,33 @@ func (s *Server) Run(ctx context.Context) error {
 	// before returning so the caller cannot exit mid-shutdown (NET-14).
 	<-shutdownDone
 	return nil
+}
+
+// ensureSocketFree guards against a second daemon instance stealing a live
+// daemon's socket: an unconditional pre-listen os.Remove would unlink the
+// serving daemon's socket, and the usurper's later shutdown would then delete
+// the survivor's file. It probes the path with a short unix dial:
+//   - dial answers → another abysslinkd is serving; refuse to start.
+//   - ECONNREFUSED → stale file from a crashed daemon; remove it.
+//   - file does not exist → nothing to clear.
+//   - anything else → ambiguous; fail closed without removing.
+func ensureSocketFree(path string) error {
+	conn, err := net.DialTimeout("unix", path, socketProbeTimeout)
+	if err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("daemon: another abysslinkd is already serving %s — refusing to start", path)
+	}
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case errors.Is(err, syscall.ECONNREFUSED):
+		if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+			return fmt.Errorf("daemon: clear stale socket: %w", rerr)
+		}
+		return nil
+	default:
+		return fmt.Errorf("daemon: cannot verify whether socket %s is live: %w", path, err)
+	}
 }
 
 func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
@@ -154,15 +290,40 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	// A11 / DOS-01: cap the request body before decoding to prevent memory-exhaustion
 	// from a hostile or compromised tailnet peer flooding POST /notify.
 	r.Body = http.MaxBytesReader(w, r.Body, maxNotifyBody)
-	var req NotifyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Read once (RESEARCH Pattern 5), probe the "v" field, branch. The cap
+	// error now surfaces at ReadAll instead of Decode — same disambiguation.
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		// MaxBytesReader sets an internal flag that causes ResponseWriter to emit 413
 		// if we call http.Error after the read limit is exceeded; we disambiguate
-		// here to return 413 explicitly for clarity.
-		if strings.Contains(err.Error(), "request body too large") {
+		// here to return 413 explicitly for clarity. Typed match — a substring
+		// match on the error text would break on wording changes and could
+		// mislabel other read errors.
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
+		// Not a JSON problem — the body could not be read at all (e.g. the
+		// client hung up mid-body).
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+	var probe struct {
+		V int `json:"v"`
+	}
+	// A probe failure on malformed JSON is fine: probe.V stays 0 and the v1
+	// unmarshal below reports the identical "invalid JSON" 400.
+	_ = json.Unmarshal(raw, &probe)
+	if probe.V == 2 {
+		s.handleNotifyV2(w, r, raw)
+		return
+	}
+
+	// v1 path — byte-identical behavior (v1 NotifyRequest has no v field, so
+	// probe.V == 0 routes every existing consumer here unchanged).
+	var req NotifyRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -183,6 +344,102 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// notifyV2Envelope is the unix-socket v2 envelope (Phase 28): the wire
+// Message plus an OPTIONAL content field. Content never enters the Message
+// struct itself — the daemon mints a content-store token and the message
+// carries only the FetchRef (BACK-06). DisallowUnknownFields semantics are
+// preserved for everything else: "content" is the single additional key the
+// decoder accepts; any other body-shaped key is still unknown by
+// construction (D-17).
+type notifyV2Envelope struct {
+	notifyv2.Message
+	Content string `json:"content,omitempty"`
+}
+
+// handleNotifyV2 is the POST /notify v2 branch (BACK-05): strict decode
+// (DisallowUnknownFields — the D-17 decode gate: Message has no body field,
+// so any body/content-shaped key is unknown by construction; the optional
+// envelope content field is hived off into the content store, never the
+// message), server-side enrichment, Validate, then dispatch through the
+// policy engine. Explicit POSTs bypass the heuristic cooldown by origin
+// (D-10). Display-name enrichment from the registry arrives with the bridge
+// in plan 27-07.
+func (s *Server) handleNotifyV2(w http.ResponseWriter, r *http.Request, raw []byte) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var env notifyV2Envelope
+	if err := dec.Decode(&env); err != nil {
+		http.Error(w, "invalid v2 payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	msg := env.Message
+
+	// Enrichment before validation: hook/CLI consumers may omit msg_id and
+	// host; the daemon fills both server-side.
+	if msg.MsgID == "" {
+		msg.MsgID = notifyv2.NewMsgID()
+	}
+	if msg.Host == "" {
+		msg.Host = s.hostname
+	}
+
+	// Optional content → content-store token → FetchRef (BACK-06). The body
+	// is capped at 64 KiB (413 beyond); a caller-supplied fetch alongside
+	// content is ambiguous and rejected. When the content listener is down
+	// the content is DROPPED and the wake dispatches unchanged — the
+	// fallback title carries it (BACK-08); content is never queued or
+	// persisted (D-13 spirit).
+	if len(env.Content) > maxContentBodyBytes {
+		http.Error(w, "content too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if env.Content != "" {
+		if msg.Fetch != nil {
+			http.Error(w, "content and fetch are mutually exclusive", http.StatusBadRequest)
+			return
+		}
+		if u, ttl, ok := s.mintFetchRef(env.Content); ok {
+			msg.Fetch = &notifyv2.FetchRef{URLTailnet: u, TTLSeconds: ttl}
+		} else {
+			slog.Debug("daemon: content dropped — content listener down; dispatching wake with fallback title only (BACK-08)",
+				"msg_id", msg.MsgID, "kind", msg.Kind)
+		}
+	}
+
+	// Single validation gate: dispatch's policy-side Validate (its first step)
+	// is the one gate; its error surfaces here as the 422 with the accurate
+	// reason. A handler-side pre-Validate would be a duplicate of the same
+	// check on the same (enriched) message.
+	//
+	// Delivery runs under WithoutCancel: the CLI client posts with a 2s
+	// timeout while the synchronous ntfy leg can take ~5s. If the client's
+	// disconnect cancelled delivery here, the daemon would queue the note for
+	// retry while the timed-out client falls back to a direct send — the same
+	// note delivered twice. Detaching from the request context makes the
+	// daemon's accepted-request delivery authoritative.
+	if err := s.dispatch.dispatch(context.WithoutCancel(r.Context()), msg, originExplicit, notifyv2.RenderOpts{}); err != nil {
+		slog.Warn("daemon: v2 notify rejected", "reason", err)
+		http.Error(w, "invalid v2 message: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	// Mirror the v1 ring-adder with METADATA ONLY (T-19-19): msg_id, kind,
+	// pane — never anything body-like (the schema has no body field anyway).
+	// The recorded priority is the post-render ntfy numeric value ("3"/"4"/"5"
+	// via D-14), not the raw wire word — v1 records ntfy numeric strings, so
+	// the webui history stays consistent across both paths.
+	if s.ring != nil {
+		parts := []string{string(msg.Kind)}
+		if msg.Session.Pane != "" {
+			parts = append(parts, msg.Session.Pane)
+		}
+		parts = append(parts, msg.MsgID)
+		s.ring.AddEvent(strings.Join(parts, " "), "", notifyv2.Render(msg, notifyv2.RenderOpts{}).Priority, time.Now())
+	}
+	// Success response mirrors the v1 handler exactly: 204 No Content.
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // daemonStatusResponse is the JSON schema for GET /status, consumed by the
 // Phase 19 Web UI. rig_id is opaque (SHA-256 prefix of the hostname) — no raw
 // hostname, IP, or node_id is exposed (OBS-04).
@@ -196,6 +453,27 @@ type daemonStatusResponse struct {
 	CertExpiry string              `json:"cert_expiry,omitempty"`
 	LastSeen   string              `json:"last_seen,omitempty"`
 	Uptime     string              `json:"uptime"`
+
+	// GateExecsObserved is live: it reads the gate decorator's atomic counter
+	// via SetExecCounter — the count of module/consumer execs the observe-only
+	// GatedRunner has intercepted (D-38); 0 when no gate is wired.
+	GateExecsObserved uint64 `json:"gate_execs_observed"`
+
+	// WakeSent counts v2 notes the dispatcher successfully delivered
+	// (including retry-queue successes); AckReceived counts BACK-07 phone
+	// acks. Both are memory-only and reset on daemon restart — wake-sent vs
+	// ack-received is reported separately by design (BACK-07), and a gap
+	// between them triggers NOTHING (no re-wake logic exists).
+	WakeSent    uint64 `json:"wake_sent"`
+	AckReceived uint64 `json:"ack_received"`
+
+	// ContentStore reports the BACK-06 content listener state:
+	// "listening on <addr>" or "disabled: <reason>".
+	ContentStore string `json:"content_store"`
+
+	// Devices is the per-device DEVC-04 surface (name, last-seen, stale,
+	// revoked) the CLI renders. Empty when no device store is wired.
+	Devices []daemonDeviceStatus `json:"devices"`
 
 	// PostureComplete signals whether the DOCTOR summary is authoritative
 	// posture data. It is false this phase: the full doctor families live in
@@ -214,6 +492,42 @@ type daemonDoctorSummary struct {
 	Fatal int `json:"fatal"`
 	Warn  int `json:"warn"`
 	Pass  int `json:"pass"`
+}
+
+// daemonDeviceStatus is one enrolled device in /status (DEVC-04): name,
+// last-seen, staleness against the 7-day window, and revocation. No push
+// token, bearer hash, or key material is ever exposed here.
+type daemonDeviceStatus struct {
+	Name     string `json:"name"`
+	LastSeen string `json:"last_seen,omitempty"`
+	Stale    bool   `json:"stale"`
+	Revoked  bool   `json:"revoked"`
+}
+
+// deviceStatuses builds the /status devices block from the device store:
+// every record (active and revoked) with its DEVC-04 staleness computed via
+// Stale(7d). nil-safe: without a device store it returns an empty list.
+func (s *Server) deviceStatuses() []daemonDeviceStatus {
+	out := []daemonDeviceStatus{}
+	if s.devices == nil {
+		return out
+	}
+	staleIDs := make(map[string]bool)
+	for _, r := range s.devices.Stale(staleDeviceWindow) {
+		staleIDs[r.ID] = true
+	}
+	for _, r := range s.devices.List() {
+		d := daemonDeviceStatus{
+			Name:    r.Name,
+			Stale:   staleIDs[r.ID],
+			Revoked: r.Revoked,
+		}
+		if !r.LastSeen.IsZero() {
+			d.LastSeen = r.LastSeen.UTC().Format(time.RFC3339)
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // handleStatus serves GET /status: a read-only JSON posture snapshot of the
@@ -259,6 +573,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// doctor summary as a genuine "0 fatal" all-clear.
 	reachable := s.resolveReachable(r.Context())
 
+	// Gate exec counter (D-38): live when the composition root wired
+	// SetExecCounter; 0 when no gate is present (nil-safe, never an error).
+	var gateExecs uint64
+	if s.execCount != nil {
+		gateExecs = s.execCount()
+	}
+
 	resp := daemonStatusResponse{
 		Version:    daemonVersion,
 		Backend:    backendType,
@@ -267,6 +588,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		LockStatus: lockStatus,            // authoritative: read from config.
 		Doctor:     daemonDoctorSummary{}, // STUB (OBS-07): zeroed counts, not a real all-clear.
 		Uptime:     time.Since(s.startedAt).Truncate(time.Second).String(),
+		// LIVE: the gate decorator's atomic exec counter via SetExecCounter (D-38).
+		GateExecsObserved: gateExecs,
+		// LIVE memory-only counters (BACK-07): wake-sent vs ack-received,
+		// reported separately and never reconciled into a re-wake.
+		WakeSent:     s.dispatch.wakeSentCount(),
+		AckReceived:  s.ackReceived.Load(),
+		ContentStore: s.contentStoreStatus(),
+		Devices:      s.deviceStatuses(),
 		// PostureComplete=false flags the DOCTOR summary as non-authoritative so
 		// consumers do not read the zeroed doctor summary as a genuine "0 fatal"
 		// all-clear on a security-posture endpoint (WR-05). Reachable is now real.

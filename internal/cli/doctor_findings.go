@@ -114,14 +114,23 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	// Backend-specific + fleet findings.
 	findings = appendBackendAndFleetFindings(ctx, cc, deps.Keychain, findings)
 
-	// Supply-chain integrity advisories.
-	findings = append(findings, supplyChainFindings(ctx, cc.runner, version, "")...)
+	// Supply-chain integrity advisories. Captured locally so the sec-* alias
+	// (sec-binary-signed) reuses the result instead of re-downloading the
+	// release artifacts a second time per doctor run (W8 / RESEARCH Pitfall 3).
+	// `doctor --offline` (cc.offline) skips the networked download entirely.
+	var supplyFinds []modules.Finding
+	if cc.offline {
+		supplyFinds = supplyChainFindingsOffline()
+	} else {
+		supplyFinds = supplyChainFindings(ctx, cc.runner, version, "")
+	}
+	findings = append(findings, supplyFinds...)
 
 	// Tamper-evident audit-log posture. Captured locally so the sec cross-ref
 	// alias reuses it (run-once pattern).
 	var auditFinds []modules.Finding
 	if logPath, lpErr := auditDefaultLogPath(); lpErr == nil {
-		auditFinds = auditDoctorFindings(ctx, logPath, deps.Keychain)
+		auditFinds = auditDoctorFindings(logPath, deps.Keychain)
 		findings = append(findings, auditFinds...)
 	} else {
 		slog.Warn("doctor: audit log path unavailable; skipping audit checks", "err", lpErr)
@@ -140,8 +149,9 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	findings = append(findings, webuiFinds...)
 
 	// Security audit posture (reuses metFinds/webuiFinds/auditFinds for the 3
-	// cross-ref aliases so the underlying checks run exactly once).
-	findings = append(findings, secDoctorFindings(ctx, cc, deps, false, metFinds, webuiFinds, auditFinds)...)
+	// cross-ref aliases and supplyFinds for sec-binary-signed so the underlying
+	// checks run exactly once — no second artifact download, W8).
+	findings = append(findings, secDoctorFindings(ctx, cc, deps, false, metFinds, webuiFinds, auditFinds, supplyFinds)...)
 
 	// Phase 21 optional-module posture.
 	findings = append(findings, mod3DoctorFindings(ctx, cc.cfg, cc.runner)...)

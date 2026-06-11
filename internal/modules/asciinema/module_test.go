@@ -134,6 +134,88 @@ func TestApply_SkipsWriteIfConfigExists(t *testing.T) {
 	assert.Equal(t, original, data)
 }
 
+// TestApply_DisablesCloudUploadInExistingConfig is the W6 regression test:
+// when an EXISTING config actively points uploads at asciinema.org, Apply
+// must remediate (comment the url line out under audit) rather than skip —
+// Plan promises "configure asciinema to disable cloud uploads".
+func TestApply_DisablesCloudUploadInExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	cfgDir := filepath.Join(dir, "asciinema")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	cfgPath := filepath.Join(cfgDir, "config")
+	require.NoError(t, os.WriteFile(cfgPath,
+		[]byte("[api]\nurl = https://asciinema.org\ntoken = abc\n"), 0o600))
+
+	a := audit.New(filepath.Join(dir, "audit.log"))
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "asciinema 2.3.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Audit: a})
+	require.NoError(t, m.Apply(context.Background()))
+
+	data, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	content := string(data)
+	assert.False(t, hasActiveCloudUploadURL(content), "active upload URL must be disabled")
+	assert.Contains(t, content, "token = abc", "unrelated user config must be preserved")
+
+	// Convergence: Detect on the patched config no longer flags it, and a
+	// second Apply leaves the file untouched.
+	findings, err := m2Detect(t, dir)
+	require.NoError(t, err)
+	for _, f := range findings {
+		assert.NotEqual(t, "no_cloud_upload", f.Check, "patched config must not re-trigger the finding")
+	}
+}
+
+// m2Detect runs Detect with a fresh module instance against the same temp env.
+func m2Detect(t *testing.T, _ string) ([]modules.Finding, error) {
+	t.Helper()
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "asciinema 2.3.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	return m.Detect(context.Background())
+}
+
+// TestDetect_DefaultConfigNotFlagged: the privacy config Apply writes mentions
+// the asciinema.org URL only in comments — Detect must not flag it (the old
+// substring check did, making the module non-convergent).
+func TestDetect_DefaultConfigNotFlagged(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	cfgDir := filepath.Join(dir, "asciinema")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "config"), []byte(asciinemaConfig), 0o600))
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "asciinema 2.3.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, findings, "the module's own default config must never be flagged")
+}
+
+func TestHasActiveCloudUploadURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"active url", "[api]\nurl = https://asciinema.org\n", true},
+		{"active url with spaces", "[api]\n  url   =   https://asciinema.org  \n", true},
+		{"commented semicolon", "[api]\n; url = https://asciinema.org\n", false},
+		{"commented hash", "[api]\n# url = https://asciinema.org\n", false},
+		{"comment mentioning url", "; Set url = https://asciinema.org to enable\n", false},
+		{"self-hosted url", "[api]\nurl = https://rec.example.com\n", false},
+		{"empty", "", false},
+		{"default config", asciinemaConfig, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, hasActiveCloudUploadURL(tc.content))
+		})
+	}
+}
+
 func TestApply_Disabled_NoOp(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Modules.Asciinema.Enabled = false
@@ -141,11 +223,13 @@ func TestApply_Disabled_NoOp(t *testing.T) {
 	require.NoError(t, m.Apply(context.Background()))
 }
 
-func TestVerify_DelegatesToDetect(t *testing.T) {
-	r := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 127}})
+// TestVerify_ReturnsNil: Verify must not re-run Detect — runner.Doctor calls
+// both, and delegating would double every finding per doctor pass (W4/NET-18).
+func TestVerify_ReturnsNil(t *testing.T) {
+	r := shell.NewMockRunner() // Verify must not touch the runner
 	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
 	findings, err := m.Verify(context.Background())
 	require.NoError(t, err)
-	require.Len(t, findings, 1)
-	assert.Equal(t, "installed", findings[0].Check)
+	assert.Empty(t, findings)
+	assert.True(t, r.Done())
 }

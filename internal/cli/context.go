@@ -25,6 +25,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/gate"
 	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/modules/acl"
@@ -55,10 +56,12 @@ import (
 )
 
 // newRunner is the factory used by loadCmdContext to construct the shell runner.
-// The default returns &shell.ExecRunner{}, which is byte-identical to the
-// previous inline literal. Tests override this var to inject a MockRunner
-// without changing production behavior.
-var newRunner = func() shell.Runner { return &shell.ExecRunner{} }
+// The default wraps &shell.ExecRunner{} in the observe-only gate decorator
+// (D-38): every module/consumer exec at the CLI composition root is recorded
+// (binary + hashes, never raw argv) and delegated verbatim — zero behavior
+// change this phase. Tests override this var to inject a MockRunner without
+// changing production behavior.
+var newRunner = func() shell.Runner { return gate.New(&shell.ExecRunner{}) }
 
 // cmdContext holds shared state for a command invocation.
 type cmdContext struct {
@@ -70,6 +73,18 @@ type cmdContext struct {
 	jsonOut bool
 	verbose bool
 	explain bool // gates per-action rationale rendering (--explain flag)
+	// offline mirrors the doctor-only --offline flag: skip checks that need
+	// the network (supply-chain artifact downloads). False everywhere else.
+	offline bool
+	// cfgMissing is true when no config file existed at the default path and
+	// cfg was synthesized from config.Defaults(). Read commands (status,
+	// doctor) use it to print a "not initialised — run `abysslink init`"
+	// banner instead of a false-green dashboard (UX review #4).
+	cfgMissing bool
+	// persistAcceptNoSSHCheck records that --accept-no-sshcheck was passed and
+	// the acknowledgment still needs to be written to abysslink.yaml. The write
+	// is deferred until AFTER ConfirmBlast so a declined apply persists nothing (I1).
+	persistAcceptNoSSHCheck bool
 	// acceptCheckPeriodExt mirrors the --accept-checkperiod-extension flag
 	// (defined on `up` only; false everywhere else). Threaded into
 	// modules.Deps so the acl module can enforce the 12h checkPeriod ceiling
@@ -118,6 +133,8 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	explain, _ := cmd.Flags().GetBool("explain")
+	// Defined on `doctor` only; GetBool returns false elsewhere.
+	offline, _ := cmd.Flags().GetBool("offline")
 	// Defined on `up` only; GetBool returns false for commands that do not
 	// register the flag, so repair / acl apply never get implicit consent.
 	acceptCPExt, _ := cmd.Flags().GetBool("accept-checkperiod-extension")
@@ -130,6 +147,13 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 		slog.SetLogLoggerLevel(slog.LevelWarn)
 	}
 
+	if configPath == "" {
+		// defaultConfigPath could not resolve a home directory (I4): error out
+		// rather than resolving a relative path against the cwd.
+		return nil, fmt.Errorf("cannot determine config path: home directory unknown — set XDG_CONFIG_HOME or pass --config")
+	}
+
+	cfgMissing := false
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		// D-01 (fail-closed): propagate validation and parse errors so a
@@ -141,7 +165,14 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("config: %w", err)
 		}
+		// An explicitly-passed --config pointing at a missing file is a hard
+		// error — the user named a specific file; silently ignoring it and
+		// running on Defaults would be a false green (UX review #4).
+		if cmd.Flags().Changed("config") {
+			return nil, fmt.Errorf("config file %s does not exist (passed via --config) — check the path or run `abysslink init`", configPath)
+		}
 		cfg = config.Defaults()
+		cfgMissing = true
 	}
 
 	return &cmdContext{
@@ -153,6 +184,8 @@ func loadCmdContext(cmd *cobra.Command) (*cmdContext, error) {
 		jsonOut:              jsonOut,
 		verbose:              verbose,
 		explain:              explain,
+		offline:              offline,
+		cfgMissing:           cfgMissing,
 		acceptCheckPeriodExt: acceptCPExt,
 		manualSteps:          &[]modules.ManualStep{},
 	}, nil
@@ -247,6 +280,12 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 		// never raw stdout (which would corrupt --json) and never a bare stdin
 		// read (which would block in non-TTY/CI/--json contexts). CR-01 / T-10-16.
 		Prompt: func(ctx context.Context, msg string) error {
+			// --yes auto-confirms every module prompt (W4): interactive()
+			// deliberately returns false when yes is true, so the gate below
+			// would otherwise demand the very flag the user already passed.
+			if cc.yes {
+				return nil
+			}
 			if !interactive(cc.yes, cc.jsonOut) {
 				return errMissingInput("yes")
 			}

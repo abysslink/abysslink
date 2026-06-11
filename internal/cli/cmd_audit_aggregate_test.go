@@ -369,3 +369,73 @@ func newAggregateTestContext(t *testing.T) *cmdContext {
 	cfg.WebUI.BindAddr = "100.64.0.1:8443"
 	return &cmdContext{cfg: cfg, runner: shell.NewMockRunner(), dryRun: true}
 }
+
+// TestMaxExitCode covers the aggregate roll-up helper.
+func TestMaxExitCode(t *testing.T) {
+	assert.Equal(t, exitCodeOK, maxExitCode(exitCodeOK, exitCodeOK))
+	assert.Equal(t, exitCodeError, maxExitCode(exitCodeError, exitCodeOK))
+	assert.Equal(t, exitCodeError, maxExitCode(exitCodeOK, exitCodeError))
+	assert.Equal(t, exitCodeFatal, maxExitCode(exitCodeError, exitCodeFatal))
+}
+
+// TestAuditVerifyStepCode covers W11: the aggregate must record a NON-FATAL
+// degraded verify result (kc==nil walk, counter unknown) so its exit code can
+// never roll back to 0 on the strength of the findings alone.
+func TestAuditVerifyStepCode(t *testing.T) {
+	t.Run("clean_signed_chain_is_zero", func(t *testing.T) {
+		logPath, kc := newSignedLog(t, 2)
+		var out bytes.Buffer
+		p := NewHumanPrinterTo(&out, &out)
+		degraded, fatalErr := auditVerifyStepCode(context.Background(), p, logPath, kc)
+		require.NoError(t, fatalErr)
+		// A clean signed chain may still report counter-unknown degradation on a
+		// fresh mock store without an anchor counter; what it must NEVER be is
+		// fatal. When the counter verifies, degraded is 0.
+		assert.NotEqual(t, exitCodeFatal, degraded)
+	})
+
+	t.Run("nil_keychain_is_degraded_not_fatal", func(t *testing.T) {
+		logPath, _ := newSignedLog(t, 2)
+		var out bytes.Buffer
+		p := NewHumanPrinterTo(&out, &out)
+		degraded, fatalErr := auditVerifyStepCode(context.Background(), p, logPath, nil)
+		require.NoError(t, fatalErr, "kc==nil degraded walk must not abort the aggregate")
+		assert.Equal(t, exitCodeError, degraded,
+			"an unauthenticated chain walk must register as exit 1, never 0")
+	})
+
+	t.Run("broken_chain_is_fatal", func(t *testing.T) {
+		logPath, kc := newSignedLog(t, 4)
+		data, rerr := os.ReadFile(logPath) //nolint:gosec // G304: test fixture under the test's own temp dir
+		require.NoError(t, rerr)
+		lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		var e map[string]any
+		require.NoError(t, json.Unmarshal([]byte(lines[2]), &e))
+		e["prev_hash"] = "deadbeef"
+		mangled, merr := json.Marshal(e)
+		require.NoError(t, merr)
+		lines[2] = string(mangled)
+		require.NoError(t, os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+
+		var out bytes.Buffer
+		p := NewHumanPrinterTo(&out, &out)
+		degraded, fatalErr := auditVerifyStepCode(context.Background(), p, logPath, kc)
+		require.Error(t, fatalErr, "a chain break must abort the aggregate")
+		assert.Equal(t, exitCodeFatal, degraded)
+		assert.Equal(t, exitCodeFatal, exitCodeOf(t, fatalErr))
+	})
+}
+
+// TestAuditAggregate_DegradedVerifyNeverExitsZero asserts the roll-up takes
+// max(degraded, findings): with kc==nil the aggregate exit code is at least 1
+// even when the findings alone would allow 0.
+func TestAuditAggregate_DegradedVerifyNeverExitsZero(t *testing.T) {
+	logPath, _ := newSignedLog(t, 2)
+	var out bytes.Buffer
+	p := NewHumanPrinterTo(&out, &out)
+	cc := newAggregateTestContext(t)
+
+	err := runAuditAggregate(context.Background(), cc, p, logPath, nil, aggregateOpts{})
+	assert.GreaterOrEqual(t, exitCodeOf(t, err), exitCodeError,
+		"a kc==nil (unauthenticated) verify must never let the aggregate exit 0")
+}

@@ -58,6 +58,13 @@ func newWatchAddCmd() *cobra.Command {
 			return mutateWatch(cmd, func(w *config.WatchModule) (string, error) {
 				switch {
 				case pane != "":
+					// Reject duplicates: a pane registered twice would fire
+					// duplicate notifications for every event.
+					for _, existing := range w.Panes {
+						if existing == pane {
+							return "", fmt.Errorf("watch add: pane watcher %q is already configured", pane)
+						}
+					}
 					w.Panes = append(w.Panes, pane)
 					return "add tmux pane watcher " + pane, nil
 				case file != "":
@@ -208,10 +215,11 @@ func mutateWatch(cmd *cobra.Command, fn func(*config.WatchModule) (string, error
 	if err != nil {
 		return err
 	}
+	// Keep the enabled flag consistent with reality in BOTH directions: adding
+	// the first watcher enables the module; removing the last one disables it
+	// (a lingering enabled:true with zero watchers is a config lie).
 	w := cfg.Modules.Watch
-	if len(w.Panes) > 0 || len(w.Files) > 0 || len(w.HTTP) > 0 {
-		cfg.Modules.Watch.Enabled = true
-	}
+	cfg.Modules.Watch.Enabled = len(w.Panes) > 0 || len(w.Files) > 0 || len(w.HTTP) > 0
 
 	if !apply {
 		printerInfo(p, "[plan] would "+desc)
@@ -227,7 +235,7 @@ func mutateWatch(cmd *cobra.Command, fn func(*config.WatchModule) (string, error
 	return nil
 }
 
-// removeString returns s without the first occurrence of v.
+// removeString returns s without any occurrence of v (all matches removed).
 func removeString(s []string, v string) []string {
 	out := s[:0:0]
 	for _, x := range s {

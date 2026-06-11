@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -462,9 +463,31 @@ func testUninstallTypedConfirmNoHang(ctx context.Context, binPath, configPath st
 	return nil
 }
 
-// testExitCodesDocumented verifies that `abysslink --help` or `abysslink doctor --help`
-// mentions exit codes 0, 1, and 2, satisfying the UX-10 documentation requirement.
+// exitCodeDocRe matches a genuine exit-code documentation line like
+// "0  — OK: ..." / "1 - Warning ..." — a digit at the start of a line followed
+// by a dash separator. Merely containing the characters "0", "1", "2" anywhere
+// in the help text is NOT documentation.
+var exitCodeDocRe = func(code string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^\s*` + code + `\s+[—–-]`)
+}
+
+// testExitCodesDocumented verifies that `abysslink --help` (or, as a fallback,
+// `abysslink doctor --help`) contains a real exit-code section: an "Exit codes"
+// heading plus one documentation line per code 0/1/2 ("<code>  — <meaning>"),
+// satisfying the UX-10 documentation requirement.
 func testExitCodesDocumented(ctx context.Context, binPath, configPath string) error {
+	helpDocumentsExitCodes := func(out string) error {
+		if !strings.Contains(strings.ToLower(out), "exit codes") {
+			return fmt.Errorf("no \"Exit codes\" section heading")
+		}
+		for _, code := range []string{"0", "1", "2"} {
+			if !exitCodeDocRe(code).MatchString(out) {
+				return fmt.Errorf("no documentation line for exit code %s (want a line like %q)", code, code+"  — meaning")
+			}
+		}
+		return nil
+	}
+
 	out, _ := runAbysslink(ctx, binPath,
 		"--config", configPath,
 		"--help",
@@ -472,15 +495,18 @@ func testExitCodesDocumented(ctx context.Context, binPath, configPath string) er
 	if ctx.Err() != nil {
 		return fmt.Errorf("--help timed out")
 	}
-	if !strings.Contains(out, "0") || !strings.Contains(out, "1") || !strings.Contains(out, "2") {
-		// Fall back to doctor --help
-		doctorOut, _ := runAbysslink(ctx, binPath,
-			"--config", configPath,
-			"doctor", "--help",
-		)
-		if !strings.Contains(doctorOut, "0") || !strings.Contains(doctorOut, "1") || !strings.Contains(doctorOut, "2") {
-			return fmt.Errorf("neither root --help nor doctor --help documents exit codes 0/1/2; root: %q; doctor: %q", out, doctorOut)
-		}
+	rootErr := helpDocumentsExitCodes(out)
+	if rootErr == nil {
+		return nil
+	}
+
+	// Fall back to doctor --help.
+	doctorOut, _ := runAbysslink(ctx, binPath,
+		"--config", configPath,
+		"doctor", "--help",
+	)
+	if doctorErr := helpDocumentsExitCodes(doctorOut); doctorErr != nil {
+		return fmt.Errorf("neither root --help (%v) nor doctor --help (%v) documents exit codes 0/1/2", rootErr, doctorErr)
 	}
 	return nil
 }

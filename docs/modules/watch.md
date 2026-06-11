@@ -44,6 +44,8 @@ watch:
 
 ```sh
 abysslink watch list             # list configured watchers
-abysslink watch status           # show daemon status
+abysslink watch add              # add a pane/file/HTTP watcher (--apply to write)
+abysslink watch remove           # remove a watcher (--apply to write)
+abysslink daemon status          # show daemon status
 abysslink up [--apply]           # configure watchers
 ```

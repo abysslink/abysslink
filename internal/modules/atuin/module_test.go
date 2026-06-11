@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -244,6 +245,13 @@ func (c *countingAudit) WriteFile(path string, content []byte, perm os.FileMode,
 	return c.inner.WriteFile(path, content, perm, dryRun)
 }
 
+// Update delegates to the inner writer's cross-process read-modify-write so
+// *countingAudit still satisfies audit.AuditWriter; the counting test exercises
+// WriteFile only.
+func (c *countingAudit) Update(ctx context.Context, path string, perm os.FileMode, content func() ([]byte, error)) error {
+	return c.inner.Update(ctx, path, perm, content)
+}
+
 func TestApply_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -273,4 +281,137 @@ func TestKeyPath_Linux(t *testing.T) {
 
 	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "xdgdata"))
 	assert.Equal(t, filepath.Join(dir, "xdgdata", "atuin", "key"), KeyPath())
+}
+
+// TestDetect_CommentedCloudSync_NoFinding is the W8 regression test: stock
+// atuin configs ship `# sync_address = "https://api.atuin.sh"` commented out —
+// that must NOT be flagged as active cloud sync (it caused a perpetual WARN).
+func TestDetect_CommentedCloudSync_NoFinding(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	cfgDir := filepath.Join(dir, "atuin")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	stock := "## where to sync to\n# sync_address = \"https://api.atuin.sh\"\n\n[history]\nfilter_mode = \"global\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(stock), 0o600))
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, findings, "commented-out default must not be flagged (W8)")
+}
+
+func TestConfigEnablesCloudSync(t *testing.T) {
+	assert.False(t, configEnablesCloudSync(`# sync_address = "https://api.atuin.sh"`))
+	assert.False(t, configEnablesCloudSync("  ## sync_address = \"https://api.atuin.sh\"\n"))
+	assert.True(t, configEnablesCloudSync(`sync_address = "https://api.atuin.sh"`))
+	assert.True(t, configEnablesCloudSync("[sync]\nsync_address = \"https://api.atuin.sh\" # default\n"))
+	assert.False(t, configEnablesCloudSync(`sync_address = "https://atuin.example.org"`))
+	assert.False(t, configEnablesCloudSync(""))
+}
+
+// TestApply_RewritesCloudSyncConfig is the W8 convergence test: an existing
+// config that actively syncs with the public cloud must be rewritten by Apply
+// (audit-backed) to local-only mode — previously Apply skipped any existing
+// file, so the planned remediation never executed and the WARN never cleared.
+func TestApply_RewritesCloudSyncConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	cfgDir := filepath.Join(dir, "atuin")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	userCfg := "## my atuin config\nauto_sync = true\n\n[sync]\nsync_address = \"https://api.atuin.sh\"\n\n[keys]\nscroll_exits = false\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(userCfg), 0o600))
+
+	a := audit.New(filepath.Join(dir, "audit.log"))
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Audit: a})
+	require.NoError(t, m.Apply(context.Background()))
+
+	data, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	content := string(data)
+	assert.NotContains(t, content, "api.atuin.sh", "cloud sync address must be blanked")
+	assert.Contains(t, content, `sync_address = ""`)
+	assert.Contains(t, content, "auto_sync = false", "auto_sync must be forced off")
+	assert.Contains(t, content, "secrets_filter = true", "secrets_filter must be forced on")
+	assert.Contains(t, content, "scroll_exits = false", "user customisations must be preserved")
+	assert.NotContains(t, content, "auto_sync = true")
+
+	// Convergence: a second Detect on the rewritten config must be clean.
+	r2 := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m2 := New(modules.Deps{Cfg: enabledCfg(), Runner: r2, Audit: a})
+	findings, err := m2.Detect(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, findings, "Apply must converge the no_cloud_sync finding (W8)")
+}
+
+// TestRemediateCloudSync_PrependsTopLevelKeys asserts missing keys are added
+// BEFORE the first [section] — appending at EOF would land them inside the
+// last TOML table.
+func TestRemediateCloudSync_PrependsTopLevelKeys(t *testing.T) {
+	in := "[sync]\nsync_address = \"https://api.atuin.sh\"\n"
+	out := remediateCloudSync(in)
+	idxAuto := strings.Index(out, "auto_sync = false")
+	idxSection := strings.Index(out, "[sync]")
+	require.GreaterOrEqual(t, idxAuto, 0)
+	require.GreaterOrEqual(t, idxSection, 0)
+	assert.Less(t, idxAuto, idxSection, "added top-level keys must precede the first [section]")
+	assert.Contains(t, out, `sync_address = ""`)
+}
+
+// TestApply_GeneratedConfigIsLocalOnly pins the hardened defaults of the
+// freshly-generated config: auto_sync off, secrets_filter on, empty
+// sync_address.
+func TestApply_GeneratedConfigIsLocalOnly(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+
+	a := audit.New(filepath.Join(dir, "audit.log"))
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Audit: a})
+	require.NoError(t, m.Apply(context.Background()))
+
+	data, err := os.ReadFile(filepath.Join(dir, "atuin", "config.toml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "auto_sync = false")
+	assert.Contains(t, string(data), "secrets_filter = true")
+	assert.Contains(t, string(data), `sync_address = ""`)
+}
+
+// TestPlan_NoPhantomWriteAction: with atuin installed and a clean existing
+// config, Plan must emit NO actions — the old unconditional "write atuin
+// config" action promised a write that Apply never performed (W8 UX).
+func TestPlan_NoPhantomWriteAction(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	cfgDir := filepath.Join(dir, "atuin")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("# user config\n"), 0o600))
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	assert.Empty(t, actions, "clean existing config: dry-run must not promise a write")
+}
+
+// TestPlan_MissingConfig_EmitsWriteAction: the write action remains when the
+// config file genuinely does not exist.
+func TestPlan_MissingConfig_EmitsWriteAction(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "atuin 18.0.0\n"}})
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	assert.Contains(t, actions[0].Description, "write atuin config")
 }

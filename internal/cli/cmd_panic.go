@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,8 +26,9 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/fleet"
-	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/spf13/cobra"
 )
 
@@ -54,8 +56,11 @@ func newPanicCmd() *cobra.Command {
 		Long: `EMERGENCY KILL SWITCH — executes immediately with no confirmation prompt.
 
 Panic disconnects your machine from the tailnet, revokes all phone devices
-tagged with your mobile tag, and destroys the local Anthropic API key from
-the keychain. The consequences are audited and REVERSIBLE via repair:
+tagged with your mobile tag, revokes every enrolled device credential
+(bearer + push token + SSH certificate from the device store), and destroys
+the local Anthropic API key from the keychain. The consequences are audited
+and REVERSIBLE via repair (device credentials are re-minted with
+"abysslink enroll phone --apply"):
 
   abysslink repair --apply     # reconnect after a panic
 
@@ -73,9 +78,10 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			if err != nil || cc == nil {
 				// Emergency kill switch MUST NOT crash: on a config-load failure cc is
 				// nil, so synthesize a defaults context rather than deref a nil pointer
-				// at the first cc.runner use below (CR-02).
+				// at the first cc.runner use below (CR-02). newRunner() keeps the
+				// exec-gate decoration (D-38) — never a bare ExecRunner.
 				slog.Warn("panic: could not load config, proceeding with defaults", "err", err)
-				cc = &cmdContext{cfg: config.Defaults(), runner: &shell.ExecRunner{}}
+				cc = &cmdContext{cfg: config.Defaults(), runner: newRunner()}
 			}
 			p := newPrinter(cmd)
 			start := time.Now()
@@ -105,7 +111,7 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			banner := styleFatal.Render("PANIC — Emergency kill switch executing NOW")
 			printerError(p, styleHeaderBox.Render(banner))
 			printerError(p, "")
-			printerError(p, styleFatal.Render("Actions: disconnect tailnet · revoke phone devices · destroy local API key"))
+			printerError(p, styleFatal.Render("Actions: disconnect tailnet · revoke phone devices · revoke device credentials · destroy local API key"))
 			printerError(p, styleMuted.Render("No confirmation required — this is the emergency design contract."))
 			printerError(p, "")
 
@@ -118,8 +124,13 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			// panic) (WR-03).
 			panicDisconnect(ctx, cc, p, logPanic)
 
-			// Steps 2+: revoke phone devices and destroy local API key.
+			// Steps 2+: revoke phone devices, revoke device credentials, and
+			// destroy local API key. Panic executes by default (the emergency
+			// design contract exempts it from the dry-run-default rule — see
+			// resolveApplyFlags); ONLY an explicit --dry-run flag previews the
+			// device-credential revocation instead of mutating (DEVC-03).
 			revokePhoneDevicesWithStep(ctx, cc, p, logPanic)
+			revokeDeviceCredentialsWithStep(ctx, p, logPanic, cmd.Flags().Changed("dry-run"))
 			destroyLocalAPIKeyWithStep(ctx, cc, p, logPanic)
 
 			// Timing line.
@@ -256,8 +267,53 @@ func revokePhoneDevicesWithStep(ctx context.Context, cc *cmdContext, p Printer, 
 	}
 }
 
+// revokeDeviceCredentialsWithStep revokes EVERY enrolled device credential —
+// bearer, push token, and SSH certificate — in one atomic device-store write
+// (DEVC-03) and emits a ✓/✕ step marker with the revoked count. Zero enrolled
+// devices is a success ("revoked 0 device credential(s)"). A failure prints ✕
+// via errPanicStepFailed and RETURNS so panic continues with the remaining
+// steps (best-effort kill-switch contract, matching every other panic step).
+//
+// planOnly (an EXPLICIT --dry-run on the panic command) prints a [plan] line
+// and returns before the store is even constructed: device.Store arms its
+// audit writer with dryRun=false on every save, so calling RevokeAll under
+// dry-run would still mutate — the gate must therefore sit in front of the
+// call, not inside the audit writer.
+func revokeDeviceCredentialsWithStep(ctx context.Context, p Printer, logPanic func(string), planOnly bool) {
+	const label = "revoke device credentials"
+	if planOnly {
+		printerError(p, "[plan] would revoke every enrolled device credential (bearer + push token + SSH certificate) — no mutation in dry-run")
+		return
+	}
+	path, err := deviceStorePath()
+	if err != nil {
+		panicStep(p, label, errPanicStepFailed{err.Error()})
+		return
+	}
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		panicStep(p, label, errPanicStepFailed{"audit log unavailable: " + err.Error()})
+		return
+	}
+	// RevokeAll never mints, so it never touches the keychain — a nil keychain
+	// keeps the kill switch working even where no secrets backend exists.
+	st := device.New(path, audit.New(logPath), nil, nil)
+	n, err := st.RevokeAll(ctx)
+	if err != nil {
+		panicStep(p, label, errPanicStepFailed{err.Error()})
+		return // panic continues with the remaining steps
+	}
+	panicStep(p, fmt.Sprintf("revoked %d device credential(s)", n), nil)
+	if n > 0 {
+		logPanic("revoke_device_credentials")
+	}
+}
+
 // destroyLocalAPIKeyWithStep deletes the Anthropic API key from the local
-// keychain and emits a ✓/✕ step marker.
+// keychain and emits a ✓/✕ step marker. It destroys BOTH the v1 entry
+// (service "abysslink") AND every rig-scoped copy created by `enroll rig`'s
+// keychain migration (fleet.RigService(name)) — a kill switch that leaves live
+// migrated copies behind has not revoked anything.
 //
 // CLI-19: when the dependency bundle cannot be built or no keychain backend is
 // available, the operator MUST be told the key was NOT destroyed — a silent
@@ -269,10 +325,32 @@ func destroyLocalAPIKeyWithStep(ctx context.Context, cc *cmdContext, p Printer, 
 			errPanicStepFailed{"keychain unavailable — key NOT destroyed; revoke it in the Anthropic console (see manual steps)"})
 		return
 	}
-	if err := deps.Keychain.Delete(ctx, "abysslink", "anthropic-api-key"); err != nil {
+	destroyAPIKeysFromKeychain(ctx, deps.Keychain, cc.cfg.Rigs, p, logPanic)
+}
+
+// destroyAPIKeysFromKeychain deletes the v1 Anthropic API key AND every
+// rig-scoped migrated copy. Extracted from destroyLocalAPIKeyWithStep so the
+// rig-iteration logic is unit-testable with a mock keychain.
+func destroyAPIKeysFromKeychain(ctx context.Context, kc secrets.KeychainStore, rigs []config.RigConfig, p Printer, logPanic func(string)) {
+	if err := kc.Delete(ctx, "abysslink", "anthropic-api-key"); err != nil {
 		panicStep(p, "destroy local API key", errPanicStepFailed{err.Error()})
-		return
+	} else {
+		panicStep(p, "deleted local Anthropic API key from keychain", nil)
+		logPanic("destroy_local_api_key")
 	}
-	panicStep(p, "deleted local Anthropic API key from keychain", nil)
-	logPanic("destroy_local_api_key")
+
+	// Rig-scoped migrated copies (enroll rig --apply copies the v1 entries into
+	// fleet.RigService(name) — those must die with the kill switch too).
+	for _, rig := range rigs {
+		svc := fleet.RigService(rig.Name)
+		if delErr := kc.Delete(ctx, svc, "anthropic-api-key"); delErr != nil {
+			if errors.Is(delErr, secrets.ErrNotFound) {
+				continue // never migrated — nothing to destroy
+			}
+			panicStep(p, "destroy rig-scoped API key ("+rig.Name+")", errPanicStepFailed{delErr.Error()})
+			continue
+		}
+		panicStep(p, "deleted rig-scoped Anthropic API key ("+rig.Name+")", nil)
+		logPanic("destroy_rig_api_key")
+	}
 }

@@ -21,9 +21,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/abysslink/abysslink/internal/secrets"
 )
 
 // VerifyResult reports the outcome of a chain walk. OK is true only when every
@@ -71,10 +74,19 @@ func Verify(ctx context.Context, logPath string, kc KeychainStore) (VerifyResult
 
 	// CR-02: only fetch the HMAC key when a keychain is actually present.
 	// fetchHMACKey calls kc.Get, which panics on a nil interface.
+	//
+	// R2: a definitively-absent key (ErrNotFound) is NOT an error — it is the
+	// legitimate "no chain was ever signed" state (key creation is lazy since
+	// R2-12). It degrades to key == nil, exactly like a nil keychain. Any other
+	// fetch failure (keychain locked, dbus down) still hard-errors.
 	var key []byte
 	if kc != nil {
-		if key, err = fetchHMACKey(ctx, kc); err != nil {
-			return VerifyResult{}, err
+		key, err = fetchHMACKey(ctx, kc)
+		if err != nil {
+			if !errors.Is(err, secrets.ErrNotFound) {
+				return VerifyResult{}, err
+			}
+			key = nil
 		}
 	}
 
@@ -171,7 +183,20 @@ func verifyAnchor(ctx context.Context, logPath string, rawLines [][]byte, entrie
 		return VerifyResult{}, err
 	}
 	if anchor == nil {
-		// No anchor yet — still run the AUD-02 counter check below.
+		// R2-C2: the HMAC key exists in the keychain, so at least one signed
+		// append has happened — and every signed append writes the anchor under
+		// the same flock. A missing anchor therefore means the anchor was
+		// deleted or the whole log was replaced (e.g. with unsigned "legacy"
+		// entries) to bypass verification. Treating it as "not a violation"
+		// would let a filesystem-only attacker pass Verify by deleting one file.
+		if key != nil {
+			return VerifyResult{
+				OK: false, At: -1,
+				Reason: "anchor missing but HMAC key exists (anchor deleted or log replaced)",
+			}, nil
+		}
+		// No key was ever created (pure pre-chain legacy log): no anchor is
+		// expected — still run the AUD-02 counter check below.
 		result = verifyCounter(ctx, kc, entries, result)
 		return result, nil
 	}
@@ -194,13 +219,18 @@ func verifyAnchor(ctx context.Context, logPath string, rawLines [][]byte, entrie
 	if anchor.EntryCount > int64(len(entries)) {
 		result.TruncationDetected = true
 	}
-	// WR-01: when the counts match, the anchor's LastHash must equal
-	// sha256(last raw line). A mismatch is a history rewrite at/below the
-	// anchored length that the count check alone cannot catch.
-	if anchor.EntryCount == int64(len(entries)) && len(rawLines) > 0 {
-		sum := sha256.Sum256(rawLines[len(rawLines)-1])
+	// WR-01 / R2-C2: whenever the log holds AT LEAST the anchored number of
+	// entries, the anchored PREFIX must end in the recorded LastHash — i.e.
+	// sha256(rawLines[EntryCount-1]) must equal anchor.LastHash. The previous
+	// equality-only form (EntryCount == len(entries)) left the legitimate
+	// "anchor lags after appends" case completely unchecked, so an attacker
+	// could replace the whole log with more-than-EntryCount forged legacy
+	// entries and pass. The lag case is exactly when rawLines is LONGER than
+	// the anchored prefix — the prefix itself must still match.
+	if anchor.EntryCount > 0 && int64(len(rawLines)) >= anchor.EntryCount {
+		sum := sha256.Sum256(rawLines[anchor.EntryCount-1])
 		if anchor.LastHash != hex.EncodeToString(sum[:]) {
-			return VerifyResult{OK: false, At: len(entries) - 1, Reason: "anchor last_hash mismatch (history rewrite)"}, nil
+			return VerifyResult{OK: false, At: int(anchor.EntryCount) - 1, Reason: "anchor last_hash mismatch (history rewrite)"}, nil
 		}
 	}
 

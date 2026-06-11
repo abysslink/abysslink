@@ -27,6 +27,17 @@ type Result struct {
 	ExitCode int
 }
 
+// Ok reports whether the command exited successfully (exit code 0).
+//
+// ExecRunner.Run returns err == nil for a process that started and exited
+// non-zero — the failure is carried in Result.ExitCode. Callers MUST check
+// both the returned error AND Ok(); checking only the error silently treats
+// failed commands as successes (the C3/C4 bug class). Prefer:
+//
+//	res, err := runner.Run(ctx, ...)
+//	if err != nil || !res.Ok() { /* handle failure */ }
+func (r Result) Ok() bool { return r.ExitCode == 0 }
+
 // Runner executes external commands. All code outside internal/shell must call
 // through this interface — never import os/exec directly.
 type Runner interface {
@@ -47,4 +58,9 @@ type Runner interface {
 	// tools that need environment overrides (e.g. GIT_TERMINAL_PROMPT=0) to
 	// prevent interactive credential prompts.
 	RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (Result, error)
+	// RunStream executes name with args and returns a Stream handle over the
+	// process's stdout, one bounded line at a time. Use this for long-lived
+	// line-oriented protocols such as tmux control mode. The returned Stream
+	// is one process lifetime; callers own reconnect (D-34).
+	RunStream(ctx context.Context, name string, args ...string) (*Stream, error)
 }

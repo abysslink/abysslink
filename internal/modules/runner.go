@@ -230,10 +230,17 @@ func (r *Runner) PlanAll(ctx context.Context, progress ProgressFunc) ([]Action, 
 	return allActions, allFindings, nil
 }
 
-// ApplyAll runs Apply then Verify for all modules in dependency order, emitting
-// a ModuleEvent via progress after each module completes. Apply errors do not
-// stop iteration — all modules are attempted. The first Apply error encountered
-// is returned at the end.
+// ApplyAll runs Plan → Apply → Verify for all modules in dependency order,
+// emitting a ModuleEvent via progress after each module completes. Apply errors
+// do not stop iteration — all modules are attempted. The first Apply error
+// encountered is returned at the end.
+//
+// Apply must never exceed the dry-run preview: each module is re-planned
+// (dryRun=true, non-mutating) immediately before Apply, and modules whose Plan
+// produces zero actions are skipped. This guarantees that a disabled or
+// already-converged module cannot mutate state the scan phase never showed the
+// user (the root cause behind disabled modules being re-applied on every
+// `up --apply`).
 // If progress is nil, no events are emitted.
 func (r *Runner) ApplyAll(ctx context.Context, progress ProgressFunc) ([]Finding, error) {
 	var allFindings []Finding
@@ -249,8 +256,20 @@ func (r *Runner) ApplyAll(ctx context.Context, progress ProgressFunc) ([]Finding
 
 		log := slog.With("module", m.Name())
 
-		// Apply.
-		applyErr := m.Apply(ctx)
+		// Plan (dry-run, non-mutating), then Apply only when the module has
+		// pending actions. A Plan error is fail-safe: the module is NOT applied
+		// (we cannot know what it would do) and the error is surfaced through
+		// the same path as an Apply error.
+		var applyErr error
+		actions, planErr := m.Plan(ctx, true)
+		switch {
+		case planErr != nil:
+			applyErr = fmt.Errorf("plan: %w", planErr)
+		case len(actions) == 0:
+			log.Info("no planned actions, skipping apply")
+		default:
+			applyErr = m.Apply(ctx)
+		}
 		if applyErr != nil {
 			log.Info("apply error", "error", applyErr)
 			if firstApplyErr == nil {
