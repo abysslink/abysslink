@@ -81,6 +81,73 @@ type Config struct {
 	WebUI WebUIConfig `yaml:"webui"`
 
 	SessionRegistry SessionRegistry `yaml:"session_registry"`
+
+	ContentStore ContentStoreConfig `yaml:"content_store"`
+}
+
+// Content-store defaults and bounds (Phase 28, BACK-06). The TTL bounds are a
+// hard floor/ceiling enforced by ValidateContentStore: below 30s a phone on a
+// flaky link cannot fetch before expiry; above 3600s bodies linger in daemon
+// memory far past their usefulness.
+const (
+	// DefaultContentStorePort is the tailnet HTTPS content listener port used
+	// when content_store.port is unset.
+	DefaultContentStorePort = 2587
+	// DefaultContentTTLSeconds is the token lifetime when content_store.ttl_seconds is unset.
+	DefaultContentTTLSeconds = 600
+	// MinContentTTLSeconds is the ttl_seconds floor.
+	MinContentTTLSeconds = 30
+	// MaxContentTTLSeconds is the ttl_seconds ceiling.
+	MaxContentTTLSeconds = 3600
+)
+
+// ContentStoreConfig configures the Phase 28 tailnet-only HTTPS content store
+// served by abysslinkd (BACK-06): token-keyed, TTL'd, memory-first bodies
+// fetched by enrolled devices at GET /content/{token}.
+//
+// BindAddr, when set, MUST be a literal IP and is additionally required at
+// runtime to equal the backend-resolved tailnet IP (the same fail-closed floor
+// as observability.metrics.bind_addr, OBS-03) — never 0.0.0.0 or ::. An empty
+// BindAddr binds the resolved tailnet IP directly.
+type ContentStoreConfig struct {
+	// Enabled defaults to true (set in Defaults). Setting it false disables
+	// the content listener; wakes then carry only the fallback title (BACK-08).
+	Enabled bool `yaml:"enabled"`
+	// Port is the HTTPS listen port. Zero means DefaultContentStorePort (2587).
+	Port int `yaml:"port,omitempty"`
+	// TTLSeconds is the content-token lifetime. Zero means
+	// DefaultContentTTLSeconds (600); non-zero values are clamped to
+	// [30, 3600] by validation (rejected, not silently clamped).
+	TTLSeconds int `yaml:"ttl_seconds,omitempty"`
+	// BindAddr optionally pins the bind IP. Must be a literal, non-wildcard
+	// IP; at runtime it must equal the backend-resolved tailnet IP.
+	BindAddr string `yaml:"bind_addr,omitempty"`
+}
+
+// EffectivePort returns the configured content-store port or the default 2587.
+func (c ContentStoreConfig) EffectivePort() int {
+	if c.Port > 0 {
+		return c.Port
+	}
+	return DefaultContentStorePort
+}
+
+// EffectiveTTL returns the configured token TTL or the default 600s. Values
+// outside the validated [30s, 3600s] range cannot reach here through Load
+// (ValidateContentStore rejects them), but a programmatically-built config is
+// still clamped defensively so the store never mints unbounded tokens.
+func (c ContentStoreConfig) EffectiveTTL() time.Duration {
+	if c.TTLSeconds == 0 {
+		return DefaultContentTTLSeconds * time.Second
+	}
+	ttl := c.TTLSeconds
+	if ttl < MinContentTTLSeconds {
+		ttl = MinContentTTLSeconds
+	}
+	if ttl > MaxContentTTLSeconds {
+		ttl = MaxContentTTLSeconds
+	}
+	return time.Duration(ttl) * time.Second
 }
 
 // SessionRegistry configures the daemon-side tmux session registry (Phase 27,
@@ -462,6 +529,11 @@ func Defaults() *Config {
 			Port:     8443,
 		},
 		SessionRegistry: SessionRegistry{Enabled: true},
+		ContentStore: ContentStoreConfig{
+			Enabled:    true,
+			Port:       DefaultContentStorePort,
+			TTLSeconds: DefaultContentTTLSeconds,
+		},
 	}
 }
 
@@ -613,6 +685,7 @@ func Validate(cfg *Config) error {
 		ValidateWebUI,
 		validateWatchPanes,
 		validateSessionRegistry,
+		ValidateContentStore,
 	} {
 		if err := validate(cfg); err != nil {
 			return err
@@ -718,6 +791,40 @@ func ValidateObservability(cfg *Config) error {
 	// "unset" (the daemon defaults to 08:00); 0 means midnight and is valid.
 	if h := cfg.Observability.Digest.Hour; h != nil && (*h < 0 || *h > 23) {
 		return fmt.Errorf("config: observability.digest.hour %d must be between 0 and 23", *h)
+	}
+	return nil
+}
+
+// ValidateContentStore enforces the BACK-06 bind floor on the content-store
+// section at the config layer:
+//
+//   - bind_addr, when set, must be a literal IP (no host:port, no DNS name —
+//     the runtime floor compares it against the backend-resolved tailnet IP,
+//     which is always a literal IP) and must not be unspecified (0.0.0.0/::,
+//     which would expose notification bodies on every interface).
+//   - port, when set, must be a valid TCP port.
+//   - ttl_seconds, when set, must sit within [30, 3600] (floor: a phone on a
+//     flaky link needs time to fetch; ceiling: bodies must not linger in
+//     daemon memory).
+//
+// It is exported so the daemon re-enforces the floor at the point the content
+// listener starts (mirroring ValidateObservability / CR-02), independent of
+// the Load-time Validate.
+func ValidateContentStore(cfg *Config) error {
+	if addr := cfg.ContentStore.BindAddr; addr != "" {
+		if IsUnspecifiedBindAddr(addr) {
+			return fmt.Errorf("config: content_store.bind_addr %q must not be 0.0.0.0 or :: — the content store must bind to the tailnet IP only (BACK-06)", addr)
+		}
+		if net.ParseIP(addr) == nil {
+			return fmt.Errorf("config: content_store.bind_addr %q must be a literal IP address (no port, no DNS name) — it is matched against the backend-resolved tailnet IP at runtime (BACK-06)", addr)
+		}
+	}
+	if p := cfg.ContentStore.Port; p < 0 || p > 65535 {
+		return fmt.Errorf("config: content_store.port %d must be between 1 and 65535 (0 means default %d)", p, DefaultContentStorePort)
+	}
+	if ttl := cfg.ContentStore.TTLSeconds; ttl != 0 && (ttl < MinContentTTLSeconds || ttl > MaxContentTTLSeconds) {
+		return fmt.Errorf("config: content_store.ttl_seconds %d must be between %d and %d (0 means default %d)",
+			ttl, MinContentTTLSeconds, MaxContentTTLSeconds, DefaultContentTTLSeconds)
 	}
 	return nil
 }

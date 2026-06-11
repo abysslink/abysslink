@@ -26,6 +26,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/spf13/cobra"
@@ -55,8 +56,11 @@ func newPanicCmd() *cobra.Command {
 		Long: `EMERGENCY KILL SWITCH — executes immediately with no confirmation prompt.
 
 Panic disconnects your machine from the tailnet, revokes all phone devices
-tagged with your mobile tag, and destroys the local Anthropic API key from
-the keychain. The consequences are audited and REVERSIBLE via repair:
+tagged with your mobile tag, revokes every enrolled device credential
+(bearer + push token + SSH certificate from the device store), and destroys
+the local Anthropic API key from the keychain. The consequences are audited
+and REVERSIBLE via repair (device credentials are re-minted with
+"abysslink enroll phone --apply"):
 
   abysslink repair --apply     # reconnect after a panic
 
@@ -107,7 +111,7 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			banner := styleFatal.Render("PANIC — Emergency kill switch executing NOW")
 			printerError(p, styleHeaderBox.Render(banner))
 			printerError(p, "")
-			printerError(p, styleFatal.Render("Actions: disconnect tailnet · revoke phone devices · destroy local API key"))
+			printerError(p, styleFatal.Render("Actions: disconnect tailnet · revoke phone devices · revoke device credentials · destroy local API key"))
 			printerError(p, styleMuted.Render("No confirmation required — this is the emergency design contract."))
 			printerError(p, "")
 
@@ -120,8 +124,13 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			// panic) (WR-03).
 			panicDisconnect(ctx, cc, p, logPanic)
 
-			// Steps 2+: revoke phone devices and destroy local API key.
+			// Steps 2+: revoke phone devices, revoke device credentials, and
+			// destroy local API key. Panic executes by default (the emergency
+			// design contract exempts it from the dry-run-default rule — see
+			// resolveApplyFlags); ONLY an explicit --dry-run flag previews the
+			// device-credential revocation instead of mutating (DEVC-03).
 			revokePhoneDevicesWithStep(ctx, cc, p, logPanic)
+			revokeDeviceCredentialsWithStep(ctx, p, logPanic, cmd.Flags().Changed("dry-run"))
 			destroyLocalAPIKeyWithStep(ctx, cc, p, logPanic)
 
 			// Timing line.
@@ -255,6 +264,48 @@ func revokePhoneDevicesWithStep(ctx context.Context, cc *cmdContext, p Printer, 
 				logPanic("revoke_device")
 			}
 		}
+	}
+}
+
+// revokeDeviceCredentialsWithStep revokes EVERY enrolled device credential —
+// bearer, push token, and SSH certificate — in one atomic device-store write
+// (DEVC-03) and emits a ✓/✕ step marker with the revoked count. Zero enrolled
+// devices is a success ("revoked 0 device credential(s)"). A failure prints ✕
+// via errPanicStepFailed and RETURNS so panic continues with the remaining
+// steps (best-effort kill-switch contract, matching every other panic step).
+//
+// planOnly (an EXPLICIT --dry-run on the panic command) prints a [plan] line
+// and returns before the store is even constructed: device.Store arms its
+// audit writer with dryRun=false on every save, so calling RevokeAll under
+// dry-run would still mutate — the gate must therefore sit in front of the
+// call, not inside the audit writer.
+func revokeDeviceCredentialsWithStep(ctx context.Context, p Printer, logPanic func(string), planOnly bool) {
+	const label = "revoke device credentials"
+	if planOnly {
+		printerError(p, "[plan] would revoke every enrolled device credential (bearer + push token + SSH certificate) — no mutation in dry-run")
+		return
+	}
+	path, err := deviceStorePath()
+	if err != nil {
+		panicStep(p, label, errPanicStepFailed{err.Error()})
+		return
+	}
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		panicStep(p, label, errPanicStepFailed{"audit log unavailable: " + err.Error()})
+		return
+	}
+	// RevokeAll never mints, so it never touches the keychain — a nil keychain
+	// keeps the kill switch working even where no secrets backend exists.
+	st := device.New(path, audit.New(logPath), nil, nil)
+	n, err := st.RevokeAll(ctx)
+	if err != nil {
+		panicStep(p, label, errPanicStepFailed{err.Error()})
+		return // panic continues with the remaining steps
+	}
+	panicStep(p, fmt.Sprintf("revoked %d device credential(s)", n), nil)
+	if n > 0 {
+		logPanic("revoke_device_credentials")
 	}
 }
 

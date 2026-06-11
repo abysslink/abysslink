@@ -88,6 +88,12 @@ func (s *Server) bridgeTransition(ctx context.Context, t session.Transition) {
 		Title:    title,
 	}
 
+	// Content-store minting (BACK-06) deliberately does NOT happen here:
+	// heuristic transitions carry no body today (Transition is metadata-only
+	// by construction — pane content structurally never reaches the bridge).
+	// If a future phase wants the wake to carry a pane excerpt, it must mint
+	// via Server.mintFetchRef AND re-run the secret scan on the excerpt;
+	// until then the fallback title is the whole payload (BACK-08).
 	opts := notifyv2.RenderOpts{SessionName: t.SessionName, WindowName: t.WindowName}
 	if err := s.dispatch.dispatch(ctx, msg, originHeuristic, opts); err != nil {
 		// NET-11 voice: log and continue — the bridge survives any single bad

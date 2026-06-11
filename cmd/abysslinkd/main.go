@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,10 +31,13 @@ import (
 	"syscall"
 	"time"
 
+	"tailscale.com/client/local"
+
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/gate"
 	"github.com/abysslink/abysslink/internal/metrics"
 	notifymod "github.com/abysslink/abysslink/internal/modules"
@@ -168,6 +172,13 @@ func main() {
 	srv := daemon.NewServer(directNotifier{m: nm}, base, cfg)
 	srv.SetExecCounter(gated.Count)
 
+	// Phase 28 content listener deps (BACK-06/BACK-07): the enrolled-device
+	// store (bearer gate + /status devices block), the audit appender for
+	// hash-only ack receipts, and the Tailscale TLS provider. A missing
+	// dependency disables the content listener (fail closed, one honest
+	// warning inside the daemon) — the unix socket keeps serving regardless.
+	wireContentDeps(srv, cfg, kc)
+
 	// tmux session registry (Phase 27, BACK-03/BACK-04). D-40: registry execs
 	// (tmux -CC attach, list-panes, capture-pane) are daemon-internal plumbing
 	// on the ungated PLAIN runner — never gated, so the Phase 30 enforcing
@@ -235,6 +246,58 @@ func main() {
 	if err := srv.Run(ctx); err != nil {
 		slog.Error("abysslinkd: exited with error", "err", err)
 		os.Exit(1)
+	}
+}
+
+// wireContentDeps constructs the device store (device.DefaultPath + the
+// daemon's audit writer + the platform keychain), the BACK-07 ack-receipt
+// appender, and the TLS provider, and injects them into the daemon server.
+// Any unresolvable dependency is logged and skipped — the daemon then keeps
+// the content listener disabled (fail closed) while everything else runs.
+func wireContentDeps(srv *daemon.Server, cfg *config.Config, kc secrets.KeychainStore) {
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		slog.Warn("abysslinkd: audit log path unavailable; content listener stays disabled", "err", err)
+		return
+	}
+	// One audit writer serves both roles: every devices.json mutation goes
+	// through WriteFile (backup + audit entry + atomic write) and ack
+	// receipts go through the same chain-aware Append the restore path uses.
+	// kc may be nil (degraded keychain) — the writer then falls back to
+	// chained-unsigned entries, keeping the chain walkable.
+	var aud *audit.Audit
+	if kc != nil {
+		aud = audit.NewWithKeychain(logPath, kc)
+	} else {
+		aud = audit.New(logPath)
+	}
+	devPath, err := device.DefaultPath()
+	if err != nil {
+		slog.Warn("abysslinkd: device store path unavailable; content listener stays disabled", "err", err)
+		return
+	}
+	srv.SetDeviceStore(device.New(devPath, aud, kc, nil))
+	srv.SetAuditAppender(aud)
+	srv.SetContentTLS(contentTLSProvider(cfg))
+}
+
+// contentTLSProvider returns the content listener's TLS provider: the
+// Tailscale local client's GetCertificate — the same WEB-03 path the webui
+// listener uses. On non-Tailscale backends GetCertificate cannot provision a
+// certificate (#2137), so nil is returned and the daemon keeps the listener
+// disabled (fail closed — never plaintext).
+func contentTLSProvider(cfg *config.Config) daemon.ContentTLSProvider {
+	if cfg.Backend.Type != "" && cfg.Backend.Type != "tailscale" {
+		slog.Warn("abysslinkd: content listener TLS unavailable on this backend (GetCertificate is Tailscale-only, #2137)",
+			"backend", cfg.Backend.Type)
+		return nil
+	}
+	var lc local.Client // zero value uses the platform-default tailscaled socket
+	return func(_ context.Context) (*tls.Config, error) {
+		return &tls.Config{
+			GetCertificate: lc.GetCertificate,
+			MinVersion:     tls.VersionTLS12,
+		}, nil
 	}
 }
 

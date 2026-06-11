@@ -185,3 +185,62 @@ func TestRender_ActionsDropped(t *testing.T) {
 		assert.Equal(t, name, typ.Field(i).Name)
 	}
 }
+
+// kindTitles is the canonical safe verb phrase per kind, mirroring what
+// consumers send on the wire. Used by the BACK-08 zero-network render suite.
+var kindTitles = map[notifyv2.Kind]string{
+	notifyv2.KindNeedsInput:      "needs input",
+	notifyv2.KindCommandDone:     "done ✓",
+	notifyv2.KindApprovalRequest: "approval required",
+	notifyv2.KindWatchFired:      "watch fired",
+	notifyv2.KindAgentStopped:    "agent stopped",
+}
+
+// TestRenderTitle_NonEmptyForEveryKind is the BACK-08 zero-network render
+// suite: for EVERY kind, a minimal VALID message renders a non-empty title.
+// Render is pure code — no I/O, no network — so this is exactly what the
+// phone shows when it is off the tailnet at fetch time.
+func TestRenderTitle_NonEmptyForEveryKind(t *testing.T) {
+	for kind, title := range kindTitles {
+		t.Run(string(kind), func(t *testing.T) {
+			m := notifyv2.Message{
+				V:     2,
+				MsgID: validULID,
+				Kind:  kind,
+				Title: title,
+			}
+			require.NoError(t, m.Validate(), "the minimal message must be valid")
+			note := notifyv2.Render(m, notifyv2.RenderOpts{})
+			assert.NotEmpty(t, strings.TrimSpace(note.Title),
+				"BACK-08: rendered title must never be empty")
+		})
+	}
+}
+
+// TestRenderTitle_EmptyCompositionFallback asserts the BACK-08 floor: when
+// title composition yields nothing (defense in depth — Validate rejects an
+// empty Title upstream, but Render must not rely on that), the fixed
+// fallback renders instead of an empty notification.
+func TestRenderTitle_EmptyCompositionFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  notifyv2.Message
+	}{
+		{name: "zero message", msg: notifyv2.Message{}},
+		{name: "kind only", msg: notifyv2.Message{V: 2, Kind: notifyv2.KindNeedsInput}},
+		{name: "blank title", msg: notifyv2.Message{V: 2, Kind: notifyv2.KindNeedsInput, Title: "   "}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			note := notifyv2.Render(tc.msg, notifyv2.RenderOpts{})
+			assert.Equal(t, "abysslink: attention needed", note.Title,
+				"empty composition must render the fixed fallback title")
+		})
+	}
+
+	// A message with host but no verb phrase still renders non-empty (and
+	// without a dangling separator).
+	note := notifyv2.Render(notifyv2.Message{V: 2, Kind: notifyv2.KindNeedsInput, Host: "rig-1"}, notifyv2.RenderOpts{})
+	assert.Equal(t, "rig-1", note.Title)
+	assert.NotContains(t, note.Title, "·")
+}

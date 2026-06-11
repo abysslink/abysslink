@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os/user"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -102,6 +103,12 @@ type dispatcher struct {
 	cooldownDur time.Duration
 	retryBase   time.Duration
 
+	// wakeSent counts notes SendNote actually delivered — first-attempt
+	// successes AND retry-queue successes, but never the D-12 flood
+	// meta-notification (it announces suppression, it is not a wake).
+	// Memory-only (BACK-07); GET /status reports it next to ack_received.
+	wakeSent atomic.Uint64
+
 	mu            sync.Mutex
 	cooldown      map[cooldownKey]time.Time // suppression-until per key
 	suppressed    map[cooldownKey]int       // D-15 suppression counters
@@ -111,6 +118,9 @@ type dispatcher struct {
 	floodNotified bool
 	retry         []retryEntry
 }
+
+// wakeSentCount reports the number of successfully delivered v2 wakes.
+func (d *dispatcher) wakeSentCount() uint64 { return d.wakeSent.Load() }
 
 // newDispatcher returns a dispatcher delivering via n. cfg may be nil (tests,
 // degraded startup); the compiled-in defaults then apply.
@@ -249,6 +259,7 @@ func (d *dispatcher) dispatch(ctx context.Context, msg notifyv2.Message, origin 
 		d.enqueueRetry(note, cd)
 		return nil
 	}
+	d.wakeSent.Add(1)
 
 	// A send succeeding with tokens available closes any flood episode, so
 	// the next ceiling trip is a NEW episode with its own meta-notification
@@ -387,6 +398,7 @@ func (d *dispatcher) processRetries(ctx context.Context) {
 	var failed []retryEntry
 	for _, e := range due {
 		if err := d.notifier.SendNote(ctx, e.note); err == nil {
+			d.wakeSent.Add(1)
 			continue
 		}
 		e.attempts++

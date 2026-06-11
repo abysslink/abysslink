@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -600,4 +601,106 @@ func TestLoad_ValidationErrorIncludesPath(t *testing.T) {
 	require.Error(t, verr)
 	require.NotNil(t, cfg, "LoadForRead returns the parsed config alongside the validation error")
 	assert.Contains(t, verr.Error(), p, "LoadForRead validation error must include the file path")
+}
+
+// TestContentStoreDefaults asserts the Phase 28 content-store defaults
+// (BACK-06): enabled by default, port 2587, TTL 600s.
+func TestContentStoreDefaults(t *testing.T) {
+	cfg := config.Defaults()
+	assert.True(t, cfg.ContentStore.Enabled, "content store must default ON")
+	assert.Equal(t, 2587, cfg.ContentStore.Port)
+	assert.Equal(t, 600, cfg.ContentStore.TTLSeconds)
+	assert.Empty(t, cfg.ContentStore.BindAddr)
+	assert.Equal(t, 2587, cfg.ContentStore.EffectivePort())
+	assert.Equal(t, 600*time.Second, cfg.ContentStore.EffectiveTTL())
+}
+
+// TestContentStoreEffectiveZeroValues asserts the zero-means-default idiom.
+func TestContentStoreEffectiveZeroValues(t *testing.T) {
+	var cs config.ContentStoreConfig
+	assert.Equal(t, config.DefaultContentStorePort, cs.EffectivePort())
+	assert.Equal(t, time.Duration(config.DefaultContentTTLSeconds)*time.Second, cs.EffectiveTTL())
+}
+
+func TestValidateContentStore(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*config.Config)
+		wantErr   bool
+		errSubstr string
+	}{
+		{name: "defaults valid", mutate: func(*config.Config) {}},
+		{
+			name:      "rejects wildcard bind 0.0.0.0",
+			mutate:    func(c *config.Config) { c.ContentStore.BindAddr = "0.0.0.0" },
+			wantErr:   true,
+			errSubstr: "BACK-06",
+		},
+		{
+			name:      "rejects wildcard bind ::",
+			mutate:    func(c *config.Config) { c.ContentStore.BindAddr = "::" },
+			wantErr:   true,
+			errSubstr: "BACK-06",
+		},
+		{
+			name:      "rejects DNS-name bind",
+			mutate:    func(c *config.Config) { c.ContentStore.BindAddr = "rig.example.ts.net" },
+			wantErr:   true,
+			errSubstr: "literal IP",
+		},
+		{
+			name:      "rejects host:port bind (literal IP only)",
+			mutate:    func(c *config.Config) { c.ContentStore.BindAddr = "100.64.0.1:2587" },
+			wantErr:   true,
+			errSubstr: "literal IP",
+		},
+		{
+			name:   "accepts literal tailnet IPv4",
+			mutate: func(c *config.Config) { c.ContentStore.BindAddr = "100.64.0.1" },
+		},
+		{
+			name:   "accepts literal tailnet IPv6 ULA",
+			mutate: func(c *config.Config) { c.ContentStore.BindAddr = "fd7a:115c:a1e0::1234" },
+		},
+		{
+			name:      "rejects ttl below floor",
+			mutate:    func(c *config.Config) { c.ContentStore.TTLSeconds = 29 },
+			wantErr:   true,
+			errSubstr: "ttl_seconds",
+		},
+		{
+			name:      "rejects ttl above ceiling",
+			mutate:    func(c *config.Config) { c.ContentStore.TTLSeconds = 3601 },
+			wantErr:   true,
+			errSubstr: "ttl_seconds",
+		},
+		{name: "accepts ttl floor", mutate: func(c *config.Config) { c.ContentStore.TTLSeconds = 30 }},
+		{name: "accepts ttl ceiling", mutate: func(c *config.Config) { c.ContentStore.TTLSeconds = 3600 }},
+		{name: "accepts ttl zero (default)", mutate: func(c *config.Config) { c.ContentStore.TTLSeconds = 0 }},
+		{
+			name:      "rejects out-of-range port",
+			mutate:    func(c *config.Config) { c.ContentStore.Port = 70000 },
+			wantErr:   true,
+			errSubstr: "content_store.port",
+		},
+		{
+			name:      "rejects negative port",
+			mutate:    func(c *config.Config) { c.ContentStore.Port = -1 },
+			wantErr:   true,
+			errSubstr: "content_store.port",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validObsBaseConfig()
+			tc.mutate(cfg)
+			err := config.Validate(cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errSubstr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

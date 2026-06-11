@@ -29,6 +29,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -109,18 +111,44 @@ type Server struct {
 	// SetSessionRegistry; handleSessions then reports "registry: disabled"
 	// (nil-safe, never an error).
 	sessionSource SessionSource
+
+	// Phase 28 content listener state (BACK-06/BACK-07). devices, auditApp,
+	// and contentTLS are injected by the composition root (SetDeviceStore /
+	// SetAuditAppender / SetContentTLS); a missing dependency disables the
+	// content listener (fail closed) while the daemon keeps running.
+	devices    DeviceStore
+	auditApp   AuditAppender
+	contentTLS ContentTLSProvider
+	// contentResolver is the tailnet-IP seam; nil means the production
+	// backendIPResolver (tests inject a stub).
+	contentResolver tailnetIPResolver
+	// content is the memory-first TTL'd token→body store.
+	content *contentStore
+	// contentWG tracks the content listener's shutdown drain so Run's
+	// graceful-shutdown path can wait for it (clean shutdown drains).
+	contentWG sync.WaitGroup
+	// ackReceived counts BACK-07 ack receipts (memory-only, reset on restart).
+	ackReceived atomic.Uint64
+
+	contentMu     sync.Mutex
+	contentLive   bool
+	contentHost   string
+	contentPort   int
+	contentStatus string
 }
 
 // NewServer returns a Server. notifier MUST be a direct backend (see Notifier).
 func NewServer(notifier Notifier, runner shell.Runner, cfg *config.Config) *Server {
 	return &Server{
-		notifier:   notifier,
-		runner:     runner,
-		cfg:        cfg,
-		socketPath: SocketPath(),
-		startedAt:  time.Now(),
-		dispatch:   newDispatcher(notifier, cfg),
-		hostname:   notifyv2.ShortHostname(),
+		notifier:      notifier,
+		runner:        runner,
+		cfg:           cfg,
+		socketPath:    SocketPath(),
+		startedAt:     time.Now(),
+		dispatch:      newDispatcher(notifier, cfg),
+		hostname:      notifyv2.ShortHostname(),
+		content:       newContentStore(nil),
+		contentStatus: "disabled: content listener not started",
 	}
 }
 
@@ -174,6 +202,10 @@ func (s *Server) Run(ctx context.Context) error {
 	s.startWatchers(ctx)
 	// v2 dispatch retry loop (D-28); exits on ctx cancellation.
 	go s.dispatch.run(ctx)
+	// Tailnet-only HTTPS content listener (BACK-06). Launched async because
+	// the bind resolution probes the backend; every failure path disables the
+	// listener (fail closed) while this socket keeps serving.
+	go s.startContentServer(ctx)
 
 	// Graceful-shutdown goroutine: by the time srv.Shutdown runs, ctx is
 	// already Done, so the drain needs a context detached from that
@@ -191,6 +223,9 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 		_ = os.Remove(s.socketPath)
+		// Wait for the content listener's own drain (BACK-06): its shutdown
+		// goroutine registered with contentWG when the listener went live.
+		s.contentWG.Wait()
 	}()
 
 	slog.Info("abysslinkd listening", "socket", s.socketPath)
@@ -297,20 +332,35 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// notifyV2Envelope is the unix-socket v2 envelope (Phase 28): the wire
+// Message plus an OPTIONAL content field. Content never enters the Message
+// struct itself — the daemon mints a content-store token and the message
+// carries only the FetchRef (BACK-06). DisallowUnknownFields semantics are
+// preserved for everything else: "content" is the single additional key the
+// decoder accepts; any other body-shaped key is still unknown by
+// construction (D-17).
+type notifyV2Envelope struct {
+	notifyv2.Message
+	Content string `json:"content,omitempty"`
+}
+
 // handleNotifyV2 is the POST /notify v2 branch (BACK-05): strict decode
 // (DisallowUnknownFields — the D-17 decode gate: Message has no body field,
-// so any body/content-shaped key is unknown by construction), server-side
-// enrichment, Validate, then dispatch through the policy engine. Explicit
-// POSTs bypass the heuristic cooldown by origin (D-10). Display-name
-// enrichment from the registry arrives with the bridge in plan 27-07.
+// so any body/content-shaped key is unknown by construction; the optional
+// envelope content field is hived off into the content store, never the
+// message), server-side enrichment, Validate, then dispatch through the
+// policy engine. Explicit POSTs bypass the heuristic cooldown by origin
+// (D-10). Display-name enrichment from the registry arrives with the bridge
+// in plan 27-07.
 func (s *Server) handleNotifyV2(w http.ResponseWriter, r *http.Request, raw []byte) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	var msg notifyv2.Message
-	if err := dec.Decode(&msg); err != nil {
+	var env notifyV2Envelope
+	if err := dec.Decode(&env); err != nil {
 		http.Error(w, "invalid v2 payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	msg := env.Message
 
 	// Enrichment before validation: hook/CLI consumers may omit msg_id and
 	// host; the daemon fills both server-side.
@@ -319,6 +369,29 @@ func (s *Server) handleNotifyV2(w http.ResponseWriter, r *http.Request, raw []by
 	}
 	if msg.Host == "" {
 		msg.Host = s.hostname
+	}
+
+	// Optional content → content-store token → FetchRef (BACK-06). The body
+	// is capped at 64 KiB (413 beyond); a caller-supplied fetch alongside
+	// content is ambiguous and rejected. When the content listener is down
+	// the content is DROPPED and the wake dispatches unchanged — the
+	// fallback title carries it (BACK-08); content is never queued or
+	// persisted (D-13 spirit).
+	if len(env.Content) > maxContentBodyBytes {
+		http.Error(w, "content too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if env.Content != "" {
+		if msg.Fetch != nil {
+			http.Error(w, "content and fetch are mutually exclusive", http.StatusBadRequest)
+			return
+		}
+		if u, ttl, ok := s.mintFetchRef(env.Content); ok {
+			msg.Fetch = &notifyv2.FetchRef{URLTailnet: u, TTLSeconds: ttl}
+		} else {
+			slog.Debug("daemon: content dropped — content listener down; dispatching wake with fallback title only (BACK-08)",
+				"msg_id", msg.MsgID, "kind", msg.Kind)
+		}
 	}
 
 	// Single validation gate: dispatch's policy-side Validate (its first step)
@@ -374,6 +447,22 @@ type daemonStatusResponse struct {
 	// GatedRunner has intercepted (D-38); 0 when no gate is wired.
 	GateExecsObserved uint64 `json:"gate_execs_observed"`
 
+	// WakeSent counts v2 notes the dispatcher successfully delivered
+	// (including retry-queue successes); AckReceived counts BACK-07 phone
+	// acks. Both are memory-only and reset on daemon restart — wake-sent vs
+	// ack-received is reported separately by design (BACK-07), and a gap
+	// between them triggers NOTHING (no re-wake logic exists).
+	WakeSent    uint64 `json:"wake_sent"`
+	AckReceived uint64 `json:"ack_received"`
+
+	// ContentStore reports the BACK-06 content listener state:
+	// "listening on <addr>" or "disabled: <reason>".
+	ContentStore string `json:"content_store"`
+
+	// Devices is the per-device DEVC-04 surface (name, last-seen, stale,
+	// revoked) the CLI renders. Empty when no device store is wired.
+	Devices []daemonDeviceStatus `json:"devices"`
+
 	// PostureComplete signals whether the DOCTOR summary is authoritative
 	// posture data. It is false this phase: the full doctor families live in
 	// internal/cli (a daemon→cli import would form a cycle, so the daemon cannot
@@ -391,6 +480,42 @@ type daemonDoctorSummary struct {
 	Fatal int `json:"fatal"`
 	Warn  int `json:"warn"`
 	Pass  int `json:"pass"`
+}
+
+// daemonDeviceStatus is one enrolled device in /status (DEVC-04): name,
+// last-seen, staleness against the 7-day window, and revocation. No push
+// token, bearer hash, or key material is ever exposed here.
+type daemonDeviceStatus struct {
+	Name     string `json:"name"`
+	LastSeen string `json:"last_seen,omitempty"`
+	Stale    bool   `json:"stale"`
+	Revoked  bool   `json:"revoked"`
+}
+
+// deviceStatuses builds the /status devices block from the device store:
+// every record (active and revoked) with its DEVC-04 staleness computed via
+// Stale(7d). nil-safe: without a device store it returns an empty list.
+func (s *Server) deviceStatuses() []daemonDeviceStatus {
+	out := []daemonDeviceStatus{}
+	if s.devices == nil {
+		return out
+	}
+	staleIDs := make(map[string]bool)
+	for _, r := range s.devices.Stale(staleDeviceWindow) {
+		staleIDs[r.ID] = true
+	}
+	for _, r := range s.devices.List() {
+		d := daemonDeviceStatus{
+			Name:    r.Name,
+			Stale:   staleIDs[r.ID],
+			Revoked: r.Revoked,
+		}
+		if !r.LastSeen.IsZero() {
+			d.LastSeen = r.LastSeen.UTC().Format(time.RFC3339)
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // handleStatus serves GET /status: a read-only JSON posture snapshot of the
@@ -453,6 +578,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Uptime:     time.Since(s.startedAt).Truncate(time.Second).String(),
 		// LIVE: the gate decorator's atomic exec counter via SetExecCounter (D-38).
 		GateExecsObserved: gateExecs,
+		// LIVE memory-only counters (BACK-07): wake-sent vs ack-received,
+		// reported separately and never reconciled into a re-wake.
+		WakeSent:     s.dispatch.wakeSentCount(),
+		AckReceived:  s.ackReceived.Load(),
+		ContentStore: s.contentStoreStatus(),
+		Devices:      s.deviceStatuses(),
 		// PostureComplete=false flags the DOCTOR summary as non-authoritative so
 		// consumers do not read the zeroed doctor summary as a genuine "0 fatal"
 		// all-clear on a security-posture endpoint (WR-05). Reachable is now real.

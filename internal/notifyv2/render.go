@@ -97,10 +97,21 @@ func Render(m Message, opts RenderOpts) RenderedNote {
 	}
 }
 
+// fallbackTitle is the BACK-08 guarantee: a push wake must NEVER render an
+// empty title. Rendering is pure code (zero network access), so when title
+// composition yields nothing the phone still shows something actionable —
+// even off-tailnet at fetch time, where the body fetch would fail.
+const fallbackTitle = "abysslink: attention needed"
+
 // renderTitle composes the locked compact title form, joining non-empty
 // segments with " · ": host, display consumer, then pane ID + verb phrase
 // (e.g. "rig-1 · claude · %3 needs input"). With no session identity the
 // title degrades to "rig-1 · needs input" — never a bare verb phrase.
+//
+// BACK-08: the result is never empty. Validate rejects an empty Message.Title
+// upstream, but renderTitle is pure defense in depth — if composition still
+// yields an empty/blank string (e.g. an unvalidated message), the fixed
+// fallbackTitle is returned instead.
 func renderTitle(m Message) string {
 	var segs []string
 	if m.Host != "" {
@@ -111,10 +122,16 @@ func renderTitle(m Message) string {
 	}
 	last := m.Title
 	if m.Session.Pane != "" {
-		last = m.Session.Pane + " " + m.Title
+		last = strings.TrimSpace(m.Session.Pane + " " + m.Title)
 	}
-	segs = append(segs, last)
-	return strings.Join(segs, titleSep)
+	if last != "" {
+		segs = append(segs, last)
+	}
+	title := strings.Join(segs, titleSep)
+	if strings.TrimSpace(title) == "" {
+		return fallbackTitle
+	}
+	return title
 }
 
 // renderBody composes a few short lines of routing metadata only (D-19): a

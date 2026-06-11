@@ -31,6 +31,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/qr"
 	"github.com/abysslink/abysslink/internal/secrets"
@@ -491,6 +492,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 					printerInfo(p, "[plan] no admin OAuth client configured — would print manual key-creation instructions (single-use, pre-authorized, tagged "+tag+") instead of minting a key")
 				}
 				printerInfo(p, "[plan] would walk through phone pairing (install QR, auth-key QR, ntfy subscription QR)")
+				printerInfo(p, "[plan] would mint device credentials for \"phone\" — bearer token, push token, and a 90-day SSH certificate — and print them ONCE (re-enrolling rotates the existing credentials); nothing is minted in dry-run")
 				printerInfo(p, "[plan] would write a pairing runbook with the remaining manual steps")
 				return nil
 			}
@@ -531,10 +533,20 @@ func newEnrollPhoneCmd() *cobra.Command {
 			// ntfy subscription QR (best-effort — needs the tailnet IP).
 			printNtfyQR(ctx, p, cmd.OutOrStdout(), cc, b)
 
+			// DEVC-01/DEVC-02: mint the device credential bundle (bearer, push
+			// token, 90-day SSH cert). A re-enroll of an active "phone" rotates
+			// the existing record instead of failing. The Bundle is printed
+			// ONCE and never persisted anywhere by abysslink.
+			bundle, rotated, mintErr := enrollPhoneDeviceBundle(ctx, cc)
+			if mintErr != nil {
+				return fmt.Errorf("enroll phone: device credentials: %w", mintErr)
+			}
+			printDeviceBundle(p, cc.jsonOut, bundle, rotated)
+
 			// Printable runbook for the remaining manual steps.
 			// §7 note 10 (lock-screen hygiene) fires here alongside the runbook.
 			emitSecurityNote(p, cc.jsonOut, "lock-screen-hygiene") // §7 note 10
-			if path, err := writeRunbook(ctx, cc); err == nil {
+			if path, err := writeRunbook(ctx, cc, bundle.CertNotAfter); err == nil {
 				printerInfo(p, "")
 				printerInfo(p, "Manual steps (SSO passkey, disable SMS 2FA, hide lock-screen previews) are in:")
 				printerInfo(p, "  "+styleCode.Render(path))
@@ -651,9 +663,108 @@ func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, 
 	printerInfo(p, fmt.Sprintf("     Topic:   %s", topic))
 }
 
+// enrollPhoneDeviceBundle opens the audited device store and mints (or
+// rotates) the one-time credential bundle for the "phone" device.
+func enrollPhoneDeviceBundle(ctx context.Context, cc *cmdContext) (*device.Bundle, bool, error) {
+	st, err := deviceStoreForWrite(ctx, cc, true)
+	if err != nil {
+		return nil, false, err
+	}
+	return mintPhoneDeviceBundle(ctx, st)
+}
+
+// mintPhoneDeviceBundle mints the "phone" device's credential bundle. When an
+// active record already holds the name, the credentials are ROTATED in place
+// (DEVC-02: re-enroll rotates cleanly — the old bearer and certificate become
+// invalid the moment the write lands); a missing or revoked record gets a
+// fresh enrollment. Returns the one-time Bundle and whether it was a rotation.
+func mintPhoneDeviceBundle(ctx context.Context, st *device.Store) (*device.Bundle, bool, error) {
+	if rec, ok := st.Get(devicePhoneName); ok && !rec.Revoked {
+		b, err := st.Rotate(ctx, devicePhoneName)
+		if err != nil {
+			return nil, false, err
+		}
+		return b, true, nil
+	}
+	b, err := st.Enroll(ctx, devicePhoneName, "phone")
+	if err != nil {
+		return nil, false, err
+	}
+	return b, false, nil
+}
+
+// deviceBundleRecord is the --json encoding of the one-time device credential
+// bundle. It DELIBERATELY contains the one-time secrets: under --json the
+// caller owns the output stream, so piping it into a file (and the custody of
+// that file) is the user's explicit choice — abysslink itself never persists
+// any of these fields, and they cannot be recovered after this record is
+// emitted.
+type deviceBundleRecord struct {
+	Device           string `json:"device"`
+	Rotated          bool   `json:"rotated"`
+	Bearer           string `json:"bearer"`
+	PushToken        string `json:"push_token"`
+	SSHPrivateKeyPEM string `json:"ssh_private_key_pem"`
+	SSHCertificate   string `json:"ssh_certificate"`
+	CAPublicKey      string `json:"ca_public_key"`
+	CertNotAfter     string `json:"cert_not_after"`
+	Warning          string `json:"warning"`
+}
+
+// printDeviceBundle prints the one-time device credential bundle exactly once,
+// in the same one-time-secret box idiom as the rig HMAC key and the Tailnet
+// Lock disablement secrets. Nothing in the bundle is ever written to disk by
+// abysslink — the runbook only records THAT enrollment happened and the cert
+// expiry, never a secret.
+func printDeviceBundle(p Printer, jsonOut bool, b *device.Bundle, rotated bool) {
+	if jsonOut {
+		p.PrintJSON(deviceBundleRecord{
+			Device:           b.Name,
+			Rotated:          rotated,
+			Bearer:           b.Bearer,
+			PushToken:        b.PushToken,
+			SSHPrivateKeyPEM: b.SSHPrivateKeyPEM,
+			SSHCertificate:   b.SSHCertAuthorizedKey,
+			CAPublicKey:      b.CAPublicKeyAuthorizedKey,
+			CertNotAfter:     b.CertNotAfter.UTC().Format(time.RFC3339),
+			Warning:          "one-time secrets — shown once and never stored by abysslink; persisting this record is your choice",
+		})
+		return
+	}
+
+	title := fmt.Sprintf("│  ONE-TIME DEVICE CREDENTIALS: %q", b.Name)
+	if rotated {
+		title += "  (rotated — the previous credentials are now INVALID)"
+	}
+	printerInfo(p, "")
+	printerInfo(p, "┌─────────────────────────────────────────────────────────────────┐")
+	printerInfo(p, title)
+	printerInfo(p, "│  Shown ONCE — store these in your phone's SSH client / shortcut NOW.")
+	printerInfo(p, "│  Abysslink never writes them to disk; they cannot be shown again.")
+	printerInfo(p, "│")
+	printerInfo(p, "│  Bearer token:  "+b.Bearer)
+	printerInfo(p, "│  Push token:    "+b.PushToken)
+	printerInfo(p, "│  Cert expires:  "+b.CertNotAfter.UTC().Format("2006-01-02"))
+	printerInfo(p, "│")
+	printerInfo(p, "│  SSH private key (save as e.g. ~/.ssh/abysslink_phone):")
+	for _, line := range strings.Split(strings.TrimRight(b.SSHPrivateKeyPEM, "\n"), "\n") {
+		printerInfo(p, "│    "+line)
+	}
+	printerInfo(p, "│")
+	printerInfo(p, "│  SSH certificate (save next to the key as abysslink_phone-cert.pub):")
+	printerInfo(p, "│    "+b.SSHCertAuthorizedKey)
+	printerInfo(p, "│")
+	printerInfo(p, "│  CA public key (for sshd TrustedUserCAKeys — also via `abysslink device ca`):")
+	printerInfo(p, "│    "+b.CAPublicKeyAuthorizedKey)
+	printerInfo(p, "└─────────────────────────────────────────────────────────────────┘")
+	printerInfo(p, "")
+}
+
 // writeRunbook writes a Markdown runbook of the remaining manual steps and
 // returns its path. It is recorded through the audit log like any other write.
-func writeRunbook(ctx context.Context, cc *cmdContext) (string, error) {
+// certNotAfter is the device SSH certificate expiry; the runbook references
+// THAT device enrollment happened and when the cert expires — never a secret.
+func writeRunbook(ctx context.Context, cc *cmdContext, certNotAfter time.Time) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -670,7 +781,7 @@ func writeRunbook(ctx context.Context, cc *cmdContext) (string, error) {
 	if cc.cfg == nil {
 		return "", fmt.Errorf("no config")
 	}
-	body := runbookMarkdown(cc)
+	body := runbookMarkdown(cc, certNotAfter)
 	deps, err := buildDeps(ctx, cc)
 	if err != nil {
 		return "", err
@@ -681,7 +792,24 @@ func writeRunbook(ctx context.Context, cc *cmdContext) (string, error) {
 	return path, nil
 }
 
-func runbookMarkdown(cc *cmdContext) string {
+// runbookMarkdown renders the pairing runbook. It must NEVER include a device
+// credential secret (bearer, push token, private key, certificate) — only the
+// fact that device credentials were enrolled and when the certificate expires.
+func runbookMarkdown(cc *cmdContext, certNotAfter time.Time) string {
+	deviceSection := ""
+	verifyHeading := "## 5. Verify"
+	if !certNotAfter.IsZero() {
+		verifyHeading = "## 6. Verify"
+		deviceSection = fmt.Sprintf(`## 5. Device credentials
+- Device credentials for "phone" were enrolled %s; the SSH certificate expires **%s**.
+- The bearer/push/key secrets were shown ONCE during enrollment and are deliberately NOT in this runbook.
+- Rotate them any time with: abysslink enroll phone --apply
+- List or revoke devices with: abysslink device ls / abysslink device revoke phone --apply
+
+`,
+			time.Now().Format("2006-01-02"),
+			certNotAfter.UTC().Format("2006-01-02"))
+	}
 	return fmt.Sprintf(`# Abysslink phone runbook
 
 Generated %s for %s.
@@ -705,12 +833,14 @@ These steps cannot be automated — do them on your phone / in the SSO console:
 - Android: ConnectBot (SSH) or Termux from F-Droid (SSH + mosh).
 - Connect with:  mosh %s -- tmux new -A -s main
 
-## 5. Verify
+%s%s
 - Run "abysslink doctor" on the laptop — everything should be green.
 `,
 		time.Now().Format("2006-01-02"),
 		cc.cfg.Identity.Email,
 		cc.cfg.Identity.Email,
 		cc.cfg.Tailnet.Hostname,
+		deviceSection,
+		verifyHeading,
 	)
 }
