@@ -105,8 +105,8 @@ func mintCert(ca ssh.Signer, pub ssh.PublicKey, name string, serial uint64, now 
 		CertType:        ssh.UserCert,
 		KeyId:           certKeyIDPrefix + name,
 		ValidPrincipals: []string{name},
-		ValidAfter:      uint64(now.Add(-certBackdate).Unix()), //nolint:gosec // G115: post-1970 timestamps are non-negative
-		ValidBefore:     uint64(notAfter.Unix()),               //nolint:gosec // G115: post-1970 timestamps are non-negative
+		ValidAfter:      uint64(now.Add(-certBackdate).Unix()), // #nosec G115 -- post-1970 Unix timestamps are non-negative; no int64->uint64 overflow
+		ValidBefore:     uint64(notAfter.Unix()),               // #nosec G115 -- post-1970 Unix timestamps are non-negative; no int64->uint64 overflow
 		Permissions: ssh.Permissions{
 			Extensions: map[string]string{"permit-pty": ""},
 		},
