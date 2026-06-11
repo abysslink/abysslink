@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/device"
@@ -74,6 +75,10 @@ type DeviceStore interface {
 type AuditAppender interface {
 	Append(op, target string, content []byte, dryRun bool) error
 }
+
+// Compile-time guard: the chain-aware audit writer must keep satisfying the
+// receipt-append contract, so interface drift fails here.
+var _ AuditAppender = (*audit.Audit)(nil)
 
 // ContentTLSProvider yields the TLS config for the content listener. The
 // production provider (cmd/abysslinkd) wraps the Tailscale local client's
