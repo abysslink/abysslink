@@ -13,6 +13,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd
+	golang.org/x/crypto v0.52.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
@@ -63,7 +64,6 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
-	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
