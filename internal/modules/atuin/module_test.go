@@ -245,6 +245,13 @@ func (c *countingAudit) WriteFile(path string, content []byte, perm os.FileMode,
 	return c.inner.WriteFile(path, content, perm, dryRun)
 }
 
+// Update delegates to the inner writer's cross-process read-modify-write so
+// *countingAudit still satisfies audit.AuditWriter; the counting test exercises
+// WriteFile only.
+func (c *countingAudit) Update(ctx context.Context, path string, perm os.FileMode, content func() ([]byte, error)) error {
+	return c.inner.Update(ctx, path, perm, content)
+}
+
 func TestApply_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)

@@ -176,29 +176,6 @@ func (s *Store) loadFromDiskLocked() error {
 	return nil
 }
 
-// saveLocked writes f through the audit writer as ONE atomic mutation, then
-// commits it to memory and refreshes the change-detection fingerprint. On
-// error the in-memory state is left untouched (memory never runs ahead of
-// disk). Caller must hold s.mu.
-func (s *Store) saveLocked(f storeFile) error {
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return fmt.Errorf("device: marshal records file: %w", err)
-	}
-	data = append(data, '\n')
-	if err := s.aud.WriteFile(s.path, data, recordsPerm, false); err != nil {
-		return fmt.Errorf("device: write records file %s: %w", s.path, err)
-	}
-	s.file = f
-	s.loaded = true
-	if fi, statErr := os.Stat(s.path); statErr == nil {
-		s.lastMod = fi.ModTime()
-		s.lastSize = fi.Size()
-		s.lastInfo = fi
-	}
-	return nil
-}
-
 // update is the single cross-process-safe read-modify-write path for every
 // records-file mutation. It holds s.mu (in-process serialization) and routes
 // through s.aud.Update, which holds the cross-process audit flock for the whole
@@ -264,13 +241,6 @@ func findActiveIn(f *storeFile, name string) int {
 		}
 	}
 	return -1
-}
-
-// findActiveLocked returns the index of the active (non-revoked) record named
-// name in the in-memory file, or -1. Caller must hold s.mu with the file
-// loaded.
-func (s *Store) findActiveLocked(name string) int {
-	return findActiveIn(&s.file, name)
 }
 
 // DefaultPath returns the canonical devices.json location,

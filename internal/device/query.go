@@ -78,39 +78,68 @@ func (s *Store) TouchLastSeen(ctx context.Context, id string, when time.Time) er
 		return err
 	}
 
+	// Fast-path rate limit: if the in-memory cache already shows LastSeen fresh
+	// (within touchWriteInterval) we can skip the whole locked read-modify-write
+	// — but only after a freshness reload so we never short-circuit on stale
+	// cache. The cache reload is cheap (mtime/size check); the cross-process
+	// flock is taken only when a write is actually warranted.
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.reloadIfChangedLocked(); err != nil {
-		return err
+	if err := s.reloadIfChangedLocked(); err == nil {
+		if idx := indexByID(&s.file, id); idx >= 0 {
+			r := s.file.Devices[idx]
+			if r.Revoked || lastSeenFresh(r.LastSeen, when) {
+				s.mu.Unlock()
+				return nil
+			}
+		}
 	}
+	s.mu.Unlock()
 
-	idx := -1
-	for i := range s.file.Devices {
-		if s.file.Devices[i].ID == id {
-			idx = i
-			break
+	// A write looks warranted. Take the cross-process flock and re-evaluate
+	// against the CURRENT on-disk state inside update: a concurrent process may
+	// have revoked the device or already bumped LastSeen between the fast-path
+	// check and acquiring the lock. The authoritative checks (revoked? fresh?)
+	// run on the freshly loaded file, so a touch can never resurrect a device
+	// another process just revoked, and never clobber that revocation.
+	return s.update(ctx, func(f *storeFile) (bool, error) {
+		idx := indexByID(f, id)
+		if idx < 0 {
+			return false, fmt.Errorf("device: touch id %q: %w", id, ErrNotFound)
 		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("device: touch id %q: %w", id, ErrNotFound)
-	}
-	r := s.file.Devices[idx]
-	if r.Revoked {
-		return nil
-	}
-	if !r.LastSeen.IsZero() {
-		d := when.Sub(r.LastSeen)
-		if d < 0 {
-			d = -d
+		r := &f.Devices[idx]
+		if r.Revoked {
+			return false, nil // revoked under us: do not write (would revert nothing, but also nothing to do)
 		}
-		if d < touchWriteInterval {
-			return nil
+		if lastSeenFresh(r.LastSeen, when) {
+			return false, nil // another process already bumped it within the window
 		}
-	}
+		r.LastSeen = when.UTC()
+		return true, nil
+	})
+}
 
-	f := s.file.clone()
-	f.Devices[idx].LastSeen = when.UTC()
-	return s.saveLocked(f)
+// indexByID returns the index of the record with the given ID in f, or -1.
+func indexByID(f *storeFile, id string) int {
+	for i := range f.Devices {
+		if f.Devices[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// lastSeenFresh reports whether a stored LastSeen is within touchWriteInterval
+// of when (so a persisted update would be redundant). A zero LastSeen is never
+// fresh — the first check-in always writes.
+func lastSeenFresh(lastSeen, when time.Time) bool {
+	if lastSeen.IsZero() {
+		return false
+	}
+	d := when.Sub(lastSeen)
+	if d < 0 {
+		d = -d
+	}
+	return d < touchWriteInterval
 }
 
 // List returns a copy of every record, active and revoked. When a freshness

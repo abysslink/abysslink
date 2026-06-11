@@ -16,6 +16,7 @@
 package device_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -69,6 +70,21 @@ func (f *fakeAudit) WriteFile(path string, content []byte, perm os.FileMode, _ b
 	// os.WriteFile only applies perm at creation; force it on rewrites too so
 	// the perm-assertion test exercises what the Store requested.
 	return os.Chmod(path, perm)
+}
+
+// Update mirrors the audit contract for unit tests: it calls content() to get
+// the fresh bytes, then writes them through WriteFile. It holds no flock (this
+// fake is for single-Store unit tests); the cross-process race tests use the
+// real internal/audit writer, which takes the flock.
+func (f *fakeAudit) Update(_ context.Context, path string, perm os.FileMode, content func() ([]byte, error)) error {
+	data, err := content()
+	if err != nil {
+		return err
+	}
+	if data == nil {
+		return nil
+	}
+	return f.WriteFile(path, data, perm, false)
 }
 
 func (f *fakeAudit) writeCount() int {
