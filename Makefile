@@ -75,26 +75,38 @@ check-webui-build-tags:
 	@echo "OK: all webui .go files carry the build tag"
 
 ## check-webui-isolation: build abysslinkd WITHOUT -tags webui and assert the
-## base binary links zero webui-module / Tailscale-SDK packages. Uses
-## `go list -deps` (authoritative, no false positives) as the primary gate and a
-## precise `go tool nm` symbol scan as a belt-and-suspenders check. The patterns
-## are the exact package import paths — NOT the bare string "webui", which would
-## falsely match the base-package config.WebUIConfig type. WEB-01 / T-19-02.
+## base binary links zero web-DASHBOARD packages — the web UI server stack
+## (internal/modules/webui) and its Tailscale safeweb HTTP framework
+## (tailscale.com/safeweb). Uses `go list -deps` (authoritative, no false
+## positives) as the primary gate and a precise `go tool nm` symbol scan as a
+## belt-and-suspenders check. The patterns are the exact package import paths —
+## NOT the bare string "webui", which would falsely match the base-package
+## config.WebUIConfig type. WEB-01 / T-19-02.
+##
+## NOTE (phase 28.1): tailscale.com/client/local is deliberately NOT forbidden
+## here. It was originally listed as a proxy for "webui present" (phase 19, when
+## only the dashboard linked it), but the phase-28 tailnet content store
+## (BACK-06) now legitimately links it in the BASE daemon for the content
+## listener's WEB-03 TLS GetCertificate — a Tailscale-only cert path with no
+## non-SDK alternative. It is a thin local-API client over the tailscaled
+## socket, not the heavy safeweb dashboard stack this invariant exists to keep
+## optional. Re-adding it would force-couple a core, non-optional feature to the
+## opt-in build tag. The dashboard stack itself remains strictly tag-gated.
 check-webui-isolation:
 	@$(GO) build -o /tmp/abysslinkd-base ./cmd/abysslinkd
-	@deps=$$($(GO) list -deps ./cmd/abysslinkd | grep -c 'internal/modules/webui\|tailscale.com/safeweb\|tailscale.com/client/local' || true); \
+	@deps=$$($(GO) list -deps ./cmd/abysslinkd | grep -c 'internal/modules/webui\|tailscale.com/safeweb' || true); \
 	  if [ "$$deps" -ne 0 ]; then \
-	    echo "FAIL: base binary depends on $$deps webui/SDK package(s)"; \
-	    $(GO) list -deps ./cmd/abysslinkd | grep 'internal/modules/webui\|tailscale.com/safeweb\|tailscale.com/client/local'; \
+	    echo "FAIL: base binary depends on $$deps web-dashboard package(s)"; \
+	    $(GO) list -deps ./cmd/abysslinkd | grep 'internal/modules/webui\|tailscale.com/safeweb'; \
 	    rm -f /tmp/abysslinkd-base; exit 1; \
 	  fi
-	@syms=$$($(GO) tool nm /tmp/abysslinkd-base | grep -c 'internal/modules/webui\|tailscale.com/safeweb\|tailscale.com/client/local' || true); \
+	@syms=$$($(GO) tool nm /tmp/abysslinkd-base | grep -c 'internal/modules/webui\|tailscale.com/safeweb' || true); \
 	  if [ "$$syms" -ne 0 ]; then \
-	    echo "FAIL: base binary contains $$syms webui/SDK symbol(s)"; \
+	    echo "FAIL: base binary contains $$syms web-dashboard symbol(s)"; \
 	    rm -f /tmp/abysslinkd-base; exit 1; \
 	  fi
 	@rm -f /tmp/abysslinkd-base
-	@echo "OK: base binary contains zero webui symbols"
+	@echo "OK: base binary contains zero web-dashboard symbols"
 
 ## check-htmx-sri: verify the SHA-384 of the vendored htmx.min.js matches the
 ## HTMXIntegrity constant in sri_const_gen.go. Until Plan 03 vendors the real
