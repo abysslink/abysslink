@@ -455,7 +455,7 @@ func newEnrollCmd() *cobra.Command {
 }
 
 func newEnrollPhoneCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "phone",
 		Short: "Mint a tagged auth key, show a QR, and walk through phone pairing (dry-run by default)",
 		Example: `  # Preview what enrollment would do (default: dry-run)
@@ -465,7 +465,10 @@ func newEnrollPhoneCmd() *cobra.Command {
   abysslink enroll phone --apply
 
   # Non-interactive enrollment (skip Pause stops)
-  abysslink enroll phone --apply --yes`,
+  abysslink enroll phone --apply --yes
+
+  # Show the device credentials as scannable QR codes (scan with the phone camera)
+  abysslink enroll phone --apply --qr`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			cc, err := loadCmdContext(cmd)
@@ -482,18 +485,8 @@ func newEnrollPhoneCmd() *cobra.Command {
 			// [plan]/--apply gate applies (mirrors `enroll rig`). Without --apply,
 			// print the plan preview and mint NOTHING.
 			if !cc.apply {
-				hasCfgCreds := cc.cfg.Tailnet.Admin.Tailnet != "" &&
-					cc.cfg.Tailnet.Admin.OAuthClientID != "" &&
-					os.Getenv(oauthSecretEnv) != ""
-				printerInfo(p, styleMuted.Render("Dry-run mode — no changes will be made. Use --apply to execute."))
-				if hasCfgCreds {
-					printerInfo(p, "[plan] would mint a single-use, pre-authorized tailnet auth key tagged "+tag+" (backend-default expiry) via the admin API and show it as a QR code")
-				} else {
-					printerInfo(p, "[plan] no admin OAuth client configured — would print manual key-creation instructions (single-use, pre-authorized, tagged "+tag+") instead of minting a key")
-				}
-				printerInfo(p, "[plan] would walk through phone pairing (install QR, auth-key QR, ntfy subscription QR)")
-				printerInfo(p, "[plan] would mint device credentials for \"phone\" — bearer token, push token, and a 90-day SSH certificate — and print them ONCE (re-enrolling rotates the existing credentials); nothing is minted in dry-run")
-				printerInfo(p, "[plan] would write a pairing runbook with the remaining manual steps")
+				qrFlag, _ := cmd.Flags().GetBool("qr")
+				printEnrollPhonePlan(p, cc, tag, qrFlag)
 				return nil
 			}
 
@@ -541,7 +534,8 @@ func newEnrollPhoneCmd() *cobra.Command {
 			if mintErr != nil {
 				return fmt.Errorf("enroll phone: device credentials: %w", mintErr)
 			}
-			printDeviceBundle(p, cc.jsonOut, bundle, rotated)
+			showQR, _ := cmd.Flags().GetBool("qr")
+			printDeviceBundle(p, cmd.OutOrStdout(), cc.jsonOut, bundle, rotated, showQR)
 
 			// Printable runbook for the remaining manual steps.
 			// §7 note 10 (lock-screen hygiene) fires here alongside the runbook.
@@ -557,6 +551,30 @@ func newEnrollPhoneCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().Bool("qr", false,
+		"render the device credentials (SSH key, cert, bearer, push token) as scannable QR codes for the phone's camera")
+	return cmd
+}
+
+// printEnrollPhonePlan prints the `enroll phone` dry-run plan (no mutations).
+// Extracted from newEnrollPhoneCmd to keep that command's cyclomatic complexity
+// in check.
+func printEnrollPhonePlan(p Printer, cc *cmdContext, tag string, showQR bool) {
+	hasCfgCreds := cc.cfg.Tailnet.Admin.Tailnet != "" &&
+		cc.cfg.Tailnet.Admin.OAuthClientID != "" &&
+		os.Getenv(oauthSecretEnv) != ""
+	printerInfo(p, styleMuted.Render("Dry-run mode — no changes will be made. Use --apply to execute."))
+	if hasCfgCreds {
+		printerInfo(p, "[plan] would mint a single-use, pre-authorized tailnet auth key tagged "+tag+" (backend-default expiry) via the admin API and show it as a QR code")
+	} else {
+		printerInfo(p, "[plan] no admin OAuth client configured — would print manual key-creation instructions (single-use, pre-authorized, tagged "+tag+") instead of minting a key")
+	}
+	printerInfo(p, "[plan] would walk through phone pairing (install QR, auth-key QR, ntfy subscription QR)")
+	printerInfo(p, "[plan] would mint device credentials for \"phone\" — bearer token, push token, and a 90-day SSH certificate — and print them ONCE (re-enrolling rotates the existing credentials); nothing is minted in dry-run")
+	if showQR {
+		printerInfo(p, "[plan] --qr set: would also render each credential as a scannable QR code")
+	}
+	printerInfo(p, "[plan] would write a pairing runbook with the remaining manual steps")
 }
 
 // printQR renders an ANSI QR code for payload to out. Under --json the raw
@@ -716,7 +734,7 @@ type deviceBundleRecord struct {
 // Lock disablement secrets. Nothing in the bundle is ever written to disk by
 // abysslink — the runbook only records THAT enrollment happened and the cert
 // expiry, never a secret.
-func printDeviceBundle(p Printer, jsonOut bool, b *device.Bundle, rotated bool) {
+func printDeviceBundle(p Printer, out io.Writer, jsonOut bool, b *device.Bundle, rotated, showQR bool) {
 	if jsonOut {
 		p.PrintJSON(deviceBundleRecord{
 			Device:           b.Name,
@@ -757,6 +775,31 @@ func printDeviceBundle(p Printer, jsonOut bool, b *device.Bundle, rotated bool) 
 	printerInfo(p, "│  CA public key (for sshd TrustedUserCAKeys — also via `abysslink device ca`):")
 	printerInfo(p, "│    "+b.CAPublicKeyAuthorizedKey)
 	printerInfo(p, "└─────────────────────────────────────────────────────────────────┘")
+	printerInfo(p, "")
+
+	if showQR {
+		printDeviceBundleQR(p, out, b)
+	}
+}
+
+// printDeviceBundleQR renders each device credential as a scannable ANSI QR so
+// the operator can import it with the phone's camera instead of hand-typing a
+// ~400-byte SSH key. It is opt-in (`enroll --qr`) and never runs under --json
+// (printDeviceBundle returns before this on the JSON path). The QR carries the
+// same secret already printed above — no new disk write, no argv exposure. The
+// CA public key is omitted (it is public and also available via `device ca`).
+func printDeviceBundleQR(p Printer, out io.Writer, b *device.Bundle) {
+	printerInfo(p, "Scan with your phone to import (one QR per credential):")
+	for _, it := range []struct{ label, payload string }{
+		{"SSH private key", b.SSHPrivateKeyPEM},
+		{"SSH certificate", b.SSHCertAuthorizedKey},
+		{"Bearer token", b.Bearer},
+		{"Push token", b.PushToken},
+	} {
+		printerInfo(p, "")
+		printerInfo(p, "  ▸ "+it.label+":")
+		qr.PrintANSI(out, it.payload)
+	}
 	printerInfo(p, "")
 }
 
