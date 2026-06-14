@@ -31,8 +31,10 @@ Or build from source:
 
 ```sh
 go install github.com/abysslink/abysslink/cmd/abysslink@latest
-go install github.com/abysslink/abysslink/cmd/abysslinkd@latest   # daemon — needed for watchers & notify
+go install github.com/abysslink/abysslink/cmd/abysslinkd@latest   # daemon — watchers, notify, content store, credential pull
 ```
+
+(From a source checkout, `make build` produces both `./abysslink` and `./abysslinkd`, and `make install` installs both to `GOBIN`.)
 
 > `go install` builds report their version as `dev (unknown)`, so
 > `abysslink upgrade --check` and `abysslink verify` won't work on them.
@@ -42,6 +44,25 @@ go install github.com/abysslink/abysslink/cmd/abysslinkd@latest   # daemon — n
 > are **planned** but not yet published. Use the installer or `go install` for now.
 > Check for newer releases any time with `abysslink upgrade --check`
 > (exits `3` when a newer release is available — handy for scripts).
+
+## 1b. The `abysslinkd` daemon
+
+`abysslinkd` is the long-running background process on your rig. It powers:
+
+- **Watchers** (`abysslink watch`) — push when a tmux pane goes idle, a log matches a regex, or an HTTP endpoint changes status.
+- **The notify socket** — `abysslink notify` and the Claude Code hooks deliver through it (falling back to a direct push when it's down).
+- **The tailnet content store** — serves opaque notification bodies and the one-scan **credential pull** for `enroll phone` over the tailnet (HTTPS, bound to the tailnet IP only).
+- **Ack receipts** — records true phone-side delivery receipts.
+
+The release installer ships it; `go install` and `make install` install it alongside the CLI (see above). Run it as a login service so it starts on boot and stays up:
+
+```sh
+abysslink daemon enable --apply   # install + start the launchd (macOS) / systemd --user (Linux) service
+abysslink daemon status           # expect: service: running · socket: reachable
+abysslink daemon disable --apply  # stop and remove the service
+```
+
+Without a running daemon, watchers don't fire, `notify` falls back to a direct push, and `enroll phone` degrades to showing the credentials inline instead of the one-scan pull QR (`daemon not reachable — showing credentials inline`).
 
 ## 2. Initialize
 
