@@ -130,6 +130,33 @@ func (s *Store) CAPublicKey(ctx context.Context) (string, error) {
 	return authorizedKeyLine(signer.PublicKey()), nil
 }
 
+// CAPublicKeyIfPresent returns the CA public key line WITHOUT creating a CA on
+// first use. It returns secrets.ErrNotFound when no CA key exists in the
+// keychain yet (or no keychain backend is configured), so read-only callers —
+// the doctor CA/KRL drift check — can detect "auto-trust not in play" without
+// the side effect of minting and persisting a fresh CA. The minting variant
+// CAPublicKey remains for the write path (ssh.Apply on `up --apply`).
+func (s *Store) CAPublicKeyIfPresent(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.caSigner != nil {
+		return authorizedKeyLine(s.caSigner.PublicKey()), nil
+	}
+	if s.kc == nil {
+		return "", secrets.ErrNotFound
+	}
+	pemStr, err := s.kc.Get(ctx, caKeychainService, caKeychainAccount)
+	if err != nil {
+		return "", err // secrets.ErrNotFound propagates unchanged; never mints
+	}
+	signer, perr := ssh.ParsePrivateKey([]byte(pemStr))
+	if perr != nil {
+		return "", fmt.Errorf("device: parse CA key from keychain: %w", perr)
+	}
+	s.caSigner = signer
+	return authorizedKeyLine(signer.PublicKey()), nil
+}
+
 // authorizedKeyLine renders pub as one authorized_keys line without the
 // trailing newline ssh.MarshalAuthorizedKey appends.
 func authorizedKeyLine(pub ssh.PublicKey) string {

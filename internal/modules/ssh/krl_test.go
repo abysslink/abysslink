@@ -148,12 +148,39 @@ func stagedPath(t *testing.T, name string) string {
 	return filepath.Join(home, ".config", "abysslink", "generated", name)
 }
 
+// TestParseKRLSerials covers the range-aware decode of `ssh-keygen -Q -l -f`
+// output. ssh-keygen collapses consecutive serials into "serial: N-M" ranges
+// (the common case, since device serials are monotonic), so the parser must
+// expand them; a non-numeric/inverted serial line is an error (never a silent
+// drop that would mis-report drift).
+func TestParseKRLSerials(t *testing.T) {
+	got, err := ParseKRLSerials("# CA key ssh-ed25519 SHA256:abc\n  serial: 1-3 \nserial: 7-8\nserial: 20\nnoise\n")
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{1, 2, 3, 7, 8, 20}, got, "ranges expanded, header+noise ignored, sorted+deduped")
+
+	single, err := ParseKRLSerials("serial: 7\nserial: 5\nserial: 5\n")
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{5, 7}, single, "single serials deduped + sorted")
+
+	empty, err := ParseKRLSerials("# CA key only\n")
+	require.NoError(t, err)
+	assert.Empty(t, empty, "header-only ⇒ empty set (valid empty KRL)")
+
+	_, err = ParseKRLSerials("serial: not-a-number\n")
+	require.Error(t, err, "non-numeric serial must error, never silently drop")
+	_, err = ParseKRLSerials("serial: 9-2\n")
+	require.Error(t, err, "inverted range must error")
+}
+
 // TestKRLBuildArgv asserts buildAndStageKRL invokes ssh-keygen through the
-// Runner with -k -f <krl> -s <ca.pub> <spec> (the -s flag is present and the
-// spec is the final operand), and that the CA pub + spec are audit-written.
+// Runner with -k -f <krl> -s <ca.pub> <spec-input> (the -s flag is present and
+// the spec input is the final operand), then re-decodes the KRL with -Q -l to
+// verify the serial set, and audit-writes the CA pub, spec input, KRL, and the
+// spec anchor.
 func TestKRLBuildArgv(t *testing.T) {
 	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -k
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                         // ssh-keygen -k
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "# CA\nserial: 5\nserial: 7\n"}}, // ssh-keygen -Q -l (assertKRLSerials)
 	)
 	m, ra := newKRLModule(t, r)
 
@@ -167,7 +194,7 @@ func TestKRLBuildArgv(t *testing.T) {
 	assert.True(t, changed)
 
 	calls := r.RecordedCalls()
-	require.Len(t, calls, 1, "exactly one ssh-keygen call")
+	require.Len(t, calls, 2, "ssh-keygen -k then ssh-keygen -Q -l (serial-set verify)")
 	assert.Equal(t, "ssh-keygen", calls[0].Name)
 	args := calls[0].Args
 	require.GreaterOrEqual(t, len(args), 6)
@@ -175,10 +202,11 @@ func TestKRLBuildArgv(t *testing.T) {
 	assert.Equal(t, "-f", args[1])
 	assert.Equal(t, "-s", args[3], "-s <ca.pub> is required for by-serial revocation")
 	assert.True(t, strings.HasSuffix(args[4], stagedCAName), "-s operand is the staged CA pub")
-	assert.True(t, strings.HasSuffix(args[len(args)-1], stagedSpecName), "the spec path is the final operand")
+	assert.True(t, strings.HasSuffix(args[len(args)-1], ".spec.in"), "the spec INPUT path is the final operand (not the anchor)")
+	assert.Equal(t, []string{"-Q", "-l", "-f"}, calls[1].Args[:3], "second call decodes the KRL for the serial-set check")
 
 	assert.True(t, ra.hasWrite(stagedCAName), "CA pub must be audit-written")
-	assert.True(t, ra.hasWrite(stagedSpecName), "spec must be audit-written")
+	assert.True(t, ra.hasWrite(stagedSpecName), "spec anchor must be audit-written")
 	assert.True(t, ra.hasWrite(stagedKRLName), "KRL must be re-staged through audit")
 }
 
@@ -187,7 +215,8 @@ func TestKRLBuildArgv(t *testing.T) {
 // bytes).
 func TestKRLIdempotent(t *testing.T) {
 	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -k (first build only)
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                         // ssh-keygen -k (first build)
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "# CA\nserial: 5\nserial: 7\n"}}, // ssh-keygen -Q -l verify
 	)
 	m, _ := newKRLModule(t, r)
 
@@ -198,7 +227,7 @@ func TestKRLIdempotent(t *testing.T) {
 	changed, err := m.buildAndStageKRL(context.Background(), "ssh-ed25519 AAAACA test-ca", serials)
 	require.NoError(t, err)
 	require.True(t, changed, "first build must run")
-	require.True(t, r.Done(), "the single scripted ssh-keygen call must be consumed by the first build")
+	require.True(t, r.Done(), "both scripted ssh-keygen calls must be consumed by the first build")
 
 	// Second build over the unchanged serial set must NOT call ssh-keygen. A
 	// fresh MockRunner with zero scripted calls would error on any Run.
@@ -211,7 +240,9 @@ func TestKRLIdempotent(t *testing.T) {
 }
 
 // TestKRLBuildFailureStagesNoKRL asserts a non-zero ssh-keygen exit aborts with
-// a wrapped error and stages no KRL.
+// a wrapped error, stages no KRL, and — critically — does NOT advance the spec
+// anchor (M1: a mid-build failure must never leave the anchor ahead of its KRL,
+// which would make the next run dedup-skip and install a stale KRL).
 func TestKRLBuildFailureStagesNoKRL(t *testing.T) {
 	r := shell.NewMockRunner(
 		shell.Call{Result: shell.Result{ExitCode: 255, Stderr: "requires specification of a CA key"}},
@@ -223,4 +254,28 @@ func TestKRLBuildFailureStagesNoKRL(t *testing.T) {
 	assert.False(t, changed)
 	assert.Contains(t, err.Error(), "ssh-keygen -k exited 255")
 	assert.False(t, ra.hasWrite(stagedKRLName), "no KRL may be staged on build failure")
+	// The anchor (stagedSpecName) must NOT exist on disk after a failed build.
+	_, statErr := os.Stat(stagedPath(t, stagedSpecName))
+	assert.True(t, os.IsNotExist(statErr), "spec anchor must not be advanced when the build fails (M1)")
+}
+
+// TestKRLSerialMismatchRefuses asserts the serial-set verification (M2) aborts
+// when the built KRL does not revoke exactly the desired serials — and does not
+// advance the anchor — so a well-formed-but-wrong KRL can never install.
+func TestKRLSerialMismatchRefuses(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},                        // ssh-keygen -k
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "serial: 5\n"}}, // -Q -l reports ONLY 5
+	)
+	m, ra := newKRLModule(t, r)
+	require.NoError(t, os.MkdirAll(filepath.Dir(stagedPath(t, stagedKRLName)), 0o700))
+	require.NoError(t, os.WriteFile(stagedPath(t, stagedKRLName), []byte("KRL-STUB"), 0o644))
+
+	changed, err := m.buildAndStageKRL(context.Background(), "ssh-ed25519 AAAACA test-ca", []uint64{5, 9})
+	require.Error(t, err, "KRL revoking {5} but store wants {5,9} must be refused")
+	assert.False(t, changed)
+	assert.Contains(t, err.Error(), "refusing to install")
+	_, statErr := os.Stat(stagedPath(t, stagedSpecName))
+	assert.True(t, os.IsNotExist(statErr), "anchor must not advance on a serial-set mismatch")
+	_ = ra
 }

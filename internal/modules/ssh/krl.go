@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -79,8 +80,7 @@ const krlSpecHeader = "# Managed by abysslink — device SSH cert revocation (by
 // nothing (never an absent/garbage RevokedKeys target that would fail closed
 // for all users).
 func renderKRLSpec(serials []uint64) string {
-	s := append([]uint64(nil), serials...)
-	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	s := sortedDedupe(serials)
 	var b strings.Builder
 	b.WriteString(krlSpecHeader)
 	for _, n := range s {
@@ -91,6 +91,96 @@ func renderKRLSpec(serials []uint64) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// sortedDedupe returns serials sorted ascending with duplicates removed. The
+// rendered spec and every serial-set comparison run through this so a duplicate
+// serial in RevokedSerials() can never change the spec bytes (idempotency) or
+// skew a set-equality check.
+func sortedDedupe(serials []uint64) []uint64 {
+	if len(serials) == 0 {
+		return nil
+	}
+	seen := make(map[uint64]struct{}, len(serials))
+	out := make([]uint64, 0, len(serials))
+	for _, n := range serials {
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// uint64SlicesEqual reports whether two ALREADY-sorted-and-deduped slices are
+// element-wise identical. Callers pass sortedDedupe output on both sides.
+func uint64SlicesEqual(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// maxKRLRangeSpan caps how many serials a single "serial: N-M" range may expand
+// to. abysslink revokes only a handful of device serials and ssh-keygen
+// collapses just the consecutive runs we actually revoked, so a legitimate span
+// is tiny; a span past this cap signals a malformed or foreign KRL and is
+// reported as an error rather than allocating unboundedly.
+const maxKRLRangeSpan = 1 << 20
+
+// ParseKRLSerials extracts every revoked serial from `ssh-keygen -Q -l -f`
+// stdout into a sorted, deduplicated []uint64. ssh-keygen COLLAPSES consecutive
+// serials into "serial: N-M" ranges — even two adjacent values — so BOTH the
+// single "serial: N" and the inclusive "serial: N-M" range forms are handled
+// (device serials are allocated monotonically, so adjacency is the common case;
+// parsing only the single form would silently drop ranged serials). Non-serial
+// lines (the "# CA key ..." header, blanks) are ignored. A "serial:" line whose
+// remainder is neither a decimal nor a valid N-M range is an error: ssh-keygen
+// never emits that, so it means the KRL or the decode is not what we expect and
+// the caller must not trust a partial parse.
+func ParseKRLSerials(stdout string) ([]uint64, error) {
+	var collected []uint64
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, "serial:")
+		if !ok {
+			continue
+		}
+		rest = strings.TrimSpace(rest)
+		if lo, hi, isRange := strings.Cut(rest, "-"); isRange {
+			a, aerr := strconv.ParseUint(strings.TrimSpace(lo), 10, 64)
+			b, berr := strconv.ParseUint(strings.TrimSpace(hi), 10, 64)
+			if aerr != nil || berr != nil {
+				return nil, fmt.Errorf("ssh: malformed KRL serial range %q", rest)
+			}
+			if b < a {
+				return nil, fmt.Errorf("ssh: inverted KRL serial range %q", rest)
+			}
+			if b-a+1 > maxKRLRangeSpan {
+				return nil, fmt.Errorf("ssh: KRL serial range %q spans more than %d serials", rest, maxKRLRangeSpan)
+			}
+			for n := a; ; n++ {
+				collected = append(collected, n)
+				if n == b {
+					break
+				}
+			}
+			continue
+		}
+		n, nerr := strconv.ParseUint(rest, 10, 64)
+		if nerr != nil {
+			return nil, fmt.Errorf("ssh: malformed KRL serial %q", rest)
+		}
+		collected = append(collected, n)
+	}
+	return sortedDedupe(collected), nil
 }
 
 // formatUint renders a uint64 as decimal without pulling in fmt, keeping
@@ -154,6 +244,7 @@ func (m *Module) buildAndStageKRL(ctx context.Context, caLine string, serials []
 	}
 
 	desiredSpec := renderKRLSpec(serials)
+	desiredSet := sortedDedupe(serials)
 
 	// Idempotency: skip the (non-deterministic) KRL rebuild when the spec is
 	// unchanged AND the prior KRL is still staged. Compare the deterministic
@@ -166,14 +257,21 @@ func (m *Module) buildAndStageKRL(ctx context.Context, caLine string, serials []
 		return false, fmt.Errorf("ssh apply: read staged spec: %w", rerr)
 	}
 
-	// Stage the spec (0600). The spec is the idempotency record for the next run.
-	if werr := m.audit.WriteFile(stagedSpec, []byte(desiredSpec), 0o600, false); werr != nil {
-		return false, fmt.Errorf("ssh apply: stage KRL spec: %w", werr)
+	// Write the spec to a SEPARATE input file for ssh-keygen. The idempotency
+	// anchor (stagedSpec) is advanced only at the END of this function — after the
+	// KRL is built, verified to revoke exactly the desired serials, and durably
+	// staged. Writing the anchor up front (as the original code did) let a
+	// mid-build failure leave the anchor ahead of its KRL: the next run would
+	// dedup-skip and install the STALE KRL, silently failing open against a
+	// just-revoked device.
+	specInput := stagedKRL + ".spec.in"
+	if werr := m.audit.WriteFile(specInput, []byte(desiredSpec), 0o600, false); werr != nil {
+		return false, fmt.Errorf("ssh apply: stage KRL spec input: %w", werr)
 	}
 
 	// Build the KRL via ssh-keygen through the Runner (never os/exec). -s is
-	// required for by-serial revocation; the spec path is the final operand.
-	res, rerr := m.runner.Run(ctx, "ssh-keygen", "-k", "-f", stagedKRL, "-s", stagedCA, stagedSpec)
+	// required for by-serial revocation; the spec input path is the final operand.
+	res, rerr := m.runner.Run(ctx, "ssh-keygen", "-k", "-f", stagedKRL, "-s", stagedCA, specInput)
 	if rerr != nil {
 		return false, fmt.Errorf("ssh apply: build KRL: %w", rerr)
 	}
@@ -193,7 +291,46 @@ func (m *Module) buildAndStageKRL(ctx context.Context, caLine string, serials []
 	if werr := m.audit.WriteFile(stagedKRL, krlBytes, 0o644, false); werr != nil {
 		return false, fmt.Errorf("ssh apply: stage KRL: %w", werr)
 	}
+
+	// Verify the built KRL revokes EXACTLY the desired serial set — not merely
+	// that it is well-formed. This catches a stale/wrong KRL before the anchor is
+	// advanced, so a well-formed-but-wrong KRL can never install silently.
+	if verr := m.assertKRLSerials(ctx, stagedKRL, desiredSet); verr != nil {
+		return false, verr
+	}
+
+	// Advance the idempotency anchor LAST: only now that the matching KRL is
+	// durably staged and verified is it safe to record this spec as the
+	// dedup baseline for the next run.
+	if werr := m.audit.WriteFile(stagedSpec, []byte(desiredSpec), 0o600, false); werr != nil {
+		return false, fmt.Errorf("ssh apply: stage KRL spec anchor: %w", werr)
+	}
 	return true, nil
+}
+
+// assertKRLSerials decodes the staged KRL via ssh-keygen -Q -l -f and verifies
+// its revoked-serial set equals want (already sorted+deduped). It errors on a
+// decode failure, a malformed serial line, or any set mismatch — so the caller
+// never advances the idempotency anchor or installs a KRL that does not revoke
+// exactly the intended serials. ssh-keygen collapses consecutive serials into
+// ranges, which ParseKRLSerials expands, so the comparison is exact.
+func (m *Module) assertKRLSerials(ctx context.Context, krlPath string, want []uint64) error {
+	res, rerr := m.runner.Run(ctx, "ssh-keygen", "-Q", "-l", "-f", krlPath)
+	if rerr != nil {
+		return fmt.Errorf("ssh apply: decode KRL for serial check: %w", rerr)
+	}
+	if !res.Ok() {
+		return fmt.Errorf("ssh apply: ssh-keygen -Q -l exited %d decoding KRL: %s",
+			res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	got, perr := ParseKRLSerials(res.Stdout)
+	if perr != nil {
+		return fmt.Errorf("ssh apply: parse staged KRL serials: %w", perr)
+	}
+	if !uint64SlicesEqual(got, want) {
+		return fmt.Errorf("ssh apply: staged KRL revokes serials %v but the device store revokes %v — refusing to install", got, want)
+	}
+	return nil
 }
 
 // installCAAndKRL orchestrates the device-CA wiring for installHardenedSSHD:

@@ -523,14 +523,15 @@ func TestCAProviderError_FailSafe(t *testing.T) {
 // referencing config never names a not-yet-installed target.
 func TestInstallOrder_KeyMaterialBeforeDropIn(t *testing.T) {
 	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // 1. ssh-keygen -k (build KRL)
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // 2. ssh-keygen -l -f ca.pub (validate CA)
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // 3. ssh-keygen -Q -l -f krl (validate KRL)
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // 4. sudo install CA -> /etc/ssh
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // 5. sudo install KRL -> /etc/ssh
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // 6. sudo install drop-in
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // 7. sshd -t
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // 8. reload
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 1. ssh-keygen -k (build KRL)
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "serial: 5\nserial: 7\n"}}, // 2. ssh-keygen -Q -l (assertKRLSerials)
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 3. ssh-keygen -l -f ca.pub (validate CA)
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 4. ssh-keygen -Q -l -f krl (validate KRL)
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 5. sudo install CA -> /etc/ssh
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 6. sudo install KRL -> /etc/ssh
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 7. sudo install drop-in
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 8. sshd -t
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 9. reload
 	)
 	ca := fakeCAProvider{caLine: "ssh-ed25519 AAAACA test-ca", serials: []uint64{5, 7}}
 	m, _ := newFallbackModuleCA(t, r, ca)
@@ -546,7 +547,7 @@ func TestInstallOrder_KeyMaterialBeforeDropIn(t *testing.T) {
 	require.NoError(t, m.installHardenedSSHD(context.Background()))
 
 	calls := r.RecordedCalls()
-	require.Len(t, calls, 8, "build + 2 validations + 2 key installs + drop-in install + sshd -t + reload")
+	require.Len(t, calls, 9, "build + serial-set verify + 2 validations + 2 key installs + drop-in install + sshd -t + reload")
 
 	// Locate the install indices.
 	idxCAInstall, idxKRLInstall, idxDropIn := -1, -1, -1
@@ -634,14 +635,15 @@ func (r *recordingAudit) countWrites(suffix string) int {
 func TestReconcile_NoChurnOnUnchangedStore(t *testing.T) {
 	ca := fakeCAProvider{caLine: "ssh-ed25519 AAAACA test-ca", serials: []uint64{5, 7}}
 
-	// Pass 1: build (ssh-keygen -k) + validate CA + validate KRL + install CA +
-	// install KRL = 5 runner calls.
+	// Pass 1: build (ssh-keygen -k) + serial-set verify (ssh-keygen -Q -l) +
+	// validate CA + validate KRL + install CA + install KRL = 6 runner calls.
 	r1 := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -k (build KRL)
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -l -f ca.pub
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -Q -l -f krl
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // sudo install CA
-		shell.Call{Result: shell.Result{ExitCode: 0}}, // sudo install KRL
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // ssh-keygen -k (build KRL)
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "serial: 5\nserial: 7\n"}}, // ssh-keygen -Q -l (assertKRLSerials)
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // ssh-keygen -l -f ca.pub
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // ssh-keygen -Q -l -f krl
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // sudo install CA
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // sudo install KRL
 	)
 	m, ra := newFallbackModuleCA(t, r1, ca)
 
@@ -656,7 +658,7 @@ func TestReconcile_NoChurnOnUnchangedStore(t *testing.T) {
 	caWired, err := m.installCAAndKRL(context.Background())
 	require.NoError(t, err)
 	require.True(t, caWired, "first reconcile must wire the CA + KRL")
-	require.True(t, r1.Done(), "first reconcile consumes exactly the 5 scripted calls (incl. ssh-keygen -k)")
+	require.True(t, r1.Done(), "first reconcile consumes exactly the 6 scripted calls (incl. ssh-keygen -k + serial-set verify)")
 	krlWritesAfterFirst := ra.countWrites(stagedKRLName)
 	require.Equal(t, 1, krlWritesAfterFirst, "first reconcile stages the KRL exactly once")
 
