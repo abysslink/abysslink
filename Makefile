@@ -143,9 +143,9 @@ cover:
 release:
 	$(GORELEASER) release --snapshot --clean
 
-## install: install CLI binary to GOPATH/bin or GOBIN
+## install: install CLI and daemon binaries to GOPATH/bin or GOBIN
 install:
-	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/abysslink
+	$(GO) install -trimpath -ldflags "$(LDFLAGS)" ./cmd/abysslink ./cmd/abysslinkd
 
 ## repro-check: build binary twice and assert byte-identical output
 repro-check:

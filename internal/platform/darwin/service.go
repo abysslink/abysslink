@@ -125,14 +125,49 @@ func (p *Platform) ServiceStop(ctx context.Context, label string) error {
 	return err
 }
 
-// ServiceStatus returns Running if the service is loaded and active, Stopped otherwise.
+// ServiceStatus reports Running only when the launchd service is BOTH loaded
+// AND actually running (a live pid). `launchctl print` exits non-zero when the
+// label is not bootstrapped in the domain (→ Stopped) and zero when it is
+// loaded — but a loaded service whose program cannot start (missing binary,
+// crash-loop) is loaded yet NOT running, so we additionally require a live pid
+// in the print output.
+//
+// shell.Runner reports a non-zero exit via Result.ExitCode with err == nil; the
+// exit code is the signal, NOT the error (mirrors the linux fix, C3). The old
+// `if err != nil` check only ever saw an error on exec failure, so it reported
+// Running for every stopped OR missing service (e.g. exit 113 "could not find
+// service") — a false-OK that made `daemon status` claim "running" when no
+// process existed.
 func (p *Platform) ServiceStatus(ctx context.Context, label string) (platform.ServiceStatus, error) {
 	uid := fmt.Sprintf("%d", os.Getuid())
-	_, err := p.runner.Run(ctx, "launchctl", "print", "gui/"+uid+"/"+label)
+	res, err := p.runner.Run(ctx, "launchctl", "print", "gui/"+uid+"/"+label)
 	if err != nil {
+		// launchctl itself could not be executed — the status is unknown.
+		return platform.ServiceUnknown, fmt.Errorf("launchctl print %s: %w", label, err)
+	}
+	if !res.Ok() {
+		// Not bootstrapped in this domain (e.g. exit 113 "could not find service").
 		return platform.ServiceStopped, nil
 	}
-	return platform.ServiceRunning, nil
+	// Loaded — but it is actually RUNNING only if launchd reports a live pid; a
+	// loaded job with no pid (waiting / crash-looping / missing program) is
+	// stopped.
+	if launchdHasLivePID(res.Stdout) {
+		return platform.ServiceRunning, nil
+	}
+	return platform.ServiceStopped, nil
+}
+
+// launchdHasLivePID reports whether `launchctl print` output shows a live pid —
+// i.e. the service process is actually running, not merely loaded. launchd
+// emits a `pid = N` line in the print block only while the job is running.
+func launchdHasLivePID(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "pid = ") {
+			return true
+		}
+	}
+	return false
 }
 
 func launchAgentPath(label string) (string, error) {

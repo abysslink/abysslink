@@ -198,9 +198,28 @@ grep "abysslink_${VERSION#v}_linux_amd64.tar.gz" checksums.txt | sha256sum --che
 git clone https://github.com/abysslink/abysslink
 cd abysslink
 make build        # produces ./abysslink and ./abysslinkd (reproducible)
+make install      # installs both to GOBIN
 ```
 
 > **Uninstalling:** remove the binaries with `rm ~/.local/bin/abysslink ~/.local/bin/abysslinkd` (or the `/usr/local/bin` equivalents). `abysslink uninstall` reverses every *system* change Abysslink made but does not delete the binaries themselves.
+
+### The `abysslinkd` daemon (optional, opt-in to run)
+
+Every install ships **two** binaries: the `abysslink` CLI and the `abysslinkd` background daemon. The CLI alone handles all one-shot work — `up`, `doctor`, `enroll`, `acl`, `panic`, hardening. The daemon adds the *continuous, real-time* features:
+
+- **Watchers** — push to your phone when a tmux pane goes idle (a prompt is waiting), a log matches a regex, or an HTTP endpoint changes.
+- **Tailnet content store** — opaque notification bodies and the one-scan **credential pull** for `enroll phone`.
+- **Ack receipts** — true phone-side delivery confirmation.
+- `abysslink notify` and the Claude Code hooks deliver through it (falling back to a direct push when it's down).
+
+Installing the binary costs nothing until you opt in to *running* it as a login service:
+
+```bash
+abysslink daemon enable --apply   # launchd (macOS) / systemd --user (Linux); starts on boot
+abysslink daemon status           # service: running · socket: reachable
+```
+
+Without a running daemon, watchers don't fire and `enroll phone` shows credentials inline instead of the one-scan pull QR. See [the daemon section in the quickstart](docs/quickstart.md#1b-the-abysslinkd-daemon) for details.
 
 ---
 
