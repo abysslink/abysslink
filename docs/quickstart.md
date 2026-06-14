@@ -6,6 +6,7 @@ Get Abysslink running in five minutes on macOS or Linux.
 
 - A machine you want to control remotely (the "rig")
 - A Tailscale account (<https://tailscale.com>)
+- **MagicDNS + HTTPS Certificates enabled** for your tailnet (Tailscale admin → [DNS](https://login.tailscale.com/admin/dns)). The daemon serves the tailnet content store, the phone **credential pull**, and the web dashboard over HTTPS with a Tailscale-issued `*.ts.net` certificate (`GetCertificate`); with certificates disabled the TLS handshake fails and the phone sees *"server stopped responding."* Verify on the rig with `tailscale cert <node>.<tailnet>.ts.net` (succeeds when enabled; 500 "does not support getting TLS certs" when not).
 - macOS 13+ or Linux (Ubuntu 22.04+, Debian 12+, Fedora 40+)
 - FileVault (macOS) or LUKS (Linux) enabled — Abysslink refuses to proceed if disk is unencrypted
 
@@ -63,6 +64,8 @@ abysslink daemon disable --apply  # stop and remove the service
 ```
 
 Without a running daemon, watchers don't fire, `notify` falls back to a direct push, and `enroll phone` degrades to showing the credentials inline instead of the one-scan pull QR (`daemon not reachable — showing credentials inline`).
+
+> The content store + credential pull serve HTTPS with a Tailscale-issued `*.ts.net` cert, so they need **MagicDNS + HTTPS Certificates enabled** on your tailnet (see Prerequisites). With certs off the daemon still runs, but the phone fetch fails the TLS handshake (*"server stopped responding"*).
 
 ## 2. Initialize
 
