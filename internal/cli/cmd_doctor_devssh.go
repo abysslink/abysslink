@@ -19,10 +19,10 @@ import (
 	"context"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/modules/ssh"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -52,41 +52,16 @@ var (
 // hard coupling to the device store lifecycle (mirrors the ssh module's
 // CAProvider seam from 28.1-01).
 type caKRLView interface {
-	// CAPublicKey returns the device CA public key as a single
-	// authorized_keys-format line (no trailing newline). An error means no CA is
-	// enrolled (no keychain backend / first use never happened) — the drift check
-	// treats that as "auto-trust not in play" and emits nothing.
-	CAPublicKey(ctx context.Context) (string, error)
+	// CAPublicKeyIfPresent returns the device CA public key as a single
+	// authorized_keys-format line (no trailing newline) WITHOUT minting a CA on
+	// first use. An error (secrets.ErrNotFound) means no CA is enrolled (no
+	// keychain backend / never minted) — the drift check treats that as
+	// "auto-trust not in play" and emits nothing. The read-only path MUST NOT use
+	// the minting CAPublicKey: doctor would otherwise create+persist a CA as a
+	// side effect and defeat its own silence gate.
+	CAPublicKeyIfPresent(ctx context.Context) (string, error)
 	// RevokedSerials returns the revoked SSH certificate serials.
 	RevokedSerials() []uint64
-}
-
-// parseKRLSerials extracts every `serial: N` integer from `ssh-keygen -Q -l -f`
-// stdout into a sorted []uint64. The `# CA key ...` header line and any other
-// non-serial line are ignored. Leading/trailing whitespace is tolerated. The
-// result is sorted ascending so it can be set-compared against a (separately
-// sorted) RevokedSerials() slice. A nil/empty result is returned for output
-// with no serial lines (a valid empty KRL).
-func parseKRLSerials(stdout string) []uint64 {
-	var out []uint64
-	for _, line := range strings.Split(stdout, "\n") {
-		line = strings.TrimSpace(line)
-		// Match "serial:" followed by a single decimal integer. Ranges ("N-M")
-		// are valid KRL syntax but abysslink only ever emits explicit single
-		// serials (renderKRLSpec), so a non-integer remainder is ignored rather
-		// than mis-parsed.
-		rest, ok := strings.CutPrefix(line, "serial:")
-		if !ok {
-			continue
-		}
-		n, err := strconv.ParseUint(strings.TrimSpace(rest), 10, 64)
-		if err != nil {
-			continue
-		}
-		out = append(out, n)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
 }
 
 // devSSHOK builds a SeverityOK device-ssh finding (the control ran and passed).
@@ -120,10 +95,11 @@ func devSSHDriftFindings(ctx context.Context, runner shell.Runner, ca caKRLView)
 	if ca == nil {
 		return nil // no managed CA view — auto-trust not in play (fail-safe).
 	}
-	caLine, err := ca.CAPublicKey(ctx)
+	caLine, err := ca.CAPublicKeyIfPresent(ctx)
 	if err != nil {
 		// No keychain backend or no enrolled CA: auto-trust is simply not in
 		// play. Emit nothing rather than warning about absent files (fail-safe).
+		// CAPublicKeyIfPresent never mints, so this read path has no side effect.
 		return nil
 	}
 	caLine = strings.TrimSpace(caLine)
@@ -197,7 +173,14 @@ func krlDriftFindings(ctx context.Context, runner shell.Runner, want []uint64) [
 				strings.TrimSpace(res.Stderr))}
 	}
 
-	got := parseKRLSerials(res.Stdout)
+	got, perr := ssh.ParseKRLSerials(res.Stdout)
+	if perr != nil {
+		// The KRL decoded but a serial line was not the expected decimal/range
+		// form — cannot trust a partial parse. Probe-failure honesty: WARN, never
+		// a false-OK and never a false drift error (T-28.1-08).
+		return []modules.Finding{devSSHWarn(checkUnknown,
+			"could not parse the live KRL's revoked-serial set (cannot verify revocation drift): "+perr.Error())}
+	}
 	if uint64SetsEqual(got, want) {
 		return []modules.Finding{devSSHOK(checkOK,
 			"installed KRL revoked-serial set matches the device store (revocation enforced on disk)")}
