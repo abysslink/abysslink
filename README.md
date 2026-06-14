@@ -476,7 +476,6 @@ flowchart LR
 | [docs/operations/faq.md](docs/operations/faq.md) | Frequently asked questions. |
 | [docs/operations/troubleshooting.md](docs/operations/troubleshooting.md) | When something won't converge. |
 | [docs/headscale-ha.md](docs/headscale-ha.md) · [docs/netbird-scim.md](docs/netbird-scim.md) | Self-hosted control-plane operations. |
-| [CLAUDE.md](CLAUDE.md) | How Claude Code works inside this repo. |
 
 ---
 
@@ -492,7 +491,7 @@ make conformance        # behavioural conformance suite against a built binary
 ```
 
 - Conventional commits (`feat:`, `fix:`, `docs:`, …), one PR per logical unit.
-- All mutations go through `internal/audit`; all external commands through `internal/shell.Runner`; no `fmt.Println` in library code; license header on every Go file. (These are enforced — see [CLAUDE.md](CLAUDE.md).)
+- All mutations go through `internal/audit`; all external commands through `internal/shell.Runner`; no `fmt.Println` in library code; license header on every Go file. (These are enforced by `make lint` and CI — see [CONTRIBUTING.md](CONTRIBUTING.md).)
 
 ---
 

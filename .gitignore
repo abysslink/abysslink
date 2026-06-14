@@ -43,6 +43,11 @@ goreleaser/
 CLAUDE.md
 .specter*
 
+# Local-only agent / editor / terminal state and scratch dirs — never tracked.
+.claude/
+.mine/
+.ghostty*
+
 # Coverage
 coverage.out
 coverage.html

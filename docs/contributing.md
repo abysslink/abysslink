@@ -4,8 +4,7 @@ Thank you for your interest in contributing to Abysslink.
 
 ## Before you start
 
-- Read [CLAUDE.md](https://github.com/abysslink/abysslink/blob/main/CLAUDE.md) — it documents the non-negotiable architectural decisions.
-- Read [docs/DESIGN.md](https://github.com/abysslink/abysslink/blob/main/docs/DESIGN.md) — the full design document.
+- Read [docs/DESIGN.md](https://github.com/abysslink/abysslink/blob/main/docs/DESIGN.md) — the full design document and the non-negotiable architectural decisions.
 - Check existing [issues](https://github.com/abysslink/abysslink/issues) and [pull requests](https://github.com/abysslink/abysslink/pulls).
 
 ## Development setup
@@ -26,7 +25,7 @@ Requirements:
 
 ## Coding conventions
 
-### Hard rules (from CLAUDE.md)
+### Hard rules
 
 - No `fmt.Println` in library code — use `log/slog`
 - Every external command call goes through `internal/shell.Runner`
