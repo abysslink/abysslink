@@ -780,7 +780,10 @@ func TestStartContentServer_TLSRoundTrip(t *testing.T) {
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
 			// Self-signed test cert; verification is not the subject here.
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test-only client against the in-test self-signed listener
+			// MinVersion pinned to TLS 1.3 (matches the server's modern floor and
+			// satisfies the missing-ssl-minversion lint — InsecureSkipVerify stays
+			// test-only against the in-test self-signed listener).
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}, //nolint:gosec // test-only client against the in-test self-signed listener
 		},
 	}
 	base := "https://" + net.JoinHostPort(host, fmt.Sprintf("%d", port))

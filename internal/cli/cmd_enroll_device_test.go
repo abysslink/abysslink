@@ -66,7 +66,7 @@ func TestEnrollPhoneDevice_MintsAndPrintsOnce(t *testing.T) {
 
 	var out bytes.Buffer
 	p := NewHumanPrinterTo(&out, io.Discard)
-	printDeviceBundle(p, false, b, rotated)
+	printDeviceBundle(p, io.Discard, false, b, rotated, false)
 	got := stripANSI(out.String())
 
 	assert.Equal(t, 1, strings.Count(got, b.Bearer), "bearer must be printed exactly once")
@@ -92,6 +92,35 @@ func TestEnrollPhoneDevice_MintsAndPrintsOnce(t *testing.T) {
 	assert.NotContains(t, runbook, b.PushToken, "runbook must never contain the push token")
 	assert.NotContains(t, runbook, "PRIVATE KEY", "runbook must never contain the private key")
 	assert.NotContains(t, runbook, b.SSHCertAuthorizedKey, "runbook must never contain the certificate")
+}
+
+// TestPrintDeviceBundle_QR covers the `enroll --qr` path: with showQR the
+// bundle is rendered as scannable QR codes (one per credential) to the QR
+// writer, alongside a scan prompt in the human output. CA pub is omitted from
+// the QR set (public + available via `device ca`).
+func TestPrintDeviceBundle_QR(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newTestDeviceStore(t, nil)
+	b, _, err := mintPhoneDeviceBundle(ctx, st)
+	require.NoError(t, err)
+
+	var human, qrOut bytes.Buffer
+	p := NewHumanPrinterTo(&human, io.Discard)
+	printDeviceBundle(p, &qrOut, false, b, false, true /* showQR */)
+
+	got := stripANSI(human.String())
+	assert.Contains(t, got, "Scan with your phone", "the QR scan prompt must be shown")
+	for _, label := range []string{"SSH private key", "SSH certificate", "Bearer token", "Push token"} {
+		assert.Contains(t, got, label, "QR section must label %q", label)
+	}
+	assert.NotEmpty(t, qrOut.String(), "QR codes must be rendered to the QR writer")
+
+	// showQR=false renders no QR codes (regression: opt-in only).
+	var human2, qrOut2 bytes.Buffer
+	p2 := NewHumanPrinterTo(&human2, io.Discard)
+	printDeviceBundle(p2, &qrOut2, false, b, false, false)
+	assert.Empty(t, qrOut2.String(), "no QR output unless --qr is set")
+	assert.NotContains(t, stripANSI(human2.String()), "Scan with your phone")
 }
 
 // TestEnrollPhoneDevice_ReenrollRotates covers DEVC-02: a second `enroll
@@ -167,7 +196,7 @@ func TestPrintDeviceBundle_JSON(t *testing.T) {
 
 	var out bytes.Buffer
 	p := NewJSONPrinterTo(&out, io.Discard)
-	printDeviceBundle(p, true, b, rotated)
+	printDeviceBundle(p, io.Discard, true, b, rotated, false)
 
 	require.Equal(t, 1, strings.Count(strings.TrimSpace(out.String()), "\n")+1,
 		"JSON mode must emit exactly one record")

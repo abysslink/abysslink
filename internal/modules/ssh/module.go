@@ -38,11 +38,30 @@ type Module struct {
 	runner shell.Runner
 	cfg    *config.Config
 	audit  audit.AuditWriter
+	// ca is the read-only device-store view used to wire TrustedUserCAKeys +
+	// RevokedKeys. nil ⇒ no CA wiring: the hardened drop-in renders exactly as
+	// the legacy config (fail-safe, never blocks `up`).
+	ca CAProvider
 }
 
-// New returns a new Module.
-func New(d modules.Deps) *Module {
-	return &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit}
+// Option configures a Module at construction time.
+type Option func(*Module)
+
+// WithCAProvider injects a read-only device-store view so the hardened sshd
+// drop-in can reference the device CA (TrustedUserCAKeys) and a KRL built from
+// the revoked serials (RevokedKeys). A nil provider keeps the legacy drop-in.
+func WithCAProvider(ca CAProvider) Option {
+	return func(m *Module) { m.ca = ca }
+}
+
+// New returns a new Module. Options are applied after the base construction so
+// New(deps) remains call-compatible (the variadic is back-compatible).
+func New(d modules.Deps, opts ...Option) *Module {
+	m := &Module{runner: d.Runner, cfg: d.Cfg, audit: d.Audit}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // sshUser returns the configured UNIX user, falling back to $USER.
@@ -322,8 +341,14 @@ func (m *Module) disableSSHDUnits(ctx context.Context) error {
 // hardenedSSHDConfig returns the sshd drop-in for openssh-fallback mode. It
 // disables passwords and agent/TCP/X11 forwarding (so a compromised phone
 // cannot pivot through a forwarded agent) and restricts logins to one user.
-func hardenedSSHDConfig(user string) string {
-	return fmt.Sprintf(`# Managed by abysslink — hardened sshd (openssh-fallback mode). Do not edit.
+//
+// When caWired is true, two ADDITIVE directives are appended:
+// TrustedUserCAKeys (so device certs minted by the device CA are trusted —
+// DEVC-05) and RevokedKeys (so revoked serials are rejected via the KRL —
+// DEVC-06). The immutable hardened block above is unchanged in both renders;
+// the two directives are additive only and never weaken an existing default.
+func hardenedSSHDConfig(user string, caWired bool) string {
+	cfg := fmt.Sprintf(`# Managed by abysslink — hardened sshd (openssh-fallback mode). Do not edit.
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
@@ -333,6 +358,11 @@ AllowTcpForwarding no
 X11Forwarding no
 AllowUsers %s
 `, user)
+	if caWired {
+		cfg += "TrustedUserCAKeys " + caTrustDest + "\n"
+		cfg += "RevokedKeys " + krlDest + "\n"
+	}
+	return cfg
 }
 
 // installHardenedSSHD renders the hardened config, records it in the audit log,
@@ -349,7 +379,19 @@ func (m *Module) installHardenedSSHD(ctx context.Context) error {
 	if err := config.ValidateUnixUser(user); err != nil {
 		return fmt.Errorf("ssh apply: refusing to render sshd config: %w", err)
 	}
-	content := hardenedSSHDConfig(user)
+
+	// Stage + validate + install the device CA pub and KRL BEFORE the drop-in
+	// that references them: RevokedKeys/TrustedUserCAKeys targets must exist
+	// before sshd parses the config (and a missing/garbage RevokedKeys target
+	// fails pubkey auth closed for ALL users). caWired is false (no error) when
+	// no CA is wired or CAPublicKey errors — the legacy drop-in then renders
+	// with neither directive, so `up` is never blocked.
+	caWired, err := m.installCAAndKRL(ctx)
+	if err != nil {
+		return err
+	}
+
+	content := hardenedSSHDConfig(user, caWired)
 
 	home, err := os.UserHomeDir()
 	if err != nil {

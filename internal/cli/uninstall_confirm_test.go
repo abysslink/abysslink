@@ -134,6 +134,14 @@ func TestUninstallConfirmSeq_BlastRadiusPrinted(t *testing.T) {
 // TestUninstallDryRun_NoConfirm asserts that a dry-run does not prompt and returns nil.
 // This preserves existing conformance behaviour (testUninstallDryRunShowsPlan equivalent).
 func TestUninstallDryRun_NoConfirm(t *testing.T) {
+	// Sandbox HOME so the uninstall dry-run reads an EMPTY temp-dir audit log
+	// rather than the developer's real ~/.local/state/abysslink/audit.log. Without
+	// this the uninstall reverse-plan scans the machine's actual audit chain, so
+	// the test's wall-clock scaled with that log's size and could blow past the
+	// -race 10m timeout on a long-lived dev box (it was never an assertion about
+	// real audit content — the test only checks "dry-run does not prompt / hang").
+	t.Setenv("HOME", t.TempDir())
+
 	// Build a root command and run uninstall without --apply (so dry-run is active).
 	rootCmd := buildRootCmd()
 	rootCmd.SetArgs([]string{"uninstall"})

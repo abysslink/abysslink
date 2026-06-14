@@ -19,6 +19,8 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,6 +67,24 @@ func TestResolveApplyFlags(t *testing.T) {
 	_, _, err = resolveApplyFlags(applyFlagsCmd(t, true, true))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+// TestAllModules_NilKeychain_NoPanic asserts the composition root builds the
+// module set (including ssh with a nil CAProvider) without panicking when no
+// keychain backend is available — the fail-safe legacy-drop-in path.
+func TestAllModules_NilKeychain_NoPanic(t *testing.T) {
+	deps := modules.Deps{Cfg: config.Defaults(), Keychain: nil}
+	var mods []modules.Module
+	require.NotPanics(t, func() { mods = allModules(deps) })
+
+	var hasSSH bool
+	for _, m := range mods {
+		if m.Name() == "ssh" {
+			hasSSH = true
+			break
+		}
+	}
+	assert.True(t, hasSSH, "the ssh module must be present in the composition root with a nil keychain")
 }
 
 // TestLoadCmdContext_DryRunApplyMutuallyExclusive asserts that any command

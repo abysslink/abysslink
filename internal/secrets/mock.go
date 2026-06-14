@@ -18,6 +18,7 @@ package secrets
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -49,8 +50,16 @@ func NewMockStore() *MockStore {
 
 func key(service, account string) string { return service + "\x00" + account }
 
-// Set stores the secret in memory.
+// Set stores the secret in memory. It mirrors the real backends' single-line
+// contract: both the darwin (`security -i`) and linux (`pass insert`) stores
+// reject a secret containing a newline (it would truncate/inject the composed
+// command). Enforcing the same rule here keeps the mock faithful, so a caller
+// that tries to store a multi-line value (e.g. a raw PEM key) fails in tests
+// the same way it would in production rather than silently "working".
 func (m *MockStore) Set(_ context.Context, service, account, secret string) error {
+	if strings.ContainsAny(secret, "\n\r") {
+		return fmt.Errorf("secrets(mock): secret contains a newline; the real keychain backends reject this (store a single-line/encoded value)")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entries[key(service, account)] = secret

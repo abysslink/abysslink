@@ -18,8 +18,10 @@ package ssh
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -31,7 +33,7 @@ import (
 )
 
 func TestHardenedSSHDConfig(t *testing.T) {
-	cfg := hardenedSSHDConfig("alice")
+	cfg := hardenedSSHDConfig("alice", false)
 
 	// Security-critical directives must be present.
 	assert.Contains(t, cfg, "PasswordAuthentication no")
@@ -40,6 +42,39 @@ func TestHardenedSSHDConfig(t *testing.T) {
 	assert.Contains(t, cfg, "X11Forwarding no")
 	assert.Contains(t, cfg, "PermitRootLogin no")
 	assert.Contains(t, cfg, "AllowUsers alice")
+	// caWired=false: neither additive directive is present (legacy render).
+	assert.NotContains(t, cfg, "TrustedUserCAKeys")
+	assert.NotContains(t, cfg, "RevokedKeys")
+}
+
+// TestHardenedSSHDConfig_CADirectives proves the two new directives are present
+// ONLY when caWired and that the immutable hardened block is unchanged in both
+// renders (additive-only).
+func TestHardenedSSHDConfig_CADirectives(t *testing.T) {
+	immutable := []string{
+		"PasswordAuthentication no",
+		"KbdInteractiveAuthentication no",
+		"PubkeyAuthentication yes",
+		"PermitRootLogin no",
+		"AllowAgentForwarding no",
+		"AllowTcpForwarding no",
+		"X11Forwarding no",
+		"AllowUsers alice",
+	}
+
+	wired := hardenedSSHDConfig("alice", true)
+	for _, d := range immutable {
+		assert.Contains(t, wired, d, "immutable directive %q must survive the CA-wired render", d)
+	}
+	assert.Contains(t, wired, "TrustedUserCAKeys "+caTrustDest)
+	assert.Contains(t, wired, "RevokedKeys "+krlDest)
+
+	legacy := hardenedSSHDConfig("alice", false)
+	for _, d := range immutable {
+		assert.Contains(t, legacy, d, "immutable directive %q must survive the legacy render", d)
+	}
+	assert.NotContains(t, legacy, "TrustedUserCAKeys")
+	assert.NotContains(t, legacy, "RevokedKeys")
 }
 
 // TestRemoteLoginOK asserts that detectDarwin emits SeverityOK(Check=="remote_login")
@@ -430,6 +465,129 @@ func TestInstallHardenedSSHD_RejectsUnsafeUnixUser(t *testing.T) {
 	}
 }
 
+// newFallbackModuleCA builds an openssh-fallback module with a recording audit
+// writer and the given CAProvider (nil ⇒ legacy path). HOME points at a temp dir.
+func newFallbackModuleCA(t *testing.T, r shell.Runner, ca CAProvider) (*Module, *recordingAudit) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	ra := &recordingAudit{Audit: audit.New(filepath.Join(dir, "audit.log"))}
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Enabled = true
+	cfg.Modules.SSH.Mode = "openssh-fallback"
+	cfg.Identity.UnixUser = "alice"
+	m := New(modules.Deps{Cfg: cfg, Runner: r, Audit: ra}, WithCAProvider(ca))
+	return m, ra
+}
+
+// TestNoCAProvider asserts that with no CAProvider wired, installHardenedSSHD
+// stages NO CA/KRL files and renders the legacy drop-in (fail-safe). The mock
+// Runner is scripted only for install + sshd -t + reload.
+func TestNoCAProvider(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // install drop-in
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sshd -t
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // reload
+	)
+	m, ra := newFallbackModuleCA(t, r, nil)
+
+	require.NoError(t, m.installHardenedSSHD(context.Background()))
+	assert.True(t, r.Done(), "no CA/KRL runner calls may precede the drop-in install")
+	assert.False(t, ra.hasWrite(stagedCAName), "no CA pub may be staged when no CA is wired")
+	assert.False(t, ra.hasWrite(stagedKRLName), "no KRL may be staged when no CA is wired")
+	// The drop-in itself is still staged + installed (legacy render).
+	assert.True(t, ra.hasWrite("99-abysslink.conf"), "the legacy drop-in must still be staged")
+}
+
+// TestCAProviderError_FailSafe asserts that when CAPublicKey errors, the module
+// renders the legacy drop-in, returns no error (up not blocked), and stages no
+// CA/KRL files.
+func TestCAProviderError_FailSafe(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // install drop-in
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sshd -t
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // reload
+	)
+	ca := fakeCAProvider{caErr: fmt.Errorf("no keychain backend")}
+	m, ra := newFallbackModuleCA(t, r, ca)
+
+	require.NoError(t, m.installHardenedSSHD(context.Background()),
+		"a CAPublicKey error must not block up — fall back to the legacy drop-in")
+	assert.True(t, r.Done(), "the fail-safe path issues no CA/KRL runner calls")
+	assert.False(t, ra.hasWrite(stagedCAName))
+	assert.False(t, ra.hasWrite(stagedKRLName))
+}
+
+// TestInstallOrder_KeyMaterialBeforeDropIn asserts the CA pub + KRL install (and
+// the pre-install ssh-keygen validation) precede the drop-in install — the
+// referencing config never names a not-yet-installed target.
+func TestInstallOrder_KeyMaterialBeforeDropIn(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 1. ssh-keygen -k (build KRL)
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "serial: 5\nserial: 7\n"}}, // 2. ssh-keygen -Q -l (assertKRLSerials)
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 3. ssh-keygen -l -f ca.pub (validate CA)
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 4. ssh-keygen -Q -l -f krl (validate KRL)
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 5. sudo install CA -> /etc/ssh
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 6. sudo install KRL -> /etc/ssh
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 7. sudo install drop-in
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 8. sshd -t
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // 9. reload
+	)
+	ca := fakeCAProvider{caLine: "ssh-ed25519 AAAACA test-ca", serials: []uint64{5, 7}}
+	m, _ := newFallbackModuleCA(t, r, ca)
+
+	// MockRunner has no side-effect hook: pre-create the stub KRL the build reads
+	// back (the build's ssh-keygen call is scripted exit 0 above).
+	home, herr := os.UserHomeDir()
+	require.NoError(t, herr)
+	gen := filepath.Join(home, ".config", "abysslink", "generated")
+	require.NoError(t, os.MkdirAll(gen, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(gen, stagedKRLName), []byte("KRL-STUB"), 0o644))
+
+	require.NoError(t, m.installHardenedSSHD(context.Background()))
+
+	calls := r.RecordedCalls()
+	require.Len(t, calls, 9, "build + serial-set verify + 2 validations + 2 key installs + drop-in install + sshd -t + reload")
+
+	// Locate the install indices.
+	idxCAInstall, idxKRLInstall, idxDropIn := -1, -1, -1
+	for i, c := range calls {
+		if c.Name == "sudo" && len(c.Args) >= 1 && c.Args[0] == "install" {
+			switch c.Args[len(c.Args)-1] {
+			case caTrustDest:
+				idxCAInstall = i
+			case krlDest:
+				idxKRLInstall = i
+			case sshdDropInPath:
+				idxDropIn = i
+			}
+		}
+	}
+	require.NotEqual(t, -1, idxCAInstall, "CA pub must be installed")
+	require.NotEqual(t, -1, idxKRLInstall, "KRL must be installed")
+	require.NotEqual(t, -1, idxDropIn, "drop-in must be installed")
+	assert.Less(t, idxCAInstall, idxDropIn, "CA pub install must precede the drop-in install")
+	assert.Less(t, idxKRLInstall, idxDropIn, "KRL install must precede the drop-in install")
+
+	// The pre-install ssh-keygen -l / -Q validations precede the drop-in install.
+	idxValCA, idxValKRL := -1, -1
+	for i, c := range calls {
+		if c.Name != "ssh-keygen" {
+			continue
+		}
+		if len(c.Args) >= 1 && c.Args[0] == "-l" {
+			idxValCA = i
+		}
+		if len(c.Args) >= 2 && c.Args[0] == "-Q" && c.Args[1] == "-l" {
+			idxValKRL = i
+		}
+	}
+	require.NotEqual(t, -1, idxValCA, "ssh-keygen -l CA validation must run")
+	require.NotEqual(t, -1, idxValKRL, "ssh-keygen -Q -l KRL validation must run")
+	assert.Less(t, idxValCA, idxDropIn, "CA validation must precede the drop-in install")
+	assert.Less(t, idxValKRL, idxDropIn, "KRL validation must precede the drop-in install")
+}
+
 // TestApply_DisableSshd_ExecErrorReported asserts the real exec error is
 // surfaced when systemctl cannot be executed at all — not a fabricated
 // "exit 0" from the zero Result (review INFO).
@@ -454,4 +612,78 @@ func TestApply_DisableSshd_ExecErrorReported(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sudo: not found", "the real exec error must be in the message")
 	assert.NotContains(t, err.Error(), "exit 0", "never fabricate an exit code from the zero Result")
+}
+
+// countWrites returns how many recorded audit writes have a path ending in
+// suffix — used to assert no NEW KRL staging occurs on an idempotent reconcile.
+func (r *recordingAudit) countWrites(suffix string) int {
+	n := 0
+	for _, w := range r.writes {
+		if strings.HasSuffix(w.path, suffix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestReconcile_NoChurnOnUnchangedStore proves end-to-end idempotency (DEVC-06):
+// a second reconcile over an unchanged CA + revoked-serial set issues NO
+// `ssh-keygen -k` (the KRL is not rebuilt) and writes NO new KRL audit entry —
+// the staged spec is byte-identical, so the non-deterministic KRL binary is
+// never regenerated and the tamper-evident audit log does not churn on every
+// `up` (RESEARCH Pitfall 1, closed at the reconcile level, not just the helper).
+func TestReconcile_NoChurnOnUnchangedStore(t *testing.T) {
+	ca := fakeCAProvider{caLine: "ssh-ed25519 AAAACA test-ca", serials: []uint64{5, 7}}
+
+	// Pass 1: build (ssh-keygen -k) + serial-set verify (ssh-keygen -Q -l) +
+	// validate CA + validate KRL + install CA + install KRL = 6 runner calls.
+	r1 := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // ssh-keygen -k (build KRL)
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "serial: 5\nserial: 7\n"}}, // ssh-keygen -Q -l (assertKRLSerials)
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // ssh-keygen -l -f ca.pub
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // ssh-keygen -Q -l -f krl
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // sudo install CA
+		shell.Call{Result: shell.Result{ExitCode: 0}},                                   // sudo install KRL
+	)
+	m, ra := newFallbackModuleCA(t, r1, ca)
+
+	// MockRunner has no side-effect hook: pre-create the stub KRL the build reads
+	// back after the scripted ssh-keygen -k.
+	home, herr := os.UserHomeDir()
+	require.NoError(t, herr)
+	gen := filepath.Join(home, ".config", "abysslink", "generated")
+	require.NoError(t, os.MkdirAll(gen, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(gen, stagedKRLName), []byte("KRL-STUB"), 0o644))
+
+	caWired, err := m.installCAAndKRL(context.Background())
+	require.NoError(t, err)
+	require.True(t, caWired, "first reconcile must wire the CA + KRL")
+	require.True(t, r1.Done(), "first reconcile consumes exactly the 6 scripted calls (incl. ssh-keygen -k + serial-set verify)")
+	krlWritesAfterFirst := ra.countWrites(stagedKRLName)
+	require.Equal(t, 1, krlWritesAfterFirst, "first reconcile stages the KRL exactly once")
+
+	// Pass 2: unchanged store. The build is skipped (spec dedup) so ssh-keygen -k
+	// is NOT issued — only validate CA + validate KRL + install CA + install KRL.
+	r2 := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -l -f ca.pub
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -Q -l -f krl
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sudo install CA
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sudo install KRL
+	)
+	m.runner = r2
+
+	caWired2, err2 := m.installCAAndKRL(context.Background())
+	require.NoError(t, err2)
+	require.True(t, caWired2, "second reconcile still wires the CA + KRL (installed from the unchanged staged files)")
+	assert.True(t, r2.Done(), "no extra runner call may be issued on the idempotent path")
+
+	// No ssh-keygen -k may appear in the second pass's recorded calls.
+	for _, c := range r2.RecordedCalls() {
+		if c.Name == "ssh-keygen" && len(c.Args) >= 1 {
+			assert.NotEqual(t, "-k", c.Args[0], "the KRL must NOT be rebuilt on an unchanged store")
+		}
+	}
+	// And no NEW KRL audit write was recorded (the staged KRL is untouched).
+	assert.Equal(t, krlWritesAfterFirst, ra.countWrites(stagedKRLName),
+		"an unchanged store must not re-stage the KRL (no audit churn — RESEARCH Pitfall 1)")
 }

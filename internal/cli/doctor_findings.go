@@ -21,6 +21,7 @@ import (
 	"log/slog"
 
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
 )
@@ -162,5 +163,36 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	// canonical order and avoids double-emission (this is the only call site).
 	findings = append(findings, versionFloorFindings(ctx, cc.runner)...)
 
+	// Device CA/KRL drift findings (DEVC-05/DEVC-06 success criterion 5). Read-
+	// only: compares the installed /etc/ssh CA-trust file + KRL against the
+	// current device store. Gated on openssh-fallback mode (a tailscale-SSH
+	// machine never wires the CA) AND a keychain-backed CA view; a nil view ⇒
+	// the family emits nothing (fail-safe — no false WARN where auto-trust is
+	// not in play). Appended after versionFloor preserves canonical order; this
+	// is the only call site (no double-emission). The web-UI dashboard inherits
+	// the family automatically via the exported CollectDoctorFindings.
+	if cc.cfg.Modules.SSH.Mode == "openssh-fallback" {
+		findings = append(findings, devSSHDriftFindings(ctx, cc.runner, devSSHCAView(deps))...)
+	}
+
 	return findings
+}
+
+// devSSHCAView builds the keychain-backed read-only CA view the drift check
+// consumes, returning a nil caKRLView (not a typed-nil interface) when no
+// keychain is available or the store path cannot be resolved — so
+// devSSHDriftFindings's `ca == nil` fail-safe fires correctly. It reuses the
+// same construction caProviderFor uses for the ssh module's wiring, keeping the
+// two views in lockstep.
+func devSSHCAView(deps modules.Deps) caKRLView {
+	if deps.Keychain == nil {
+		return nil
+	}
+	path, err := deviceStorePath()
+	if err != nil {
+		slog.Warn("doctor: device store path unavailable; skipping CA/KRL drift check", "err", err)
+		return nil
+	}
+	// nil audit writer: this view never mutates the records file (read-only).
+	return device.New(path, nil, deps.Keychain, nil)
 }
