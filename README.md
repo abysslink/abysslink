@@ -107,6 +107,8 @@ The mesh-VPN model means **your phone and laptop talk directly to each other.** 
 ### Notifications & observability
 
 - **Self-hosted push** — a built-in [ntfy](https://ntfy.sh) server bound **exclusively to the tailnet IP** (never `0.0.0.0`). Notifications go phone → your laptop → phone; no Pushover, no Telegram, no third party ever sees the content. The admin password lives in the OS keychain.
+- **Session-aware wakes** — every notification names the exact rig, agent, and pane that needs you (`rig-1 · claude · %3 needs input`), so a tap drops you straight back into *that* live `tmux` session — not a guess. Built on a typed notification schema and a live `tmux -CC` session registry.
+- **Opaque push, content over the tailnet** — the push payload carries **only routing metadata — no body, no secrets, no code.** Your phone fetches the real notification text from the daemon over the tailnet (token-keyed, single-use, TTL'd, and fail-closed on any non-tailnet bind). APNs / FCM / ntfy.sh see a device token and a generic title, never content; each fetch lands a hash-only delivery receipt, and a safe fallback title still renders with zero network access.
 - **Watchers** — `abysslink watch` fires a push when a tmux pane goes idle (a prompt is waiting), a log file matches a regex, or an HTTP endpoint changes status. Run by the `abysslinkd` daemon.
 - **AI-agent integration (opt-in)** — `abysslink enable claudecode --apply` (then `abysslink up --apply`) wires Claude Code's Stop/Notification hooks into the generic `notify` module so your phone buzzes the moment the agent needs you; `abysslink claudecode disable` unwires them. Any other agent, build, or long-running job plugs into the same `notify`/`watch` core. *This is the only agent-aware code in the tree.*
 - **Metrics & digests (opt-in)** — Prometheus metrics on a tailnet-only listener, plus a scheduled daily ntfy security-posture digest.
@@ -123,6 +125,7 @@ The mesh-VPN model means **your phone and laptop talk directly to each other.** 
 - **No secrets on argv, ever** — API keys and passwords are read from stdin or the OS keychain (macOS `security`, Linux `secret-tool` / `pass`), never passed as flags. The audit log records titles and diff hashes — **never body content** that could contain a token.
 - **Signed, reproducible releases** — builds are reproducible (`SOURCE_DATE_EPOCH` from git, `-trimpath`), and `abysslink upgrade` / `abysslink verify` refuse to install a binary without a valid [cosign](https://github.com/sigstore/cosign) signature and SLSA provenance. Upgrade refuses to run as root.
 - **Sandboxed where the OS allows it** — Linux Landlock confines filesystem access for sensitive operations.
+- **Per-device, revocable credentials** — `abysslink enroll phone` mints a per-device push token, a bearer credential, and a short-lived **SSH certificate** from an in-process CA (keys in the OS keychain). `abysslink panic` and `abysslink device revoke` revoke them atomically — the daemon stops honouring the bearer immediately and `sshd` rejects the revoked certificate (via an auto-installed CA-trust + revocation list). Device `last_seen` is tracked and stale devices are flagged.
 - **Emergency kill switch** — `abysslink panic` tears down the VPN session, revokes the phone's auth key, and destroys the local API key in seconds, with **no confirmation prompt**.
 
 ---
@@ -382,7 +385,7 @@ Run `abysslink threat-model` to print this table with the live ✓/✗ status of
 
 | Threat | Mitigation |
 |---|---|
-| Stolen phone | Revocable device keys (Tailnet Lock); `abysslink panic` revokes immediately. |
+| Stolen phone | Per-device revocable credentials (push token + bearer + SSH cert from an in-process CA) on top of Tailnet Lock; `abysslink panic` / `device revoke` revoke immediately — the daemon drops the bearer and `sshd` rejects the revoked cert. |
 | Stolen laptop | Disk encryption enforced (doctor fails closed); ntfy/webui/metrics bind tailnet-only. |
 | Compromised VPN account | Tailnet Lock — a rogue node can't join without your signing key. |
 | Secrets leaked via logs | Audit log stores diff hashes only; no secrets on argv; doctor scans for leaks. |
