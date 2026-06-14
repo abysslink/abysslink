@@ -17,9 +17,15 @@ package ssh
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -90,4 +96,131 @@ func TestEmptyKRLSpec(t *testing.T) {
 		require.Equal(t, krlSpecHeader, got, "empty serial set must render the header alone")
 		assert.Equal(t, 0, strings.Count(got, "serial:"), "empty spec must contain no serial lines")
 	}
+}
+
+// recordingAudit wraps a real audit.Audit so staged files actually land on disk
+// (the idempotency read-back relies on the persisted spec/KRL) while recording
+// every WriteFile path+perm for assertions — mirroring the device-store fakes.
+type recordingAudit struct {
+	*audit.Audit
+	writes []recordedWrite
+}
+
+type recordedWrite struct {
+	path string
+	perm os.FileMode
+}
+
+func (r *recordingAudit) WriteFile(path string, content []byte, perm os.FileMode, dryRun bool) error {
+	r.writes = append(r.writes, recordedWrite{path: path, perm: perm})
+	return r.Audit.WriteFile(path, content, perm, dryRun)
+}
+
+func (r *recordingAudit) hasWrite(suffix string) bool {
+	for _, w := range r.writes {
+		if strings.HasSuffix(w.path, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// newKRLModule builds an ssh module with HOME pointed at a temp dir and a
+// recording audit writer wrapping a real on-disk audit log.
+func newKRLModule(t *testing.T, r shell.Runner) (*Module, *recordingAudit) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	ra := &recordingAudit{Audit: audit.New(filepath.Join(dir, "audit.log"))}
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Enabled = true
+	cfg.Modules.SSH.Mode = "openssh-fallback"
+	cfg.Identity.UnixUser = "alice"
+	m := New(modules.Deps{Cfg: cfg, Runner: r, Audit: ra})
+	return m, ra
+}
+
+// stagedPath returns the staged path under the temp HOME's generated dir.
+func stagedPath(t *testing.T, name string) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	return filepath.Join(home, ".config", "abysslink", "generated", name)
+}
+
+// TestKRLBuildArgv asserts buildAndStageKRL invokes ssh-keygen through the
+// Runner with -k -f <krl> -s <ca.pub> <spec> (the -s flag is present and the
+// spec is the final operand), and that the CA pub + spec are audit-written.
+func TestKRLBuildArgv(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -k
+	)
+	m, ra := newKRLModule(t, r)
+
+	// MockRunner has no side-effect hook: pre-create the stub KRL the helper
+	// reads back after ssh-keygen "writes" it.
+	require.NoError(t, os.MkdirAll(filepath.Dir(stagedPath(t, stagedKRLName)), 0o700))
+	require.NoError(t, os.WriteFile(stagedPath(t, stagedKRLName), []byte("KRL-STUB"), 0o644))
+
+	changed, err := m.buildAndStageKRL(context.Background(), "ssh-ed25519 AAAACA test-ca", []uint64{7, 5})
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	calls := r.RecordedCalls()
+	require.Len(t, calls, 1, "exactly one ssh-keygen call")
+	assert.Equal(t, "ssh-keygen", calls[0].Name)
+	args := calls[0].Args
+	require.GreaterOrEqual(t, len(args), 6)
+	assert.Equal(t, "-k", args[0])
+	assert.Equal(t, "-f", args[1])
+	assert.Equal(t, "-s", args[3], "-s <ca.pub> is required for by-serial revocation")
+	assert.True(t, strings.HasSuffix(args[4], stagedCAName), "-s operand is the staged CA pub")
+	assert.True(t, strings.HasSuffix(args[len(args)-1], stagedSpecName), "the spec path is the final operand")
+
+	assert.True(t, ra.hasWrite(stagedCAName), "CA pub must be audit-written")
+	assert.True(t, ra.hasWrite(stagedSpecName), "spec must be audit-written")
+	assert.True(t, ra.hasWrite(stagedKRLName), "KRL must be re-staged through audit")
+}
+
+// TestKRLIdempotent asserts a second build over the same serial set is skipped:
+// changed=false and NO ssh-keygen call (idempotency on the spec, never on KRL
+// bytes).
+func TestKRLIdempotent(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -k (first build only)
+	)
+	m, _ := newKRLModule(t, r)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(stagedPath(t, stagedKRLName)), 0o700))
+	require.NoError(t, os.WriteFile(stagedPath(t, stagedKRLName), []byte("KRL-STUB"), 0o644))
+
+	serials := []uint64{5, 7}
+	changed, err := m.buildAndStageKRL(context.Background(), "ssh-ed25519 AAAACA test-ca", serials)
+	require.NoError(t, err)
+	require.True(t, changed, "first build must run")
+	require.True(t, r.Done(), "the single scripted ssh-keygen call must be consumed by the first build")
+
+	// Second build over the unchanged serial set must NOT call ssh-keygen. A
+	// fresh MockRunner with zero scripted calls would error on any Run.
+	r2 := shell.NewMockRunner()
+	m.runner = r2
+	changed2, err2 := m.buildAndStageKRL(context.Background(), "ssh-ed25519 AAAACA test-ca", serials)
+	require.NoError(t, err2)
+	assert.False(t, changed2, "unchanged serial set must be a no-op (spec dedup)")
+	assert.True(t, r2.Done(), "no ssh-keygen call may be issued on the idempotent path")
+}
+
+// TestKRLBuildFailureStagesNoKRL asserts a non-zero ssh-keygen exit aborts with
+// a wrapped error and stages no KRL.
+func TestKRLBuildFailureStagesNoKRL(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 255, Stderr: "requires specification of a CA key"}},
+	)
+	m, ra := newKRLModule(t, r)
+
+	changed, err := m.buildAndStageKRL(context.Background(), "ssh-ed25519 AAAACA test-ca", []uint64{5})
+	require.Error(t, err)
+	assert.False(t, changed)
+	assert.Contains(t, err.Error(), "ssh-keygen -k exited 255")
+	assert.False(t, ra.hasWrite(stagedKRLName), "no KRL may be staged on build failure")
 }

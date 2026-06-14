@@ -17,6 +17,10 @@ package ssh
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -102,4 +106,91 @@ func formatUint(n uint64) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// generatedDir resolves ~/.config/abysslink/generated/, creating it 0700 if
+// absent. It is the single staging location for every artifact (the drop-in,
+// the CA pub, the spec, and the KRL) — mirroring installHardenedSSHD.
+func generatedDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("ssh apply: home dir: %w", err)
+	}
+	dir := filepath.Join(home, ".config", "abysslink", "generated")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("ssh apply: mkdir generated: %w", err)
+	}
+	return dir, nil
+}
+
+// buildAndStageKRL stages the CA public key line and the deterministic KRL
+// serial spec via audit.WriteFile, then builds the OpenSSH KRL by invoking
+// ssh-keygen -k -s <ca.pub> <spec> through the shell.Runner, and finally
+// re-stages the produced KRL binary through audit so the mutation is recorded.
+//
+// Idempotency is anchored on the deterministic spec, NOT on the KRL bytes (the
+// KRL embeds a generation timestamp and is non-deterministic — comparing its
+// bytes would churn the audit log on every Apply). When the freshly rendered
+// spec is byte-identical to the previously-staged spec AND the staged KRL still
+// exists, the build is skipped and changed=false is returned.
+//
+// The -s <ca.pub> flag is REQUIRED for by-serial revocation (without it
+// ssh-keygen exits 255). It is therefore never omitted.
+func (m *Module) buildAndStageKRL(ctx context.Context, caLine string, serials []uint64) (changed bool, err error) {
+	dir, err := generatedDir()
+	if err != nil {
+		return false, err
+	}
+	stagedCA := filepath.Join(dir, stagedCAName)
+	stagedSpec := filepath.Join(dir, stagedSpecName)
+	stagedKRL := filepath.Join(dir, stagedKRLName)
+
+	// Stage the CA public key (0644 — public material). Every file mutation goes
+	// through internal/audit (CLAUDE.md hard rule): backup + hash-only audit +
+	// atomic write.
+	if werr := m.audit.WriteFile(stagedCA, []byte(caLine+"\n"), 0o644, false); werr != nil {
+		return false, fmt.Errorf("ssh apply: stage CA pub: %w", werr)
+	}
+
+	desiredSpec := renderKRLSpec(serials)
+
+	// Idempotency: skip the (non-deterministic) KRL rebuild when the spec is
+	// unchanged AND the prior KRL is still staged. Compare the deterministic
+	// spec, never the KRL bytes (RESEARCH Pitfall 1).
+	if prior, rerr := os.ReadFile(stagedSpec); rerr == nil && string(prior) == desiredSpec {
+		if _, serr := os.Stat(stagedKRL); serr == nil {
+			return false, nil
+		}
+	} else if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		return false, fmt.Errorf("ssh apply: read staged spec: %w", rerr)
+	}
+
+	// Stage the spec (0600). The spec is the idempotency record for the next run.
+	if werr := m.audit.WriteFile(stagedSpec, []byte(desiredSpec), 0o600, false); werr != nil {
+		return false, fmt.Errorf("ssh apply: stage KRL spec: %w", werr)
+	}
+
+	// Build the KRL via ssh-keygen through the Runner (never os/exec). -s is
+	// required for by-serial revocation; the spec path is the final operand.
+	res, rerr := m.runner.Run(ctx, "ssh-keygen", "-k", "-f", stagedKRL, "-s", stagedCA, stagedSpec)
+	if rerr != nil {
+		return false, fmt.Errorf("ssh apply: build KRL: %w", rerr)
+	}
+	if !res.Ok() {
+		return false, fmt.Errorf("ssh apply: ssh-keygen -k exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+
+	// ssh-keygen -k writes the KRL binary itself; re-stage it through audit so
+	// the mutation is recorded (CLAUDE.md: every file mutation goes through
+	// internal/audit). The audit re-write produces an atomic, backed-up,
+	// hash-recorded copy at the same path (0644 — must be root-readable once
+	// installed or sshd fails pubkey auth closed).
+	krlBytes, rderr := os.ReadFile(stagedKRL)
+	if rderr != nil {
+		return false, fmt.Errorf("ssh apply: read built KRL: %w", rderr)
+	}
+	if werr := m.audit.WriteFile(stagedKRL, krlBytes, 0o644, false); werr != nil {
+		return false, fmt.Errorf("ssh apply: stage KRL: %w", werr)
+	}
+	return true, nil
 }
