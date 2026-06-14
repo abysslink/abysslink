@@ -20,13 +20,45 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// devSSHKeychain is an in-memory KeychainStore whose Get returns the wrapped
+// secrets.ErrNotFound on a miss, so device.Store.CAPublicKey mints the CA on
+// first use (the enroll test mock returns a plain error and pre-seeds instead).
+type devSSHKeychain struct{ data map[string]string }
+
+func (k *devSSHKeychain) key(s, a string) string { return s + ":" + a }
+
+func (k *devSSHKeychain) Set(_ context.Context, s, a, secret string) error {
+	if k.data == nil {
+		k.data = map[string]string{}
+	}
+	k.data[k.key(s, a)] = secret
+	return nil
+}
+
+func (k *devSSHKeychain) Get(_ context.Context, s, a string) (string, error) {
+	if v, ok := k.data[k.key(s, a)]; ok {
+		return v, nil
+	}
+	return "", secrets.ErrNotFound
+}
+
+func (k *devSSHKeychain) Delete(_ context.Context, s, a string) error {
+	delete(k.data, k.key(s, a))
+	return nil
+}
+
+var _ secrets.KeychainStore = (*devSSHKeychain)(nil)
 
 // fakeCAView is a test caKRLView. A non-nil caErr makes CAPublicKey fail
 // (no enrolled CA / no keychain).
@@ -247,3 +279,63 @@ func TestDevSSHDrift_CATrustMissing(t *testing.T) {
 	require.True(t, ok, "expected ca-trust-missing WARN")
 	assert.Equal(t, modules.SeverityWarning, f.Severity)
 }
+
+// --- Task 2: wiring (findingFix + collectDoctorFindings) ---------------------
+
+// TestFindingFix_DevSSH asserts every new drift check ID has a non-empty
+// remediation. The CA/KRL drift fixes are all `up --apply` (the operator runs
+// it; doctor never auto-fixes); devssh-unknown points at installing ssh-keygen.
+func TestFindingFix_DevSSH(t *testing.T) {
+	t.Parallel()
+	for _, check := range []string{"ca-trust-drift", "krl-drift", "ca-trust-missing", "krl-missing"} {
+		fix := findingFix(check)
+		assert.NotEmpty(t, fix, "findingFix(%q) must return a non-empty remediation", check)
+		assert.Contains(t, fix, "up --apply", "%q remediation must point at up --apply", check)
+	}
+	unknown := findingFix("devssh-unknown")
+	assert.NotEmpty(t, unknown, "devssh-unknown must have a remediation")
+	assert.Contains(t, unknown, "ssh-keygen", "devssh-unknown remediation must mention ssh-keygen")
+}
+
+// TestDevSSHCAView_KeychainBacked asserts the wiring helper builds a usable
+// read-only CA view from a keychain-backed device store: CAPublicKey returns a
+// real authorized_keys line (created on first use) so the drift family runs end
+// to end through the production construction path. A nil keychain yields a nil
+// view (the fail-safe the gate relies on).
+func TestDevSSHCAView_KeychainBacked(t *testing.T) {
+	// Not t.Parallel(): mutates the deviceStorePath + devSSH path package-var seams.
+	tmp := t.TempDir()
+	origPath := deviceStorePath
+	t.Cleanup(func() { deviceStorePath = origPath })
+	deviceStorePath = func() (string, error) { return filepath.Join(tmp, "devices.json"), nil }
+
+	// nil keychain ⇒ nil view (fail-safe; the family stays silent).
+	assert.Nil(t, devSSHCAView(modules.Deps{Keychain: nil}))
+
+	kc := &devSSHKeychain{}
+	view := devSSHCAView(modules.Deps{Keychain: kc})
+	require.NotNil(t, view, "keychain-backed view must be constructed")
+
+	caLine, err := view.CAPublicKey(context.Background())
+	require.NoError(t, err, "CAPublicKey must mint the CA on first use")
+	require.True(t, strings.HasPrefix(caLine, "ssh-"), "CA line must be an authorized_keys line, got %q", caLine)
+	assert.Empty(t, view.RevokedSerials(), "fresh store has no revoked serials")
+
+	// Drive the full family with this production-shaped view: install a matching
+	// CA-trust file + an empty KRL, script ssh-keygen listing no serials ⇒ both OK.
+	caTrust := writeTemp(t, "abysslink_device_ca.pub", caLine+"\n")
+	krl := writeTemp(t, "abysslink.krl", "binary")
+	withDevSSHPaths(t, caTrust, krl)
+	runner := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "# CA key\n", ExitCode: 0}})
+
+	findings := devSSHDriftFindings(context.Background(), runner, view)
+	require.Len(t, findings, 2, "drift family emits exactly the ca-trust + krl findings")
+	caF, ok := findCheck(findings, "ca-trust")
+	require.True(t, ok)
+	assert.Equal(t, modules.SeverityOK, caF.Severity)
+	krlF, ok := findCheck(findings, "krl")
+	require.True(t, ok)
+	assert.Equal(t, modules.SeverityOK, krlF.Severity)
+}
+
+var _ caKRLView = (*device.Store)(nil) // *device.Store must satisfy the drift view.

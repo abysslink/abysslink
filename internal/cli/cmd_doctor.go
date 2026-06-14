@@ -860,6 +860,14 @@ func findingFix(check string) string {
 		"ntfy_admin":    "abysslink up --apply",
 		"ntfy-bind":     "abysslink up --apply  (restarts ntfy container with tailnet-IP-only binding; removes 127.0.0.1 port mapping)",
 		"ntfy-loopback": "abysslink up --apply  (reprovisioning removes the loopback -p flag from docker run; verify with: docker inspect abysslink-ntfy)",
+		// Device SSH CA / KRL drift (DEVC-05/DEVC-06 success criterion 5). All
+		// remediations are an explicit operator-run `up --apply` — the drift
+		// check never auto-fixes (CONTEXT locked decision).
+		"ca-trust-drift":   "abysslink up --apply  (re-installs the device CA trust file from the current device store)",
+		"krl-drift":        "abysslink up --apply  (rebuilds the KRL from the current revoked serials)",
+		"ca-trust-missing": "abysslink up --apply  (installs TrustedUserCAKeys for the enrolled device CA)",
+		"krl-missing":      "abysslink up --apply  (installs the RevokedKeys KRL)",
+		"devssh-unknown":   "install OpenSSH ssh-keygen (>= 10.0) then re-run abysslink doctor",
 		// Generic install / config.
 		"not_installed":        "abysslink up --apply",
 		"panes_configured":     "add panes to modules.watch.panes in abysslink.yaml",
