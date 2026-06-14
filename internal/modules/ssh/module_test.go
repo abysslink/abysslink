@@ -551,13 +551,12 @@ func TestInstallOrder_KeyMaterialBeforeDropIn(t *testing.T) {
 	idxCAInstall, idxKRLInstall, idxDropIn := -1, -1, -1
 	for i, c := range calls {
 		if c.Name == "sudo" && len(c.Args) >= 1 && c.Args[0] == "install" {
-			last := c.Args[len(c.Args)-1]
-			switch {
-			case last == caTrustDest:
+			switch c.Args[len(c.Args)-1] {
+			case caTrustDest:
 				idxCAInstall = i
-			case last == krlDest:
+			case krlDest:
 				idxKRLInstall = i
-			case last == sshdDropInPath:
+			case sshdDropInPath:
 				idxDropIn = i
 			}
 		}
