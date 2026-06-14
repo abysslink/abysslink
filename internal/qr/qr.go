@@ -21,14 +21,26 @@ import (
 	"github.com/mdp/qrterminal/v3"
 )
 
-// PrintANSI writes an ANSI-art QR code for the given URL to w.
-func PrintANSI(w io.Writer, url string) {
+// PrintANSI writes an ANSI-art QR code for the given payload to w.
+//
+// It uses HALF-BLOCK rendering (two QR modules packed into one character cell
+// vertically via ▀/▄ glyphs) so the code is ~1 character per module wide and
+// half as tall as the full-block form — roughly 4× smaller in area. That keeps
+// small payloads (URLs, tokens) compact and lets a ~400-byte SSH key fit inside
+// an 80-column terminal. Very large payloads (e.g. a full certificate line) can
+// still exceed 80 columns; callers with large secrets should prefer a short
+// capability URL over embedding the raw bytes. Lowest error-correction level (L)
+// is used to minimise the module count.
+func PrintANSI(w io.Writer, payload string) {
 	config := qrterminal.Config{
-		Level:     qrterminal.L,
-		Writer:    w,
-		BlackChar: qrterminal.BLACK,
-		WhiteChar: qrterminal.WHITE,
-		QuietZone: 1,
+		Level:          qrterminal.L,
+		Writer:         w,
+		HalfBlocks:     true,
+		BlackChar:      qrterminal.BLACK_BLACK,
+		WhiteChar:      qrterminal.WHITE_WHITE,
+		BlackWhiteChar: qrterminal.BLACK_WHITE,
+		WhiteBlackChar: qrterminal.WHITE_BLACK,
+		QuietZone:      1,
 	}
-	qrterminal.GenerateWithConfig(url, config)
+	qrterminal.GenerateWithConfig(payload, config)
 }
