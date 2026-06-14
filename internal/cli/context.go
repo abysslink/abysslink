@@ -25,6 +25,7 @@ import (
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/gate"
 	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/modules"
@@ -301,6 +302,25 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 	}, nil
 }
 
+// caProviderFor builds a keychain-backed READ-ONLY device store for the ssh
+// module's TrustedUserCAKeys/RevokedKeys wiring. It carries a real keychain (so
+// CAPublicKey can read the CA key — RevokedSerials only reads the records file)
+// but a nil audit writer, because this view never mutates. It returns nil when
+// the keychain is unavailable or the store path cannot be resolved; ssh then
+// renders the legacy hardened drop-in (fail-safe — `up` is never blocked).
+func caProviderFor(deps modules.Deps) ssh.CAProvider {
+	if deps.Keychain == nil {
+		return nil // no keychain backend → CAPublicKey would err → legacy drop-in
+	}
+	path, err := deviceStorePath()
+	if err != nil {
+		slog.Warn("device store path unavailable; ssh CA auto-trust disabled (legacy hardened drop-in)", "err", err)
+		return nil
+	}
+	// nil audit writer: read-only view, never mutates the records file.
+	return device.New(path, nil, deps.Keychain, nil)
+}
+
 // allModules returns the core modules plus optional modules wired with the
 // shared dependency bundle. Optional modules no-op when disabled in config, so
 // they are always constructed; enabling one in abysslink.yaml is what activates
@@ -308,7 +328,10 @@ func buildDeps(ctx context.Context, cc *cmdContext) (modules.Deps, error) {
 func allModules(deps modules.Deps) []modules.Module {
 	return []modules.Module{
 		tsmod.New(deps),
-		ssh.New(deps),
+		// Inject a keychain-backed read-only device store so the hardened sshd
+		// drop-in auto-trusts device certs (TrustedUserCAKeys) and rejects
+		// revoked serials (RevokedKeys). A nil provider ⇒ legacy drop-in.
+		ssh.New(deps, ssh.WithCAProvider(caProviderFor(deps))),
 		tmux.New(deps),
 		mosh.New(deps),
 		acl.New(deps),

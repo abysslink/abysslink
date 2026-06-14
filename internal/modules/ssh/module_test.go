@@ -18,6 +18,7 @@ package ssh
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -31,7 +32,7 @@ import (
 )
 
 func TestHardenedSSHDConfig(t *testing.T) {
-	cfg := hardenedSSHDConfig("alice")
+	cfg := hardenedSSHDConfig("alice", false)
 
 	// Security-critical directives must be present.
 	assert.Contains(t, cfg, "PasswordAuthentication no")
@@ -40,6 +41,39 @@ func TestHardenedSSHDConfig(t *testing.T) {
 	assert.Contains(t, cfg, "X11Forwarding no")
 	assert.Contains(t, cfg, "PermitRootLogin no")
 	assert.Contains(t, cfg, "AllowUsers alice")
+	// caWired=false: neither additive directive is present (legacy render).
+	assert.NotContains(t, cfg, "TrustedUserCAKeys")
+	assert.NotContains(t, cfg, "RevokedKeys")
+}
+
+// TestHardenedSSHDConfig_CADirectives proves the two new directives are present
+// ONLY when caWired and that the immutable hardened block is unchanged in both
+// renders (additive-only).
+func TestHardenedSSHDConfig_CADirectives(t *testing.T) {
+	immutable := []string{
+		"PasswordAuthentication no",
+		"KbdInteractiveAuthentication no",
+		"PubkeyAuthentication yes",
+		"PermitRootLogin no",
+		"AllowAgentForwarding no",
+		"AllowTcpForwarding no",
+		"X11Forwarding no",
+		"AllowUsers alice",
+	}
+
+	wired := hardenedSSHDConfig("alice", true)
+	for _, d := range immutable {
+		assert.Contains(t, wired, d, "immutable directive %q must survive the CA-wired render", d)
+	}
+	assert.Contains(t, wired, "TrustedUserCAKeys "+caTrustDest)
+	assert.Contains(t, wired, "RevokedKeys "+krlDest)
+
+	legacy := hardenedSSHDConfig("alice", false)
+	for _, d := range immutable {
+		assert.Contains(t, legacy, d, "immutable directive %q must survive the legacy render", d)
+	}
+	assert.NotContains(t, legacy, "TrustedUserCAKeys")
+	assert.NotContains(t, legacy, "RevokedKeys")
 }
 
 // TestRemoteLoginOK asserts that detectDarwin emits SeverityOK(Check=="remote_login")
@@ -428,6 +462,129 @@ func TestInstallHardenedSSHD_RejectsUnsafeUnixUser(t *testing.T) {
 		assert.Contains(t, err.Error(), "refusing to render sshd config")
 		assert.Empty(t, r.RecordedCalls(), "no command may run for unsafe user %q", user)
 	}
+}
+
+// newFallbackModuleCA builds an openssh-fallback module with a recording audit
+// writer and the given CAProvider (nil ⇒ legacy path). HOME points at a temp dir.
+func newFallbackModuleCA(t *testing.T, r shell.Runner, ca CAProvider) (*Module, *recordingAudit) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	ra := &recordingAudit{Audit: audit.New(filepath.Join(dir, "audit.log"))}
+	cfg := config.Defaults()
+	cfg.Modules.SSH.Enabled = true
+	cfg.Modules.SSH.Mode = "openssh-fallback"
+	cfg.Identity.UnixUser = "alice"
+	m := New(modules.Deps{Cfg: cfg, Runner: r, Audit: ra}, WithCAProvider(ca))
+	return m, ra
+}
+
+// TestNoCAProvider asserts that with no CAProvider wired, installHardenedSSHD
+// stages NO CA/KRL files and renders the legacy drop-in (fail-safe). The mock
+// Runner is scripted only for install + sshd -t + reload.
+func TestNoCAProvider(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // install drop-in
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sshd -t
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // reload
+	)
+	m, ra := newFallbackModuleCA(t, r, nil)
+
+	require.NoError(t, m.installHardenedSSHD(context.Background()))
+	assert.True(t, r.Done(), "no CA/KRL runner calls may precede the drop-in install")
+	assert.False(t, ra.hasWrite(stagedCAName), "no CA pub may be staged when no CA is wired")
+	assert.False(t, ra.hasWrite(stagedKRLName), "no KRL may be staged when no CA is wired")
+	// The drop-in itself is still staged + installed (legacy render).
+	assert.True(t, ra.hasWrite("99-abysslink.conf"), "the legacy drop-in must still be staged")
+}
+
+// TestCAProviderError_FailSafe asserts that when CAPublicKey errors, the module
+// renders the legacy drop-in, returns no error (up not blocked), and stages no
+// CA/KRL files.
+func TestCAProviderError_FailSafe(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // install drop-in
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sshd -t
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // reload
+	)
+	ca := fakeCAProvider{caErr: fmt.Errorf("no keychain backend")}
+	m, ra := newFallbackModuleCA(t, r, ca)
+
+	require.NoError(t, m.installHardenedSSHD(context.Background()),
+		"a CAPublicKey error must not block up — fall back to the legacy drop-in")
+	assert.True(t, r.Done(), "the fail-safe path issues no CA/KRL runner calls")
+	assert.False(t, ra.hasWrite(stagedCAName))
+	assert.False(t, ra.hasWrite(stagedKRLName))
+}
+
+// TestInstallOrder_KeyMaterialBeforeDropIn asserts the CA pub + KRL install (and
+// the pre-install ssh-keygen validation) precede the drop-in install — the
+// referencing config never names a not-yet-installed target.
+func TestInstallOrder_KeyMaterialBeforeDropIn(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // 1. ssh-keygen -k (build KRL)
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // 2. ssh-keygen -l -f ca.pub (validate CA)
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // 3. ssh-keygen -Q -l -f krl (validate KRL)
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // 4. sudo install CA -> /etc/ssh
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // 5. sudo install KRL -> /etc/ssh
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // 6. sudo install drop-in
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // 7. sshd -t
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // 8. reload
+	)
+	ca := fakeCAProvider{caLine: "ssh-ed25519 AAAACA test-ca", serials: []uint64{5, 7}}
+	m, _ := newFallbackModuleCA(t, r, ca)
+
+	// MockRunner has no side-effect hook: pre-create the stub KRL the build reads
+	// back (the build's ssh-keygen call is scripted exit 0 above).
+	home, herr := os.UserHomeDir()
+	require.NoError(t, herr)
+	gen := filepath.Join(home, ".config", "abysslink", "generated")
+	require.NoError(t, os.MkdirAll(gen, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(gen, stagedKRLName), []byte("KRL-STUB"), 0o644))
+
+	require.NoError(t, m.installHardenedSSHD(context.Background()))
+
+	calls := r.RecordedCalls()
+	require.Len(t, calls, 8, "build + 2 validations + 2 key installs + drop-in install + sshd -t + reload")
+
+	// Locate the install indices.
+	idxCAInstall, idxKRLInstall, idxDropIn := -1, -1, -1
+	for i, c := range calls {
+		if c.Name == "sudo" && len(c.Args) >= 1 && c.Args[0] == "install" {
+			last := c.Args[len(c.Args)-1]
+			switch {
+			case last == caTrustDest:
+				idxCAInstall = i
+			case last == krlDest:
+				idxKRLInstall = i
+			case last == sshdDropInPath:
+				idxDropIn = i
+			}
+		}
+	}
+	require.NotEqual(t, -1, idxCAInstall, "CA pub must be installed")
+	require.NotEqual(t, -1, idxKRLInstall, "KRL must be installed")
+	require.NotEqual(t, -1, idxDropIn, "drop-in must be installed")
+	assert.Less(t, idxCAInstall, idxDropIn, "CA pub install must precede the drop-in install")
+	assert.Less(t, idxKRLInstall, idxDropIn, "KRL install must precede the drop-in install")
+
+	// The pre-install ssh-keygen -l / -Q validations precede the drop-in install.
+	idxValCA, idxValKRL := -1, -1
+	for i, c := range calls {
+		if c.Name != "ssh-keygen" {
+			continue
+		}
+		if len(c.Args) >= 1 && c.Args[0] == "-l" {
+			idxValCA = i
+		}
+		if len(c.Args) >= 2 && c.Args[0] == "-Q" && c.Args[1] == "-l" {
+			idxValKRL = i
+		}
+	}
+	require.NotEqual(t, -1, idxValCA, "ssh-keygen -l CA validation must run")
+	require.NotEqual(t, -1, idxValKRL, "ssh-keygen -Q -l KRL validation must run")
+	assert.Less(t, idxValCA, idxDropIn, "CA validation must precede the drop-in install")
+	assert.Less(t, idxValKRL, idxDropIn, "KRL validation must precede the drop-in install")
 }
 
 // TestApply_DisableSshd_ExecErrorReported asserts the real exec error is

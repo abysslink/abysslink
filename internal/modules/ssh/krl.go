@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -192,5 +193,76 @@ func (m *Module) buildAndStageKRL(ctx context.Context, caLine string, serials []
 	if werr := m.audit.WriteFile(stagedKRL, krlBytes, 0o644, false); werr != nil {
 		return false, fmt.Errorf("ssh apply: stage KRL: %w", werr)
 	}
+	return true, nil
+}
+
+// installCAAndKRL orchestrates the device-CA wiring for installHardenedSSHD:
+// resolve the CA pub + revoked serials, stage and build the KRL, run the
+// pre-install validation chain, and install the CA pub + KRL into /etc/ssh —
+// all BEFORE the referencing drop-in is installed.
+//
+// It returns caWired=true only when both key files are validated and installed.
+// It is fail-safe: a nil CAProvider, or a CAPublicKey error (no keychain
+// backend / no enrolled CA yet), returns (false, nil) so the caller renders the
+// legacy hardened drop-in with neither directive — `up` is never blocked. A
+// non-nil error is returned ONLY for a real validation or install failure once a
+// CA is genuinely present (so a broken KRL never silently disables revocation).
+func (m *Module) installCAAndKRL(ctx context.Context) (caWired bool, err error) {
+	if m.ca == nil {
+		return false, nil // no CA wiring — legacy drop-in (fail-safe)
+	}
+
+	caLine, cerr := m.ca.CAPublicKey(ctx)
+	if cerr != nil {
+		// No keychain backend or no enrolled CA: fall back to the legacy
+		// hardened drop-in rather than blocking `up`. WARN, never error.
+		slog.WarnContext(ctx, "ssh apply: device CA unavailable — installing legacy hardened sshd config without TrustedUserCAKeys/RevokedKeys",
+			"err", cerr)
+		return false, nil
+	}
+
+	serials := m.ca.RevokedSerials()
+	if _, berr := m.buildAndStageKRL(ctx, caLine, serials); berr != nil {
+		return false, berr
+	}
+
+	dir, derr := generatedDir()
+	if derr != nil {
+		return false, derr
+	}
+	stagedCA := filepath.Join(dir, stagedCAName)
+	stagedKRL := filepath.Join(dir, stagedKRLName)
+
+	// Pre-install validation chain. sshd -t does NOT validate these key-file
+	// targets (it stops at host-key checks), so validate them explicitly before
+	// any live mutation: the CA pub must parse and the KRL must be well-formed.
+	if res, rerr := m.runner.Run(ctx, "ssh-keygen", "-l", "-f", stagedCA); rerr != nil {
+		return false, fmt.Errorf("ssh apply: validate CA pub: %w", rerr)
+	} else if !res.Ok() {
+		return false, fmt.Errorf("ssh apply: CA pub invalid (ssh-keygen -l exited %d): %s",
+			res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	if res, rerr := m.runner.Run(ctx, "ssh-keygen", "-Q", "-l", "-f", stagedKRL); rerr != nil {
+		return false, fmt.Errorf("ssh apply: validate KRL: %w", rerr)
+	} else if !res.Ok() {
+		return false, fmt.Errorf("ssh apply: KRL malformed (ssh-keygen -Q -l exited %d): %s",
+			res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+
+	// Install the key material into /etc/ssh BEFORE the drop-in. Both are 0644
+	// (the CA pub is public; the KRL MUST be root-readable or sshd refuses all
+	// pubkey auth — RESEARCH Pitfall 2).
+	slog.InfoContext(ctx, "ssh apply: installing device CA trust + KRL", "ca", caTrustDest, "krl", krlDest)
+	if res, rerr := m.runner.Run(ctx, "sudo", "install", "-m", "644", stagedCA, caTrustDest); rerr != nil {
+		return false, fmt.Errorf("ssh apply: install CA pub: %w", rerr)
+	} else if !res.Ok() {
+		return false, fmt.Errorf("ssh apply: install CA pub exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	if res, rerr := m.runner.Run(ctx, "sudo", "install", "-m", "644", stagedKRL, krlDest); rerr != nil {
+		return false, fmt.Errorf("ssh apply: install KRL: %w", rerr)
+	} else if !res.Ok() {
+		return false, fmt.Errorf("ssh apply: install KRL exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+
 	return true, nil
 }
