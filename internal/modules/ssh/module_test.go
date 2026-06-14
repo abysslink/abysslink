@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -610,4 +611,77 @@ func TestApply_DisableSshd_ExecErrorReported(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sudo: not found", "the real exec error must be in the message")
 	assert.NotContains(t, err.Error(), "exit 0", "never fabricate an exit code from the zero Result")
+}
+
+// countWrites returns how many recorded audit writes have a path ending in
+// suffix — used to assert no NEW KRL staging occurs on an idempotent reconcile.
+func (r *recordingAudit) countWrites(suffix string) int {
+	n := 0
+	for _, w := range r.writes {
+		if strings.HasSuffix(w.path, suffix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestReconcile_NoChurnOnUnchangedStore proves end-to-end idempotency (DEVC-06):
+// a second reconcile over an unchanged CA + revoked-serial set issues NO
+// `ssh-keygen -k` (the KRL is not rebuilt) and writes NO new KRL audit entry —
+// the staged spec is byte-identical, so the non-deterministic KRL binary is
+// never regenerated and the tamper-evident audit log does not churn on every
+// `up` (RESEARCH Pitfall 1, closed at the reconcile level, not just the helper).
+func TestReconcile_NoChurnOnUnchangedStore(t *testing.T) {
+	ca := fakeCAProvider{caLine: "ssh-ed25519 AAAACA test-ca", serials: []uint64{5, 7}}
+
+	// Pass 1: build (ssh-keygen -k) + validate CA + validate KRL + install CA +
+	// install KRL = 5 runner calls.
+	r1 := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -k (build KRL)
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -l -f ca.pub
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -Q -l -f krl
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sudo install CA
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sudo install KRL
+	)
+	m, ra := newFallbackModuleCA(t, r1, ca)
+
+	// MockRunner has no side-effect hook: pre-create the stub KRL the build reads
+	// back after the scripted ssh-keygen -k.
+	home, herr := os.UserHomeDir()
+	require.NoError(t, herr)
+	gen := filepath.Join(home, ".config", "abysslink", "generated")
+	require.NoError(t, os.MkdirAll(gen, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(gen, stagedKRLName), []byte("KRL-STUB"), 0o644))
+
+	caWired, err := m.installCAAndKRL(context.Background())
+	require.NoError(t, err)
+	require.True(t, caWired, "first reconcile must wire the CA + KRL")
+	require.True(t, r1.Done(), "first reconcile consumes exactly the 5 scripted calls (incl. ssh-keygen -k)")
+	krlWritesAfterFirst := ra.countWrites(stagedKRLName)
+	require.Equal(t, 1, krlWritesAfterFirst, "first reconcile stages the KRL exactly once")
+
+	// Pass 2: unchanged store. The build is skipped (spec dedup) so ssh-keygen -k
+	// is NOT issued — only validate CA + validate KRL + install CA + install KRL.
+	r2 := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -l -f ca.pub
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // ssh-keygen -Q -l -f krl
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sudo install CA
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // sudo install KRL
+	)
+	m.runner = r2
+
+	caWired2, err2 := m.installCAAndKRL(context.Background())
+	require.NoError(t, err2)
+	require.True(t, caWired2, "second reconcile still wires the CA + KRL (installed from the unchanged staged files)")
+	assert.True(t, r2.Done(), "no extra runner call may be issued on the idempotent path")
+
+	// No ssh-keygen -k may appear in the second pass's recorded calls.
+	for _, c := range r2.RecordedCalls() {
+		if c.Name == "ssh-keygen" && len(c.Args) >= 1 {
+			assert.NotEqual(t, "-k", c.Args[0], "the KRL must NOT be rebuilt on an unchanged store")
+		}
+	}
+	// And no NEW KRL audit write was recorded (the staged KRL is untouched).
+	assert.Equal(t, krlWritesAfterFirst, ra.countWrites(stagedKRLName),
+		"an unchanged store must not re-stage the KRL (no audit churn — RESEARCH Pitfall 1)")
 }
