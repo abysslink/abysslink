@@ -38,6 +38,11 @@ goreleaser/
 # Local planning (not committed)
 .planning/
 
+# Local-only agent instructions + scratch backgrounds — kept on disk, never
+# tracked in the public repo (purged from history 2026-06-14).
+CLAUDE.md
+.specter*
+
 # Coverage
 coverage.out
 coverage.html
