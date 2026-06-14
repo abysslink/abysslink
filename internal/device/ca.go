@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -46,6 +47,29 @@ const (
 	certBackdate = 5 * time.Minute
 )
 
+// The KeychainStore contract is single-line, control-character-free secrets:
+// both backends reject embedded newlines (darwin `security -i` is line-oriented;
+// linux `pass insert` reads value+confirmation as two lines). The CA private key
+// is a MULTI-LINE PEM block, so — exactly as internal/audit hex-encodes its HMAC
+// key before storing — we base64-encode the PEM into a single keychain-safe line
+// and decode it back on load. encodeCAKey/decodeCAKey are the only places that
+// cross that boundary.
+
+// encodeCAKey renders PEM bytes as a single base64 line safe to hand to the
+// keychain Set (no newlines, no control characters).
+func encodeCAKey(pemBytes []byte) string {
+	return base64.StdEncoding.EncodeToString(pemBytes)
+}
+
+// decodeCAKey reverses encodeCAKey, returning the PEM bytes for ssh.ParsePrivateKey.
+func decodeCAKey(stored string) ([]byte, error) {
+	pemBytes, err := base64.StdEncoding.DecodeString(stored)
+	if err != nil {
+		return nil, fmt.Errorf("device: decode CA key from keychain: %w", err)
+	}
+	return pemBytes, nil
+}
+
 // caSignerLocked returns the in-process SSH CA signer, lazily loading it from
 // the OS keychain or — on first ever use — generating a fresh ed25519 key and
 // persisting it there. The CA private key never touches disk. Caller must
@@ -55,10 +79,14 @@ func (s *Store) caSignerLocked(ctx context.Context) (ssh.Signer, error) {
 		return s.caSigner, nil
 	}
 
-	pemStr, err := s.kc.Get(ctx, caKeychainService, caKeychainAccount)
+	stored, err := s.kc.Get(ctx, caKeychainService, caKeychainAccount)
 	switch {
 	case err == nil:
-		signer, perr := ssh.ParsePrivateKey([]byte(pemStr))
+		pemBytes, derr := decodeCAKey(stored)
+		if derr != nil {
+			return nil, derr
+		}
+		signer, perr := ssh.ParsePrivateKey(pemBytes)
 		if perr != nil {
 			return nil, fmt.Errorf("device: parse CA key from keychain: %w", perr)
 		}
@@ -78,7 +106,7 @@ func (s *Store) caSignerLocked(ctx context.Context) (ssh.Signer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("device: marshal CA key: %w", err)
 	}
-	if err := s.kc.Set(ctx, caKeychainService, caKeychainAccount, string(pem.EncodeToMemory(block))); err != nil {
+	if err := s.kc.Set(ctx, caKeychainService, caKeychainAccount, encodeCAKey(pem.EncodeToMemory(block))); err != nil {
 		return nil, fmt.Errorf("device: store CA key in keychain: %w", err)
 	}
 	signer, err := ssh.NewSignerFromKey(priv)
@@ -145,11 +173,15 @@ func (s *Store) CAPublicKeyIfPresent(ctx context.Context) (string, error) {
 	if s.kc == nil {
 		return "", secrets.ErrNotFound
 	}
-	pemStr, err := s.kc.Get(ctx, caKeychainService, caKeychainAccount)
+	stored, err := s.kc.Get(ctx, caKeychainService, caKeychainAccount)
 	if err != nil {
 		return "", err // secrets.ErrNotFound propagates unchanged; never mints
 	}
-	signer, perr := ssh.ParsePrivateKey([]byte(pemStr))
+	pemBytes, derr := decodeCAKey(stored)
+	if derr != nil {
+		return "", derr
+	}
+	signer, perr := ssh.ParsePrivateKey(pemBytes)
 	if perr != nil {
 		return "", fmt.Errorf("device: parse CA key from keychain: %w", perr)
 	}

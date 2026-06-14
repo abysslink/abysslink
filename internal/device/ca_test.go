@@ -17,7 +17,9 @@ package device_test
 
 import (
 	"context"
+	"encoding/base64"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,10 +56,18 @@ func TestCA_PersistsAcrossStoreInstances(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pub1, pub2, "same keychain must yield the same CA public key")
 
-	// The CA key lives at the documented keychain coordinates and is PEM.
-	pemStr, err := kc.Get(ctx, "abysslink", "device-ssh-ca")
+	// The CA key lives at the documented keychain coordinates, stored as a
+	// SINGLE-LINE base64 value — the keychain contract forbids embedded newlines
+	// (the darwin/linux backends reject a raw multi-line PEM), so the key is
+	// base64-wrapped. It must contain no newline and decode back to an OPENSSH
+	// PRIVATE KEY PEM (regression guard for the enroll-time keychain Set failure).
+	stored, err := kc.Get(ctx, "abysslink", "device-ssh-ca")
 	require.NoError(t, err)
-	assert.Contains(t, pemStr, "OPENSSH PRIVATE KEY")
+	assert.NotContains(t, stored, "\n", "keychain value must be single-line (no raw PEM newlines)")
+	assert.False(t, strings.ContainsAny(stored, "\r\x00"), "keychain value must be control-character-free")
+	pemBytes, err := base64.StdEncoding.DecodeString(stored)
+	require.NoError(t, err, "stored CA key must be base64-encoded")
+	assert.Contains(t, string(pemBytes), "OPENSSH PRIVATE KEY")
 
 	// The bundle's CA line matches CAPublicKey, and the cert is signed by it.
 	b, err := s1.Enroll(ctx, "phone", "phone")
