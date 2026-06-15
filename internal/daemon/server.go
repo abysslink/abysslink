@@ -288,6 +288,20 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 			continue
 		}
 		s.gatewayCounters.Queued.Add(1)
+
+		// WR-02: increment the per-device wake window at ENQUEUE, where the
+		// CeilingCheck decision is made, not at delivery. The retry goroutine
+		// fires asynchronously every 5s, so incrementing on successful send let
+		// a burst sail past the ceiling while the count was still low. Counting
+		// here — in the same synchronous fan-out path as the check above —
+		// closes the burst gap (D-05). approval_request is exempt (it bypassed
+		// the check above and must not consume the window either).
+		if msg.Kind != notifyv2.KindApprovalRequest {
+			if err := s.outbox.CeilingIncr(r.ID, push.DefaultCeiling); err != nil {
+				slog.Warn("daemon: fanout ceiling incr failed",
+					"device_id", r.ID, "err", err)
+			}
+		}
 	}
 	return nil
 }

@@ -35,11 +35,16 @@ var (
 	bucketCeiling = []byte("ceiling") // key=deviceID, val=ceilingEntry JSON
 )
 
+// DefaultCeiling is the default per-device wakes-per-hour limit (D-05). It is
+// exported so the daemon fan-out path can pass it to CeilingIncr at enqueue
+// time (WR-02) using the same constant the runner uses.
+const DefaultCeiling = 60
+
 // Outbox constants (D-05, D-07, D-08).
 const (
 	dedupTTL       = 24 * time.Hour // D-07: msg_id seen-set TTL
 	ceilingWindow  = time.Hour      // D-05: per-device wakes-per-hour fixed window
-	defaultCeiling = 60             // D-05: default wakes/hour per device
+	defaultCeiling = DefaultCeiling // D-05: default wakes/hour per device
 
 	backoffBase = 5 * time.Second // D-08: exponential backoff base
 	backoffCap  = 5 * time.Minute // D-08: exponential backoff cap

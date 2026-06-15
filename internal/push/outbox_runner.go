@@ -75,7 +75,9 @@ const retryInterval = 5 * time.Second
 // them through the appropriate Gateway leg:
 //
 //   - On nil error (provider accepted): Dequeue + MarkSeen(24h) + increment
-//     ProviderAccepted counter + CeilingIncr to record the wake (D-05).
+//     ProviderAccepted counter. The per-device ceiling window is incremented at
+//     ENQUEUE in the daemon fan-out path, not here (WR-02 / D-05): counting on
+//     async delivery let a burst exceed the ceiling.
 //   - On ErrDeadToken: prune via devices.RevokeByID + Dequeue + increment
 //     PrunedTokens counter. Logs device_id only (never the provider token — D-17).
 //   - On transient error: increment Attempts + schedule NextRetryUnix via
@@ -191,7 +193,13 @@ func processEntry(ctx context.Context, outbox *Outbox, gateways map[string]Gatew
 
 	switch {
 	case sendErr == nil:
-		// Provider accepted: remove from outbox, mark seen, record ceiling.
+		// Provider accepted: remove from outbox, mark seen.
+		//
+		// WR-02: the per-device ceiling window is incremented at ENQUEUE (in the
+		// daemon fan-out path), NOT here. Incrementing on successful send let a
+		// burst sail past the ceiling because deliveries complete asynchronously
+		// (this loop fires every 5s); the count must advance where CeilingCheck's
+		// decision is made.
 		if err := outbox.Dequeue(deviceID, e.MsgID); err != nil {
 			slog.Warn("push: dequeue after send failed", "device_id", deviceID, "msg_id", e.MsgID, "err", err)
 		}
@@ -199,9 +207,6 @@ func processEntry(ctx context.Context, outbox *Outbox, gateways map[string]Gatew
 			slog.Warn("push: mark-seen after send failed", "msg_id", e.MsgID, "err", err)
 		}
 		counters.ProviderAccepted.Add(1)
-		if err := outbox.CeilingIncr(deviceID, defaultCeiling); err != nil {
-			slog.Warn("push: ceiling incr failed", "device_id", deviceID, "err", err)
-		}
 
 	case errors.Is(sendErr, ErrDeadToken):
 		// Provider confirmed dead token: prune from device store + dequeue (D-12).
