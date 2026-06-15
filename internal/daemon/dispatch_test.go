@@ -636,8 +636,13 @@ func newFanOutServer(t *testing.T, records []device.Record) (*Server, *push.Outb
 	return srv, outbox, counters
 }
 
-// makeRecord returns a device.Record with the given id, platform, and push token.
-func makeRecord(id, platform, token string) device.Record {
+// makeRecord returns a device.Record with the given id and push token. It takes
+// no platform argument: device.Record has no platform field, and after the WR-03
+// fan-out fix every record routes through devicePlatform() → unifiedpush
+// regardless. A platform arg here would be inert and would falsely imply
+// multi-platform fan-out the schema cannot express (IN-04). Wire a real platform
+// through here together with devicePlatform if/when device.Record gains one.
+func makeRecord(id, token string) device.Record {
 	return device.Record{
 		ID:        id,
 		PushToken: "ablk_p_" + token,
@@ -661,8 +666,8 @@ func fanOutMsg(kind notifyv2.Kind) notifyv2.Message {
 // TestDispatchFanOut: two enrolled devices → both get outbox entries (D-10).
 func TestDispatchFanOut(t *testing.T) {
 	records := []device.Record{
-		makeRecord("dev-a", "unifiedpush", "aaaa"),
-		makeRecord("dev-b", "apns", "bbbb"),
+		makeRecord("dev-a", "aaaa"),
+		makeRecord("dev-b", "bbbb"),
 	}
 	srv, outbox, counters := newFanOutServer(t, records)
 	msg := fanOutMsg(notifyv2.KindNeedsInput)
@@ -682,7 +687,7 @@ func TestDispatchFanOut(t *testing.T) {
 // TestDispatchDedupSkips: if a msg_id is already marked seen (D-07), fanOut
 // must not add new outbox entries for non-approval_request kinds.
 func TestDispatchDedupSkips(t *testing.T) {
-	records := []device.Record{makeRecord("dev-a", "unifiedpush", "aaaa")}
+	records := []device.Record{makeRecord("dev-a", "aaaa")}
 	srv, outbox, counters := newFanOutServer(t, records)
 	msg := fanOutMsg(notifyv2.KindNeedsInput)
 
@@ -701,7 +706,7 @@ func TestDispatchDedupSkips(t *testing.T) {
 // TestDispatchCeilingDrop: a device at the 60-wake ceiling gets its wake
 // dropped for non-approval_request kinds (D-05).
 func TestDispatchCeilingDrop(t *testing.T) {
-	records := []device.Record{makeRecord("dev-a", "unifiedpush", "aaaa")}
+	records := []device.Record{makeRecord("dev-a", "aaaa")}
 	srv, outbox, counters := newFanOutServer(t, records)
 
 	// Fill the ceiling to the default limit (60).
@@ -717,11 +722,35 @@ func TestDispatchCeilingDrop(t *testing.T) {
 	assert.EqualValues(t, 0, counters.Queued.Load(), "dropped wake must not be queued")
 }
 
+// TestDispatchFanOutIncrementsCeiling locks in WR-02 + IN-01: fanOutToDevices
+// itself advances the per-device window (atomically, via CeilingCheckAndIncr) —
+// the prior TestDispatchCeilingDrop only proved the drop after priming the
+// window directly with CeilingIncr, never that fan-out increments it. Here 60
+// distinct fan-outs for one device queue with zero direct priming, and the 61st
+// is ceiling-dropped. If the increment at the fan-out path regressed, the 61st
+// would queue and this test would fail.
+func TestDispatchFanOutIncrementsCeiling(t *testing.T) {
+	records := []device.Record{makeRecord("dev-a", "aaaa")}
+	srv, _, counters := newFanOutServer(t, records)
+
+	for range int(push.DefaultCeiling) {
+		require.NoError(t, srv.fanOutToDevices(context.Background(), fanOutMsg(notifyv2.KindNeedsInput)))
+	}
+	require.EqualValues(t, push.DefaultCeiling, counters.Queued.Load(), "all %d distinct wakes must queue", push.DefaultCeiling)
+	require.EqualValues(t, 0, counters.CeilingDropped.Load(), "none dropped within the limit")
+
+	// 61st distinct wake for the same device must be ceiling-dropped — proving the
+	// window was incremented by fan-out, not primed externally.
+	require.NoError(t, srv.fanOutToDevices(context.Background(), fanOutMsg(notifyv2.KindNeedsInput)))
+	assert.EqualValues(t, push.DefaultCeiling, counters.Queued.Load(), "the over-limit wake must not queue")
+	assert.EqualValues(t, 1, counters.CeilingDropped.Load(), "the over-limit wake must be ceiling-dropped")
+}
+
 // TestDispatchApprovalExemptCeiling: approval_request is exempt from the
 // per-device ceiling (D-05 / research Q3); it must be enqueued even when the
 // device is at the limit.
 func TestDispatchApprovalExemptCeiling(t *testing.T) {
-	records := []device.Record{makeRecord("dev-a", "unifiedpush", "aaaa")}
+	records := []device.Record{makeRecord("dev-a", "aaaa")}
 	srv, outbox, counters := newFanOutServer(t, records)
 
 	// Fill the ceiling to the default limit (60).
@@ -742,7 +771,7 @@ func TestDispatchApprovalExemptCeiling(t *testing.T) {
 // TestDispatchApprovalNeverDedup: approval_request is exempt from dedup
 // (Phase 27 D-09 carried forward); it must be queued even if msg_id is seen.
 func TestDispatchApprovalNeverDedup(t *testing.T) {
-	records := []device.Record{makeRecord("dev-a", "unifiedpush", "aaaa")}
+	records := []device.Record{makeRecord("dev-a", "aaaa")}
 	srv, outbox, counters := newFanOutServer(t, records)
 	msg := fanOutMsg(notifyv2.KindApprovalRequest)
 
