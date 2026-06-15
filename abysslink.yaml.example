@@ -80,3 +80,16 @@ webui:
   bind_addr: ""            # resolved to tailnet IP at runtime; never set to 0.0.0.0 or ::
   port: 8443
   read_only: true          # MUST be true — mutations are disabled in the web UI (WEB-02)
+
+# Tailnet-only HTTPS content store served by abysslinkd (BACK-06/09): token-keyed,
+# TTL'd bodies fetched by enrolled devices, plus the first-contact one-scan
+# credential pull. `enabled` is the SINGLE gate for the one-scan pull — there is
+# no separate enroll flag; disabling it makes `enroll phone` degrade to the
+# inline secret box.
+content_store:
+  enabled: true            # default ON; false disables the listener and the one-scan pull
+  # port: 2587             # tailnet HTTPS listen port (0/unset = 2587)
+  # ttl_seconds: 600       # content-token lifetime; [30, 3600], 0 = default 600
+  # bind_addr: ""          # literal tailnet IP only; never 0.0.0.0 or :: (BACK-06)
+  # enroll_ttl_seconds: 300  # first-contact bootstrap-token lifetime; [30, 900],
+                             # 0 = default 300; independent of ttl_seconds (BACK-09)

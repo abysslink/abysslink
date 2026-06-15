@@ -868,6 +868,9 @@ func findingFix(check string) string {
 		"ca-trust-missing": "abysslink up --apply  (installs TrustedUserCAKeys for the enrolled device CA)",
 		"krl-missing":      "abysslink up --apply  (installs the RevokedKeys KRL)",
 		"devssh-unknown":   "install OpenSSH ssh-keygen (>= 10.0) then re-run abysslink doctor",
+		// Content-store / credential-pull preflight (Phase 28.2).
+		"content-store-daemon-down": "Start the daemon: abysslink daemon enable --apply",
+		"content-store-disabled":    "Resolve the reason shown (often: enable MagicDNS + HTTPS Certificates in the Tailscale admin DNS page, or open tcp:2587 mobile→laptop in the ACL)",
 		// Generic install / config.
 		"not_installed":        "abysslink up --apply",
 		"panes_configured":     "add panes to modules.watch.panes in abysslink.yaml",

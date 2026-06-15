@@ -17,6 +17,8 @@ package daemon_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -93,4 +95,44 @@ func TestServer_NotifySocketRoundTrip(t *testing.T) {
 func TestClient_PingFailsWhenNoDaemon(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", shortRuntimeDir(t))
 	assert.False(t, daemon.NewClient().Ping(context.Background()))
+}
+
+// TestClient_Stage covers the unix-socket staging RPC (BACK-09). With the
+// content listener disabled the daemon answers /enroll/stage with 503 — a plain
+// REJECTION error that does NOT wrap ErrUnreachable (the daemon received it). A
+// transport failure (no daemon) wraps ErrUnreachable so the enroll CLI degrades.
+func TestClient_Stage(t *testing.T) {
+	bundle := json.RawMessage(`{"device":"phone","bearer":"ablk_tok_xyz"}`)
+
+	t.Run("non-2xx is a plain rejection (503 listener disabled)", func(t *testing.T) {
+		t.Setenv("XDG_RUNTIME_DIR", shortRuntimeDir(t))
+
+		cfg := config.Defaults()
+		cfg.Modules.Watch.Enabled = false
+		cfg.ContentStore.Enabled = false // listener never goes live → 503
+
+		srv := daemon.NewServer(&fakeNotifier{}, shell.NewMockRunner(), cfg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _ = srv.Run(ctx) }()
+
+		client := daemon.NewClient()
+		require.Eventually(t, func() bool { return client.Ping(context.Background()) },
+			2*time.Second, 20*time.Millisecond, "daemon socket should come up")
+
+		res, err := client.Stage(context.Background(), bundle, 0)
+		require.Error(t, err)
+		assert.Nil(t, res)
+		assert.False(t, errors.Is(err, daemon.ErrUnreachable),
+			"a 503 rejection must NOT wrap ErrUnreachable — the daemon received the request")
+	})
+
+	t.Run("transport failure wraps ErrUnreachable", func(t *testing.T) {
+		t.Setenv("XDG_RUNTIME_DIR", shortRuntimeDir(t))
+		res, err := daemon.NewClient().Stage(context.Background(), bundle, 0)
+		require.Error(t, err)
+		assert.Nil(t, res)
+		assert.True(t, errors.Is(err, daemon.ErrUnreachable),
+			"a dial failure must wrap ErrUnreachable so the CLI degrades")
+	})
 }

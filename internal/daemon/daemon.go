@@ -175,6 +175,50 @@ func (c *Client) Send(ctx context.Context, req NotifyRequest) error {
 	return nil
 }
 
+// EnrollStageResult is the decoded POST /enroll/stage reply (BACK-09): the
+// one-scan capability URL the enroll CLI renders as a QR, and the effective
+// (server-clamped) bootstrap-token TTL in seconds.
+type EnrollStageResult struct {
+	URL        string `json:"url"`
+	TTLSeconds int    `json:"ttl_seconds"`
+}
+
+// Stage POSTs a freshly minted credential bundle to the daemon's local staging
+// route over the unix socket (BACK-09) and returns the one-scan capability URL.
+// Mirroring Send: a transport-level failure (the daemon never received the
+// request) wraps ErrUnreachable so the enroll CLI may degrade to the inline
+// secret box; a non-2xx reply (e.g. 503 when the content listener is disabled)
+// is a plain REJECTION error that deliberately does NOT wrap ErrUnreachable. The
+// bundle travels only in the request body — never on argv (CLAUDE.md).
+func (c *Client) Stage(ctx context.Context, bundleJSON json.RawMessage, ttlSeconds int) (*EnrollStageResult, error) {
+	body, err := json.Marshal(struct {
+		Bundle     json.RawMessage `json:"bundle"`
+		TTLSeconds int             `json:"ttl_seconds"`
+	}{Bundle: bundleJSON, TTLSeconds: ttlSeconds})
+	if err != nil {
+		return nil, fmt.Errorf("daemon client: marshal: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/enroll/stage", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("daemon client: build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("daemon client: socket unreachable: %w: %w", ErrUnreachable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("daemon client: stage rejected: HTTP %d", resp.StatusCode)
+	}
+	var out EnrollStageResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("daemon client: decode stage reply: %w", err)
+	}
+	return &out, nil
+}
+
 // CloseIdleConnections closes the keep-alive connections held by the client's
 // private transport. One-shot callers (e.g. the notify module's per-send fast
 // path) call it after the request so each send does not leak a unix conn plus

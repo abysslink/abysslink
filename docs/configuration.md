@@ -76,6 +76,18 @@ Abysslink reads `~/.config/abysslink/abysslink.yaml` (override with `--config`, 
 | `digest.enabled` | bool | `false` | Scheduled daily ntfy posture digest. |
 | `digest.hour` / `digest.ntfy_topic` | int / string | — | |
 
+## `content_store`
+
+Tailnet-only HTTPS store served by `abysslinkd`: token-keyed, TTL'd notification bodies fetched by enrolled devices, plus the first-contact one-scan credential pull used by `enroll phone --apply`. `enabled` is the single gate for both — disabling it makes `enroll phone` degrade to the inline secret box.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `true` | On by default; `false` disables the listener and the one-scan pull. |
+| `port` | int | `2587` | TLS listen port (`0`/unset → `2587`). |
+| `ttl_seconds` | int | `600` | Content-token lifetime; clamped to `[30, 3600]` (out of range is rejected). |
+| `enroll_ttl_seconds` | int | `300` | First-contact bootstrap-token lifetime; clamped to `[30, 900]`. Independent of `ttl_seconds`. |
+| `bind_addr` | string | tailnet IP | Literal tailnet IP only; never `0.0.0.0`/`::`. Must equal the resolved tailnet IP. |
+
 ## Self-hosted backends — `server`
 
 Used only when `backend.type` is `headscale` or `netbird`. See [headscale-ha.md](headscale-ha.md) and [netbird-scim.md](netbird-scim.md).

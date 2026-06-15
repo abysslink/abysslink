@@ -622,6 +622,62 @@ func TestContentStoreEffectiveZeroValues(t *testing.T) {
 	assert.Equal(t, time.Duration(config.DefaultContentTTLSeconds)*time.Second, cs.EffectiveTTL())
 }
 
+// TestEffectiveEnrollTTL_Default asserts the zero-means-default 300s for the
+// SEPARATE bootstrap TTL knob (BACK-09), independent of the content TTL.
+func TestEffectiveEnrollTTL_Default(t *testing.T) {
+	var cs config.ContentStoreConfig
+	assert.Equal(t, time.Duration(config.DefaultEnrollTTLSeconds)*time.Second, cs.EffectiveEnrollTTL())
+	assert.Equal(t, 300*time.Second, cs.EffectiveEnrollTTL())
+}
+
+// TestEffectiveEnrollTTL_ClampsLow asserts a programmatic below-floor value is
+// clamped up to the 30s floor so the store never mints a too-short bootstrap.
+func TestEffectiveEnrollTTL_ClampsLow(t *testing.T) {
+	cs := config.ContentStoreConfig{EnrollTTLSeconds: 5}
+	assert.Equal(t, time.Duration(config.MinEnrollTTLSeconds)*time.Second, cs.EffectiveEnrollTTL())
+	assert.Equal(t, 30*time.Second, cs.EffectiveEnrollTTL())
+}
+
+// TestEffectiveEnrollTTL_ClampsHigh asserts a programmatic above-ceiling value
+// is clamped down to the 900s ceiling so the store never mints an unbounded
+// bootstrap token.
+func TestEffectiveEnrollTTL_ClampsHigh(t *testing.T) {
+	cs := config.ContentStoreConfig{EnrollTTLSeconds: 5000}
+	assert.Equal(t, time.Duration(config.MaxEnrollTTLSeconds)*time.Second, cs.EffectiveEnrollTTL())
+	assert.Equal(t, 900*time.Second, cs.EffectiveEnrollTTL())
+}
+
+// TestValidateContentStore_EnrollTTLRejectsOutOfRange asserts a non-zero
+// enroll_ttl_seconds outside [30,900] is rejected at validation, while 0 and a
+// valid in-range value pass.
+func TestValidateContentStore_EnrollTTLRejectsOutOfRange(t *testing.T) {
+	tests := []struct {
+		name    string
+		seconds int
+		wantErr bool
+	}{
+		{name: "rejects below floor", seconds: 10, wantErr: true},
+		{name: "rejects above ceiling", seconds: 1000, wantErr: true},
+		{name: "accepts zero (default)", seconds: 0},
+		{name: "accepts in-range default", seconds: 300},
+		{name: "accepts floor", seconds: 30},
+		{name: "accepts ceiling", seconds: 900},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validObsBaseConfig()
+			cfg.ContentStore.EnrollTTLSeconds = tc.seconds
+			err := config.Validate(cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "enroll_ttl_seconds")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestValidateContentStore(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -99,6 +99,16 @@ const (
 	MinContentTTLSeconds = 30
 	// MaxContentTTLSeconds is the ttl_seconds ceiling.
 	MaxContentTTLSeconds = 3600
+
+	// DefaultEnrollTTLSeconds is the first-contact bootstrap-token lifetime when
+	// content_store.enroll_ttl_seconds is unset (BACK-09). It is SEPARATE from
+	// and independent of the content TTL: the operator and phone are co-located
+	// and scan immediately, so the default is short.
+	DefaultEnrollTTLSeconds = 300
+	// MinEnrollTTLSeconds is the enroll_ttl_seconds floor.
+	MinEnrollTTLSeconds = 30
+	// MaxEnrollTTLSeconds is the enroll_ttl_seconds ceiling.
+	MaxEnrollTTLSeconds = 900
 )
 
 // ContentStoreConfig configures the Phase 28 tailnet-only HTTPS content store
@@ -119,6 +129,11 @@ type ContentStoreConfig struct {
 	// DefaultContentTTLSeconds (600); non-zero values are clamped to
 	// [30, 3600] by validation (rejected, not silently clamped).
 	TTLSeconds int `yaml:"ttl_seconds,omitempty"`
+	// EnrollTTLSeconds is the first-contact bootstrap-token lifetime (BACK-09).
+	// Zero means DefaultEnrollTTLSeconds (300); non-zero values are clamped to
+	// [30, 900] by validation (rejected, not silently clamped). It is SEPARATE
+	// from and independent of TTLSeconds (the content TTL).
+	EnrollTTLSeconds int `yaml:"enroll_ttl_seconds,omitempty"`
 	// BindAddr optionally pins the bind IP. Must be a literal, non-wildcard
 	// IP; at runtime it must equal the backend-resolved tailnet IP.
 	BindAddr string `yaml:"bind_addr,omitempty"`
@@ -146,6 +161,25 @@ func (c ContentStoreConfig) EffectiveTTL() time.Duration {
 	}
 	if ttl > MaxContentTTLSeconds {
 		ttl = MaxContentTTLSeconds
+	}
+	return time.Duration(ttl) * time.Second
+}
+
+// EffectiveEnrollTTL returns the configured first-contact bootstrap-token TTL
+// or the default 300s. Values outside the validated [30s, 900s] range cannot
+// reach here through Load (ValidateContentStore rejects them), but a
+// programmatically-built config is still clamped defensively so the store never
+// mints an unbounded bootstrap token. It is independent of EffectiveTTL.
+func (c ContentStoreConfig) EffectiveEnrollTTL() time.Duration {
+	if c.EnrollTTLSeconds == 0 {
+		return DefaultEnrollTTLSeconds * time.Second
+	}
+	ttl := c.EnrollTTLSeconds
+	if ttl < MinEnrollTTLSeconds {
+		ttl = MinEnrollTTLSeconds
+	}
+	if ttl > MaxEnrollTTLSeconds {
+		ttl = MaxEnrollTTLSeconds
 	}
 	return time.Duration(ttl) * time.Second
 }
@@ -825,6 +859,10 @@ func ValidateContentStore(cfg *Config) error {
 	if ttl := cfg.ContentStore.TTLSeconds; ttl != 0 && (ttl < MinContentTTLSeconds || ttl > MaxContentTTLSeconds) {
 		return fmt.Errorf("config: content_store.ttl_seconds %d must be between %d and %d (0 means default %d)",
 			ttl, MinContentTTLSeconds, MaxContentTTLSeconds, DefaultContentTTLSeconds)
+	}
+	if ttl := cfg.ContentStore.EnrollTTLSeconds; ttl != 0 && (ttl < MinEnrollTTLSeconds || ttl > MaxEnrollTTLSeconds) {
+		return fmt.Errorf("config: content_store.enroll_ttl_seconds %d must be between %d and %d (0 means default %d)",
+			ttl, MinEnrollTTLSeconds, MaxEnrollTTLSeconds, DefaultEnrollTTLSeconds)
 	}
 	return nil
 }

@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -208,6 +209,11 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/notify", s.handleNotify)
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/sessions", s.handleSessions)
+	// BACK-09: the local staging seam. This route accepts a SECRET credential
+	// bundle in the request body, so it lives ONLY on this chmod-0600 unix
+	// socket (the local trust root) — NEVER on buildContentMux (the network TLS
+	// mux). Do not move it.
+	mux.HandleFunc("/enroll/stage", s.handleEnrollStage)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO, IdleTimeout: idleTO}
 
@@ -606,6 +612,118 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Warn("daemon: status encode failed", "err", err)
 	}
+}
+
+// maxStageBody caps the POST /enroll/stage request body. The bundle carries an
+// SSH private key + certificate + CA line + tokens — typically a few KiB, but a
+// larger key type (e.g. RSA-4096) plus the cert can exceed 4 KiB, so it reuses
+// the 64 KiB content body cap as a generous ceiling rather than the tight ack
+// cap (a too-tight cap would silently degrade enrollment to the inline box on
+// large keys). Still a hard bound against body flooding (T-28.2-09).
+const maxStageBody = maxContentBodyBytes
+
+// enrollStageRequest is the POST /enroll/stage body: the marshaled credential
+// bundle (opaque to the daemon — served back verbatim) plus a caller-requested
+// TTL (0 means the configured EffectiveEnrollTTL default).
+type enrollStageRequest struct {
+	Bundle     json.RawMessage `json:"bundle"`
+	TTLSeconds int             `json:"ttl_seconds"`
+}
+
+// enrollStageResponse is the POST /enroll/stage reply: the one-scan capability
+// URL the operator renders as a QR, and the effective (clamped) TTL.
+type enrollStageResponse struct {
+	URL        string `json:"url"`
+	TTLSeconds int    `json:"ttl_seconds"`
+}
+
+// clampEnrollTTL clamps a caller-requested TTL (in seconds) into the enroll
+// bounds [Min,Max]EnrollTTLSeconds so a hostile or buggy caller can never mint
+// an unbounded bootstrap token (T-28.2-08).
+func clampEnrollTTL(seconds int) time.Duration {
+	if seconds < config.MinEnrollTTLSeconds {
+		seconds = config.MinEnrollTTLSeconds
+	}
+	if seconds > config.MaxEnrollTTLSeconds {
+		seconds = config.MaxEnrollTTLSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// handleEnrollStage serves POST /enroll/stage on the LOCAL unix mux ONLY
+// (BACK-09). The separate `enroll` CLI process POSTs a freshly minted credential
+// bundle here; the daemon stages it in the in-memory content store under a
+// single-use bootstrap token and returns the one-scan capability URL.
+//
+// SECURITY (CLAUDE.md immutables):
+//   - The bundle is a SECRET and arrives only in the request body — never argv.
+//   - The staged bundle is TRANSIENT daemon runtime memory (the contentStore
+//     map): explicitly EXEMPT from the audit-mutation rule, exactly like the
+//     BACK-06 store, and NEVER written to disk. This handler makes no audit call.
+//   - No secret/url/token/bundle ever reaches a log — only ttl_seconds (opaque).
+//   - When the content listener is not live the handler returns 503 (a clean
+//     degrade signal so the CLI falls back to the inline box); it never panics.
+func (s *Server) handleEnrollStage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	req, ok := decodeStageRequest(w, r)
+	if !ok {
+		return
+	}
+
+	// Read the listener fields under contentMu exactly as mintFetchRef does.
+	s.contentMu.Lock()
+	live, advertiseHost, port := s.contentLive, s.contentAdvertiseHost, s.contentPort
+	s.contentMu.Unlock()
+	if !live {
+		// Clean degrade signal — NOT an ErrUnreachable-class failure (the daemon
+		// received the request); the CLI shows credentials inline instead.
+		http.Error(w, "content listener not live", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Resolve the TTL: the configured default (nil-guard s.cfg), or the clamped
+	// caller-requested value when a positive ttl_seconds is supplied.
+	ttl := config.DefaultEnrollTTLSeconds * time.Second
+	if s.cfg != nil {
+		ttl = s.cfg.ContentStore.EffectiveEnrollTTL()
+	}
+	if req.TTLSeconds > 0 {
+		ttl = clampEnrollTTL(req.TTLSeconds)
+	}
+
+	token, _ := s.content.mintBootstrap(string(req.Bundle), ttl)
+	u := "https://" + net.JoinHostPort(advertiseHost, strconv.Itoa(port)) + "/enroll/" + token
+
+	// Opaque ttl only — never the url, token, or credential body (T-28.2-10).
+	slog.Info("daemon: staged bootstrap entry", "ttl_seconds", int(ttl/time.Second))
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(enrollStageResponse{URL: u, TTLSeconds: int(ttl / time.Second)}); err != nil {
+		slog.Warn("daemon: enroll-stage encode failed", "err", err)
+	}
+}
+
+// decodeStageRequest caps the body, decodes the staging request with unknown
+// fields rejected, and validates a non-empty bundle. It writes the 4xx response
+// itself and returns ok=false on any failure (keeps handleEnrollStage's cyclo
+// flat). It never logs the body.
+func decodeStageRequest(w http.ResponseWriter, r *http.Request) (enrollStageRequest, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxStageBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req enrollStageRequest
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid stage payload", http.StatusBadRequest)
+		return enrollStageRequest{}, false
+	}
+	if len(req.Bundle) == 0 || string(req.Bundle) == "null" {
+		http.Error(w, "bundle is required", http.StatusBadRequest)
+		return enrollStageRequest{}, false
+	}
+	return req, true
 }
 
 // resolveReachable reports whether this node is reachable on the tailnet by

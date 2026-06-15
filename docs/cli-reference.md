@@ -31,7 +31,7 @@ Persistent flags on the root command, available to every subcommand:
 | `doctor` | `--offline` | Exhaustive verification of all modules and security posture; `--offline` skips checks that need network access. |
 | `report` | `--tail <n>` | Read-only security-posture snapshot; include the last N audit entries. |
 | `repair` | — | Auto-fix failures detected by `doctor` (needs `--apply`). |
-| `enroll phone` | — | Mint a tagged auth key, show a QR, walk through pairing. Dry-run by default — pairing requires `--apply` (`--yes` to skip the pause stops). |
+| `enroll phone` | `--qr` | Mint a tagged auth key, show a QR, walk through pairing. Dry-run by default — pairing requires `--apply` (`--yes` to skip the pause stops). After minting the device bundle it stages it into the running daemon and prints **one** single-use capability-URL QR the phone scans to pull all credentials over the tailnet (`GET /enroll/{token}`, expires per `content_store.enroll_ttl_seconds`); the one-time secret box always prints too. If the daemon is unreachable or the content listener is disabled it falls back to the box (never fails enrollment). `--qr` adds the per-credential QRs as an offline fallback. |
 | `enroll rig <name>` | — | Enroll another laptop as a named rig in the fleet. |
 
 ## Operations

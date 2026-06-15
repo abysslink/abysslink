@@ -42,10 +42,25 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/notifyv2"
 )
+
+// TestSelfDNSName covers the FQDN-preference fix: the content advertise host
+// must be the MagicDNS FQDN (Status.Self.DNSName) so it matches the Tailscale
+// cert SAN, not the short HostName (which would degrade the pull URL to the bind
+// IP → a TLS-SAN mismatch on the phone).
+func TestSelfDNSName(t *testing.T) {
+	assert.Equal(t, "rig.tail1234.ts.net.",
+		selfDNSName(&backend.Status{Self: &backend.PeerStatus{HostName: "rig", DNSName: "rig.tail1234.ts.net."}}),
+		"must return the FQDN DNSName (trailing dot kept; the resolver trims it), not the short HostName")
+	assert.Equal(t, "", selfDNSName(&backend.Status{Self: &backend.PeerStatus{HostName: "rig"}}),
+		"no DNSName → empty so the caller falls back to the short hostname")
+	assert.Equal(t, "", selfDNSName(&backend.Status{}), "nil Self → empty")
+	assert.Equal(t, "", selfDNSName(nil), "nil status → empty")
+}
 
 const (
 	testBearer = "ablk_b_test-bearer-credential"
@@ -113,6 +128,20 @@ func doContentGet(t *testing.T, ts *httptest.Server, token, bearer string) *http
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// doBootstrapGet issues a bearer-LESS GET /enroll/{token} (BACK-09): no
+// Authorization header — the single-use token IS the only credential.
+func doBootstrapGet(t *testing.T, ts *httptest.Server, token string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/enroll/"+token, nil)
+	require.NoError(t, err)
+	// HTML is the default now (the link is a QR for a human); a machine consumer
+	// must opt into raw JSON explicitly. These tests assert the JSON contract.
+	req.Header.Set("Accept", "application/json")
 	resp, err := ts.Client().Do(req)
 	require.NoError(t, err)
 	return resp
@@ -259,6 +288,235 @@ func TestHandleContent_ConstantWork404(t *testing.T) {
 	// Only the genuine success touched last-seen — the auth-failed attempts did not.
 	assert.Equal(t, []string{fd.rec.ID}, fd.touchedIDs(),
 		"only the genuine success may touch last-seen")
+}
+
+// --- BACK-09: bearer-LESS GET /enroll/{token} ---
+
+func TestHandleBootstrap_Happy(t *testing.T) {
+	s, _, ts, _ := newContentTestServer(t)
+	const bundle = `{"device":"phone","bearer":"ablk_b_x"}`
+	token, _ := s.content.mintBootstrap(bundle, time.Minute)
+
+	resp := doBootstrapGet(t, ts, token)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, bundle, string(body))
+}
+
+// doBootstrapGetHTML is doBootstrapGet with a browser Accept header so the
+// endpoint serves the formatted credential page instead of JSON.
+func doBootstrapGetHTML(t *testing.T, ts *httptest.Server, token string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/enroll/"+token, nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// TestHandleBootstrap_HTMLPage covers the DEVC-07 phone UX: a browser (Accept:
+// text/html) gets the formatted page — text/html, the secret values present in
+// the page, per-field Copy + Download for the key/cert — and the token is still
+// single-use. curl/JSON behavior is unchanged (TestHandleBootstrap_Happy).
+func TestHandleBootstrap_HTMLPage(t *testing.T) {
+	s, _, ts, _ := newContentTestServer(t)
+	// A multi-line value stands in for the PEM (avoid a literal key header in the
+	// test source); the point is the page carries values, labels, and buttons.
+	const keyVal = "PRIV-KEY-LINE-1\nPRIV-KEY-LINE-2\n"
+	bundle, err := json.Marshal(map[string]any{
+		"device":              "phone",
+		"bearer":              "ablk_b_secret",
+		"ssh_private_key_pem": keyVal,
+		"ssh_certificate":     "ssh-ed25519-cert-v01@openssh.com AAAAcert",
+	})
+	require.NoError(t, err)
+	token, _ := s.content.mintBootstrap(string(bundle), time.Minute)
+
+	resp := doBootstrapGetHTML(t, ts, token)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	page, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	htmlBody := string(page)
+	// The page carries the secret values (HTML-escaped in <pre> text) and the
+	// human labels + action buttons.
+	assert.Contains(t, htmlBody, "ablk_b_secret", "bearer value must be on the page")
+	assert.Contains(t, htmlBody, "PRIV-KEY-LINE-1", "key value must be on the page")
+	assert.Contains(t, htmlBody, "SSH private key", "known fields get human labels")
+	assert.Contains(t, htmlBody, ">Copy<", "every field gets a Copy button")
+	assert.Contains(t, htmlBody, "abysslink_phone-cert.pub", "the cert gets a Download with the OpenSSH filename")
+	// No secret value is interpolated into a JS string literal (read from DOM).
+	assert.NotContains(t, htmlBody, "writeText('ablk_b_secret", "secrets must not enter JS string literals")
+
+	// Single-use: the page fetch consumed the token.
+	second := doBootstrapGetHTML(t, ts, token)
+	defer func() { _ = second.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, second.StatusCode, "the HTML page fetch must consume the single-use token")
+}
+
+// TestHandleBootstrap_NotFoundHTML covers the dead-link UX: a BROWSER that
+// opens an expired/used/unknown link gets a clear "link expired" HTML page (not
+// a blank white 404), while curl/JSON keeps the empty-body 404 (uniform,
+// no-oracle). The page is generic — identical for every not-found cause.
+func TestHandleBootstrap_NotFoundHTML(t *testing.T) {
+	_, _, ts, _ := newContentTestServer(t)
+
+	// Browser (Accept: text/html) → friendly 404 page.
+	resp := doBootstrapGetHTML(t, ts, "ablk_e_does-not-exist")
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "expired", "the dead-link page must explain the link is expired/used")
+	assert.Contains(t, string(body), "enroll phone --apply", "the page must tell the operator how to get a fresh link")
+
+	// curl/JSON (no Accept) → empty-body 404 unchanged (BACK-09 contract).
+	jsonResp := doBootstrapGet(t, ts, "ablk_e_does-not-exist")
+	defer func() { _ = jsonResp.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, jsonResp.StatusCode)
+	jb, err := io.ReadAll(jsonResp.Body)
+	require.NoError(t, err)
+	assert.Empty(t, string(jb), "the non-browser 404 stays empty-body (no oracle)")
+}
+
+// TestParseOrderedEnrollFields covers the generic, order-preserving parse that
+// keeps the daemon decoupled from the exact bundle shape.
+func TestParseOrderedEnrollFields(t *testing.T) {
+	raw := `{"device":"phone","rotated":true,"ssh_private_key_pem":"K","unknown_field":"v"}`
+	fields, err := parseOrderedEnrollFields(raw)
+	require.NoError(t, err)
+	require.Len(t, fields, 4)
+	assert.Equal(t, []string{"f0", "f1", "f2", "f3"}, []string{fields[0].ID, fields[1].ID, fields[2].ID, fields[3].ID})
+	assert.Equal(t, "Device", fields[0].Label)
+	assert.Equal(t, "true", fields[1].Value, "non-string scalar stringified")
+	assert.Equal(t, "abysslink_phone", fields[2].File, "key field gets the OpenSSH key filename")
+	assert.Equal(t, "unknown_field", fields[3].Label, "unknown keys fall back to the raw key (decoupled)")
+	assert.Empty(t, fields[3].File, "non-key/cert fields get no Download")
+
+	_, err = parseOrderedEnrollFields(`["not","an","object"]`)
+	assert.Error(t, err, "a non-object bundle is a render error (caller falls back to JSON)")
+}
+
+// TestWantsJSON covers the content-negotiation gate: HTML is the DEFAULT (QR
+// for a human); JSON only on an explicit opt-in. This is the fix for QR
+// scanners / in-app webviews that send "*/*" (no text/html) and were wrongly
+// getting the raw JSON dump.
+func TestWantsJSON(t *testing.T) {
+	mk := func(accept, query string) *http.Request {
+		r, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "/enroll/x"+query, nil)
+		if accept != "" {
+			r.Header.Set("Accept", accept)
+		}
+		return r
+	}
+	// HTML (the default) — wantsJSON false:
+	assert.False(t, wantsJSON(mk("text/html,application/xhtml+xml", "")), "browser → HTML")
+	assert.False(t, wantsJSON(mk("*/*", "")), "QR scanner / curl default (*/*) → HTML (was the bug)")
+	assert.False(t, wantsJSON(mk("", "")), "no Accept → HTML")
+	assert.False(t, wantsJSON(mk("text/html,application/json", "")), "browser sending both → HTML")
+	// JSON — only on explicit opt-in:
+	assert.True(t, wantsJSON(mk("application/json", "")), "explicit Accept: application/json → JSON")
+	assert.True(t, wantsJSON(mk("*/*", "?format=json")), "?format=json → JSON")
+}
+
+// TestHandleBootstrap_NoBearerRequired proves the route is bearer-LESS: a GET
+// with no Authorization header succeeds (doBootstrapGet sends none).
+func TestHandleBootstrap_NoBearerRequired(t *testing.T) {
+	s, _, ts, _ := newContentTestServer(t)
+	token, _ := s.content.mintBootstrap(`{"device":"phone"}`, time.Minute)
+
+	resp := doBootstrapGet(t, ts, token)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GET /enroll must succeed with NO bearer")
+}
+
+func TestHandleBootstrap_SingleUse(t *testing.T) {
+	s, _, ts, _ := newContentTestServer(t)
+	token, _ := s.content.mintBootstrap(`{"device":"phone"}`, time.Minute)
+
+	first := doBootstrapGet(t, ts, token)
+	_ = first.Body.Close()
+	require.Equal(t, http.StatusOK, first.StatusCode)
+
+	second := doBootstrapGet(t, ts, token)
+	defer func() { _ = second.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, second.StatusCode, "a replayed bootstrap token must 404")
+}
+
+// TestHandleBootstrap_Uniform404 asserts the no-oracle property: an unknown
+// token, an expired token, AND a CONTENT token routed through /enroll/ are ALL
+// empty-body 404s — and the cross-class probe burns NOTHING (the content token
+// still resolves via an authed /content/ GET afterward).
+func TestHandleBootstrap_Uniform404(t *testing.T) {
+	clk := newContentClock()
+	s, _, ts, _ := newContentTestServer(t)
+	s.content = newContentStore(clk.now)
+
+	// A live content token — must survive a wrong-class /enroll/ probe (long
+	// TTL so the clock advance below does not expire it).
+	contentTok, _ := s.content.mintContent("bearer-gated body", time.Hour)
+	// An expired bootstrap token.
+	expiredTok, _ := s.content.mintBootstrap(`{"device":"gone"}`, 30*time.Second)
+	clk.advance(time.Minute)
+
+	cases := []struct {
+		name  string
+		token string
+	}{
+		{name: "unknown token", token: "ablk_e_nonexistent-token-xx"},
+		{name: "expired bootstrap token", token: expiredTok},
+		{name: "cross-class content token", token: contentTok},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doBootstrapGet(t, ts, tc.token)
+			defer func() { _ = resp.Body.Close() }()
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.Empty(t, string(body), "uniform 404 must carry an empty body (no oracle)")
+		})
+	}
+
+	// The cross-class /enroll/ probe must NOT have consumed the content token:
+	// the legitimate authed /content/ fetch still resolves the real body.
+	resp := doContentGet(t, ts, contentTok, testBearer)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"a wrong-class /enroll/ probe must not burn the content token")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "bearer-gated body", string(body))
+}
+
+// TestHandleContent_RejectsBootstrapToken asserts the symmetric guard: a
+// bootstrap token requested via the bearer-gated /content/ route is a 404 even
+// WITH a valid bearer (the kind guard, not just the bearer gate) — and the
+// probe burns nothing (the bootstrap token still resolves via /enroll/).
+func TestHandleContent_RejectsBootstrapToken(t *testing.T) {
+	s, _, ts, _ := newContentTestServer(t)
+	bootTok, _ := s.content.mintBootstrap(`{"device":"phone"}`, time.Minute)
+
+	resp := doContentGet(t, ts, bootTok, testBearer)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode,
+		"a bootstrap token via /content/ must 404 even with a valid bearer")
+
+	// The probe must not have consumed the bootstrap token.
+	resp2 := doBootstrapGet(t, ts, bootTok)
+	defer func() { _ = resp2.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp2.StatusCode,
+		"the bootstrap token must survive a wrong-class /content/ probe")
 }
 
 func TestHandleAck_HappyRecordsHashOnlyReceipt(t *testing.T) {
@@ -751,6 +1009,87 @@ func TestStartContentServer_FailClosed(t *testing.T) {
 			assert.False(t, live, "listener must stay down (fail closed)")
 			assert.True(t, strings.HasPrefix(status, tc.want),
 				"status %q must start with %q", status, tc.want)
+		})
+	}
+}
+
+// getCertTLS returns a tls.Config that serves the leaf LAZILY via
+// GetCertificate (the production Tailscale-localapi shape), so the eager
+// cert-probe path exercises a real GetCertificate call. selfSignedTLS uses a
+// static Certificates slice (GetCertificate nil) and therefore deliberately
+// skips the probe — these two helpers cover both branches.
+func getCertTLS(t *testing.T, getErr error) *tls.Config {
+	t.Helper()
+	leaf := selfSignedTLS(t).Certificates[0]
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if getErr != nil {
+				return nil, getErr
+			}
+			return &leaf, nil
+		},
+	}
+}
+
+// TestStartContentServer_CertProbe covers the eager TLS-cert probe: with HTTPS
+// Certificates unavailable (GetCertificate errors) on a *.ts.net advertise host,
+// the listener must end DISABLED with a reason naming HTTPS certs — never a
+// "listening" status that later dies on every handshake. The happy path
+// (GetCertificate returns a leaf) stays live.
+func TestStartContentServer_CertProbe(t *testing.T) {
+	cases := []struct {
+		name      string
+		getErr    error
+		host      tailnetHostResolver
+		wantLive  bool
+		wantInMsg string
+	}{
+		{
+			name:      "certs unavailable on ts.net host disables",
+			getErr:    errors.New("no cert: HTTPS certs disabled"),
+			host:      stubHostResolver{host: "myrig.tail1234.ts.net"},
+			wantLive:  false,
+			wantInMsg: "HTTPS certs",
+		},
+		{
+			name:     "cert available stays live",
+			getErr:   nil,
+			host:     stubHostResolver{host: "myrig.tail1234.ts.net"},
+			wantLive: true,
+		},
+		{
+			name:     "bare-ip advertise host skips probe (degraded, not false-disable)",
+			getErr:   errors.New("no cert"),
+			host:     stubHostResolver{err: errors.New("no name")}, // → advertise the bind IP
+			wantLive: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.ContentStore.Port = freePort(t)
+			s := NewServer(&captureNotifier{}, nil, cfg)
+			s.SetDeviceStore(&fakeDeviceStore{bearer: testBearer, rec: device.Record{ID: "id-1", Name: "phone"}})
+			s.SetAuditAppender(audit.New(filepath.Join(t.TempDir(), "audit.log")))
+			s.SetContentTLS(func(context.Context) (*tls.Config, error) { return getCertTLS(t, tc.getErr), nil })
+			s.contentResolver = stubResolver{ip: "127.0.0.1"}
+			s.contentHostResolver = tc.host
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s.startContentServer(ctx)
+
+			s.contentMu.Lock()
+			live, status := s.contentLive, s.contentStatus
+			s.contentMu.Unlock()
+			assert.Equal(t, tc.wantLive, live, "status: %q", status)
+			if !tc.wantLive {
+				assert.True(t, strings.HasPrefix(status, "disabled:"), "status %q must be disabled", status)
+			}
+			if tc.wantInMsg != "" {
+				assert.Contains(t, status, tc.wantInMsg, "disabled reason must name HTTPS certs")
+			}
 		})
 	}
 }
