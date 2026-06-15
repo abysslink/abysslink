@@ -95,6 +95,54 @@ func wantsJSON(r *http.Request) bool {
 	return strings.Contains(accept, "application/json") && !strings.Contains(accept, "text/html")
 }
 
+// previewBotUAs is a focused denylist of well-known link-preview/crawler
+// User-Agent tokens. When a user pastes a credential link into a chat app
+// (iMessage/Slack/WhatsApp/…), that service FETCHES the URL to build a preview
+// — which would otherwise burn the single-use token (and worse, deliver the
+// secret bundle to the crawler's servers) before the real user opens it. We
+// match these case-insensitively as substrings and serve a non-secret
+// placeholder WITHOUT consuming the token.
+//
+// A bot that SPOOFS a real-browser UA falls through to the normal consume path
+// — that is the same risk as any first-fetcher today (whoever fetches first
+// wins the token), and is acceptable: this denylist handles the well-behaved
+// previewers, which is the actual leak vector in practice.
+var previewBotUAs = []string{ //nolint:gochecknoglobals // static denylist
+	"slackbot", "facebookexternalhit", "whatsapp", "twitterbot",
+	"telegrambot", "discordbot", "discord", "linkedinbot", "redditbot",
+	"pinterest", "applebot", "skypeuripreview", "bingbot", "googlebot",
+	"embedly", "vkshare", "preview", "crawler", "spider", "bot",
+}
+
+// isPreviewBot reports whether ua looks like a link-preview/crawler client.
+// The match is a case-insensitive substring scan over previewBotUAs. An empty
+// or browser UA is not a bot (returns false → the normal consume path runs).
+func isPreviewBot(ua string) bool {
+	if ua == "" {
+		return false
+	}
+	lower := strings.ToLower(ua)
+	for _, tok := range previewBotUAs {
+		if strings.Contains(lower, tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeEnrollPreviewPlaceholder serves a small, self-contained, NON-SECRET page
+// to a link-preview crawler. It carries NO credential fields and NO token, is
+// identical regardless of whether the requested token exists/valid/expired (so
+// it is no token-existence oracle), and — crucially — is served WITHOUT the
+// caller ever reaching the single-use consume, so a preview never burns the
+// link nor leaks the bundle. Same dark style as the other enroll pages.
+func writeEnrollPreviewPlaceholder(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(enrollPreviewHTML))
+}
+
 // writeEnrollNotFoundHTML serves a small, GENERIC "link expired or already
 // used" page for a browser that opened a dead bootstrap link (expired, already
 // consumed, or simply wrong) — instead of the blank white page an empty 404
@@ -200,6 +248,25 @@ p{margin:0 0 12px}</style></head>
 <h1>Link expired or already used</h1>
 <p>Credential links are single-use and short-lived — this one has already been opened or has expired.</p>
 <p>On your rig, run <code>abysslink enroll phone --apply</code> and scan the new QR (each QR is a fresh, one-time link — don't reuse a screenshot).</p>
+</body></html>`
+
+// enrollPreviewHTML is the static, NON-SECRET placeholder served to link-preview
+// crawlers (see writeEnrollPreviewPlaceholder). It carries no credentials and no
+// token, so a chat-app preview can never burn the single-use link nor receive
+// the bundle.
+const enrollPreviewHTML = `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Abysslink credential link</title>
+<style>:root{color-scheme:dark}
+body{margin:0;padding:24px;background:#0b0e14;color:#d7dbe0;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+h1{font-size:20px;margin:0 0 12px}
+p{margin:0 0 12px}</style></head>
+<body>
+<h1>Abysslink credential link</h1>
+<p>Open this on the device you're enrolling. It's a one-time, single-use credential link — this preview did not consume it.</p>
 </body></html>`
 
 const enrollPageHTML = `<!doctype html>

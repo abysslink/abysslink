@@ -530,6 +530,18 @@ func (s *Server) handleContent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	// A GET carries no meaningful body; cap it anyway (defense in depth).
 	r.Body = http.MaxBytesReader(w, r.Body, maxAckBody)
+	// Preview-safe (BACK-09): a link-preview/crawler that fetches the pasted URL
+	// (iMessage/Slack/WhatsApp/…) must NEVER reach the single-use consume below —
+	// otherwise it would BURN the token before the real user opens it and LEAK
+	// the credential bundle to the crawler's servers. Detect well-known preview
+	// User-Agents and serve a generic non-secret placeholder instead: no burn (we
+	// return before lookupKind), no leak (no bundle), no oracle (the placeholder
+	// is identical whether or not the token exists). A bot spoofing a browser UA
+	// falls through to the normal path — same risk as any first-fetcher today.
+	if isPreviewBot(r.UserAgent()) {
+		writeEnrollPreviewPlaceholder(w)
+		return
+	}
 	body, found := s.content.lookupKind(r.PathValue("token"), kindBootstrap, true)
 	if !found {
 		// A scanner/browser that opened a dead/expired/used link gets a clear
