@@ -199,7 +199,13 @@ func main() {
 	// ungated-runner bypass): bbolt is a single-writer runtime file, not a
 	// user-data mutation subject to backup+audit. The file is 0600 and lives
 	// under XDG_STATE_HOME/abysslink/ alongside devices.json.
-	wirePushOutbox(ctx, cfg, srv)
+	//
+	// kc (the platform keychain constructed at line 169 and already threaded
+	// into wireContentDeps) is passed through so the always-on UnifiedPush leg
+	// can attach Basic auth for the sovereign self-hosted ntfy default (CR-01).
+	// NewUnifiedPushGateway tolerates a nil kc, so headless/no-auth setups are
+	// unaffected.
+	wirePushOutbox(ctx, cfg, srv, kc)
 
 	// tmux session registry (Phase 27, BACK-03/BACK-04). D-40: registry execs
 	// (tmux -CC attach, list-panes, capture-pane) are daemon-internal plumbing
@@ -417,7 +423,12 @@ func (a pushDeviceStoreAdapter) RevokeByID(ctx context.Context, id string) error
 // Structural audit-mutation exemption D-06: the bbolt outbox is daemon runtime
 // state opened at the composition root, never via internal/audit (same shape
 // as D-40 ungated-runner bypass).
-func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server) {
+//
+// kc is the platform keychain (may be nil in degraded mode); it is handed to
+// the always-on UnifiedPush gateway so authenticated self-hosted ntfy
+// endpoints receive Basic auth (CR-01). A nil kc degrades to no-auth POSTs,
+// which is correct for headless/no-auth ntfy instances.
+func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server, kc secrets.KeychainStore) {
 	outboxDir := filepath.Join(xdgStateHome(), "abysslink")
 	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
 		slog.Warn("abysslinkd: push outbox dir creation failed; push disabled", "err", err)
@@ -444,7 +455,11 @@ func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server)
 	// D-18). APNs and FCM are registered only when enabled in config (D-14).
 	// Keychain is nil-safe: NewUnifiedPushGateway degrades when kc is nil.
 	gateways := make(map[string]push.Gateway)
-	gateways["unifiedpush"] = push.NewUnifiedPushGateway(nil) // kc not accessible here; degraded but wired
+	// CR-01: hand the daemon's keychain to the UnifiedPush leg so authenticated
+	// self-hosted ntfy endpoints receive Basic auth. A nil kc still degrades to
+	// no-auth POSTs (headless/no-auth ntfy); only the previously-broken
+	// authenticated path is fixed.
+	gateways["unifiedpush"] = push.NewUnifiedPushGateway(kc)
 
 	// cfg.Gateway.APNs/FCM gates: disabled by default (D-14). The startup
 	// warnings were already emitted above in main() after config load.
