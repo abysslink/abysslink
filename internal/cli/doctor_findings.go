@@ -175,6 +175,14 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 		findings = append(findings, devSSHDriftFindings(ctx, cc.runner, devSSHCAView(deps))...)
 	}
 
+	// Content-store / credential-pull preflight (Phase 28.2): pings the daemon
+	// over the unix socket and reads its /status content_store field so a silent
+	// pull failure (daemon down, tailnet HTTPS certs disabled, tcp:2587 closed in
+	// the ACL) surfaces as a WARN instead of leaving doctor green. WARN only —
+	// the content store being off is a valid choice; appended last so it never
+	// reorders the established families.
+	findings = append(findings, contentStoreDoctorFindings(ctx, cc.cfg)...)
+
 	return findings
 }
 

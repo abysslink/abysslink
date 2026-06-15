@@ -35,8 +35,13 @@ const (
 )
 
 // requiredGrantPorts is the minimal mobile→laptop port set abysslink needs:
-// SSH, ntfy (push notifications), and the mosh UDP range.
-var requiredGrantPorts = []string{"tcp:22", "tcp:2586", "udp:60000-61000"}
+// SSH (22), ntfy push (2586), the tailnet content store + first-contact
+// credential pull (2587 — the BACK-06/BACK-09 HTTPS listener; without this the
+// phone is blocked at the tailnet ACL and the pull/content fetch is
+// "not reachable"), and the mosh UDP range. 2587 is config.DefaultContentStorePort;
+// a customized content_store.port would need a manual grant (ACL port derivation
+// from config is a follow-up — EnsureGrant is a no-arg interface method today).
+var requiredGrantPorts = []string{"tcp:22", "tcp:2586", "tcp:2587", "udp:60000-61000"}
 
 // aclDoc is the internal representation of the ACL sections abysslink manages.
 type aclDoc struct {
@@ -191,7 +196,7 @@ func (e *ACLEditor) EnsureTagOwners(owner string) error {
 }
 
 // EnsureGrant ensures the mobile→laptop grant covers all required ports
-// (tcp:22, tcp:2586, udp:60000-61000).
+// (tcp:22, tcp:2586, tcp:2587, udp:60000-61000).
 //
 // Idempotent: no-op when the union of all existing mobile→laptop grants
 // already covers the required ports (or one grants "*"). When a matching

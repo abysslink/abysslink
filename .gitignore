@@ -59,3 +59,10 @@ coverage.html
 /abysslink-conformance
 /abysslink
 /abysslinkd
+
+# never commit TLS keys/certs (e.g. stray `tailscale cert` output)
+*.key
+*.crt
+*.pem
+*.ts.net.crt
+*.ts.net.key

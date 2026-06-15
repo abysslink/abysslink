@@ -33,6 +33,11 @@ const (
 	// distinguishable from push tokens ("ablk_p_") and bearers in any debug
 	// surface. The suffix is 16 bytes of crypto/rand, base64url no-pad.
 	contentTokenPrefix = "ablk_c_"
+	// bootstrapTokenPrefix namespaces first-contact bootstrap tokens (BACK-09)
+	// so they are structurally distinguishable from content tokens ("ablk_c_")
+	// in any debug surface. The suffix is 16 bytes of crypto/rand, base64url
+	// no-pad (≥128-bit entropy — same mint as content tokens).
+	bootstrapTokenPrefix = "ablk_e_"
 	// maxContentEntries bounds daemon memory: at the 64 KiB body cap, 512
 	// entries are at most 32 MiB. Beyond the bound the OLDEST entry is
 	// dropped with a warning (drop-oldest, never an error to the caller).
@@ -42,11 +47,27 @@ const (
 	contentPruneInterval = 60 * time.Second
 )
 
+// entryKind discriminates the capability class of a store entry (BACK-09).
+// content entries serve GET /content/{token} bearer-gated; bootstrap entries
+// serve the first-contact GET /enroll/{token} bearer-LESS. The kind is checked
+// BEFORE the single-use consume (see lookupKind) so a cross-class probe can
+// neither read the wrong body class nor burn a victim's live token.
+type entryKind string
+
+const (
+	// kindContent is a BACK-06 message-body entry (bearer-gated /content/).
+	kindContent entryKind = "content"
+	// kindBootstrap is a BACK-09 first-contact credential-bundle entry
+	// (bearer-LESS /enroll/).
+	kindBootstrap entryKind = "bootstrap"
+)
+
 // contentEntry is one minted token→body binding. Single-purpose: a token maps
 // to exactly one body for its whole lifetime (one body per token); it is
 // never reused or rebound.
 type contentEntry struct {
 	body    string
+	kind    entryKind // BACK-09: capability class, checked BEFORE the consume
 	expires time.Time
 	minted  time.Time
 }
@@ -70,17 +91,21 @@ func newContentStore(now func() time.Time) *contentStore {
 	return &contentStore{now: now, entries: make(map[string]contentEntry)}
 }
 
-// mintContent stores body under a fresh single-purpose token valid for ttl
-// and returns the token and its expiry instant. Expired entries are pruned
-// first; if the store is still at maxContentEntries, the oldest entry is
-// dropped with a warning (metadata only — never body content in the log).
-func (c *contentStore) mintContent(body string, ttl time.Duration) (string, time.Time) {
+// mintKind stores body under a fresh single-purpose token of the given
+// capability class and prefix, valid for ttl, and returns the token and its
+// expiry instant (BACK-09). It generalizes mintContent: the IDENTICAL lock →
+// prune → drop-oldest-to-cap → insert sequence, stamping kind on the entry.
+// Expired entries are pruned first; if the store is still at maxContentEntries,
+// the oldest entry is dropped with a warning (metadata only — never body
+// content in the log). Bootstrap entries share this map, so they are counted
+// and 512-bounded exactly like content entries.
+func (c *contentStore) mintKind(prefix string, kind entryKind, body string, ttl time.Duration) (string, time.Time) {
 	buf := make([]byte, 16)
 	// crypto/rand.Read never returns an error on Go >= 1.24 (the runtime
 	// aborts if the OS entropy source is broken), so this cannot fail in
 	// normal control flow.
 	_, _ = rand.Read(buf)
-	token := contentTokenPrefix + base64.RawURLEncoding.EncodeToString(buf)
+	token := prefix + base64.RawURLEncoding.EncodeToString(buf)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -90,8 +115,22 @@ func (c *contentStore) mintContent(body string, ttl time.Duration) (string, time
 		c.dropOldestLocked()
 	}
 	expires := now.Add(ttl)
-	c.entries[token] = contentEntry{body: body, expires: expires, minted: now}
+	c.entries[token] = contentEntry{body: body, kind: kind, expires: expires, minted: now}
 	return token, expires
+}
+
+// mintContent stores body under a fresh single-purpose content token valid for
+// ttl and returns the token and its expiry instant. Thin wrapper over mintKind
+// (kindContent) — the BACK-06 signature and behavior are preserved unchanged.
+func (c *contentStore) mintContent(body string, ttl time.Duration) (string, time.Time) {
+	return c.mintKind(contentTokenPrefix, kindContent, body, ttl)
+}
+
+// mintBootstrap stores body under a fresh single-use first-contact
+// credential-bundle token valid for ttl (BACK-09). The token carries the
+// bootstrapTokenPrefix and is served bearer-LESS by GET /enroll/{token}.
+func (c *contentStore) mintBootstrap(body string, ttl time.Duration) (string, time.Time) {
+	return c.mintKind(bootstrapTokenPrefix, kindBootstrap, body, ttl)
 }
 
 // getContent returns the body bound to token, or ("", false) when the token
@@ -103,24 +142,37 @@ func (c *contentStore) getContent(token string) (string, bool) {
 	return c.lookupContent(token, true)
 }
 
-// lookupContent is getContent with an explicit consume flag. It always does the
-// same work (lock + prune + map lookup) regardless of consume, so the handler
-// can run an identical lookup on both the authed and the auth-failed path
-// (Finding 3: no bearer-validity timing oracle from skipping the prune). When
-// consume is true the entry is deleted (single-use); when false the entry is
-// left intact — an auth-failed request must NEVER consume a valid token.
-func (c *contentStore) lookupContent(token string, consume bool) (string, bool) {
+// lookupKind is the kind-aware lookup core (BACK-09). It always does the SAME
+// work (lock + prune + map lookup) regardless of outcome, so a handler can run
+// an identical lookup on every path — no timing oracle distinguishes an absent,
+// expired, or wrong-class token (all return ("", false) → the same uniform
+// 404). The capability-class guard `e.kind != want` sits INSIDE the critical
+// section, BEFORE the single-use delete, so a class mismatch is a MISS that
+// DELETES NOTHING: a cross-class probe can never burn a victim's live token
+// (the one load-bearing BACK-09 invariant; Pitfall 1). When kind matches and
+// consume is true the entry is deleted (single-use); when consume is false the
+// entry is left intact — an auth-failed request must NEVER consume a valid
+// token.
+func (c *contentStore) lookupKind(token string, want entryKind, consume bool) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pruneLocked(c.now())
 	e, ok := c.entries[token]
-	if !ok {
+	if !ok || e.kind != want {
 		return "", false
 	}
 	if consume {
 		delete(c.entries, token)
 	}
 	return e.body, true
+}
+
+// lookupContent is getContent with an explicit consume flag. Thin wrapper over
+// lookupKind (kindContent) so the bearer-gated /content/ route rejects a
+// bootstrap token automatically (kind mismatch → uniform miss). The BACK-06
+// constant-work / single-use behavior is preserved unchanged.
+func (c *contentStore) lookupContent(token string, consume bool) (string, bool) {
+	return c.lookupKind(token, kindContent, consume)
 }
 
 // len reports the current entry count (test/diagnostic accessor).
@@ -139,21 +191,39 @@ func (c *contentStore) pruneLocked(now time.Time) {
 	}
 }
 
-// dropOldestLocked removes the entry with the earliest mint time (bounded
-// store, drop-oldest). NET-11 voice: the drop is logged, never silent —
-// metadata only, no body content and no token value in the log line. Caller
-// holds c.mu and guarantees len(c.entries) > 0.
+// dropOldestLocked removes one entry to keep the store within maxContentEntries
+// (bounded store, drop-oldest). It PREFERS the oldest content entry as the
+// victim and evicts a bootstrap entry ONLY when every entry is a bootstrap one
+// (BACK-09). Rationale: a first-contact bootstrap token is rare (one per active
+// enrollment), long-lived (it must survive its full enroll TTL until the phone
+// scans the QR), and the single most important entry to preserve — a
+// class-blind drop-oldest would always target it FIRST (it is both the oldest
+// and the longest-lived), silently breaking enrollment under content-mint
+// churn. Exempting it costs almost nothing (bootstrap entries are few and
+// short-TTL bounded) while keeping the 512-entry memory bound intact. NET-11
+// voice: the drop is logged, never silent — metadata only (kind + age), no body
+// content and no token value in the log line. Caller holds c.mu and guarantees
+// len(c.entries) > 0.
 func (c *contentStore) dropOldestLocked() {
 	var oldestTok string
 	var oldest time.Time
+	var oldestKind entryKind
 	first := true
 	for tok, e := range c.entries {
-		if first || e.minted.Before(oldest) {
-			oldestTok, oldest, first = tok, e.minted, false
+		// A content candidate always beats a bootstrap one; within the same
+		// class the earliest mint wins. So the selection converges to the
+		// oldest content entry, falling back to the oldest bootstrap entry only
+		// when no content entry exists.
+		better := first ||
+			(oldestKind == kindBootstrap && e.kind == kindContent) ||
+			(oldestKind == e.kind && e.minted.Before(oldest))
+		if better {
+			oldestTok, oldest, oldestKind, first = tok, e.minted, e.kind, false
 		}
 	}
 	slog.Warn("daemon: content store full — dropping oldest entry",
-		"max_entries", maxContentEntries, "dropped_age", c.now().Sub(oldest).String())
+		"max_entries", maxContentEntries, "dropped_kind", string(oldestKind),
+		"dropped_age", c.now().Sub(oldest).String())
 	delete(c.entries, oldestTok)
 }
 

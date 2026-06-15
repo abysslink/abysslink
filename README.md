@@ -125,7 +125,7 @@ The mesh-VPN model means **your phone and laptop talk directly to each other.** 
 - **No secrets on argv, ever** — API keys and passwords are read from stdin or the OS keychain (macOS `security`, Linux `secret-tool` / `pass`), never passed as flags. The audit log records titles and diff hashes — **never body content** that could contain a token.
 - **Signed, reproducible releases** — builds are reproducible (`SOURCE_DATE_EPOCH` from git, `-trimpath`), and `abysslink upgrade` / `abysslink verify` refuse to install a binary without a valid [cosign](https://github.com/sigstore/cosign) signature and SLSA provenance. Upgrade refuses to run as root.
 - **Sandboxed where the OS allows it** — Linux Landlock confines filesystem access for sensitive operations.
-- **Per-device, revocable credentials** — `abysslink enroll phone` mints a per-device push token, a bearer credential, and a short-lived **SSH certificate** from an in-process CA (keys in the OS keychain). `abysslink panic` and `abysslink device revoke` revoke them atomically — the daemon stops honouring the bearer immediately and `sshd` rejects the revoked certificate (via an auto-installed CA-trust + revocation list). Device `last_seen` is tracked and stale devices are flagged.
+- **Per-device, revocable credentials** — `abysslink enroll phone` mints a per-device push token, a bearer credential, and a short-lived **SSH certificate** from an in-process CA (keys in the OS keychain). When the daemon is reachable it stages the bundle and prints one single-use QR your phone scans to pull every credential over the tailnet (no key hand-copying); the one-time secret box still prints as the source of truth, and `--qr` is the offline per-credential fallback. `abysslink panic` and `abysslink device revoke` revoke them atomically — the daemon stops honouring the bearer immediately and `sshd` rejects the revoked certificate (via an auto-installed CA-trust + revocation list). Device `last_seen` is tracked and stale devices are flagged.
 - **Emergency kill switch** — `abysslink panic` tears down the VPN session, revokes the phone's auth key, and destroys the local API key in seconds, with **no confirmation prompt**.
 
 ---
@@ -238,7 +238,8 @@ abysslink up
 abysslink up --apply
 
 # 4. Pair your phone — mints a tagged auth key and shows an ANSI QR code
-#    (dry-run by default too: --apply does the actual pairing)
+#    (dry-run by default too: --apply does the actual pairing). When the daemon
+#    is up it also prints one single-use QR to pull all credentials over the tailnet.
 abysslink enroll phone --apply
 
 # 5. Deep health check — exits 0 (ok) / 1 (warn) / 2 (fatal)
@@ -273,7 +274,7 @@ abysslink repair                  # auto-fix what doctor flagged
 ### Drive terminals & notifications
 
 ```bash
-abysslink enroll phone --apply            # pair a phone (QR + poll for join)
+abysslink enroll phone --apply            # pair a phone (QR + poll for join; one-scan credential pull)
 abysslink notify "deploy done" "v1.2.3"   # one-off push
 abysslink notify -- npm run build         # push when the wrapped command exits
 abysslink watch add --pane 0 --apply      # buzz when a tmux pane goes idle at a prompt

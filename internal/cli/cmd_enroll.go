@@ -23,14 +23,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/qr"
@@ -535,7 +539,13 @@ func newEnrollPhoneCmd() *cobra.Command {
 				return fmt.Errorf("enroll phone: device credentials: %w", mintErr)
 			}
 			showQR, _ := cmd.Flags().GetBool("qr")
-			printDeviceBundle(p, cmd.OutOrStdout(), cc.jsonOut, bundle, rotated, showQR)
+			// Resolve the rig's connection coordinates so the bundle carries
+			// ready-to-paste ssh/mosh commands (no host/user typing on the phone).
+			conn := sshConnInfo{Host: resolveSSHHost(ctx, b), User: currentSSHUser(), Port: 22}
+			// DEVC-07: pull is the DEFAULT. Stage the bundle into the running
+			// daemon and print ONE capability-URL QR; the box always prints, and
+			// any staging failure degrades gracefully (never errors enrollment).
+			offerCredentialPull(ctx, p, cmd.OutOrStdout(), cc.jsonOut, bundle, rotated, showQR, conn)
 
 			// Printable runbook for the remaining manual steps.
 			// §7 note 10 (lock-screen hygiene) fires here alongside the runbook.
@@ -718,15 +728,205 @@ func mintPhoneDeviceBundle(ctx context.Context, st *device.Store) (*device.Bundl
 // any of these fields, and they cannot be recovered after this record is
 // emitted.
 type deviceBundleRecord struct {
+	// Field order IS the phone-page render order (the daemon renders the staged
+	// JSON in document order). Lead with what the operator acts on — the ready
+	// ssh/mosh commands, then the two files to import (key + cert) — then
+	// reference (host/user/port), then the notification tokens, then metadata.
+	// The ssh_* connect fields are omitempty: when the rig's tailnet host can't
+	// be resolved they drop out cleanly (the secrets still ship).
 	Device           string `json:"device"`
-	Rotated          bool   `json:"rotated"`
-	Bearer           string `json:"bearer"`
-	PushToken        string `json:"push_token"`
+	SSHCommand       string `json:"ssh_command,omitempty"`
+	MoshCommand      string `json:"mosh_command,omitempty"`
 	SSHPrivateKeyPEM string `json:"ssh_private_key_pem"`
 	SSHCertificate   string `json:"ssh_certificate"`
+	SSHHost          string `json:"ssh_host,omitempty"`
+	SSHUser          string `json:"ssh_user,omitempty"`
+	SSHPort          int    `json:"ssh_port,omitempty"`
+	Bearer           string `json:"bearer"`
+	PushToken        string `json:"push_token"`
 	CAPublicKey      string `json:"ca_public_key"`
 	CertNotAfter     string `json:"cert_not_after"`
+	Rotated          bool   `json:"rotated"`
 	Warning          string `json:"warning"`
+}
+
+// sshConnInfo is the rig's connection coordinates, resolved at enroll time and
+// embedded in the bundle so the phone never has to type a host/user/command.
+type sshConnInfo struct {
+	Host string // MagicDNS FQDN (preferred) or tailnet IP
+	User string // the rig login user the phone connects as
+	Port int    // SSH port (22 — abysslink hardens the standard sshd / Tailscale SSH)
+}
+
+// flags renders the shared ssh client flags: the key file the phone saves
+// (matches the Download filename), plus -p when the port is non-standard.
+func (c sshConnInfo) flags() string {
+	f := "-i abysslink_phone"
+	if c.Port != 0 && c.Port != 22 {
+		f += " -p " + strconv.Itoa(c.Port)
+	}
+	return f
+}
+
+func (c sshConnInfo) sshCommand() string {
+	return fmt.Sprintf("ssh %s %s@%s", c.flags(), c.User, c.Host)
+}
+
+// moshCommand is the recommended persistent path (roaming mosh + a resumable
+// tmux session) — the same shape as the quickstart.
+func (c sshConnInfo) moshCommand() string {
+	return fmt.Sprintf("mosh --ssh=%q %s@%s -- tmux new -A -s main", "ssh "+c.flags(), c.User, c.Host)
+}
+
+// resolveSSHHost returns the rig's MagicDNS FQDN (preferred — survives IP
+// changes and matches the cert) or its first tailnet IP, or "" when the backend
+// can't report one (the connect fields are then omitted, never fabricated).
+func resolveSSHHost(ctx context.Context, b backend.Client) string {
+	st, err := b.Status(ctx)
+	if err != nil || st == nil || st.Self == nil {
+		return ""
+	}
+	host := strings.TrimRight(st.Self.DNSName, ".")
+	if host == "" && len(st.Self.TailscaleIPs) > 0 {
+		host = st.Self.TailscaleIPs[0].String()
+	}
+	return host
+}
+
+// currentSSHUser is the rig login user the phone authenticates as (the hardened
+// sshd AllowUsers entry / Tailscale SSH user).
+func currentSSHUser() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return os.Getenv("USER")
+}
+
+// enrollStageFn is the test seam over the daemon staging call (mirrors the
+// notifySendMessage / fetchDaemonStatus seams). The default marshals the shared
+// deviceBundleRecord and POSTs it to the running daemon over the unix socket;
+// the bundle travels ONLY in the request body, never on argv (CLAUDE.md). Tests
+// override it to inject a fake capability URL or a transport error without a
+// live daemon. A ttl of 0 lets the daemon apply its configured default.
+var enrollStageFn = func(ctx context.Context, b *device.Bundle, rotated bool, conn sshConnInfo) (*daemon.EnrollStageResult, error) { //nolint:gochecknoglobals // gochecknoglobals: package-level var is a test/injection seam; intentional
+	raw, err := marshalStagedBundle(b, rotated, conn)
+	if err != nil {
+		return nil, fmt.Errorf("enroll phone: marshal bundle: %w", err)
+	}
+	dc := daemon.NewClient()
+	defer dc.CloseIdleConnections()
+	return dc.Stage(ctx, raw, 0)
+}
+
+// marshalStagedBundle produces the EXACT bytes the daemon stages and the phone
+// pulls (BACK-09). It is the single staged-wire producer — separated from the
+// enrollStageFn seam so a no-drift test can assert these bytes against the
+// `--json` output without a live daemon (T-28.2-14). It marshals the shared
+// newDeviceBundleRecord, so the staged wire shape and the documented `--json`
+// contract are byte-identical by construction.
+func marshalStagedBundle(b *device.Bundle, rotated bool, conn sshConnInfo) ([]byte, error) {
+	return json.Marshal(newDeviceBundleRecord(b, rotated, conn))
+}
+
+// tryStageBundle stages the freshly minted bundle into the running daemon via
+// the enrollStageFn seam. It is the single injection point the orchestrator
+// calls.
+func tryStageBundle(ctx context.Context, b *device.Bundle, rotated bool, conn sshConnInfo) (*daemon.EnrollStageResult, error) {
+	return enrollStageFn(ctx, b, rotated, conn)
+}
+
+// offerCredentialPull is the pull-DEFAULT enroll UX (DEVC-07). It stages the
+// freshly minted bundle into the running daemon and, on success, prints ONE
+// short capability-URL QR with a single-use prompt; the one-time secret box
+// ALWAYS prints afterward as the source of truth (the pull is a typing
+// convenience, NOT a confidentiality upgrade — DEVC-07 LOCKED). On ANY staging
+// failure (daemon down, content listener disabled, stage error) it degrades to
+// a one-line notice + the box (+ the per-credential QRs iff --qr was set). It
+// NEVER returns an error: a failed pull must never block or error enrollment
+// (T-28.2-13), and it NEVER logs or persists the URL/bundle (T-28.2-12 — only
+// the opaque error is logged at debug).
+func offerCredentialPull(ctx context.Context, p Printer, out io.Writer, jsonOut bool, b *device.Bundle, rotated, showQR bool, conn sshConnInfo) {
+	res, err := tryStageBundle(ctx, b, rotated, conn)
+	if err != nil || res == nil || res.URL == "" {
+		// Degrade on ANY staging failure (transport OR daemon rejection) OR a
+		// malformed result: a nil/empty-URL reply has nothing to scan, and the
+		// stage seam is overridable, so never dereference it blindly. Log the
+		// ERROR ONLY — never the URL, token, or bundle (CLAUDE.md / T-28.2-12).
+		if err != nil {
+			slog.Debug("enroll phone: bundle staging failed; showing credentials inline", "err", err)
+		}
+		printStageDegradedNotice(p)
+		printDeviceBundle(p, out, jsonOut, b, rotated, showQR, conn)
+		return
+	}
+	printOneScanQR(p, out, jsonOut, res)
+	// The box ALWAYS prints — source of truth, regardless of the pull.
+	printDeviceBundle(p, out, jsonOut, b, rotated, showQR, conn)
+}
+
+// printOneScanQR renders the single-use capability URL as one ANSI QR (a ~60-
+// char URL renders ~30 cols via half-block — fits an 80-column terminal) with a
+// clear single-use prompt. The URL is rendered ONLY as a QR (and as a typed
+// record under --json via printQR) — never written to disk or logged.
+func printOneScanQR(p Printer, out io.Writer, jsonOut bool, res *daemon.EnrollStageResult) {
+	minutes := res.TTLSeconds / 60
+	if minutes < 1 {
+		minutes = 1
+	}
+	printerInfo(p, "")
+	printerInfo(p, fmt.Sprintf("Scan with your phone to pull your credentials — single use, expires in %d minutes:", minutes))
+	printQR(p, out, jsonOut, "enroll-pull-url", res.URL)
+	// Also print the URL as text (human mode only — under --json it is already a
+	// typed record) so the operator can open it directly when scanning is
+	// inconvenient. It is a single-use, short-TTL capability; printing it to the
+	// local terminal is no broader an exposure than the secret box right below.
+	if !jsonOut {
+		printerInfo(p, "")
+		printerInfo(p, "Or open this link once (do NOT send it via a messaging app — link previews consume it):")
+		printerInfo(p, "  "+res.URL)
+	}
+}
+
+// printStageDegradedNotice prints the graceful-degradation notice when staging
+// is unavailable, and tells the operator how to enable the one-scan pull (the
+// daemon is what serves it). Output goes through the Printer only (never
+// fmt.Println — CLAUDE.md).
+func printStageDegradedNotice(p Printer) {
+	printerInfo(p, styleWarn.Render("daemon not reachable — showing credentials inline"))
+	printerInfo(p, styleMuted.Render("  for the one-scan pull QR, start the daemon: abysslink daemon enable --apply"))
+}
+
+// newDeviceBundleRecord builds the JSON-encodable record for a device bundle.
+// It is the SINGLE source of the wire shape: both the `--json` print path
+// (printDeviceBundle) and the one-scan staging body (enrollStageFn) marshal
+// THIS constructor, so the documented `--json` contract and the bytes the phone
+// pulls over the tailnet can never drift (T-28.2-14). The warning string is
+// byte-identical across both paths by construction.
+func newDeviceBundleRecord(b *device.Bundle, rotated bool, conn sshConnInfo) deviceBundleRecord {
+	rec := deviceBundleRecord{
+		Device:           b.Name,
+		Rotated:          rotated,
+		SSHHost:          conn.Host,
+		SSHUser:          conn.User,
+		SSHPrivateKeyPEM: b.SSHPrivateKeyPEM,
+		SSHCertificate:   b.SSHCertAuthorizedKey,
+		Bearer:           b.Bearer,
+		PushToken:        b.PushToken,
+		CAPublicKey:      b.CAPublicKeyAuthorizedKey,
+		CertNotAfter:     b.CertNotAfter.UTC().Format(time.RFC3339),
+		Warning:          "one-time secrets -- shown once and never stored by abysslink; persisting this record is your choice",
+	}
+	// Compose the ready-to-paste commands only when the host + user are known
+	// (omitempty drops them otherwise — never a half-built command). The port is
+	// recorded only when non-standard, to keep the page tidy.
+	if conn.Host != "" && conn.User != "" {
+		if conn.Port != 0 && conn.Port != 22 {
+			rec.SSHPort = conn.Port
+		}
+		rec.SSHCommand = conn.sshCommand()
+		rec.MoshCommand = conn.moshCommand()
+	}
+	return rec
 }
 
 // printDeviceBundle prints the one-time device credential bundle exactly once,
@@ -734,19 +934,10 @@ type deviceBundleRecord struct {
 // Lock disablement secrets. Nothing in the bundle is ever written to disk by
 // abysslink — the runbook only records THAT enrollment happened and the cert
 // expiry, never a secret.
-func printDeviceBundle(p Printer, out io.Writer, jsonOut bool, b *device.Bundle, rotated, showQR bool) {
+func printDeviceBundle(p Printer, out io.Writer, jsonOut bool, b *device.Bundle, rotated, showQR bool, conn sshConnInfo) {
+	rec := newDeviceBundleRecord(b, rotated, conn)
 	if jsonOut {
-		p.PrintJSON(deviceBundleRecord{
-			Device:           b.Name,
-			Rotated:          rotated,
-			Bearer:           b.Bearer,
-			PushToken:        b.PushToken,
-			SSHPrivateKeyPEM: b.SSHPrivateKeyPEM,
-			SSHCertificate:   b.SSHCertAuthorizedKey,
-			CAPublicKey:      b.CAPublicKeyAuthorizedKey,
-			CertNotAfter:     b.CertNotAfter.UTC().Format(time.RFC3339),
-			Warning:          "one-time secrets — shown once and never stored by abysslink; persisting this record is your choice",
-		})
+		p.PrintJSON(rec)
 		return
 	}
 
@@ -759,6 +950,20 @@ func printDeviceBundle(p Printer, out io.Writer, jsonOut bool, b *device.Bundle,
 	printerInfo(p, title)
 	printerInfo(p, "│  Shown ONCE — store these in your phone's SSH client / shortcut NOW.")
 	printerInfo(p, "│  Abysslink never writes them to disk; they cannot be shown again.")
+	if rec.SSHHost != "" {
+		printerInfo(p, "│")
+		printerInfo(p, "│  Host:          "+rec.SSHHost)
+		printerInfo(p, "│  User:          "+rec.SSHUser)
+		if rec.SSHPort != 0 {
+			printerInfo(p, "│  SSH port:      "+strconv.Itoa(rec.SSHPort))
+		}
+	}
+	if rec.SSHCommand != "" {
+		printerInfo(p, "│")
+		printerInfo(p, "│  Connect (after saving the key below as ~/.ssh/abysslink_phone):")
+		printerInfo(p, "│    "+rec.SSHCommand)
+		printerInfo(p, "│    "+rec.MoshCommand)
+	}
 	printerInfo(p, "│")
 	printerInfo(p, "│  Bearer token:  "+b.Bearer)
 	printerInfo(p, "│  Push token:    "+b.PushToken)

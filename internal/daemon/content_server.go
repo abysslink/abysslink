@@ -146,7 +146,29 @@ func (r backendHostResolver) Hostname(ctx context.Context) (host string, err err
 	if berr != nil || b == nil {
 		return "", fmt.Errorf("daemon: backend unavailable: %w", berr)
 	}
+	// PREFER the full MagicDNS name (Status.Self.DNSName, e.g.
+	// "rig.tail1234.ts.net.") over the short HostName ("rig"): the advertised
+	// FetchRef host must match the Tailscale-issued cert SAN, which is the FQDN.
+	// Client.Hostname returns only the short HostName, which fails the .ts.net
+	// suffix check in resolveContentAdvertiseHost and silently degrades the pull
+	// URL to the bind IP (a TLS-SAN mismatch on the phone). Fall back to the
+	// short hostname only when DNSName is unavailable.
+	if st, serr := b.Status(ctx); serr == nil {
+		if dns := selfDNSName(st); dns != "" {
+			return dns, nil
+		}
+	}
 	return b.Hostname(ctx)
+}
+
+// selfDNSName returns this node's MagicDNS FQDN from a backend status, or "" if
+// unavailable. The returned name may carry a trailing dot (resolveContentAdvertiseHost
+// trims it before the *.ts.net suffix check).
+func selfDNSName(st *backend.Status) string {
+	if st != nil && st.Self != nil {
+		return st.Self.DNSName
+	}
+	return ""
 }
 
 // SetDeviceStore injects the enrolled-device registry consumed by the content
@@ -260,48 +282,110 @@ func (s *Server) resolveContentAdvertiseHost(ctx context.Context, bindIP string,
 	return host
 }
 
+// probeContentCert eagerly fetches the TLS leaf ONCE so a tailnet with HTTPS
+// Certificates disabled (or otherwise unable to mint a cert) fails closed with
+// an honest reason rather than binding a listener whose every handshake later
+// dies silently. It returns true (proceed) when the probe succeeds OR when it
+// is deliberately skipped; it calls disableContent and returns false only on a
+// genuine probe failure.
+//
+// Skip conditions (NOT failures):
+//   - tlsCfg.GetCertificate is nil: the cert is served from a static
+//     tlsCfg.Certificates slice (the test seam, and any non-localapi provider),
+//     so there is nothing to probe — the listener will use it directly.
+//   - advertiseHost is a bare IP, not a *.ts.net hostname: the leaf is issued
+//     for the MagicDNS FQDN, so a SAN-correct probe needs the hostname. When we
+//     are advertising a bare IP (the degraded resolveContentAdvertiseHost
+//     fallback) a phone TLS verify would already fail on its own; probing with
+//     an IP ServerName would false-disable a listener that may still work for a
+//     client that trusts the IP, so we skip and let the existing degraded path
+//     stand.
+func (s *Server) probeContentCert(tlsCfg *tls.Config, advertiseHost string) bool {
+	if tlsCfg.GetCertificate == nil {
+		return true
+	}
+	// Only probe when the advertise host is a MagicDNS hostname (the SAN the
+	// Tailscale leaf is issued for). A bare IP means we are already in the
+	// degraded advertise path; do not false-disable on it.
+	if net.ParseIP(advertiseHost) != nil || !strings.Contains(advertiseHost, ".") {
+		return true
+	}
+	if _, certErr := tlsCfg.GetCertificate(&tls.ClientHelloInfo{ServerName: advertiseHost}); certErr != nil {
+		s.disableContent("tailnet HTTPS certs unavailable — enable HTTPS Certificates in the Tailscale admin DNS page (https://login.tailscale.com/admin/dns)", "err", certErr)
+		return false
+	}
+	return true
+}
+
+// resolveContentPreconditions runs every fail-closed gate that must pass before
+// the content listener can bind: config enabled + valid, a device store, a TLS
+// provider, a confirmed tailnet bind IP, a resolvable advertise host, real TLS
+// material, and an eager cert probe. It returns (host, advertiseHost, tlsCfg,
+// true) when the listener may proceed; on any failure it calls disableContent
+// with the specific reason and returns ok=false. Extracted from
+// startContentServer to keep that function under the gocyclo ceiling.
+func (s *Server) resolveContentPreconditions(ctx context.Context) (host, advertiseHost string, tlsCfg *tls.Config, ok bool) {
+	if s.cfg == nil || !s.cfg.ContentStore.Enabled {
+		s.disableContent("content_store.enabled is false")
+		return "", "", nil, false
+	}
+	// Re-enforce the config floor at the listener seam (the CR-02 pattern):
+	// a programmatically-built config bypassing Load must still fail closed.
+	if err := config.ValidateContentStore(s.cfg); err != nil {
+		s.disableContent("invalid content_store config", "err", err)
+		return "", "", nil, false
+	}
+	if s.devices == nil {
+		s.disableContent("no device store (bearer auth unavailable)")
+		return "", "", nil, false
+	}
+	if s.contentTLS == nil {
+		s.disableContent("TLS material unavailable (no certificate provider)")
+		return "", "", nil, false
+	}
+	resolver := s.contentResolver
+	if resolver == nil {
+		resolver = backendIPResolver{cfg: s.cfg, runner: s.runner}
+	}
+	host, addrOK := s.resolveContentAddr(ctx, resolver)
+	if !addrOK {
+		// resolveContentAddr already logged the specific reason.
+		s.disableContent("bind address could not be confirmed as the tailnet IP (BACK-06)")
+		return "", "", nil, false
+	}
+	// Resolve the advertise host (Finding 2): prefer the *.ts.net MagicDNS name
+	// so a TLS-verifying phone fetch verifies against the cert SAN. This NEVER
+	// fails the listener — a missing/non-ts.net hostname falls back to the bind
+	// IP (degraded). The listener still binds `host` (the tailnet IP).
+	advertiseHost = s.resolveContentAdvertiseHost(ctx, host, s.hostResolverOrDefault())
+	cfg, err := s.contentTLS(ctx)
+	if err != nil || cfg == nil {
+		s.disableContent("TLS material unavailable", "err", err)
+		return "", "", nil, false
+	}
+	// Eager cert probe (Finding: silent TLS-handshake failure). The content
+	// listener serves the leaf via GetCertificate (the Tailscale localapi cert
+	// path) LAZILY — so with HTTPS Certificates DISABLED on the tailnet, the
+	// listener binds and /status reads "listening", yet every phone TLS
+	// handshake dies ("server stopped responding"). Probe the cert ONCE here so
+	// that failure surfaces as an honest disabled-with-reason instead of a
+	// cryptic runtime handshake error. If the probe fails we fail closed — a
+	// listener that can never complete a handshake is worse than no listener.
+	if !s.probeContentCert(cfg, advertiseHost) {
+		return "", "", nil, false
+	}
+	return host, advertiseHost, cfg, true
+}
+
 // startContentServer resolves the tailnet-only bind address, builds the TLS
 // listener, and serves the content endpoints until ctx is cancelled
 // (BACK-06). Every precondition failure disables the listener with one honest
 // warning while the daemon and its unix socket keep running; "fail closed"
 // here always means NO listener — never a wider bind, never plaintext.
 func (s *Server) startContentServer(ctx context.Context) {
-	if s.cfg == nil || !s.cfg.ContentStore.Enabled {
-		s.disableContent("content_store.enabled is false")
-		return
-	}
-	// Re-enforce the config floor at the listener seam (the CR-02 pattern):
-	// a programmatically-built config bypassing Load must still fail closed.
-	if err := config.ValidateContentStore(s.cfg); err != nil {
-		s.disableContent("invalid content_store config", "err", err)
-		return
-	}
-	if s.devices == nil {
-		s.disableContent("no device store (bearer auth unavailable)")
-		return
-	}
-	if s.contentTLS == nil {
-		s.disableContent("TLS material unavailable (no certificate provider)")
-		return
-	}
-	resolver := s.contentResolver
-	if resolver == nil {
-		resolver = backendIPResolver{cfg: s.cfg, runner: s.runner}
-	}
-	host, ok := s.resolveContentAddr(ctx, resolver)
+	host, advertiseHost, tlsCfg, ok := s.resolveContentPreconditions(ctx)
 	if !ok {
-		// resolveContentAddr already logged the specific reason.
-		s.disableContent("bind address could not be confirmed as the tailnet IP (BACK-06)")
-		return
-	}
-	// Resolve the advertise host (Finding 2): prefer the *.ts.net MagicDNS name
-	// so a TLS-verifying phone fetch verifies against the cert SAN. This NEVER
-	// fails the listener — a missing/non-ts.net hostname falls back to the bind
-	// IP (degraded). The listener still binds `host` (the tailnet IP) below.
-	advertiseHost := s.resolveContentAdvertiseHost(ctx, host, s.hostResolverOrDefault())
-	tlsCfg, err := s.contentTLS(ctx)
-	if err != nil || tlsCfg == nil {
-		s.disableContent("TLS material unavailable", "err", err)
+		// resolveContentPreconditions already disabled with the specific reason.
 		return
 	}
 
@@ -369,6 +453,7 @@ func (s *Server) startContentServer(ctx context.Context) {
 func (s *Server) buildContentMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /content/{token}", s.handleContent)
+	mux.HandleFunc("GET /enroll/{token}", s.handleBootstrap) // BACK-09: bearer-LESS first-contact pull
 	mux.HandleFunc("POST /ack", s.handleAck)
 	return mux
 }
@@ -416,11 +501,69 @@ func (s *Server) handleContent(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if _, err := w.Write([]byte(body)); err != nil {
+	// #nosec G705 -- not XSS: Content-Type is text/plain (set above), never
+	// text/html, so the browser does not parse the body as markup; the body is a
+	// server-minted notification body, not attacker-controlled HTML. (gosec's
+	// taint analysis flags it only because the BACK-09 /enroll/stage input now
+	// shares the content store; the served content-type is the real guard.)
+	if _, err := w.Write([]byte(body)); err != nil { //nosec G705
 		slog.Debug("daemon: content write failed", "err", err)
 	}
 	if err := s.devices.TouchLastSeen(r.Context(), rec.ID, time.Now()); err != nil {
 		slog.Debug("daemon: touch last-seen failed", "err", err)
+	}
+}
+
+// handleBootstrap serves GET /enroll/{token} (BACK-09): the first-contact,
+// bearer-LESS credential-bundle pull. There is NO device bearer at first
+// contact — the high-entropy single-use token IS the only credential — so this
+// handler deliberately does NOT call verifyRequestBearer. The bootstrap KIND is
+// checked before the single-use consume (lookupKind), so a content token (or
+// any non-bootstrap token) is a uniform 404 that burns nothing — a bearer-less
+// /enroll request can never read a bearer-gated message body. Success returns
+// the staged bundle JSON as application/json with Cache-Control: no-store.
+//
+// Constant work + uniform 404: a bad token, an expired token, and a wrong-class
+// token are byte-identical empty-body 404s; lookupKind always runs the same
+// lock+prune work. Unlike handleContent there is no TouchLastSeen — the device
+// is not yet enrolled from the daemon's view, so there is no record to touch.
+func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	// A GET carries no meaningful body; cap it anyway (defense in depth).
+	r.Body = http.MaxBytesReader(w, r.Body, maxAckBody)
+	body, found := s.content.lookupKind(r.PathValue("token"), kindBootstrap, true)
+	if !found {
+		// A scanner/browser that opened a dead/expired/used link gets a clear
+		// "link expired" page instead of a blank white 404; an explicit JSON
+		// caller keeps the empty-body 404 (uniform, no-oracle — the page is
+		// generic). The constant-work lookup already ran above.
+		if wantsJSON(r) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writeEnrollNotFoundHTML(w)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	// HTML is the DEFAULT (the link is a QR for a human to scan): the formatted
+	// credential page with per-field Copy/Download. Only an explicit JSON caller
+	// (?format=json or Accept: application/json) gets raw JSON. Both are this
+	// single (already-consumed) response — no second fetch. On any HTML render
+	// error, fall back to JSON so the credentials are never lost.
+	if !wantsJSON(r) {
+		err := writeEnrollHTML(w, body)
+		if err == nil {
+			return
+		}
+		// HTML render failed — fall through to JSON so credentials are never lost.
+		slog.Debug("daemon: bootstrap html render failed; serving json", "err", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	// #nosec G705 -- not XSS: Content-Type is application/json (data, not markup);
+	// the human-facing page goes through html/template (writeEnrollHTML). The body
+	// is the server-staged bundle, served verbatim as JSON.
+	if _, err := w.Write([]byte(body)); err != nil { //nosec G705
+		// Opaque error only — never the body or token (CLAUDE.md no-secrets-in-log).
+		slog.Debug("daemon: bootstrap write failed", "err", err)
 	}
 }
 

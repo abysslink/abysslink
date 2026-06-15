@@ -36,6 +36,8 @@ As of v3.0.0, the threat surface has expanded to include per-backend trust model
 | Metrics endpoint exposed to internet | `doctor` FATAL on 0.0.0.0/:: bind_addr (sec-metrics-bind); hard floor in config.Validate |
 | Web UI exposed to internet or unauthenticated | `doctor` FATAL on 0.0.0.0/:: bind_addr (sec-webui-bind); WhoIs auth gate in handler; read_only:false rejected at schema level |
 | Audit log tampered or truncated | HMAC-signed entries; anchor-age WARN after 24h; chain integrity checked by `abysslink audit verify` |
+| Content store / credential pull exposed to internet | Hard floor: the content listener binds the tailnet IP only; `0.0.0.0`/`::` rejected by `config.ValidateContentStore` and re-checked at the listener seam (fail closed — no listener if the bind cannot be confirmed as the tailnet IP) |
+| Bearer-less first-contact credential pull abused (`GET /enroll/{token}`) | The phone has no bearer at first contact, so the capability is a high-entropy (≥128-bit) single-use token carried only in the QR'd URL (operator screen → phone camera): consumed on first success (a second fetch 404s), a short separate TTL (`content_store.enroll_ttl_seconds`, default 300s), tailnet-only TLS bind. It is a distinct capability class from `/content` — a bearer-less `/enroll` fetch can never read a bearer-gated message body. The staged bundle lives only in transient daemon memory (never on disk); the URL, token, and bundle never appear in any log |
 
 ## Backend: Tailscale
 

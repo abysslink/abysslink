@@ -257,6 +257,7 @@ func TestEnsureGrant_ExtendsGrantMissingRequiredPorts(t *testing.T) {
 	assert.Contains(t, got.Grants[0].IP, "tcp:443", "pre-existing ports must be kept")
 	assert.Contains(t, got.Grants[0].IP, "tcp:22")
 	assert.Contains(t, got.Grants[0].IP, "tcp:2586")
+	assert.Contains(t, got.Grants[0].IP, "tcp:2587")
 	assert.Contains(t, got.Grants[0].IP, "udp:60000-61000")
 }
 
@@ -274,7 +275,7 @@ func TestEnsureGrant_ExtendsGrantWithPartialPorts(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(e.Bytes(), &got))
 	require.Len(t, got.Grants, 1)
-	assert.ElementsMatch(t, []string{"tcp:22", "tcp:2586", "udp:60000-61000"}, got.Grants[0].IP)
+	assert.ElementsMatch(t, []string{"tcp:22", "tcp:2586", "tcp:2587", "udp:60000-61000"}, got.Grants[0].IP)
 }
 
 func TestEnsureGrant_WildcardPortsSatisfy(t *testing.T) {
@@ -290,7 +291,7 @@ func TestEnsureGrant_WildcardPortsSatisfy(t *testing.T) {
 func TestEnsureGrant_PortsSplitAcrossGrants(t *testing.T) {
 	// The union of all mobile→laptop grants covers the required set — no edit.
 	raw := `{"grants":[
-		{"src":["tag:mobile"],"dst":["tag:laptop"],"ip":["tcp:22","tcp:2586"]},
+		{"src":["tag:mobile"],"dst":["tag:laptop"],"ip":["tcp:22","tcp:2586","tcp:2587"]},
 		{"src":["tag:mobile"],"dst":["tag:laptop"],"ip":["udp:60000-61000"]}
 	]}`
 	e, err := tailscale.NewACLEditor([]byte(raw))

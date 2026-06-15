@@ -118,3 +118,135 @@ func TestMintContent_BoundedDropOldest(t *testing.T) {
 	require.True(t, ok, "the new entry must be present")
 	assert.Equal(t, "overflow", got)
 }
+
+// --- BACK-09: bootstrap (first-contact) capability class ---
+
+func TestMintBootstrap_TokenShape(t *testing.T) {
+	cs := newContentStore(nil)
+	tok1, exp := cs.mintBootstrap(`{"device":"phone"}`, time.Minute)
+	tok2, _ := cs.mintBootstrap(`{"device":"laptop"}`, time.Minute)
+
+	assert.True(t, strings.HasPrefix(tok1, bootstrapTokenPrefix), "token must carry the ablk_e_ prefix")
+	// 16 bytes base64url no-pad = 22 chars.
+	assert.Len(t, tok1, len(bootstrapTokenPrefix)+22)
+	assert.NotEqual(t, tok1, tok2, "tokens must be unique per mint")
+	assert.True(t, exp.After(time.Now()), "expiry must be in the future")
+}
+
+func TestLookupKind_SingleUse(t *testing.T) {
+	cs := newContentStore(nil)
+	tok, _ := cs.mintBootstrap("bundle-once", 30*time.Second)
+
+	body, ok := cs.lookupKind(tok, kindBootstrap, true)
+	require.True(t, ok, "first bootstrap lookup must resolve")
+	assert.Equal(t, "bundle-once", body)
+
+	_, ok = cs.lookupKind(tok, kindBootstrap, true)
+	assert.False(t, ok, "a replayed bootstrap token must serve nothing — single-use")
+	assert.Equal(t, 0, cs.len(), "consumed token must be removed")
+}
+
+// TestLookupKind_CrossClassNoConsume is the LOAD-BEARING BACK-09 regression: a
+// cross-class probe must return a MISS and DELETE NOTHING — the kind is checked
+// before the single-use delete, so a probe can never burn a victim's live
+// token. Asserted in BOTH directions (content↛bootstrap and bootstrap↛content).
+func TestLookupKind_CrossClassNoConsume(t *testing.T) {
+	cs := newContentStore(nil)
+
+	// content token probed via the bootstrap class → miss, no consume.
+	cTok, _ := cs.mintContent("content-body", time.Minute)
+	require.Equal(t, 1, cs.len())
+	_, ok := cs.lookupKind(cTok, kindBootstrap, true)
+	assert.False(t, ok, "a content token probed as bootstrap must miss")
+	assert.Equal(t, 1, cs.len(), "a cross-class probe must NOT burn the content token")
+	// The content token still resolves via its own class.
+	body, ok := cs.getContent(cTok)
+	require.True(t, ok, "the content token must survive the wrong-class probe")
+	assert.Equal(t, "content-body", body)
+
+	// bootstrap token probed via the content class (== lookupContent) → miss, no consume.
+	bTok, _ := cs.mintBootstrap("bootstrap-body", time.Minute)
+	require.Equal(t, 1, cs.len())
+	_, ok = cs.lookupContent(bTok, true)
+	assert.False(t, ok, "a bootstrap token probed as content must miss")
+	assert.Equal(t, 1, cs.len(), "a cross-class probe must NOT burn the bootstrap token")
+	// The bootstrap token still resolves via its own class.
+	body, ok = cs.lookupKind(bTok, kindBootstrap, true)
+	require.True(t, ok, "the bootstrap token must survive the wrong-class probe")
+	assert.Equal(t, "bootstrap-body", body)
+}
+
+func TestLookupKind_TTLExpiry(t *testing.T) {
+	clk := newContentClock()
+	cs := newContentStore(clk.now)
+	tok, _ := cs.mintBootstrap("ephemeral-bundle", 30*time.Second)
+
+	_, ok := cs.lookupKind(tok, kindBootstrap, false)
+	require.True(t, ok, "fresh bootstrap token must resolve")
+
+	clk.advance(31 * time.Second)
+	_, ok = cs.lookupKind(tok, kindBootstrap, true)
+	assert.False(t, ok, "expired bootstrap token must miss")
+	assert.Equal(t, 0, cs.len(), "expired entry must be pruned on lookup")
+}
+
+// TestMintBootstrap_CountedInCap proves bootstrap entries live in the same map
+// and are bounded by the 512-cap drop-oldest across both kinds.
+func TestMintBootstrap_CountedInCap(t *testing.T) {
+	clk := newContentClock()
+	cs := newContentStore(clk.now)
+
+	// Fill the store to the cap mixing content and bootstrap entries.
+	for i := 0; i < maxContentEntries; i++ {
+		if i%2 == 0 {
+			cs.mintContent(fmt.Sprintf("c-%d", i), time.Hour)
+		} else {
+			cs.mintBootstrap(fmt.Sprintf("b-%d", i), time.Hour)
+		}
+		clk.advance(time.Millisecond)
+	}
+	require.Equal(t, maxContentEntries, cs.len())
+
+	// One more bootstrap mint must drop-oldest, not grow past the cap.
+	cs.mintBootstrap("overflow-bundle", time.Hour)
+	assert.Equal(t, maxContentEntries, cs.len(),
+		"bootstrap entries must be counted by the 512-cap (drop-oldest across both kinds)")
+}
+
+// TestDropOldest_SparesBootstrapUnderContentFlood proves the BACK-09 eviction
+// invariant: a pending (not-yet-fetched) bootstrap token must SURVIVE a flood of
+// content tokens, even though it is the oldest + longest-lived entry. A
+// class-blind drop-oldest would evict it first and silently break first-contact
+// enrollment; drop-oldest must prefer content victims and spare bootstrap.
+func TestDropOldest_SparesBootstrapUnderContentFlood(t *testing.T) {
+	clk := newContentClock()
+	cs := newContentStore(clk.now)
+
+	// Mint the bootstrap token FIRST so it has the earliest mint time (the entry
+	// a class-blind drop-oldest would target) and a long TTL.
+	bootTok, _ := cs.mintBootstrap("enroll-bundle", 15*time.Minute)
+	clk.advance(time.Millisecond)
+
+	// Flood the store well past the cap with newer content tokens.
+	for i := 0; i < maxContentEntries+50; i++ {
+		cs.mintContent(fmt.Sprintf("flood-%d", i), time.Hour)
+		clk.advance(time.Millisecond)
+	}
+	assert.Equal(t, maxContentEntries, cs.len(), "store stays within the cap")
+
+	// The bootstrap token must still be fetchable — content churn evicted other
+	// content entries, never the pending bootstrap one.
+	body, ok := cs.lookupKind(bootTok, kindBootstrap, true)
+	require.True(t, ok, "pending bootstrap token must survive a content flood (BACK-09)")
+	assert.Equal(t, "enroll-bundle", body)
+
+	// Sanity: when ALL entries are bootstrap, drop-oldest still evicts one (the
+	// fallback path) so the cap is never exceeded.
+	cs2 := newContentStore(clk.now)
+	for i := 0; i < maxContentEntries+5; i++ {
+		cs2.mintBootstrap(fmt.Sprintf("b-%d", i), time.Hour)
+		clk.advance(time.Millisecond)
+	}
+	assert.Equal(t, maxContentEntries, cs2.len(),
+		"all-bootstrap store still respects the cap (drop-oldest falls back to bootstrap)")
+}

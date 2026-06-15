@@ -151,6 +151,13 @@ join the tailnet, shows a QR to subscribe in the ntfy app, and writes a
 printable runbook (`~/Documents/abysslink-runbook-*.md`) covering the manual SSO
 hardening steps (passkey, disabling SMS 2FA, lock-screen previews).
 
+When the `abysslinkd` daemon is running it also stages the device credentials
+and prints **one** single-use QR — scan it to pull every credential (SSH key +
+cert, bearer, push token) over the tailnet instead of hand-copying them; it
+expires in a few minutes (`content_store.enroll_ttl_seconds`). The one-time
+secret box still prints as the source of truth, and `--qr` adds per-credential
+QRs as an offline fallback.
+
 Then connect from an SSH client:
 
 1. iOS: [Blink Shell](https://blink.sh) (best mosh support) or [Termius](https://termius.com). Android: ConnectBot, or Termux from F-Droid for mosh.
