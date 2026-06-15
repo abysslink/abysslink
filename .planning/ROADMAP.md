@@ -60,7 +60,7 @@ Phases 22, 23, 23.1, 23.2, 24, 25, 26 (7 phases, 29 plans) — closes the 2026-0
 - [x] **Phase 27: Session-Aware Notification Backbone** - notify-v2 typed schema + shell.Runner streaming + GatedRunner seam + tmux -CC session registry + v2 dispatch over existing ntfy (executed 2026-06-10; verification found gaps — see 27-VERIFICATION.md) (completed 2026-06-10)
 - [x] **Phase 28: Device Enrollment v2 & Tailnet Content Delivery** - per-device revocable credentials (token/bearer/SSH cert, panic-wired) + tailnet-only content store + ack receipts + safe fallback titles (implemented 2026-06-11 via Fable multi-agent build outside the GSD plan loop; 3 adversarial review passes; cross-process revoke-race + FetchRef TLS-host fixes; see 28-SUMMARY.md) (completed 2026-06-11)
 - [x] **Phase 28.1: Device SSH CA sshd Integration** - auto-wire `TrustedUserCAKeys` to the device CA + enforce revocation via an `ssh-keygen -k` KRL referenced by `RevokedKeys`, both through the existing hardened-sshd reconcile path (DEVC-05/06; closes Phase 28's manual-CA-copy-paste + dead `RevokedSerials()` threads) (completed 2026-06-14)
-- [ ] **Phase 29: Push Gateway & Outbox** - push.Gateway interface + bbolt outbox; UnifiedPush/ntfy sovereign path shipped working, APNs/FCM interface-complete experimental
+- [x] **Phase 29: Push Gateway & Outbox** - push.Gateway interface + bbolt outbox; UnifiedPush/ntfy sovereign path shipped working, APNs/FCM interface-complete experimental (completed 2026-06-15)
 - [ ] **Phase 30: Phone Approve Loop** - signed single-use approve/deny bound to execution-closure hash, GatedRunner flips enforcing, pre-app bridges with tier policy, claudecode consumer
 - [ ] **Phase 31: Agent Kill-Switch ("Apoptosis")** - budget module: notify → SIGSTOP-then-ask → kill ladder, shadow-mode default, pgid kill, rollback offer, flight-recorder cast hash in audit chain
 - [ ] **Phase 32: Supply-Chain Depth & Trimmed Fortify** - SLSA L3 + Scorecard + Syft/Grype/VEX, doctor external version floors, cheap MED gaps, at-risk profile + dead-man switch
@@ -492,20 +492,20 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 29-01-PLAN.md — internal/push package scaffold: Gateway interface, Wake struct, CollapseID, Outbox (bbolt), CredsSource, backoff/dedup/ceiling — PUSH-01, PUSH-05
+- [x] 29-01-PLAN.md — internal/push package scaffold: Gateway interface, Wake struct, CollapseID, Outbox (bbolt), CredsSource, backoff/dedup/ceiling — PUSH-01, PUSH-05
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 29-02-PLAN.md — UnifiedPush sovereign leg (APNs httptest-backed experimental) — PUSH-02, PUSH-03
-- [ ] 29-03-PLAN.md — FCM raw HTTP v1 leg (httptest-backed, experimental) — PUSH-04
+- [x] 29-02-PLAN.md — UnifiedPush sovereign leg (APNs httptest-backed experimental) — PUSH-02, PUSH-03
+- [x] 29-03-PLAN.md — FCM raw HTTP v1 leg (httptest-backed, experimental) — PUSH-04
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 29-04-PLAN.md — Config schema + daemon wiring: bbolt open, dispatch fan-out, outbox retry goroutine, /status gateway counters — PUSH-01..05
+- [x] 29-04-PLAN.md — Config schema + daemon wiring: bbolt open, dispatch fan-out, outbox retry goroutine, /status gateway counters — PUSH-01..05
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 29-05-PLAN.md — Doctor push checks (10 checks) + integration test scaffold + real-device runbook — PUSH-06
+- [x] 29-05-PLAN.md — Doctor push checks (10 checks) + integration test scaffold + real-device runbook — PUSH-06
 
 **Notes:** DEEP RESEARCH FLAG — three decision gates resolved in writing at phase start: (a) APNs relay-vs-sideload (SPEC §14 Q1, product decision, reconciled with the no-proprietary-cloud brand), (b) FCM SDK vs raw HTTP v1 (measure binary delta; swap if > ~3 MB — Gateway interface keeps the swap invisible), (c) daemon-keychain access spike per platform × session type (may force a documented `creds_source: file` 0600 fallback). The bbolt outbox file is daemon runtime state — explicitly documented as exempt from the audit-mutation rule. Apple Developer paperwork (started at milestone start, parallel track) feeds the APNs leg here but never blocks this phase: UnifiedPush/ntfy is the shipping path.
 
@@ -614,7 +614,7 @@ Phases execute in numeric order: 1 → … → 21 → 22 → 23 → 23.1 → 23.
 | 27. Session-Aware Notification Backbone | 9/9 | Complete   | 2026-06-10 |
 | 28. Device Enrollment v2 & Tailnet Content Delivery | n/a (Fable build) | Complete | 2026-06-11 |
 | 28.1 Device SSH CA sshd Integration | 2/2 | Complete   | 2026-06-14 |
-| 29. Push Gateway & Outbox | 0/? | Not started | - |
+| 29. Push Gateway & Outbox | 5/5 | Complete    | 2026-06-15 |
 | 30. Phone Approve Loop | 0/? | Not started | - |
 | 31. Agent Kill-Switch ("Apoptosis") | 0/? | Not started | - |
 | 32. Supply-Chain Depth & Trimmed Fortify | 0/? | Not started | - |
@@ -633,7 +633,7 @@ Phases execute in numeric order: 1 → … → 21 → 22 → 23 → 23.1 → 23.
   4. Report-only `SeverityOK` findings appear exactly ONCE per `abysslink doctor` pass for lock/ssh/ntfy/acl/tailscale — either emitted in only one of Detect/Verify (hardening-module precedent) or deduped on `(Module, Check)` in `runner.Doctor`; the "N ok" count is no longer inflated and no duplicate ✓ rows render (DOC-08 / WR-08)
   5. `make lint test` green; new/updated tests cover each probe-failure → non-OK path and the single-emission/dedup guarantee
 
-**Plans:** 4/4 plans complete
+**Plans:** 5/5 plans complete
 
 Plans:
 **Wave 1** *(all plans independent — parallel execution)*
