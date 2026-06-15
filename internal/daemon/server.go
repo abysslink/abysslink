@@ -292,9 +292,15 @@ func (s *Server) enqueueDeviceWake(msg notifyv2.Message, r device.Record, metaJS
 	if r.Revoked || r.PushToken == "" {
 		return // skip revoked or token-less devices
 	}
-	// Per-device ceiling check for non-approval_request (D-05 / research Q3).
+	// Per-device ceiling check + window increment, atomic in one bbolt txn
+	// (D-05 / WR-02 / IN-01). Folding admit and consume into a single transaction
+	// closes the check-then-act race two concurrent fan-outs for the same device
+	// could exploit. approval_request is exempt inside CeilingCheckAndIncr
+	// (admitted, does not consume the window). The slot is consumed here at
+	// admission, not at successful enqueue: a later enqueue failure (rare, counted
+	// as FanoutErrors below) does not refund it — the ceiling counts admitted wakes.
 	if msg.Kind != notifyv2.KindApprovalRequest {
-		allowed, cerr := s.outbox.CeilingCheck(r.ID, msg.Kind)
+		allowed, cerr := s.outbox.CeilingCheckAndIncr(r.ID, msg.Kind, push.DefaultCeiling)
 		if cerr != nil {
 			// WR-05/WR-01: a ceiling-STORE error is a storage failure, not an
 			// intentional drop, and schedules no retry — count it as a FanoutErrors
@@ -339,18 +345,8 @@ func (s *Server) enqueueDeviceWake(msg notifyv2.Message, r device.Record, metaJS
 		return
 	}
 	s.gatewayCounters.Queued.Add(1)
-
-	// WR-02: increment the per-device wake window at ENQUEUE, where the
-	// CeilingCheck decision is made, not at delivery. The retry goroutine fires
-	// asynchronously every 5s, so incrementing on successful send let a burst sail
-	// past the ceiling while the count was still low. approval_request is exempt
-	// (it bypassed the check above and must not consume the window either).
-	if msg.Kind != notifyv2.KindApprovalRequest {
-		if err := s.outbox.CeilingIncr(r.ID, push.DefaultCeiling); err != nil {
-			slog.Warn("daemon: fanout ceiling incr failed",
-				"device_id", r.ID, "err", err)
-		}
-	}
+	// The per-device window was already incremented atomically in
+	// CeilingCheckAndIncr above (IN-01) — no separate post-enqueue increment.
 }
 
 // devicePlatform returns the push platform for a device record (WR-03). The
