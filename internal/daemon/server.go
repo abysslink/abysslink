@@ -37,8 +37,10 @@ import (
 
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/notifyv2"
+	"github.com/abysslink/abysslink/internal/push"
 	"github.com/abysslink/abysslink/internal/session"
 	"github.com/abysslink/abysslink/internal/shell"
 )
@@ -137,6 +139,19 @@ type Server struct {
 	// ackReceived counts BACK-07 ack receipts (memory-only, reset on restart).
 	ackReceived atomic.Uint64
 
+	// Phase 29 push gateway (D-06 / D-10 / D-19).
+	// outbox is the bbolt-backed persistent send queue; nil when the daemon
+	// starts without a configured outbox (graceful degrade: fan-out is skipped).
+	// gatewayCounters are the six D-19 atomic metrics reported on GET /status.
+	outbox          *push.Outbox
+	gatewayCounters *push.GatewayCounters
+	// gatewayCredsStatus is the push-creds-keychain doctor signal (WR-01):
+	// "ok" when the gateway's keychain-backed auth path is available,
+	// "unavailable" when the keychain backend is absent, "" when the push
+	// gateway is not wired (older-daemon / push-disabled — omitted on /status).
+	// Set once by the composition root via SetGatewayCredsStatus.
+	gatewayCredsStatus string
+
 	contentMu     sync.Mutex
 	contentLive   bool
 	contentHost   string
@@ -182,6 +197,172 @@ func (s *Server) SetExecCounter(fn func() uint64) { s.execCount = fn }
 // session_registry.enabled is true; nil-safe: when unset (or set to nil),
 // handleSessions reports "registry: disabled" with an empty sessions list.
 func (s *Server) SetSessionRegistry(src SessionSource) { s.sessionSource = src }
+
+// SetOutbox injects the Phase 29 push outbox and gateway counter set.
+// Called by the composition root before Run. When nil, fanOutToDevices is a
+// no-op so a daemon without a configured push outbox still starts cleanly
+// (no push fan-out, just the existing ntfy/legacy path).
+func (s *Server) SetOutbox(o *push.Outbox, c *push.GatewayCounters) {
+	s.outbox = o
+	s.gatewayCounters = c
+}
+
+// SetGatewayCredsStatus records the push-creds-keychain doctor signal (WR-01)
+// the daemon emits on GET /status as gateway_creds_status. Called by the
+// composition root after probing the gateway's keychain-backed auth path:
+// "ok" (auth path available) or "unavailable" (keychain backend absent). When
+// left unset (push gateway not wired), /status omits the field so an older-style
+// no-push daemon and a current push daemon stay distinguishable to doctor.
+func (s *Server) SetGatewayCredsStatus(status string) { s.gatewayCredsStatus = status }
+
+// fanOutToDevices fans out msg to all active enrolled devices via the persistent
+// push outbox (D-10). For each active device with a push token:
+//   - Dedup check: if msg_id is already in the dedup bucket and kind is NOT
+//     approval_request → skip (D-07 / Phase 27 D-09).
+//   - Ceiling check: if the device is at its hourly wake ceiling and kind is NOT
+//     approval_request → skip and increment CeilingDropped (D-05 / research Q3).
+//   - Enqueue: store an outboxEntry in the bbolt outbox with NextRetryUnix=now
+//     (immediate first attempt); increment Queued counter.
+//
+// fanOutToDevices is intentionally fast (bbolt writes are the only I/O); the
+// async retry goroutine (RunOutboxRetry) owns the actual provider-send path.
+// Called from handleNotifyV2 AFTER the ntfy delivery (existing pipeline runs
+// first; push adds an extra wake channel on top).
+//
+// nil-safe: returns immediately when the outbox or device store is not wired.
+func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) error {
+	if s.outbox == nil || s.gatewayCounters == nil || s.devices == nil {
+		return nil // no push outbox wired — graceful degrade
+	}
+
+	// Dedup check for non-approval_request: skip the entire fan-out if this
+	// msg_id has already been dispatched (D-07 / Phase 27 D-09 carried forward).
+	// approval_request is always exempt from dedup.
+	//
+	// WR-05: a dedup-STORE error (bbolt transient) is NOT an intentional skip —
+	// collapsing it into a silent `return nil` drops the wake for every device
+	// with no signal. Treat a store error as "not seen, proceed" (fail-open: a
+	// possible duplicate wake is far less harmful than a silently-lost one) and
+	// emit a greppable WARN so a flapping outbox DB is observable. Only a genuine
+	// `seen == true` is an intentional, silent (debug-level) skip.
+	if msg.Kind != notifyv2.KindApprovalRequest {
+		seen, err := s.outbox.DedupSeen(msg.MsgID)
+		switch {
+		case err != nil:
+			// WR-01: a dedup-store error proceeds fail-open (no retry scheduled),
+			// so it is a FanoutErrors event, not a BackoffPending one — counting
+			// it as pending-retry would inflate the /status retry depth.
+			s.gatewayCounters.FanoutErrors.Add(1)
+			slog.Warn("daemon: fanout dedup-store error; proceeding without dedup (fail-open)",
+				"msg_id", msg.MsgID, "err", err)
+		case seen:
+			slog.Debug("daemon: fanout dedup skip", "msg_id", msg.MsgID)
+			return nil
+		}
+	}
+
+	// Serialize msg to JSON for the outbox MetaJSON field (routing metadata only).
+	// WR-05: a marshal failure loses the wake for ALL devices — count it so a
+	// systematic encode failure is observable on /status, not just a lone log.
+	// WR-01: the wake is DROPPED here (no retry scheduled), so it belongs to
+	// FanoutErrors, not the pending-retry BackoffPending counter.
+	metaJSON, err := json.Marshal(msg)
+	if err != nil {
+		s.gatewayCounters.FanoutErrors.Add(1)
+		slog.Warn("daemon: fanout msg marshal failed; wake lost for all devices", "msg_id", msg.MsgID, "err", err)
+		return nil
+	}
+
+	records := s.devices.List()
+	meta := string(metaJSON)
+	for _, r := range records {
+		s.enqueueDeviceWake(msg, r, meta)
+	}
+	return nil
+}
+
+// enqueueDeviceWake enqueues one device's wake during fan-out. Extracted from
+// fanOutToDevices to keep that function under the gocyclo ceiling; the per-device
+// decision tree (skip revoked/token-less, per-device ceiling, route, enqueue,
+// ceiling increment) lives here. Counter/log semantics are unchanged
+// (WR-01/02/05): every drop/skip path that schedules no retry increments
+// FanoutErrors, a genuine ceiling rejection increments CeilingDropped, and the
+// per-device window is incremented at enqueue (not at delivery).
+func (s *Server) enqueueDeviceWake(msg notifyv2.Message, r device.Record, metaJSON string) {
+	if r.Revoked || r.PushToken == "" {
+		return // skip revoked or token-less devices
+	}
+	// Per-device ceiling check for non-approval_request (D-05 / research Q3).
+	if msg.Kind != notifyv2.KindApprovalRequest {
+		allowed, cerr := s.outbox.CeilingCheck(r.ID, msg.Kind)
+		if cerr != nil {
+			// WR-05/WR-01: a ceiling-STORE error is a storage failure, not an
+			// intentional drop, and schedules no retry — count it as a FanoutErrors
+			// signal and skip only this device, never the whole fan-out.
+			s.gatewayCounters.FanoutErrors.Add(1)
+			slog.Warn("daemon: fanout ceiling-store error; skipping device",
+				"device_id", r.ID, "err", cerr)
+			return
+		}
+		if !allowed {
+			s.gatewayCounters.CeilingDropped.Add(1)
+			slog.Debug("daemon: fanout ceiling drop",
+				"device_id", r.ID, "msg_id", msg.MsgID, "kind", msg.Kind)
+			return
+		}
+	}
+
+	// WR-03: route by the device record's platform via devicePlatform rather than
+	// a bare "unifiedpush" literal. The current enrollment schema (device.Record)
+	// carries no platform-specific token, so every enrolled device IS a UnifiedPush
+	// endpoint (its PushToken is the ntfy endpoint URL, the sovereign default —
+	// D-18). devicePlatform is the single seam to update when the v5 app adds a
+	// platform field to device.Record.
+	cid := push.CollapseID(msg.MsgID, msg.Session.Session, msg.Kind)
+	entry := push.OutboxEntry{
+		Platform:       devicePlatform(r),
+		ProviderToken:  r.PushToken, // secret-class — never log (D-17)
+		MsgID:          msg.MsgID,
+		Title:          msg.Title,
+		MetaJSON:       metaJSON,
+		Attempts:       0,
+		FirstTriedUnix: time.Now().Unix(),
+		NextRetryUnix:  time.Now().Unix(), // immediate first attempt
+		CollapseID:     cid,
+	}
+	if err := s.outbox.Enqueue(r.ID, entry); err != nil {
+		// WR-05/WR-01: an enqueue failure drops this device's wake with no retry
+		// scheduled — count it as a FanoutErrors signal and skip only this device.
+		s.gatewayCounters.FanoutErrors.Add(1)
+		slog.Warn("daemon: fanout enqueue failed; wake lost for device",
+			"device_id", r.ID, "msg_id", msg.MsgID, "err", err)
+		return
+	}
+	s.gatewayCounters.Queued.Add(1)
+
+	// WR-02: increment the per-device wake window at ENQUEUE, where the
+	// CeilingCheck decision is made, not at delivery. The retry goroutine fires
+	// asynchronously every 5s, so incrementing on successful send let a burst sail
+	// past the ceiling while the count was still low. approval_request is exempt
+	// (it bypassed the check above and must not consume the window either).
+	if msg.Kind != notifyv2.KindApprovalRequest {
+		if err := s.outbox.CeilingIncr(r.ID, push.DefaultCeiling); err != nil {
+			slog.Warn("daemon: fanout ceiling incr failed",
+				"device_id", r.ID, "err", err)
+		}
+	}
+}
+
+// devicePlatform returns the push platform for a device record (WR-03). The
+// current enrollment schema (device.Record) has no platform field, so every
+// enrolled device is a UnifiedPush endpoint (its PushToken IS the ntfy endpoint
+// URL — the sovereign default, D-18). This is the single seam to update when
+// the v5 app adds a platform field to device.Record: returning the record's
+// real platform here routes APNs/FCM devices to their own legs instead of
+// mis-routing them through the UnifiedPush gateway.
+func devicePlatform(_ device.Record) string {
+	return push.PlatformUnifiedPush
+}
 
 // Run listens on the Unix socket and starts watchers until ctx is cancelled.
 // On cancellation it waits for the graceful shutdown (connection drain +
@@ -429,6 +610,12 @@ func (s *Server) handleNotifyV2(w http.ResponseWriter, r *http.Request, raw []by
 		return
 	}
 
+	// Phase 29 push fan-out (D-10): enqueue to all enrolled devices via the
+	// persistent push outbox after the ntfy delivery succeeds. nil-safe: no-op
+	// when the outbox is not wired (daemon started without Phase 29 push config).
+	// Errors are logged internally; fan-out failure does not 500 the caller.
+	_ = s.fanOutToDevices(context.WithoutCancel(r.Context()), msg)
+
 	// Mirror the v1 ring-adder with METADATA ONLY (T-19-19): msg_id, kind,
 	// pane — never anything body-like (the schema has no body field anyway).
 	// The recorded priority is the post-render ntfy numeric value ("3"/"4"/"5"
@@ -491,6 +678,25 @@ type daemonStatusResponse struct {
 	// posture from cli.CollectDoctorFindings, not this endpoint. Consumers MUST
 	// NOT read the zeroed doctor summary as a "0 fatal" all-clear (WR-05).
 	PostureComplete bool `json:"posture_complete"`
+
+	// Phase 29 push gateway counters (D-19): aggregate delivery metrics.
+	// All seven fields are omitempty so the JSON stays backward-compatible when
+	// the push outbox is not wired (zero values are omitted). No device token,
+	// provider credential, or per-device detail is ever included (D-17 / T-29-04-4).
+	GatewayQueued       int `json:"gateway_queued,omitempty"`
+	GatewaySent         int `json:"gateway_sent,omitempty"`
+	GatewayAccepted     int `json:"gateway_provider_accepted,omitempty"`
+	GatewayPruned       int `json:"gateway_pruned_tokens,omitempty"`
+	GatewayCeiling      int `json:"gateway_ceiling_dropped,omitempty"`
+	GatewayBackoff      int `json:"gateway_backoff_pending,omitempty"`
+	GatewayFanoutErrors int `json:"gateway_fanout_errors,omitempty"`
+
+	// GatewayCredsStatus is the push-creds-keychain doctor signal (WR-01):
+	// "ok" (gateway auth path available) or "unavailable" (keychain backend
+	// absent). omitempty so a daemon without a wired push gateway omits it and
+	// the doctor check reports the honest "older daemon / not wired" default
+	// instead of a fabricated outcome. No credential material is ever included.
+	GatewayCredsStatus string `json:"gateway_creds_status,omitempty"`
 }
 
 // daemonDoctorSummary is the per-severity doctor finding count in /status.
@@ -586,6 +792,27 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		gateExecs = s.execCount()
 	}
 
+	// Phase 29 gateway counters (D-19): read from the atomic fields. When the
+	// outbox is not wired all counters stay 0 and are omitted (omitempty).
+	var (
+		gwQueued       int
+		gwSent         int
+		gwAccepted     int
+		gwPruned       int
+		gwCeiling      int
+		gwBackoff      int
+		gwFanoutErrors int
+	)
+	if s.gatewayCounters != nil {
+		gwQueued = int(s.gatewayCounters.Queued.Load())             //nolint:gosec // G115: counter is non-negative
+		gwSent = int(s.gatewayCounters.Sent.Load())                 //nolint:gosec // G115: counter is non-negative
+		gwAccepted = int(s.gatewayCounters.ProviderAccepted.Load()) //nolint:gosec // G115: counter is non-negative
+		gwPruned = int(s.gatewayCounters.PrunedTokens.Load())       //nolint:gosec // G115: counter is non-negative
+		gwCeiling = int(s.gatewayCounters.CeilingDropped.Load())    //nolint:gosec // G115: counter is non-negative
+		gwBackoff = int(s.gatewayCounters.BackoffPending.Load())    //nolint:gosec // G115: counter is non-negative
+		gwFanoutErrors = int(s.gatewayCounters.FanoutErrors.Load()) //nolint:gosec // G115: counter is non-negative
+	}
+
 	resp := daemonStatusResponse{
 		Version:    daemonVersion,
 		Backend:    backendType,
@@ -606,6 +833,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// consumers do not read the zeroed doctor summary as a genuine "0 fatal"
 		// all-clear on a security-posture endpoint (WR-05). Reachable is now real.
 		PostureComplete: false,
+		// Phase 29 push gateway counters (D-19). Zero values are omitted (omitempty).
+		GatewayQueued:       gwQueued,
+		GatewaySent:         gwSent,
+		GatewayAccepted:     gwAccepted,
+		GatewayPruned:       gwPruned,
+		GatewayCeiling:      gwCeiling,
+		GatewayBackoff:      gwBackoff,
+		GatewayFanoutErrors: gwFanoutErrors,
+		// WR-01: real push-creds-keychain signal from the composition-root probe.
+		// Empty when the push gateway is not wired (omitempty drops it).
+		GatewayCredsStatus: s.gatewayCredsStatus,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

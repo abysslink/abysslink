@@ -760,3 +760,47 @@ func TestValidateContentStore(t *testing.T) {
 		})
 	}
 }
+
+// TestGatewayDefaults checks that the default config has APNs off, FCM off,
+// and UnifiedPush on — per D-14 and D-18.
+func TestGatewayDefaults(t *testing.T) {
+	cfg := config.Defaults()
+	assert.False(t, cfg.Gateway.APNs.Enabled, "APNs must default disabled (D-14 experimental)")
+	assert.False(t, cfg.Gateway.FCM.Enabled, "FCM must default disabled (D-14 experimental)")
+	assert.True(t, cfg.Gateway.UnifiedPush.Enabled, "UnifiedPush must default enabled (D-18 sovereign path)")
+	assert.Equal(t, "keychain", cfg.Gateway.APNs.KeySource, "APNs key_source must default to keychain")
+	assert.Equal(t, "keychain", cfg.Gateway.FCM.CredsSource, "FCM creds_source must default to keychain")
+}
+
+// TestGatewayValidateAPNsBundleRequired ensures that enabling APNs without a
+// bundle_id returns a validation error (research Q1 / plan must-have).
+func TestGatewayValidateAPNsBundleRequired(t *testing.T) {
+	cfg := validObsBaseConfig()
+	cfg.Gateway.APNs.Enabled = true
+	cfg.Gateway.APNs.BundleID = "" // explicit blank
+	err := config.Validate(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bundle_id")
+}
+
+// TestGatewayValidateKeySource ensures that an invalid key_source is rejected.
+func TestGatewayValidateKeySource(t *testing.T) {
+	cfg := validObsBaseConfig()
+	cfg.Gateway.APNs.KeySource = "invalid-source"
+	err := config.Validate(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "key_source")
+}
+
+// TestGatewayValidateOK confirms that a fully specified gateway config passes
+// validation (APNs enabled with bundle_id, valid key_source and creds_source).
+func TestGatewayValidateOK(t *testing.T) {
+	cfg := validObsBaseConfig()
+	cfg.Gateway.APNs.Enabled = true
+	cfg.Gateway.APNs.BundleID = "com.example.app"
+	cfg.Gateway.APNs.KeySource = "keychain"
+	cfg.Gateway.FCM.Enabled = true
+	cfg.Gateway.FCM.CredsSource = "file"
+	cfg.Gateway.UnifiedPush.Enabled = true
+	require.NoError(t, config.Validate(cfg))
+}

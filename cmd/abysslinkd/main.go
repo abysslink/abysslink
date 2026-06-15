@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	bbolt "go.etcd.io/bbolt"
 	"tailscale.com/client/local"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -44,6 +45,7 @@ import (
 	notify "github.com/abysslink/abysslink/internal/modules/notify"
 	"github.com/abysslink/abysslink/internal/notifyv2"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
+	"github.com/abysslink/abysslink/internal/push"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/session"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -153,6 +155,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// D-14: emit experimental startup warnings when APNs or FCM is enabled.
+	// These legs are interface-complete but ship disabled by default until the
+	// v5 native app provides a receiver; operators enabling them accept the
+	// experimental status.
+	if cfg.Gateway.APNs.Enabled {
+		slog.Warn("abysslinkd: APNs push leg is EXPERIMENTAL — disabled by default (D-14); ensure bundle_id is correct before relying on APNs delivery")
+	}
+	if cfg.Gateway.FCM.Enabled {
+		slog.Warn("abysslinkd: FCM push leg is EXPERIMENTAL — disabled by default (D-14); ensure GCP service-account credentials are configured")
+	}
+
 	kc, kerr := secrets.NewStore(ctx, gated)
 	if kerr != nil {
 		slog.Warn("abysslinkd: keychain backend unavailable", "err", kerr)
@@ -164,7 +177,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	nm := notify.New(notifymod.Deps{Cfg: cfg, Runner: gated, Keychain: kc, Platform: plat})
+	// Backend client resolves this node's tailnet IP. The notify module needs it
+	// to target ntfy at its tailnet-IP bind: ntfy binds the tailnet IP only, so a
+	// nil backend forces a localhost fallback that fails under the secure binding
+	// (connection refused -> the daemon returns 502 to notify clients). Built here
+	// (before notify wiring) and reused by the metrics listener below. bc may be
+	// nil when the backend is unconfigured -- every consumer is nil-safe (notify
+	// falls back to localhost, metrics nil-guards internally).
+	bc, bcErr := backend.New(cfg, base)
+	if bcErr != nil {
+		slog.Warn("abysslinkd: backend client unavailable; tailnet-IP-dependent features degraded", "err", bcErr)
+	}
+
+	nm := notify.New(notifymod.Deps{Cfg: cfg, Runner: gated, Keychain: kc, Platform: plat, Backend: bc})
 	// D-40: the daemon's internal watchers/probes (and the session registry in
 	// plan 27-07) use the ungated base runner so the Phase 30 enforcing gate can
 	// never deadlock the daemon on its own plumbing. The bypass is structural —
@@ -177,7 +202,30 @@ func main() {
 	// hash-only ack receipts, and the Tailscale TLS provider. A missing
 	// dependency disables the content listener (fail closed, one honest
 	// warning inside the daemon) — the unix socket keeps serving regardless.
-	wireContentDeps(srv, cfg, kc)
+	//
+	// The audited device store is returned so the Phase 29 push retry goroutine
+	// reuses the SAME handle for its dead-token prune (WR-04): a second store
+	// over devices.json with a nil audit writer would write revocations outside
+	// the backup+audit chain and create a concurrent-writer hazard. devStore is
+	// nil when the device path/audit log is unavailable (content listener stays
+	// disabled); the push prune path then degrades to a no-op.
+	devStore := wireContentDeps(srv, cfg, kc)
+
+	// Phase 29 push outbox (D-06 structural exemption):
+	// The bbolt push-outbox file is daemon runtime state opened at the
+	// composition root, NEVER through internal/audit.
+	// Structural audit-mutation exemption D-06 (same shape as Phase 27 D-40
+	// ungated-runner bypass): bbolt is a single-writer runtime file, not a
+	// user-data mutation subject to backup+audit. The file is 0600 and lives
+	// under XDG_STATE_HOME/abysslink/ alongside devices.json.
+	//
+	// kc (the platform keychain constructed at line 169 and already threaded
+	// into wireContentDeps) is passed through so the always-on UnifiedPush leg
+	// can attach Basic auth for the sovereign self-hosted ntfy default (CR-01).
+	// NewUnifiedPushGateway tolerates a nil kc, so headless/no-auth setups are
+	// unaffected. devStore (the audited handle from wireContentDeps) is reused
+	// for the dead-token prune so revocations stay on the audit chain (WR-04).
+	wirePushOutbox(ctx, cfg, srv, kc, devStore)
 
 	// tmux session registry (Phase 27, BACK-03/BACK-04). D-40: registry execs
 	// (tmux -CC attach, list-panes, capture-pane) are daemon-internal plumbing
@@ -212,10 +260,8 @@ func main() {
 	// skip wiring. The registry is a live in-memory sink when enabled, NoopRegistry
 	// otherwise so every metrics call is nil-safe.
 	// base (D-40): the metrics tailnet-IP binding is a daemon-internal probe.
-	bc, bcErr := backend.New(cfg, base)
-	if bcErr != nil {
-		slog.Warn("abysslinkd: backend client unavailable; metrics binding degraded", "err", bcErr)
-	}
+	// bc is the backend client constructed above (before notify wiring) and
+	// reused here; StartMetricsServer nil-guards internally if it is nil.
 	var reg metrics.Registry = metrics.NoopRegistry{}
 	if cfg.Observability.Metrics.Enabled {
 		reg = metrics.NewMemRegistry()
@@ -254,11 +300,16 @@ func main() {
 // appender, and the TLS provider, and injects them into the daemon server.
 // Any unresolvable dependency is logged and skipped — the daemon then keeps
 // the content listener disabled (fail closed) while everything else runs.
-func wireContentDeps(srv *daemon.Server, cfg *config.Config, kc secrets.KeychainStore) {
+//
+// It returns the constructed *device.Store so the composition root can hand the
+// SAME audited handle to the Phase 29 push retry goroutine (WR-04): the
+// dead-token prune must go through this audited writer, not a second nil-audit
+// store over the same devices.json. Returns nil on any wiring failure.
+func wireContentDeps(srv *daemon.Server, cfg *config.Config, kc secrets.KeychainStore) *device.Store {
 	logPath, err := audit.DefaultLogPath()
 	if err != nil {
 		slog.Warn("abysslinkd: audit log path unavailable; content listener stays disabled", "err", err)
-		return
+		return nil
 	}
 	// One audit writer serves both roles: every devices.json mutation goes
 	// through WriteFile (backup + audit entry + atomic write) and ack
@@ -274,11 +325,13 @@ func wireContentDeps(srv *daemon.Server, cfg *config.Config, kc secrets.Keychain
 	devPath, err := device.DefaultPath()
 	if err != nil {
 		slog.Warn("abysslinkd: device store path unavailable; content listener stays disabled", "err", err)
-		return
+		return nil
 	}
-	srv.SetDeviceStore(device.New(devPath, aud, kc, nil))
+	devStore := device.New(devPath, aud, kc, nil)
+	srv.SetDeviceStore(devStore)
 	srv.SetAuditAppender(aud)
 	srv.SetContentTLS(contentTLSProvider(cfg))
+	return devStore
 }
 
 // contentTLSProvider returns the content listener's TLS provider: the
@@ -341,6 +394,165 @@ func startAnchorWriter(ctx context.Context, kc secrets.KeychainStore) {
 			}
 		}
 	}()
+}
+
+// xdgStateHome returns the XDG_STATE_HOME base directory, defaulting to
+// ~/.local/state when the environment variable is unset. It is the canonical
+// location for abysslinkd runtime state files (bbolt outbox, devices.json).
+func xdgStateHome() string {
+	if s := os.Getenv("XDG_STATE_HOME"); s != "" {
+		return s
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".local/state"
+	}
+	return filepath.Join(home, ".local", "state")
+}
+
+// pushDeviceStoreAdapter bridges daemon.DeviceStore (uses device.Record) to
+// push.DeviceStore (uses push.DeviceRecord). It wraps device.Store so the push
+// retry goroutine can call List and RevokeByID without importing internal/device.
+type pushDeviceStoreAdapter struct{ s *device.Store }
+
+// List returns all device records converted to push.DeviceRecord. Only active
+// records with a push token are relevant for the retry goroutine; the adapter
+// returns all so the runner can filter. ProviderToken = PushToken (the opaque
+// push identity minted at enrollment).
+//
+// WR-03: Platform is set from push.PlatformUnifiedPush rather than a bare string
+// literal. The current enrollment schema (device.Record) carries no
+// platform-specific token, so every enrolled device IS a UnifiedPush endpoint;
+// the v5 app enrollment will add APNs/FCM tokens to a separate field and this
+// adapter will then carry the record's real platform.
+func (a pushDeviceStoreAdapter) List() []push.DeviceRecord {
+	records := a.s.List()
+	out := make([]push.DeviceRecord, 0, len(records))
+	for _, r := range records {
+		out = append(out, push.DeviceRecord{
+			ID:        r.ID,
+			Platform:  push.PlatformUnifiedPush,
+			PushToken: r.PushToken,
+			Revoked:   r.Revoked,
+		})
+	}
+	return out
+}
+
+// RevokeByID permanently revokes the device with the given ULID ID via the
+// wrapped device.Store (dead-token prune, D-12). Forwards to Store.RevokeByID.
+func (a pushDeviceStoreAdapter) RevokeByID(ctx context.Context, id string) error {
+	return a.s.RevokeByID(ctx, id)
+}
+
+// wirePushOutbox opens the bbolt push-outbox database and starts the Phase 29
+// push gateway retry goroutine. On any failure it logs and returns without
+// wiring — the daemon continues in degraded mode without push delivery.
+//
+// Structural audit-mutation exemption D-06: the bbolt outbox is daemon runtime
+// state opened at the composition root, never via internal/audit (same shape
+// as D-40 ungated-runner bypass).
+//
+// kc is the platform keychain (may be nil in degraded mode); it is handed to
+// the always-on UnifiedPush gateway so authenticated self-hosted ntfy
+// endpoints receive Basic auth (CR-01). A nil kc degrades to no-auth POSTs,
+// which is correct for headless/no-auth ntfy instances.
+//
+// devStore is the SAME audited *device.Store the content listener uses (from
+// wireContentDeps). The retry goroutine's dead-token prune (RevokeByID) writes
+// devices.json through this audited handle so revocations keep their
+// backup+audit-chain entry (WR-04 / CLAUDE.md "audit + backup on every file
+// mutation"). A nil devStore (degraded wiring) disables the prune — a no-op,
+// not fatal — and never opens an unaudited second writer over devices.json.
+func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server, kc secrets.KeychainStore, devStore *device.Store) {
+	outboxDir := filepath.Join(xdgStateHome(), "abysslink")
+	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
+		slog.Warn("abysslinkd: push outbox dir creation failed; push disabled", "err", err)
+		return
+	}
+	outboxPath := filepath.Join(outboxDir, "push_outbox.db")
+	// Phase 29 push outbox — opened at the composition root, NEVER through
+	// internal/audit. Structural audit-mutation exemption D-06 (same shape as
+	// Phase 27 D-40 ungated-runner bypass).
+	outboxDB, err := bbolt.Open(outboxPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
+	if err != nil {
+		slog.Warn("abysslinkd: push outbox open failed; push disabled", "path", outboxPath, "err", err)
+		return
+	}
+	outbox := push.NewOutbox(outboxDB)
+	counters := &push.GatewayCounters{}
+
+	// Sweep expired dedup entries at daemon start (D-07).
+	if sweepErr := outbox.SweepDedup(); sweepErr != nil {
+		slog.Warn("abysslinkd: push dedup sweep failed at startup", "err", sweepErr)
+	}
+
+	// Build the gateway map. UnifiedPush is always registered (sovereign path,
+	// D-18). APNs and FCM are registered only when enabled in config (D-14).
+	// Keychain is nil-safe: NewUnifiedPushGateway degrades when kc is nil.
+	gateways := make(map[string]push.Gateway)
+	// CR-01: hand the daemon's keychain to the UnifiedPush leg so authenticated
+	// self-hosted ntfy endpoints receive Basic auth. A nil kc still degrades to
+	// no-auth POSTs (headless/no-auth ntfy); only the previously-broken
+	// authenticated path is fixed.
+	gateways["unifiedpush"] = push.NewUnifiedPushGateway(kc)
+
+	// cfg.Gateway.APNs/FCM gates: disabled by default (D-14). The startup
+	// warnings were already emitted above in main() after config load.
+	//
+	// WR-06: these legs are ENABLED-but-NOT-WIRED — the gateway is intentionally
+	// omitted from the gateways map (credential resolution lands with the v5
+	// receiver). The log honestly says "enabled but not yet wired" rather than
+	// "registered", which would assert a capability that does not exist and
+	// mislead an operator debugging why an enabled leg never delivers. If an
+	// APNs/FCM entry is ever enqueued, processEntry drops it after
+	// maxNoGatewayAttempts rather than rescheduling forever.
+	if cfg.Gateway.APNs.Enabled {
+		slog.Warn("abysslinkd: APNs push leg enabled but NOT yet wired (EXPERIMENTAL) — deliveries deferred until the v5 receiver; no APNs gateway is registered")
+	}
+	if cfg.Gateway.FCM.Enabled {
+		slog.Warn("abysslinkd: FCM push leg enabled but NOT yet wired (EXPERIMENTAL) — deliveries deferred until the v5 receiver; no FCM gateway is registered")
+	}
+
+	// Inject the outbox and counters into the daemon Server (D-10 fan-out).
+	srv.SetOutbox(outbox, counters)
+
+	// WR-01: emit the push-creds-keychain doctor signal on GET /status. The
+	// UnifiedPush leg attaches Basic auth from the keychain ("abysslink",
+	// "ntfy-password"); when no keychain backend is available that auth path can
+	// never be attached, so report "unavailable" — otherwise the auth path is
+	// functional and we report "ok". (A no-auth ntfy setup is valid and still
+	// "ok": the gateway degrades to unauthenticated POSTs by design, D-18.)
+	if kc != nil {
+		srv.SetGatewayCredsStatus("ok")
+	} else {
+		srv.SetGatewayCredsStatus("unavailable")
+	}
+
+	// Resolve the device store adapter for the retry goroutine. WR-04: REUSE the
+	// single audited *device.Store the content listener already owns rather than
+	// opening a second nil-audit handle over the same devices.json. A dead-token
+	// prune (RevokeByID) therefore goes through the backup+audit chain, and one
+	// store instance owns the file (no concurrent-writer hazard). A nil devStore
+	// (degraded wiring) leaves the runner without a device store — dead-token
+	// prune becomes a no-op, which is non-fatal.
+	var pushStore push.DeviceStore
+	if devStore != nil {
+		pushStore = pushDeviceStoreAdapter{s: devStore}
+	} else {
+		slog.Warn("abysslinkd: push device store unavailable; dead-token prune disabled")
+	}
+
+	// Start the retry goroutine. It closes bbolt on daemon exit via the deferred
+	// close registered by the daemon's shutdown path (not here — the goroutine
+	// holds no close obligation; the DB handle ownership stays with wirePushOutbox's
+	// caller via a deferred close in the goroutine itself to avoid a leak).
+	go func() {
+		defer func() { _ = outboxDB.Close() }()
+		push.RunOutboxRetry(ctx, outbox, gateways, pushStore, counters)
+	}()
+
+	slog.Info("abysslinkd: push outbox started", "path", outboxPath)
 }
 
 // configPath returns the abysslink.yaml path under XDG_CONFIG_HOME.

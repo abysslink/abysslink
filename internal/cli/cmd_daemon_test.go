@@ -104,3 +104,31 @@ func TestDaemonServiceSpec_AbsolutePathFromPATH(t *testing.T) {
 	assert.True(t, filepath.IsAbs(spec.Args[0]), "the service argv must be an absolute path, got %q", spec.Args[0])
 	assert.Equal(t, fake, spec.Args[0])
 }
+
+// TestDaemonServiceSpec_EnvPATHIncludesToolDirs is a regression guard: the
+// service spec MUST inject a PATH covering the conventional dirs where
+// tailscale/tmux/mosh live. launchd/systemd hand the daemon a minimal PATH
+// (/usr/bin:/bin:/usr/sbin:/sbin) that excludes Homebrew and /usr/local/bin, so
+// without this the daemon's CLI shellouts fail "executable file not found":
+// the content listener self-disables and the notify module falls back to
+// http://localhost:<ntfy_port>, which the secure tailnet-only ntfy bind refuses
+// — surfacing as HTTP 502 to notify clients.
+func TestDaemonServiceSpec_EnvPATHIncludesToolDirs(t *testing.T) {
+	binDir := t.TempDir()
+	fake := filepath.Join(binDir, "abysslinkd")
+	require.NoError(t, os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755)) //nolint:gosec // executable test stub
+	t.Setenv("PATH", binDir)                                             // a minimal user PATH must NOT become the service PATH
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	spec, err := daemonServiceSpec()
+	require.NoError(t, err)
+
+	got, ok := spec.Env["PATH"]
+	require.True(t, ok, "service spec must set a PATH so daemon shellouts (tailscale/tmux/mosh) resolve")
+	for _, dir := range []string{"/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"} {
+		assert.Contains(t, got, dir, "service PATH must include %s where notify/push tools live", dir)
+	}
+	// Fixed safe baseline, NOT os.Getenv("PATH"): importing the user's PATH would
+	// bake any world-writable/relative entries into the daemon's shellout surface.
+	assert.NotContains(t, got, binDir, "service PATH must not import the user's PATH entries")
+}

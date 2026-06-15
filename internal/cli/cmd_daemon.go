@@ -166,9 +166,28 @@ func daemonServiceSpec() (platform.ServiceSpec, error) {
 	return platform.ServiceSpec{
 		Label:      daemonLabel,
 		Args:       []string{binPath},
+		Env:        map[string]string{"PATH": daemonServicePATH},
 		StdoutPath: filepath.Join(stateDir, "abysslinkd.out.log"),
 		StderrPath: filepath.Join(stateDir, "abysslinkd.err.log"),
 		KeepAlive:  true,
 		RunAtLoad:  true,
 	}, nil
 }
+
+// daemonServicePATH is the PATH the daemon runs with under launchd/systemd.
+//
+// Service managers hand a process a minimal PATH (launchd: /usr/bin:/bin:/usr/sbin:/sbin)
+// that excludes Homebrew (/opt/homebrew/bin) and /usr/local/bin — exactly where
+// tailscale, tmux, and mosh live. Without these dirs the daemon's CLI shellouts
+// fail "executable file not found in $PATH": the content listener cannot confirm
+// its tailnet-IP bind and disables itself (BACK-06), and the notify module's
+// backend IP lookup fails so it falls back to http://localhost:<ntfy_port>, which
+// the secure tailnet-only ntfy bind refuses — surfacing as a 502 to notify clients.
+//
+// This is a FIXED set of root-owned, conventional bin dirs — deliberately NOT
+// os.Getenv("PATH"). Baking the enabling user's full PATH into a persisted
+// service plist would import any world-writable or relative entries as a
+// shellout-hijack surface for the daemon, contradicting the absolute-binary-path
+// guard in daemonServiceSpec. A tailscale installed outside these dirs degrades
+// honestly (content listener warns) rather than widening that surface.
+const daemonServicePATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
