@@ -145,6 +145,12 @@ type Server struct {
 	// gatewayCounters are the six D-19 atomic metrics reported on GET /status.
 	outbox          *push.Outbox
 	gatewayCounters *push.GatewayCounters
+	// gatewayCredsStatus is the push-creds-keychain doctor signal (WR-01):
+	// "ok" when the gateway's keychain-backed auth path is available,
+	// "unavailable" when the keychain backend is absent, "" when the push
+	// gateway is not wired (older-daemon / push-disabled — omitted on /status).
+	// Set once by the composition root via SetGatewayCredsStatus.
+	gatewayCredsStatus string
 
 	contentMu     sync.Mutex
 	contentLive   bool
@@ -200,6 +206,14 @@ func (s *Server) SetOutbox(o *push.Outbox, c *push.GatewayCounters) {
 	s.outbox = o
 	s.gatewayCounters = c
 }
+
+// SetGatewayCredsStatus records the push-creds-keychain doctor signal (WR-01)
+// the daemon emits on GET /status as gateway_creds_status. Called by the
+// composition root after probing the gateway's keychain-backed auth path:
+// "ok" (auth path available) or "unavailable" (keychain backend absent). When
+// left unset (push gateway not wired), /status omits the field so an older-style
+// no-push daemon and a current push daemon stay distinguishable to doctor.
+func (s *Server) SetGatewayCredsStatus(status string) { s.gatewayCredsStatus = status }
 
 // fanOutToDevices fans out msg to all active enrolled devices via the persistent
 // push outbox (D-10). For each active device with a push token:
@@ -665,6 +679,13 @@ type daemonStatusResponse struct {
 	GatewayPruned   int `json:"gateway_pruned_tokens,omitempty"`
 	GatewayCeiling  int `json:"gateway_ceiling_dropped,omitempty"`
 	GatewayBackoff  int `json:"gateway_backoff_pending,omitempty"`
+
+	// GatewayCredsStatus is the push-creds-keychain doctor signal (WR-01):
+	// "ok" (gateway auth path available) or "unavailable" (keychain backend
+	// absent). omitempty so a daemon without a wired push gateway omits it and
+	// the doctor check reports the honest "older daemon / not wired" default
+	// instead of a fabricated outcome. No credential material is ever included.
+	GatewayCredsStatus string `json:"gateway_creds_status,omitempty"`
 }
 
 // daemonDoctorSummary is the per-severity doctor finding count in /status.
@@ -806,6 +827,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		GatewayPruned:   gwPruned,
 		GatewayCeiling:  gwCeiling,
 		GatewayBackoff:  gwBackoff,
+		// WR-01: real push-creds-keychain signal from the composition-root probe.
+		// Empty when the push gateway is not wired (omitempty drops it).
+		GatewayCredsStatus: s.gatewayCredsStatus,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

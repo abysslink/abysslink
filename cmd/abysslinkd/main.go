@@ -507,6 +507,18 @@ func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server,
 	// Inject the outbox and counters into the daemon Server (D-10 fan-out).
 	srv.SetOutbox(outbox, counters)
 
+	// WR-01: emit the push-creds-keychain doctor signal on GET /status. The
+	// UnifiedPush leg attaches Basic auth from the keychain ("abysslink",
+	// "ntfy-password"); when no keychain backend is available that auth path can
+	// never be attached, so report "unavailable" — otherwise the auth path is
+	// functional and we report "ok". (A no-auth ntfy setup is valid and still
+	// "ok": the gateway degrades to unauthenticated POSTs by design, D-18.)
+	if kc != nil {
+		srv.SetGatewayCredsStatus("ok")
+	} else {
+		srv.SetGatewayCredsStatus("unavailable")
+	}
+
 	// Resolve the device store adapter for the retry goroutine. WR-04: REUSE the
 	// single audited *device.Store the content listener already owns rather than
 	// opening a second nil-audit handle over the same devices.json. A dead-token
