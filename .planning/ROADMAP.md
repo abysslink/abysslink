@@ -505,7 +505,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 29-05-PLAN.md — Doctor push checks (9 checks) + integration test scaffold + real-device runbook — PUSH-06
+- [ ] 29-05-PLAN.md — Doctor push checks (10 checks) + integration test scaffold + real-device runbook — PUSH-06
 
 **Notes:** DEEP RESEARCH FLAG — three decision gates resolved in writing at phase start: (a) APNs relay-vs-sideload (SPEC §14 Q1, product decision, reconciled with the no-proprietary-cloud brand), (b) FCM SDK vs raw HTTP v1 (measure binary delta; swap if > ~3 MB — Gateway interface keeps the swap invisible), (c) daemon-keychain access spike per platform × session type (may force a documented `creds_source: file` 0600 fallback). The bbolt outbox file is daemon runtime state — explicitly documented as exempt from the audit-mutation rule. Apple Developer paperwork (started at milestone start, parallel track) feeds the APNs leg here but never blocks this phase: UnifiedPush/ntfy is the shipping path.
 
