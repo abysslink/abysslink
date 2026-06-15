@@ -408,16 +408,20 @@ type pushDeviceStoreAdapter struct{ s *device.Store }
 // List returns all device records converted to push.DeviceRecord. Only active
 // records with a push token are relevant for the retry goroutine; the adapter
 // returns all so the runner can filter. ProviderToken = PushToken (the opaque
-// push identity minted at enrollment); Platform is always "unifiedpush" for
-// Phase 29 devices (no platform-specific token in the current schema — v5 app
-// enrollment will add APNs/FCM tokens to a separate field).
+// push identity minted at enrollment).
+//
+// WR-03: Platform is set from push.PlatformUnifiedPush rather than a bare string
+// literal. The current enrollment schema (device.Record) carries no
+// platform-specific token, so every enrolled device IS a UnifiedPush endpoint;
+// the v5 app enrollment will add APNs/FCM tokens to a separate field and this
+// adapter will then carry the record's real platform.
 func (a pushDeviceStoreAdapter) List() []push.DeviceRecord {
 	records := a.s.List()
 	out := make([]push.DeviceRecord, 0, len(records))
 	for _, r := range records {
 		out = append(out, push.DeviceRecord{
 			ID:        r.ID,
-			Platform:  "unifiedpush",
+			Platform:  push.PlatformUnifiedPush,
 			PushToken: r.PushToken,
 			Revoked:   r.Revoked,
 		})

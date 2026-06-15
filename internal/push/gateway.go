@@ -24,6 +24,17 @@ import (
 	"github.com/abysslink/abysslink/internal/notifyv2"
 )
 
+// Push platform identifiers (the gateway-map keys and OutboxEntry.Platform
+// values). Exported so the daemon fan-out path and the device-store adapter
+// carry the real platform from one named constant rather than scattered string
+// literals (WR-03). The current enrollment schema mints only PlatformUnifiedPush
+// tokens; PlatformAPNs/PlatformFCM exist for the v5 receiver legs.
+const (
+	PlatformUnifiedPush = "unifiedpush"
+	PlatformAPNs        = "apns"
+	PlatformFCM         = "fcm"
+)
+
 // Wake is the unit of work the Gateway dispatches to a provider.
 // It carries routing metadata only — never body content (D-17 / opaque-wake invariant).
 // The ProviderToken field is secret-class: it must never appear in logs, audit

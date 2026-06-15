@@ -37,6 +37,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/notifyv2"
 	"github.com/abysslink/abysslink/internal/push"
@@ -263,12 +264,16 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 			}
 		}
 
-		// PushToken is the opaque device identity. The current enrollment uses
-		// "unifiedpush" as the default platform (the sovereign sovereign path,
-		// D-18). When APNs/FCM enrollment is added (v5 app), the device record
-		// will carry a platform field; for now all enrolled devices are
-		// unifiedpush (their PushToken IS the ntfy endpoint URL).
-		platform := "unifiedpush"
+		// WR-03: route by the device record's platform via the named constant
+		// rather than a bare "unifiedpush" literal. The current enrollment schema
+		// (device.Record) carries no platform-specific token, so every enrolled
+		// device IS a UnifiedPush endpoint (its PushToken is the ntfy endpoint
+		// URL, the sovereign default — D-18). devicePlatform centralizes this
+		// invariant; once the v5 app adds a platform field to device.Record it
+		// returns the record's real platform and any record that is not a
+		// registered gateway is skipped (processEntry's no-gateway path drops it)
+		// rather than silently POSTing an APNs/FCM token to an ntfy URL.
+		platform := devicePlatform(r)
 
 		cid := push.CollapseID(msg.MsgID, msg.Session.Session, msg.Kind)
 		entry := push.OutboxEntry{
@@ -304,6 +309,17 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 		}
 	}
 	return nil
+}
+
+// devicePlatform returns the push platform for a device record (WR-03). The
+// current enrollment schema (device.Record) has no platform field, so every
+// enrolled device is a UnifiedPush endpoint (its PushToken IS the ntfy endpoint
+// URL — the sovereign default, D-18). This is the single seam to update when
+// the v5 app adds a platform field to device.Record: returning the record's
+// real platform here routes APNs/FCM devices to their own legs instead of
+// mis-routing them through the UnifiedPush gateway.
+func devicePlatform(_ device.Record) string {
+	return push.PlatformUnifiedPush
 }
 
 // Run listens on the Unix socket and starts watchers until ctx is cancelled.
