@@ -306,6 +306,67 @@ func (o *Outbox) CeilingIncr(deviceID string, defaultLimit int) error {
 	})
 }
 
+// CeilingCheckAndIncr atomically checks the per-device wake ceiling and, when
+// the wake is admitted, increments the window count in the SAME bbolt
+// transaction. It returns allowed=true only if the wake was admitted (and, for
+// non-exempt kinds, the window has already been incremented to consume the
+// slot).
+//
+// This closes the check-then-act race that separate CeilingCheck (a db.View)
+// and CeilingIncr (a db.Update) calls expose under concurrent fan-out (IN-01):
+// two requests for the same device at count==limit-1 could both pass the View
+// check before either Update landed, admitting one wake over the ceiling.
+// Folding admit and consume into one Update makes them a single atomic decision.
+//
+// approval_request is exempt (safety-critical, D-13): it always returns allowed
+// and never consumes the window. A fresh, missing, corrupt (Limit<=0), or
+// window-expired entry resets to a fresh window with count=1. When the device is
+// already at/over the ceiling the entry is left UNCHANGED and allowed=false.
+//
+// The slot is consumed at admission, not at successful enqueue: a wake admitted
+// here that then fails to enqueue (a rare bbolt error, separately counted as a
+// FanoutErrors event) does not refund its slot. The ceiling counts admitted
+// wakes — slightly stricter under failure, never looser.
+func (o *Outbox) CeilingCheckAndIncr(deviceID string, kind notifyv2.Kind, defaultLimit int) (allowed bool, err error) {
+	if kind == notifyv2.KindApprovalRequest {
+		return true, nil // exempt: admitted, does not consume the window (D-13)
+	}
+	if defaultLimit <= 0 {
+		defaultLimit = defaultCeiling
+	}
+	err = o.db.Update(func(tx *bbolt.Tx) error {
+		b, berr := tx.CreateBucketIfNotExists(bucketCeiling)
+		if berr != nil {
+			return berr
+		}
+		now := time.Now().Unix()
+		var ce ceilingEntry
+		if v := b.Get([]byte(deviceID)); v != nil {
+			_ = json.Unmarshal(v, &ce) // decode errors fall through to the reset below
+		}
+		windowEnd := ce.WindowStartUnix + int64(ceilingWindow.Seconds())
+		switch {
+		case ce.Limit <= 0 || now >= windowEnd:
+			// No entry, corrupt, or expired window — start a fresh window, admit.
+			ce = ceilingEntry{WindowStartUnix: now, Count: 1, Limit: defaultLimit}
+			allowed = true
+		case ce.Count < ce.Limit:
+			ce.Count++
+			allowed = true
+		default:
+			// At or over the ceiling — do not admit, leave the entry untouched.
+			allowed = false
+			return nil
+		}
+		data, merr := json.Marshal(ce)
+		if merr != nil {
+			return merr
+		}
+		return b.Put([]byte(deviceID), data)
+	})
+	return allowed, err
+}
+
 // OutboxHasEntry reports whether the outbox bucket contains an entry for the
 // given (deviceID, msgID) pair. Exported for whitebox test assertions in
 // sibling packages (e.g. internal/daemon fan-out tests).
