@@ -206,7 +206,7 @@ type GatewayConfig struct {
 type APNsGatewayConfig struct {
 	Enabled      bool   `yaml:"enabled"`
 	BundleID     string `yaml:"bundle_id,omitempty"`
-	KeySource    string `yaml:"key_source,omitempty"`    // "keychain" | "file"
+	KeySource    string `yaml:"key_source,omitempty"`     // "keychain" | "file"
 	CredFilePath string `yaml:"cred_file_path,omitempty"` // when key_source=file
 }
 
@@ -216,7 +216,7 @@ type APNsGatewayConfig struct {
 // "keychain" (default) or "file" (CredFilePath must be set).
 type FCMGatewayConfig struct {
 	Enabled      bool   `yaml:"enabled"`
-	CredsSource  string `yaml:"creds_source,omitempty"`  // "keychain" | "file"
+	CredsSource  string `yaml:"creds_source,omitempty"`   // "keychain" | "file"
 	CredFilePath string `yaml:"cred_file_path,omitempty"` // when creds_source=file
 }
 
