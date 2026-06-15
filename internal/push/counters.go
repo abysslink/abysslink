@@ -17,7 +17,7 @@ package push
 
 import "sync/atomic"
 
-// GatewayCounters holds the six gateway metrics exposed on GET /status (D-19).
+// GatewayCounters holds the seven gateway metrics exposed on GET /status (D-19).
 // All fields are atomic.Int64 (value type — not pointer) for goroutine-safe
 // increment / load without mutex overhead. The zero value is ready for use.
 //
@@ -28,6 +28,10 @@ import "sync/atomic"
 //   - PrunedTokens: dead-token entries removed (ErrDeadToken — D-12).
 //   - CeilingDropped: dispatches skipped by the per-device ceiling (D-05).
 //   - BackoffPending: transient errors that scheduled a retry (D-08).
+//   - FanoutErrors: fan-out storage failures (dedup/marshal/ceiling-store/
+//     enqueue) that did NOT schedule a retry — the wake was dropped or
+//     proceeded fail-open. Kept distinct from BackoffPending so /status does
+//     not misreport dropped/fail-open wakes as pending-retry depth (WR-01).
 //
 // No device token, bearer, or push credential is ever stored here (D-17 / T-29-04-4).
 type GatewayCounters struct {
@@ -37,4 +41,5 @@ type GatewayCounters struct {
 	PrunedTokens     atomic.Int64
 	CeilingDropped   atomic.Int64
 	BackoffPending   atomic.Int64
+	FanoutErrors     atomic.Int64
 }

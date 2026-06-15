@@ -249,7 +249,10 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 		seen, err := s.outbox.DedupSeen(msg.MsgID)
 		switch {
 		case err != nil:
-			s.gatewayCounters.BackoffPending.Add(1)
+			// WR-01: a dedup-store error proceeds fail-open (no retry scheduled),
+			// so it is a FanoutErrors event, not a BackoffPending one — counting
+			// it as pending-retry would inflate the /status retry depth.
+			s.gatewayCounters.FanoutErrors.Add(1)
 			slog.Warn("daemon: fanout dedup-store error; proceeding without dedup (fail-open)",
 				"msg_id", msg.MsgID, "err", err)
 		case seen:
@@ -261,9 +264,11 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 	// Serialize msg to JSON for the outbox MetaJSON field (routing metadata only).
 	// WR-05: a marshal failure loses the wake for ALL devices — count it so a
 	// systematic encode failure is observable on /status, not just a lone log.
+	// WR-01: the wake is DROPPED here (no retry scheduled), so it belongs to
+	// FanoutErrors, not the pending-retry BackoffPending counter.
 	metaJSON, err := json.Marshal(msg)
 	if err != nil {
-		s.gatewayCounters.BackoffPending.Add(1)
+		s.gatewayCounters.FanoutErrors.Add(1)
 		slog.Warn("daemon: fanout msg marshal failed; wake lost for all devices", "msg_id", msg.MsgID, "err", err)
 		return nil
 	}
@@ -280,7 +285,9 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 				// WR-05: a ceiling-STORE error is a storage failure, not an
 				// intentional ceiling drop — count it (greppable signal) and skip
 				// only this device, never the whole fan-out.
-				s.gatewayCounters.BackoffPending.Add(1)
+				// WR-01: this device's wake is SKIPPED (no retry scheduled), so it
+				// is a FanoutErrors event, not a BackoffPending one.
+				s.gatewayCounters.FanoutErrors.Add(1)
 				slog.Warn("daemon: fanout ceiling-store error; skipping device",
 					"device_id", r.ID, "err", cerr)
 				continue
@@ -319,7 +326,9 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 		if err := s.outbox.Enqueue(r.ID, entry); err != nil {
 			// WR-05: an enqueue failure silently dropped this device's wake.
 			// Count it (greppable signal) and skip only this device.
-			s.gatewayCounters.BackoffPending.Add(1)
+			// WR-01: the wake is DROPPED (no retry scheduled), so it is a
+			// FanoutErrors event, not a pending-retry BackoffPending one.
+			s.gatewayCounters.FanoutErrors.Add(1)
 			slog.Warn("daemon: fanout enqueue failed; wake lost for device",
 				"device_id", r.ID, "msg_id", msg.MsgID, "err", err)
 			continue
@@ -670,15 +679,16 @@ type daemonStatusResponse struct {
 	PostureComplete bool `json:"posture_complete"`
 
 	// Phase 29 push gateway counters (D-19): aggregate delivery metrics.
-	// All six fields are omitempty so the JSON stays backward-compatible when
+	// All seven fields are omitempty so the JSON stays backward-compatible when
 	// the push outbox is not wired (zero values are omitted). No device token,
 	// provider credential, or per-device detail is ever included (D-17 / T-29-04-4).
-	GatewayQueued   int `json:"gateway_queued,omitempty"`
-	GatewaySent     int `json:"gateway_sent,omitempty"`
-	GatewayAccepted int `json:"gateway_provider_accepted,omitempty"`
-	GatewayPruned   int `json:"gateway_pruned_tokens,omitempty"`
-	GatewayCeiling  int `json:"gateway_ceiling_dropped,omitempty"`
-	GatewayBackoff  int `json:"gateway_backoff_pending,omitempty"`
+	GatewayQueued       int `json:"gateway_queued,omitempty"`
+	GatewaySent         int `json:"gateway_sent,omitempty"`
+	GatewayAccepted     int `json:"gateway_provider_accepted,omitempty"`
+	GatewayPruned       int `json:"gateway_pruned_tokens,omitempty"`
+	GatewayCeiling      int `json:"gateway_ceiling_dropped,omitempty"`
+	GatewayBackoff      int `json:"gateway_backoff_pending,omitempty"`
+	GatewayFanoutErrors int `json:"gateway_fanout_errors,omitempty"`
 
 	// GatewayCredsStatus is the push-creds-keychain doctor signal (WR-01):
 	// "ok" (gateway auth path available) or "unavailable" (keychain backend
@@ -784,12 +794,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Phase 29 gateway counters (D-19): read from the atomic fields. When the
 	// outbox is not wired all counters stay 0 and are omitted (omitempty).
 	var (
-		gwQueued   int
-		gwSent     int
-		gwAccepted int
-		gwPruned   int
-		gwCeiling  int
-		gwBackoff  int
+		gwQueued       int
+		gwSent         int
+		gwAccepted     int
+		gwPruned       int
+		gwCeiling      int
+		gwBackoff      int
+		gwFanoutErrors int
 	)
 	if s.gatewayCounters != nil {
 		gwQueued = int(s.gatewayCounters.Queued.Load())             //nolint:gosec // G115: counter is non-negative
@@ -798,6 +809,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		gwPruned = int(s.gatewayCounters.PrunedTokens.Load())       //nolint:gosec // G115: counter is non-negative
 		gwCeiling = int(s.gatewayCounters.CeilingDropped.Load())    //nolint:gosec // G115: counter is non-negative
 		gwBackoff = int(s.gatewayCounters.BackoffPending.Load())    //nolint:gosec // G115: counter is non-negative
+		gwFanoutErrors = int(s.gatewayCounters.FanoutErrors.Load()) //nolint:gosec // G115: counter is non-negative
 	}
 
 	resp := daemonStatusResponse{
@@ -821,12 +833,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// all-clear on a security-posture endpoint (WR-05). Reachable is now real.
 		PostureComplete: false,
 		// Phase 29 push gateway counters (D-19). Zero values are omitted (omitempty).
-		GatewayQueued:   gwQueued,
-		GatewaySent:     gwSent,
-		GatewayAccepted: gwAccepted,
-		GatewayPruned:   gwPruned,
-		GatewayCeiling:  gwCeiling,
-		GatewayBackoff:  gwBackoff,
+		GatewayQueued:       gwQueued,
+		GatewaySent:         gwSent,
+		GatewayAccepted:     gwAccepted,
+		GatewayPruned:       gwPruned,
+		GatewayCeiling:      gwCeiling,
+		GatewayBackoff:      gwBackoff,
+		GatewayFanoutErrors: gwFanoutErrors,
 		// WR-01: real push-creds-keychain signal from the composition-root probe.
 		// Empty when the push gateway is not wired (omitempty drops it).
 		GatewayCredsStatus: s.gatewayCredsStatus,
