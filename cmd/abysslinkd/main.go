@@ -485,17 +485,19 @@ func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server,
 
 	// cfg.Gateway.APNs/FCM gates: disabled by default (D-14). The startup
 	// warnings were already emitted above in main() after config load.
+	//
+	// WR-06: these legs are ENABLED-but-NOT-WIRED — the gateway is intentionally
+	// omitted from the gateways map (credential resolution lands with the v5
+	// receiver). The log honestly says "enabled but not yet wired" rather than
+	// "registered", which would assert a capability that does not exist and
+	// mislead an operator debugging why an enabled leg never delivers. If an
+	// APNs/FCM entry is ever enqueued, processEntry drops it after
+	// maxNoGatewayAttempts rather than rescheduling forever.
 	if cfg.Gateway.APNs.Enabled {
-		slog.Info("abysslinkd: APNs push leg registered (EXPERIMENTAL)")
-		// APNs gateway construction requires a CredsSource; wired when
-		// keychain/file creds are available. For now, stub — doctor enforces
-		// bundle_id presence (Plan 05). Omit APNs from gateways map until
-		// credential resolution is complete (a nil gateway would panic on Send).
+		slog.Warn("abysslinkd: APNs push leg enabled but NOT yet wired (EXPERIMENTAL) — deliveries deferred until the v5 receiver; no APNs gateway is registered")
 	}
 	if cfg.Gateway.FCM.Enabled {
-		slog.Info("abysslinkd: FCM push leg registered (EXPERIMENTAL)")
-		// FCM gateway construction requires a service-account JSON; wired when
-		// creds are available. Same defer pattern as APNs above.
+		slog.Warn("abysslinkd: FCM push leg enabled but NOT yet wired (EXPERIMENTAL) — deliveries deferred until the v5 receiver; no FCM gateway is registered")
 	}
 
 	// Inject the outbox and counters into the daemon Server (D-10 fan-out).

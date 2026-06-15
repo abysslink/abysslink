@@ -70,6 +70,14 @@ type DeviceRecord struct {
 // goroutine checks for outbox entries whose NextRetryUnix ≤ now (D-08).
 const retryInterval = 5 * time.Second
 
+// maxNoGatewayAttempts bounds how many times an entry whose platform has no
+// registered gateway is rescheduled before it is dropped (WR-06). A
+// permanently-unwired leg (e.g. an enabled-but-not-yet-wired APNs/FCM gateway)
+// would otherwise reschedule the same undeliverable entry forever, growing the
+// outbox unbounded. After this many attempts the entry is dequeued so the
+// outbox cannot accumulate undeliverable wakes for a missing gateway.
+const maxNoGatewayAttempts = 10
+
 // RunOutboxRetry is the persistent outbox retry goroutine. It scans the outbox
 // bucket every retryInterval for entries with NextRetryUnix ≤ now and drives
 // them through the appropriate Gateway leg:
@@ -158,10 +166,25 @@ func findLastColon(key string, msgIDLen int) int {
 func processEntry(ctx context.Context, outbox *Outbox, gateways map[string]Gateway, devices DeviceStore, counters *GatewayCounters, deviceID string, e outboxEntry) {
 	gw, ok := gateways[e.Platform]
 	if !ok {
-		// No gateway registered for this platform (e.g. APNs disabled).
-		// Reschedule with backoff to avoid a tight loop and leave the entry for
-		// when the operator enables the leg and restarts the daemon.
+		// No gateway registered for this platform (e.g. an enabled-but-unwired
+		// APNs/FCM leg). WR-06: a permanently-missing gateway must NOT reschedule
+		// the same undeliverable entry forever — that grows the outbox unbounded.
+		// Reschedule with backoff for a bounded number of attempts (the leg may
+		// be wired on a daemon restart), then drop the entry so a never-wired
+		// platform cannot accumulate undeliverable wakes.
 		e.Attempts++
+		if e.Attempts >= maxNoGatewayAttempts {
+			if err := outbox.Dequeue(deviceID, e.MsgID); err != nil {
+				slog.Warn("push: dequeue of undeliverable no-gateway entry failed",
+					"device_id", deviceID, "msg_id", e.MsgID, "err", err)
+			}
+			slog.Warn("push: no gateway for platform after max attempts; entry dropped",
+				"device_id", deviceID,
+				"msg_id", e.MsgID,
+				"platform", e.Platform,
+				"attempts", e.Attempts)
+			return
+		}
 		e.NextRetryUnix = time.Now().Add(NextBackoff(e.Attempts)).Unix()
 		_ = outbox.Enqueue(deviceID, e)
 		counters.BackoffPending.Add(1)
