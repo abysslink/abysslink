@@ -183,6 +183,11 @@ func TestSendDirectWithOptions_ClickHeader(t *testing.T) {
 // Click string field keeps SendOptions comparable so the zero-options fast-path
 // guard in SendWithOptions (opts == SendOptions{}) still compiles and works.
 func TestSendWithOptions_ZeroValueGuardStillComparable(t *testing.T) {
+	// Hermetic: force the "no daemon listening" direct-fallback path this test
+	// asserts. Without it, a real abysslinkd running on the dev host intercepts
+	// the socket-first send and delivers to the live ntfy, so the httptest server
+	// below is never hit (gotPath stays "") — a host-dependent false failure.
+	noDaemon(t)
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
