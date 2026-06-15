@@ -147,6 +147,103 @@ func doBootstrapGet(t *testing.T, ts *httptest.Server, token string) *http.Respo
 	return resp
 }
 
+// doBootstrapGetUA issues a bearer-LESS GET /enroll/{token} with a custom
+// User-Agent (and no Accept header), to exercise the preview-bot detection.
+func doBootstrapGetUA(t *testing.T, ts *httptest.Server, token, ua string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/enroll/"+token, nil)
+	require.NoError(t, err)
+	req.Header.Set("User-Agent", ua)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// TestIsPreviewBot covers the User-Agent denylist: well-known preview/crawler
+// UAs match (true), while real-browser UAs and the empty UA do not (false → the
+// normal consume path runs).
+func TestIsPreviewBot(t *testing.T) {
+	cases := []struct {
+		ua   string
+		want bool
+	}{
+		{ua: "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)", want: true},
+		{ua: "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)", want: true},
+		{ua: "WhatsApp/2.23.20.0", want: true},
+		{ua: "Twitterbot/1.0", want: true},
+		{ua: "TelegramBot (like TwitterBot)", want: true},
+		{ua: "Discordbot/2.0 (+https://discordapp.com)", want: true},
+		{ua: "LinkedInBot/1.0", want: true},
+		{ua: "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)", want: true},
+		{ua: "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", want: true},
+		{ua: "Applebot/0.1", want: true},
+		// Real browsers must NOT match.
+		{ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1", want: false},
+		{ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", want: false},
+		{ua: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.ua, func(t *testing.T) {
+			assert.Equal(t, tc.want, isPreviewBot(tc.ua))
+		})
+	}
+}
+
+// TestHandleBootstrap_PreviewBotDoesNotConsume proves the preview-safe contract:
+// a preview crawler GET serves the generic placeholder (200, no secret), does
+// NOT consume the single-use token (a subsequent real fetch still gets the
+// bundle), and is identical on a non-existent token (no oracle).
+func TestHandleBootstrap_PreviewBotDoesNotConsume(t *testing.T) {
+	// A placeholder stand-in for the staged secret (avoid a real credential
+	// literal in the test source); the page must never echo it back.
+	const secretMarker = "STAGED-SECRET-MARKER-VALUE-XYZ"
+	bundle := `{"device":"phone","token_field":"` + secretMarker + `"}`
+
+	botUAs := []string{
+		"Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
+		"facebookexternalhit/1.1",
+		"WhatsApp/2.23.20.0",
+	}
+	for _, ua := range botUAs {
+		t.Run(ua, func(t *testing.T) {
+			s, _, ts, _ := newContentTestServer(t)
+			token, _ := s.content.mintBootstrap(bundle, time.Minute)
+
+			// The preview fetch: placeholder, 200, NO secret.
+			resp := doBootstrapGetUA(t, ts, token, ua)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+			assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+			page, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			require.NoError(t, err)
+			assert.NotContains(t, string(page), secretMarker, "the placeholder must never carry the secret bundle")
+			assert.Contains(t, string(page), "single-use", "the placeholder must hint at the one-time link")
+			assert.Contains(t, strings.ToLower(string(page)), "open", "the placeholder must tell the user to open it on the device")
+
+			// The token survived: a real (no/browser UA) fetch still gets the bundle.
+			real := doBootstrapGet(t, ts, token)
+			require.Equal(t, http.StatusOK, real.StatusCode, "the preview must not have consumed the token")
+			body, err := io.ReadAll(real.Body)
+			_ = real.Body.Close()
+			require.NoError(t, err)
+			assert.Equal(t, bundle, string(body), "the real fetch must still receive the secret bundle")
+		})
+	}
+
+	// A bot GET on a NON-existent token is the same placeholder 200 (no oracle,
+	// no 404 difference vs a real token).
+	t.Run("nonexistent token same placeholder", func(t *testing.T) {
+		_, _, ts, _ := newContentTestServer(t)
+		resp := doBootstrapGetUA(t, ts, "ablk_e_does-not-exist", "Slackbot-LinkExpanding 1.0")
+		defer func() { _ = resp.Body.Close() }()
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "a bot must get 200 even for an unknown token (no oracle)")
+		page, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Contains(t, string(page), "single-use")
+	})
+}
+
 func doAck(t *testing.T, ts *httptest.Server, body, bearer string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/ack", strings.NewReader(body))
