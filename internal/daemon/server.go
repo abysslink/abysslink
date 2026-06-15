@@ -274,82 +274,83 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 	}
 
 	records := s.devices.List()
+	meta := string(metaJSON)
 	for _, r := range records {
-		if r.Revoked || r.PushToken == "" {
-			continue // skip revoked or token-less devices
-		}
-		// Per-device ceiling check for non-approval_request (D-05 / research Q3).
-		if msg.Kind != notifyv2.KindApprovalRequest {
-			allowed, cerr := s.outbox.CeilingCheck(r.ID, msg.Kind)
-			if cerr != nil {
-				// WR-05: a ceiling-STORE error is a storage failure, not an
-				// intentional ceiling drop — count it (greppable signal) and skip
-				// only this device, never the whole fan-out.
-				// WR-01: this device's wake is SKIPPED (no retry scheduled), so it
-				// is a FanoutErrors event, not a BackoffPending one.
-				s.gatewayCounters.FanoutErrors.Add(1)
-				slog.Warn("daemon: fanout ceiling-store error; skipping device",
-					"device_id", r.ID, "err", cerr)
-				continue
-			}
-			if !allowed {
-				s.gatewayCounters.CeilingDropped.Add(1)
-				slog.Debug("daemon: fanout ceiling drop",
-					"device_id", r.ID, "msg_id", msg.MsgID, "kind", msg.Kind)
-				continue
-			}
-		}
-
-		// WR-03: route by the device record's platform via the named constant
-		// rather than a bare "unifiedpush" literal. The current enrollment schema
-		// (device.Record) carries no platform-specific token, so every enrolled
-		// device IS a UnifiedPush endpoint (its PushToken is the ntfy endpoint
-		// URL, the sovereign default — D-18). devicePlatform centralizes this
-		// invariant; once the v5 app adds a platform field to device.Record it
-		// returns the record's real platform and any record that is not a
-		// registered gateway is skipped (processEntry's no-gateway path drops it)
-		// rather than silently POSTing an APNs/FCM token to an ntfy URL.
-		platform := devicePlatform(r)
-
-		cid := push.CollapseID(msg.MsgID, msg.Session.Session, msg.Kind)
-		entry := push.OutboxEntry{
-			Platform:       platform,
-			ProviderToken:  r.PushToken, // secret-class — never log (D-17)
-			MsgID:          msg.MsgID,
-			Title:          msg.Title,
-			MetaJSON:       string(metaJSON),
-			Attempts:       0,
-			FirstTriedUnix: time.Now().Unix(),
-			NextRetryUnix:  time.Now().Unix(), // immediate first attempt
-			CollapseID:     cid,
-		}
-		if err := s.outbox.Enqueue(r.ID, entry); err != nil {
-			// WR-05: an enqueue failure silently dropped this device's wake.
-			// Count it (greppable signal) and skip only this device.
-			// WR-01: the wake is DROPPED (no retry scheduled), so it is a
-			// FanoutErrors event, not a pending-retry BackoffPending one.
-			s.gatewayCounters.FanoutErrors.Add(1)
-			slog.Warn("daemon: fanout enqueue failed; wake lost for device",
-				"device_id", r.ID, "msg_id", msg.MsgID, "err", err)
-			continue
-		}
-		s.gatewayCounters.Queued.Add(1)
-
-		// WR-02: increment the per-device wake window at ENQUEUE, where the
-		// CeilingCheck decision is made, not at delivery. The retry goroutine
-		// fires asynchronously every 5s, so incrementing on successful send let
-		// a burst sail past the ceiling while the count was still low. Counting
-		// here — in the same synchronous fan-out path as the check above —
-		// closes the burst gap (D-05). approval_request is exempt (it bypassed
-		// the check above and must not consume the window either).
-		if msg.Kind != notifyv2.KindApprovalRequest {
-			if err := s.outbox.CeilingIncr(r.ID, push.DefaultCeiling); err != nil {
-				slog.Warn("daemon: fanout ceiling incr failed",
-					"device_id", r.ID, "err", err)
-			}
-		}
+		s.enqueueDeviceWake(msg, r, meta)
 	}
 	return nil
+}
+
+// enqueueDeviceWake enqueues one device's wake during fan-out. Extracted from
+// fanOutToDevices to keep that function under the gocyclo ceiling; the per-device
+// decision tree (skip revoked/token-less, per-device ceiling, route, enqueue,
+// ceiling increment) lives here. Counter/log semantics are unchanged
+// (WR-01/02/05): every drop/skip path that schedules no retry increments
+// FanoutErrors, a genuine ceiling rejection increments CeilingDropped, and the
+// per-device window is incremented at enqueue (not at delivery).
+func (s *Server) enqueueDeviceWake(msg notifyv2.Message, r device.Record, metaJSON string) {
+	if r.Revoked || r.PushToken == "" {
+		return // skip revoked or token-less devices
+	}
+	// Per-device ceiling check for non-approval_request (D-05 / research Q3).
+	if msg.Kind != notifyv2.KindApprovalRequest {
+		allowed, cerr := s.outbox.CeilingCheck(r.ID, msg.Kind)
+		if cerr != nil {
+			// WR-05/WR-01: a ceiling-STORE error is a storage failure, not an
+			// intentional drop, and schedules no retry — count it as a FanoutErrors
+			// signal and skip only this device, never the whole fan-out.
+			s.gatewayCounters.FanoutErrors.Add(1)
+			slog.Warn("daemon: fanout ceiling-store error; skipping device",
+				"device_id", r.ID, "err", cerr)
+			return
+		}
+		if !allowed {
+			s.gatewayCounters.CeilingDropped.Add(1)
+			slog.Debug("daemon: fanout ceiling drop",
+				"device_id", r.ID, "msg_id", msg.MsgID, "kind", msg.Kind)
+			return
+		}
+	}
+
+	// WR-03: route by the device record's platform via devicePlatform rather than
+	// a bare "unifiedpush" literal. The current enrollment schema (device.Record)
+	// carries no platform-specific token, so every enrolled device IS a UnifiedPush
+	// endpoint (its PushToken is the ntfy endpoint URL, the sovereign default —
+	// D-18). devicePlatform is the single seam to update when the v5 app adds a
+	// platform field to device.Record.
+	cid := push.CollapseID(msg.MsgID, msg.Session.Session, msg.Kind)
+	entry := push.OutboxEntry{
+		Platform:       devicePlatform(r),
+		ProviderToken:  r.PushToken, // secret-class — never log (D-17)
+		MsgID:          msg.MsgID,
+		Title:          msg.Title,
+		MetaJSON:       metaJSON,
+		Attempts:       0,
+		FirstTriedUnix: time.Now().Unix(),
+		NextRetryUnix:  time.Now().Unix(), // immediate first attempt
+		CollapseID:     cid,
+	}
+	if err := s.outbox.Enqueue(r.ID, entry); err != nil {
+		// WR-05/WR-01: an enqueue failure drops this device's wake with no retry
+		// scheduled — count it as a FanoutErrors signal and skip only this device.
+		s.gatewayCounters.FanoutErrors.Add(1)
+		slog.Warn("daemon: fanout enqueue failed; wake lost for device",
+			"device_id", r.ID, "msg_id", msg.MsgID, "err", err)
+		return
+	}
+	s.gatewayCounters.Queued.Add(1)
+
+	// WR-02: increment the per-device wake window at ENQUEUE, where the
+	// CeilingCheck decision is made, not at delivery. The retry goroutine fires
+	// asynchronously every 5s, so incrementing on successful send let a burst sail
+	// past the ceiling while the count was still low. approval_request is exempt
+	// (it bypassed the check above and must not consume the window either).
+	if msg.Kind != notifyv2.KindApprovalRequest {
+		if err := s.outbox.CeilingIncr(r.ID, push.DefaultCeiling); err != nil {
+			slog.Warn("daemon: fanout ceiling incr failed",
+				"device_id", r.ID, "err", err)
+		}
+	}
 }
 
 // devicePlatform returns the push platform for a device record (WR-03). The
