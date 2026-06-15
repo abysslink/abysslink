@@ -224,22 +224,33 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 	// Dedup check for non-approval_request: skip the entire fan-out if this
 	// msg_id has already been dispatched (D-07 / Phase 27 D-09 carried forward).
 	// approval_request is always exempt from dedup.
+	//
+	// WR-05: a dedup-STORE error (bbolt transient) is NOT an intentional skip —
+	// collapsing it into a silent `return nil` drops the wake for every device
+	// with no signal. Treat a store error as "not seen, proceed" (fail-open: a
+	// possible duplicate wake is far less harmful than a silently-lost one) and
+	// emit a greppable WARN so a flapping outbox DB is observable. Only a genuine
+	// `seen == true` is an intentional, silent (debug-level) skip.
 	if msg.Kind != notifyv2.KindApprovalRequest {
 		seen, err := s.outbox.DedupSeen(msg.MsgID)
-		if err != nil {
-			slog.Warn("daemon: fanout dedup check failed; skipping fan-out", "msg_id", msg.MsgID, "err", err)
-			return nil
-		}
-		if seen {
+		switch {
+		case err != nil:
+			s.gatewayCounters.BackoffPending.Add(1)
+			slog.Warn("daemon: fanout dedup-store error; proceeding without dedup (fail-open)",
+				"msg_id", msg.MsgID, "err", err)
+		case seen:
 			slog.Debug("daemon: fanout dedup skip", "msg_id", msg.MsgID)
 			return nil
 		}
 	}
 
 	// Serialize msg to JSON for the outbox MetaJSON field (routing metadata only).
+	// WR-05: a marshal failure loses the wake for ALL devices — count it so a
+	// systematic encode failure is observable on /status, not just a lone log.
 	metaJSON, err := json.Marshal(msg)
 	if err != nil {
-		slog.Warn("daemon: fanout msg marshal failed", "msg_id", msg.MsgID, "err", err)
+		s.gatewayCounters.BackoffPending.Add(1)
+		slog.Warn("daemon: fanout msg marshal failed; wake lost for all devices", "msg_id", msg.MsgID, "err", err)
 		return nil
 	}
 
@@ -252,7 +263,11 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 		if msg.Kind != notifyv2.KindApprovalRequest {
 			allowed, cerr := s.outbox.CeilingCheck(r.ID, msg.Kind)
 			if cerr != nil {
-				slog.Warn("daemon: fanout ceiling check failed; skipping device",
+				// WR-05: a ceiling-STORE error is a storage failure, not an
+				// intentional ceiling drop — count it (greppable signal) and skip
+				// only this device, never the whole fan-out.
+				s.gatewayCounters.BackoffPending.Add(1)
+				slog.Warn("daemon: fanout ceiling-store error; skipping device",
 					"device_id", r.ID, "err", cerr)
 				continue
 			}
@@ -288,7 +303,10 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 			CollapseID:     cid,
 		}
 		if err := s.outbox.Enqueue(r.ID, entry); err != nil {
-			slog.Warn("daemon: fanout enqueue failed",
+			// WR-05: an enqueue failure silently dropped this device's wake.
+			// Count it (greppable signal) and skip only this device.
+			s.gatewayCounters.BackoffPending.Add(1)
+			slog.Warn("daemon: fanout enqueue failed; wake lost for device",
 				"device_id", r.ID, "msg_id", msg.MsgID, "err", err)
 			continue
 		}
