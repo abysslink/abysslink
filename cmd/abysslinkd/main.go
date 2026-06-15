@@ -190,7 +190,14 @@ func main() {
 	// hash-only ack receipts, and the Tailscale TLS provider. A missing
 	// dependency disables the content listener (fail closed, one honest
 	// warning inside the daemon) — the unix socket keeps serving regardless.
-	wireContentDeps(srv, cfg, kc)
+	//
+	// The audited device store is returned so the Phase 29 push retry goroutine
+	// reuses the SAME handle for its dead-token prune (WR-04): a second store
+	// over devices.json with a nil audit writer would write revocations outside
+	// the backup+audit chain and create a concurrent-writer hazard. devStore is
+	// nil when the device path/audit log is unavailable (content listener stays
+	// disabled); the push prune path then degrades to a no-op.
+	devStore := wireContentDeps(srv, cfg, kc)
 
 	// Phase 29 push outbox (D-06 structural exemption):
 	// The bbolt push-outbox file is daemon runtime state opened at the
@@ -204,8 +211,9 @@ func main() {
 	// into wireContentDeps) is passed through so the always-on UnifiedPush leg
 	// can attach Basic auth for the sovereign self-hosted ntfy default (CR-01).
 	// NewUnifiedPushGateway tolerates a nil kc, so headless/no-auth setups are
-	// unaffected.
-	wirePushOutbox(ctx, cfg, srv, kc)
+	// unaffected. devStore (the audited handle from wireContentDeps) is reused
+	// for the dead-token prune so revocations stay on the audit chain (WR-04).
+	wirePushOutbox(ctx, cfg, srv, kc, devStore)
 
 	// tmux session registry (Phase 27, BACK-03/BACK-04). D-40: registry execs
 	// (tmux -CC attach, list-panes, capture-pane) are daemon-internal plumbing
@@ -282,11 +290,16 @@ func main() {
 // appender, and the TLS provider, and injects them into the daemon server.
 // Any unresolvable dependency is logged and skipped — the daemon then keeps
 // the content listener disabled (fail closed) while everything else runs.
-func wireContentDeps(srv *daemon.Server, cfg *config.Config, kc secrets.KeychainStore) {
+//
+// It returns the constructed *device.Store so the composition root can hand the
+// SAME audited handle to the Phase 29 push retry goroutine (WR-04): the
+// dead-token prune must go through this audited writer, not a second nil-audit
+// store over the same devices.json. Returns nil on any wiring failure.
+func wireContentDeps(srv *daemon.Server, cfg *config.Config, kc secrets.KeychainStore) *device.Store {
 	logPath, err := audit.DefaultLogPath()
 	if err != nil {
 		slog.Warn("abysslinkd: audit log path unavailable; content listener stays disabled", "err", err)
-		return
+		return nil
 	}
 	// One audit writer serves both roles: every devices.json mutation goes
 	// through WriteFile (backup + audit entry + atomic write) and ack
@@ -302,11 +315,13 @@ func wireContentDeps(srv *daemon.Server, cfg *config.Config, kc secrets.Keychain
 	devPath, err := device.DefaultPath()
 	if err != nil {
 		slog.Warn("abysslinkd: device store path unavailable; content listener stays disabled", "err", err)
-		return
+		return nil
 	}
-	srv.SetDeviceStore(device.New(devPath, aud, kc, nil))
+	devStore := device.New(devPath, aud, kc, nil)
+	srv.SetDeviceStore(devStore)
 	srv.SetAuditAppender(aud)
 	srv.SetContentTLS(contentTLSProvider(cfg))
+	return devStore
 }
 
 // contentTLSProvider returns the content listener's TLS provider: the
@@ -428,7 +443,14 @@ func (a pushDeviceStoreAdapter) RevokeByID(ctx context.Context, id string) error
 // the always-on UnifiedPush gateway so authenticated self-hosted ntfy
 // endpoints receive Basic auth (CR-01). A nil kc degrades to no-auth POSTs,
 // which is correct for headless/no-auth ntfy instances.
-func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server, kc secrets.KeychainStore) {
+//
+// devStore is the SAME audited *device.Store the content listener uses (from
+// wireContentDeps). The retry goroutine's dead-token prune (RevokeByID) writes
+// devices.json through this audited handle so revocations keep their
+// backup+audit-chain entry (WR-04 / CLAUDE.md "audit + backup on every file
+// mutation"). A nil devStore (degraded wiring) disables the prune — a no-op,
+// not fatal — and never opens an unaudited second writer over devices.json.
+func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server, kc secrets.KeychainStore, devStore *device.Store) {
 	outboxDir := filepath.Join(xdgStateHome(), "abysslink")
 	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
 		slog.Warn("abysslinkd: push outbox dir creation failed; push disabled", "err", err)
@@ -479,15 +501,18 @@ func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server,
 	// Inject the outbox and counters into the daemon Server (D-10 fan-out).
 	srv.SetOutbox(outbox, counters)
 
-	// Resolve the device store adapter for the retry goroutine. The device
-	// store is set on the server by wireContentDeps; we re-open it here for
-	// the push adapter. If the device path is unavailable the runner starts
-	// without a device store (dead-token prune is a no-op — not fatal).
-	var devStore push.DeviceStore
-	if devPath, pathErr := device.DefaultPath(); pathErr == nil {
-		devStore = pushDeviceStoreAdapter{s: device.New(devPath, nil, nil, nil)}
+	// Resolve the device store adapter for the retry goroutine. WR-04: REUSE the
+	// single audited *device.Store the content listener already owns rather than
+	// opening a second nil-audit handle over the same devices.json. A dead-token
+	// prune (RevokeByID) therefore goes through the backup+audit chain, and one
+	// store instance owns the file (no concurrent-writer hazard). A nil devStore
+	// (degraded wiring) leaves the runner without a device store — dead-token
+	// prune becomes a no-op, which is non-fatal.
+	var pushStore push.DeviceStore
+	if devStore != nil {
+		pushStore = pushDeviceStoreAdapter{s: devStore}
 	} else {
-		slog.Warn("abysslinkd: push device store unavailable; dead-token prune disabled", "err", pathErr)
+		slog.Warn("abysslinkd: push device store unavailable; dead-token prune disabled")
 	}
 
 	// Start the retry goroutine. It closes bbolt on daemon exit via the deferred
@@ -496,7 +521,7 @@ func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server,
 	// caller via a deferred close in the goroutine itself to avoid a leak).
 	go func() {
 		defer func() { _ = outboxDB.Close() }()
-		push.RunOutboxRetry(ctx, outbox, gateways, devStore, counters)
+		push.RunOutboxRetry(ctx, outbox, gateways, pushStore, counters)
 	}()
 
 	slog.Info("abysslinkd: push outbox started", "path", outboxPath)
