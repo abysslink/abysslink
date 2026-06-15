@@ -177,7 +177,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	nm := notify.New(notifymod.Deps{Cfg: cfg, Runner: gated, Keychain: kc, Platform: plat})
+	// Backend client resolves this node's tailnet IP. The notify module needs it
+	// to target ntfy at its tailnet-IP bind: ntfy binds the tailnet IP only, so a
+	// nil backend forces a localhost fallback that fails under the secure binding
+	// (connection refused -> the daemon returns 502 to notify clients). Built here
+	// (before notify wiring) and reused by the metrics listener below. bc may be
+	// nil when the backend is unconfigured -- every consumer is nil-safe (notify
+	// falls back to localhost, metrics nil-guards internally).
+	bc, bcErr := backend.New(cfg, base)
+	if bcErr != nil {
+		slog.Warn("abysslinkd: backend client unavailable; tailnet-IP-dependent features degraded", "err", bcErr)
+	}
+
+	nm := notify.New(notifymod.Deps{Cfg: cfg, Runner: gated, Keychain: kc, Platform: plat, Backend: bc})
 	// D-40: the daemon's internal watchers/probes (and the session registry in
 	// plan 27-07) use the ungated base runner so the Phase 30 enforcing gate can
 	// never deadlock the daemon on its own plumbing. The bypass is structural —
@@ -248,10 +260,8 @@ func main() {
 	// skip wiring. The registry is a live in-memory sink when enabled, NoopRegistry
 	// otherwise so every metrics call is nil-safe.
 	// base (D-40): the metrics tailnet-IP binding is a daemon-internal probe.
-	bc, bcErr := backend.New(cfg, base)
-	if bcErr != nil {
-		slog.Warn("abysslinkd: backend client unavailable; metrics binding degraded", "err", bcErr)
-	}
+	// bc is the backend client constructed above (before notify wiring) and
+	// reused here; StartMetricsServer nil-guards internally if it is nil.
 	var reg metrics.Registry = metrics.NoopRegistry{}
 	if cfg.Observability.Metrics.Enabled {
 		reg = metrics.NewMemRegistry()
