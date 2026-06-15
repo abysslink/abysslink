@@ -83,6 +83,11 @@ type Config struct {
 	SessionRegistry SessionRegistry `yaml:"session_registry"`
 
 	ContentStore ContentStoreConfig `yaml:"content_store"`
+
+	// Gateway holds the Phase 29 push-gateway configuration
+	// (notify.gateway.* per SPEC §12). APNs and FCM default disabled (D-14);
+	// UnifiedPush defaults enabled (D-18 sovereign path).
+	Gateway GatewayConfig `yaml:"gateway"`
 }
 
 // Content-store defaults and bounds (Phase 28, BACK-06). The TTL bounds are a
@@ -182,6 +187,67 @@ func (c ContentStoreConfig) EffectiveEnrollTTL() time.Duration {
 		ttl = MaxEnrollTTLSeconds
 	}
 	return time.Duration(ttl) * time.Second
+}
+
+// GatewayConfig holds the push-gateway configuration block (SPEC §12,
+// notify.gateway.*). APNs and FCM are experimental and disabled by default
+// (D-14); UnifiedPush/ntfy is the sovereign default-on path (D-18).
+type GatewayConfig struct {
+	APNs        APNsGatewayConfig        `yaml:"apns"`
+	FCM         FCMGatewayConfig         `yaml:"fcm"`
+	UnifiedPush UnifiedPushGatewayConfig `yaml:"unifiedpush"`
+}
+
+// APNsGatewayConfig configures the Apple Push Notification Service leg.
+// APNs is EXPERIMENTAL and disabled by default (D-14). BundleID is required
+// when Enabled is true (validation gate — research Q1; doctor FATAL in Plan 05).
+// KeySource controls how the .p8 signing key is retrieved: "keychain" (default)
+// or "file" (CredFilePath must be set).
+type APNsGatewayConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	BundleID     string `yaml:"bundle_id,omitempty"`
+	KeySource    string `yaml:"key_source,omitempty"`    // "keychain" | "file"
+	CredFilePath string `yaml:"cred_file_path,omitempty"` // when key_source=file
+}
+
+// FCMGatewayConfig configures the Firebase Cloud Messaging HTTP v1 leg.
+// FCM is EXPERIMENTAL and disabled by default (D-14).
+// CredsSource controls how the GCP service-account JSON is retrieved:
+// "keychain" (default) or "file" (CredFilePath must be set).
+type FCMGatewayConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	CredsSource  string `yaml:"creds_source,omitempty"`  // "keychain" | "file"
+	CredFilePath string `yaml:"cred_file_path,omitempty"` // when creds_source=file
+}
+
+// UnifiedPushGatewayConfig configures the UnifiedPush/ntfy sovereign leg.
+// Enabled defaults to true (D-18): this is the default-on path for phone wake.
+type UnifiedPushGatewayConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// ValidateGateway validates the gateway configuration block (SPEC §12).
+// Called by Validate; exported for doctor checks (Plan 05).
+func ValidateGateway(cfg *Config) error {
+	gw := &cfg.Gateway
+	// APNs: bundle_id required when enabled (research Q1).
+	if gw.APNs.Enabled && gw.APNs.BundleID == "" {
+		return fmt.Errorf("config: gateway.apns.bundle_id must be set when notify.gateway.apns.enabled is true")
+	}
+	// APNs key_source: must be one of {"keychain","file"} when set; empty
+	// means the default "keychain" (set by Defaults) and is also accepted.
+	switch gw.APNs.KeySource {
+	case "", "keychain", "file":
+	default:
+		return fmt.Errorf("config: gateway.apns.key_source %q must be keychain or file", gw.APNs.KeySource)
+	}
+	// FCM creds_source: must be one of {"keychain","file"} when set.
+	switch gw.FCM.CredsSource {
+	case "", "keychain", "file":
+	default:
+		return fmt.Errorf("config: gateway.fcm.creds_source %q must be keychain or file", gw.FCM.CredsSource)
+	}
+	return nil
 }
 
 // SessionRegistry configures the daemon-side tmux session registry (Phase 27,
@@ -568,6 +634,23 @@ func Defaults() *Config {
 			Port:       DefaultContentStorePort,
 			TTLSeconds: DefaultContentTTLSeconds,
 		},
+		// Gateway defaults (SPEC §12, D-14, D-18):
+		//   APNs and FCM are experimental — disabled by default.
+		//   UnifiedPush/ntfy is the sovereign path — enabled by default.
+		//   KeySource and CredsSource default to "keychain" (OS keychain, most secure).
+		Gateway: GatewayConfig{
+			APNs: APNsGatewayConfig{
+				Enabled:   false,
+				KeySource: "keychain",
+			},
+			FCM: FCMGatewayConfig{
+				Enabled:     false,
+				CredsSource: "keychain",
+			},
+			UnifiedPush: UnifiedPushGatewayConfig{
+				Enabled: true,
+			},
+		},
 	}
 }
 
@@ -720,6 +803,7 @@ func Validate(cfg *Config) error {
 		validateWatchPanes,
 		validateSessionRegistry,
 		ValidateContentStore,
+		ValidateGateway,
 	} {
 		if err := validate(cfg); err != nil {
 			return err
