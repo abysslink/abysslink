@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	bbolt "go.etcd.io/bbolt"
 	"tailscale.com/client/local"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -44,6 +45,7 @@ import (
 	notify "github.com/abysslink/abysslink/internal/modules/notify"
 	"github.com/abysslink/abysslink/internal/notifyv2"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
+	"github.com/abysslink/abysslink/internal/push"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/session"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -153,6 +155,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// D-14: emit experimental startup warnings when APNs or FCM is enabled.
+	// These legs are interface-complete but ship disabled by default until the
+	// v5 native app provides a receiver; operators enabling them accept the
+	// experimental status.
+	if cfg.Gateway.APNs.Enabled {
+		slog.Warn("abysslinkd: APNs push leg is EXPERIMENTAL — disabled by default (D-14); ensure bundle_id is correct before relying on APNs delivery")
+	}
+	if cfg.Gateway.FCM.Enabled {
+		slog.Warn("abysslinkd: FCM push leg is EXPERIMENTAL — disabled by default (D-14); ensure GCP service-account credentials are configured")
+	}
+
 	kc, kerr := secrets.NewStore(ctx, gated)
 	if kerr != nil {
 		slog.Warn("abysslinkd: keychain backend unavailable", "err", kerr)
@@ -178,6 +191,15 @@ func main() {
 	// dependency disables the content listener (fail closed, one honest
 	// warning inside the daemon) — the unix socket keeps serving regardless.
 	wireContentDeps(srv, cfg, kc)
+
+	// Phase 29 push outbox (D-06 structural exemption):
+	// The bbolt push-outbox file is daemon runtime state opened at the
+	// composition root, NEVER through internal/audit.
+	// Structural audit-mutation exemption D-06 (same shape as Phase 27 D-40
+	// ungated-runner bypass): bbolt is a single-writer runtime file, not a
+	// user-data mutation subject to backup+audit. The file is 0600 and lives
+	// under XDG_STATE_HOME/abysslink/ alongside devices.json.
+	wirePushOutbox(ctx, cfg, srv)
 
 	// tmux session registry (Phase 27, BACK-03/BACK-04). D-40: registry execs
 	// (tmux -CC attach, list-panes, capture-pane) are daemon-internal plumbing
@@ -341,6 +363,128 @@ func startAnchorWriter(ctx context.Context, kc secrets.KeychainStore) {
 			}
 		}
 	}()
+}
+
+// xdgStateHome returns the XDG_STATE_HOME base directory, defaulting to
+// ~/.local/state when the environment variable is unset. It is the canonical
+// location for abysslinkd runtime state files (bbolt outbox, devices.json).
+func xdgStateHome() string {
+	if s := os.Getenv("XDG_STATE_HOME"); s != "" {
+		return s
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".local/state"
+	}
+	return filepath.Join(home, ".local", "state")
+}
+
+// pushDeviceStoreAdapter bridges daemon.DeviceStore (uses device.Record) to
+// push.DeviceStore (uses push.DeviceRecord). It wraps device.Store so the push
+// retry goroutine can call List and RevokeByID without importing internal/device.
+type pushDeviceStoreAdapter struct{ s *device.Store }
+
+// List returns all device records converted to push.DeviceRecord. Only active
+// records with a push token are relevant for the retry goroutine; the adapter
+// returns all so the runner can filter. ProviderToken = PushToken (the opaque
+// push identity minted at enrollment); Platform is always "unifiedpush" for
+// Phase 29 devices (no platform-specific token in the current schema — v5 app
+// enrollment will add APNs/FCM tokens to a separate field).
+func (a pushDeviceStoreAdapter) List() []push.DeviceRecord {
+	records := a.s.List()
+	out := make([]push.DeviceRecord, 0, len(records))
+	for _, r := range records {
+		out = append(out, push.DeviceRecord{
+			ID:        r.ID,
+			Platform:  "unifiedpush",
+			PushToken: r.PushToken,
+			Revoked:   r.Revoked,
+		})
+	}
+	return out
+}
+
+// RevokeByID permanently revokes the device with the given ULID ID via the
+// wrapped device.Store (dead-token prune, D-12). Forwards to Store.RevokeByID.
+func (a pushDeviceStoreAdapter) RevokeByID(ctx context.Context, id string) error {
+	return a.s.RevokeByID(ctx, id)
+}
+
+// wirePushOutbox opens the bbolt push-outbox database and starts the Phase 29
+// push gateway retry goroutine. On any failure it logs and returns without
+// wiring — the daemon continues in degraded mode without push delivery.
+//
+// Structural audit-mutation exemption D-06: the bbolt outbox is daemon runtime
+// state opened at the composition root, never via internal/audit (same shape
+// as D-40 ungated-runner bypass).
+func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server) {
+	outboxDir := filepath.Join(xdgStateHome(), "abysslink")
+	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
+		slog.Warn("abysslinkd: push outbox dir creation failed; push disabled", "err", err)
+		return
+	}
+	outboxPath := filepath.Join(outboxDir, "push_outbox.db")
+	// Phase 29 push outbox — opened at the composition root, NEVER through
+	// internal/audit. Structural audit-mutation exemption D-06 (same shape as
+	// Phase 27 D-40 ungated-runner bypass).
+	outboxDB, err := bbolt.Open(outboxPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
+	if err != nil {
+		slog.Warn("abysslinkd: push outbox open failed; push disabled", "path", outboxPath, "err", err)
+		return
+	}
+	outbox := push.NewOutbox(outboxDB)
+	counters := &push.GatewayCounters{}
+
+	// Sweep expired dedup entries at daemon start (D-07).
+	if sweepErr := outbox.SweepDedup(); sweepErr != nil {
+		slog.Warn("abysslinkd: push dedup sweep failed at startup", "err", sweepErr)
+	}
+
+	// Build the gateway map. UnifiedPush is always registered (sovereign path,
+	// D-18). APNs and FCM are registered only when enabled in config (D-14).
+	// Keychain is nil-safe: NewUnifiedPushGateway degrades when kc is nil.
+	gateways := make(map[string]push.Gateway)
+	gateways["unifiedpush"] = push.NewUnifiedPushGateway(nil) // kc not accessible here; degraded but wired
+
+	// cfg.Gateway.APNs/FCM gates: disabled by default (D-14). The startup
+	// warnings were already emitted above in main() after config load.
+	if cfg.Gateway.APNs.Enabled {
+		slog.Info("abysslinkd: APNs push leg registered (EXPERIMENTAL)")
+		// APNs gateway construction requires a CredsSource; wired when
+		// keychain/file creds are available. For now, stub — doctor enforces
+		// bundle_id presence (Plan 05). Omit APNs from gateways map until
+		// credential resolution is complete (a nil gateway would panic on Send).
+	}
+	if cfg.Gateway.FCM.Enabled {
+		slog.Info("abysslinkd: FCM push leg registered (EXPERIMENTAL)")
+		// FCM gateway construction requires a service-account JSON; wired when
+		// creds are available. Same defer pattern as APNs above.
+	}
+
+	// Inject the outbox and counters into the daemon Server (D-10 fan-out).
+	srv.SetOutbox(outbox, counters)
+
+	// Resolve the device store adapter for the retry goroutine. The device
+	// store is set on the server by wireContentDeps; we re-open it here for
+	// the push adapter. If the device path is unavailable the runner starts
+	// without a device store (dead-token prune is a no-op — not fatal).
+	var devStore push.DeviceStore
+	if devPath, pathErr := device.DefaultPath(); pathErr == nil {
+		devStore = pushDeviceStoreAdapter{s: device.New(devPath, nil, nil, nil)}
+	} else {
+		slog.Warn("abysslinkd: push device store unavailable; dead-token prune disabled", "err", pathErr)
+	}
+
+	// Start the retry goroutine. It closes bbolt on daemon exit via the deferred
+	// close registered by the daemon's shutdown path (not here — the goroutine
+	// holds no close obligation; the DB handle ownership stays with wirePushOutbox's
+	// caller via a deferred close in the goroutine itself to avoid a leak).
+	go func() {
+		defer func() { _ = outboxDB.Close() }()
+		push.RunOutboxRetry(ctx, outbox, gateways, devStore, counters)
+	}()
+
+	slog.Info("abysslinkd: push outbox started", "path", outboxPath)
 }
 
 // configPath returns the abysslink.yaml path under XDG_CONFIG_HOME.

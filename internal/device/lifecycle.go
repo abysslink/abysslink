@@ -252,6 +252,33 @@ func (s *Store) Revoke(ctx context.Context, name string) error {
 	})
 }
 
+// RevokeByID permanently disables the active device with the given ID. It is
+// the dead-token prune path used by the push outbox retry goroutine (Phase 29
+// D-12): when a provider returns ErrDeadToken the goroutine knows the device
+// ID (not the name), so this method revokes by stable ULID ID without a name
+// lookup. Revoking an already-revoked device is a no-op; an unknown or
+// revoked ID returns ErrNotFound only when no record with that ID exists at all.
+func (s *Store) RevokeByID(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return s.update(ctx, func(f *storeFile) (bool, error) {
+		idx := indexByID(f, id)
+		if idx < 0 {
+			return false, fmt.Errorf("device: revoke by id %q: %w", id, ErrNotFound)
+		}
+		r := &f.Devices[idx]
+		if !r.active() {
+			return false, nil // already revoked: no-op success
+		}
+		name := r.Name
+		revokeAt(f, r, s.now().UTC())
+		slog.InfoContext(ctx, "device: revoked by id", "id", id, "name", name)
+		return true, nil
+	})
+}
+
 // RevokeAll revokes every active device in ONE atomic file write (DEVC-03:
 // the panic step must not be interruptible halfway). It returns the number of
 // devices transitioned from active to revoked; already-revoked devices are

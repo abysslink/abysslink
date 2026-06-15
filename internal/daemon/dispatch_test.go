@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -26,9 +27,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	bbolt "go.etcd.io/bbolt"
 
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/notifyv2"
+	"github.com/abysslink/abysslink/internal/push"
 )
 
 // captureNotifier records every SendNote for assertions; setting err makes
@@ -610,4 +614,151 @@ func TestDispatch_RequeueRespectsDepthAndDropsTrueOldest(t *testing.T) {
 	}
 	assert.Equal(t, base.Add(2*time.Second), oldest,
 		"the TRUE oldest entry (earliest firstTried) must be dropped, not index 0")
+}
+
+// ── Phase 29 fan-out tests (D-10, D-07, D-05, D-09) ──────────────────────
+
+// newFanOutServer builds a Server with an in-memory bbolt outbox and a
+// fakeDeviceStore pre-populated with the given records. Returns the server,
+// the outbox, and the gateway counters.
+func newFanOutServer(t *testing.T, records []device.Record) (*Server, *push.Outbox, *push.GatewayCounters) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := dir + "/outbox.db"
+	db, err := bbolt.Open(dbPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close(); _ = os.Remove(dbPath) })
+	outbox := push.NewOutbox(db)
+	counters := &push.GatewayCounters{}
+	srv := NewServer(&captureNotifier{}, nil, nil)
+	srv.SetDeviceStore(&fakeDeviceStore{records: records})
+	srv.SetOutbox(outbox, counters)
+	return srv, outbox, counters
+}
+
+// makeRecord returns a device.Record with the given id, platform, and push token.
+func makeRecord(id, platform, token string) device.Record {
+	return device.Record{
+		ID:        id,
+		PushToken: "ablk_p_" + token,
+		Revoked:   false,
+	}
+}
+
+// fanOutMsg returns a v2 message suitable for fan-out tests.
+func fanOutMsg(kind notifyv2.Kind) notifyv2.Message {
+	return notifyv2.Message{
+		V:        2,
+		MsgID:    notifyv2.NewMsgID(),
+		Kind:     kind,
+		Host:     "rig-1",
+		Session:  notifyv2.SessionRef{Session: "$1", Window: "@2", Pane: "%1", Epoch: 1},
+		Consumer: "claudecode",
+		Title:    "test wake",
+	}
+}
+
+// TestDispatchFanOut: two enrolled devices → both get outbox entries (D-10).
+func TestDispatchFanOut(t *testing.T) {
+	records := []device.Record{
+		makeRecord("dev-a", "unifiedpush", "aaaa"),
+		makeRecord("dev-b", "apns", "bbbb"),
+	}
+	srv, outbox, counters := newFanOutServer(t, records)
+	msg := fanOutMsg(notifyv2.KindNeedsInput)
+
+	err := srv.fanOutToDevices(context.Background(), msg)
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 2, counters.Queued.Load(), "both devices must be queued")
+	// Verify each device has an outbox entry.
+	for _, r := range records {
+		seen, err := outboxHasEntry(outbox, r.ID, msg.MsgID)
+		require.NoError(t, err)
+		assert.True(t, seen, "device %s must have an outbox entry", r.ID)
+	}
+}
+
+// TestDispatchDedupSkips: if a msg_id is already marked seen (D-07), fanOut
+// must not add new outbox entries for non-approval_request kinds.
+func TestDispatchDedupSkips(t *testing.T) {
+	records := []device.Record{makeRecord("dev-a", "unifiedpush", "aaaa")}
+	srv, outbox, counters := newFanOutServer(t, records)
+	msg := fanOutMsg(notifyv2.KindNeedsInput)
+
+	// Pre-mark the msg_id as seen.
+	require.NoError(t, outbox.MarkSeen(msg.MsgID, 24*time.Hour))
+
+	err := srv.fanOutToDevices(context.Background(), msg)
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 0, counters.Queued.Load(), "dedup-seen msg must not be queued")
+	seen, err := outboxHasEntry(outbox, "dev-a", msg.MsgID)
+	require.NoError(t, err)
+	assert.False(t, seen, "no outbox entry for dedup-skipped message")
+}
+
+// TestDispatchCeilingDrop: a device at the 60-wake ceiling gets its wake
+// dropped for non-approval_request kinds (D-05).
+func TestDispatchCeilingDrop(t *testing.T) {
+	records := []device.Record{makeRecord("dev-a", "unifiedpush", "aaaa")}
+	srv, outbox, counters := newFanOutServer(t, records)
+
+	// Fill the ceiling to the default limit (60).
+	for range 60 {
+		require.NoError(t, outbox.CeilingIncr("dev-a", 60))
+	}
+
+	msg := fanOutMsg(notifyv2.KindNeedsInput)
+	err := srv.fanOutToDevices(context.Background(), msg)
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 1, counters.CeilingDropped.Load(), "ceiling must drop the wake")
+	assert.EqualValues(t, 0, counters.Queued.Load(), "dropped wake must not be queued")
+}
+
+// TestDispatchApprovalExemptCeiling: approval_request is exempt from the
+// per-device ceiling (D-05 / research Q3); it must be enqueued even when the
+// device is at the limit.
+func TestDispatchApprovalExemptCeiling(t *testing.T) {
+	records := []device.Record{makeRecord("dev-a", "unifiedpush", "aaaa")}
+	srv, outbox, counters := newFanOutServer(t, records)
+
+	// Fill the ceiling to the default limit (60).
+	for range 60 {
+		require.NoError(t, outbox.CeilingIncr("dev-a", 60))
+	}
+
+	msg := fanOutMsg(notifyv2.KindApprovalRequest)
+	err := srv.fanOutToDevices(context.Background(), msg)
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 1, counters.Queued.Load(), "approval_request must bypass ceiling")
+	seen, err := outboxHasEntry(outbox, "dev-a", msg.MsgID)
+	require.NoError(t, err)
+	assert.True(t, seen, "approval_request must have an outbox entry despite ceiling")
+}
+
+// TestDispatchApprovalNeverDedup: approval_request is exempt from dedup
+// (Phase 27 D-09 carried forward); it must be queued even if msg_id is seen.
+func TestDispatchApprovalNeverDedup(t *testing.T) {
+	records := []device.Record{makeRecord("dev-a", "unifiedpush", "aaaa")}
+	srv, outbox, counters := newFanOutServer(t, records)
+	msg := fanOutMsg(notifyv2.KindApprovalRequest)
+
+	// Pre-mark the msg_id as seen.
+	require.NoError(t, outbox.MarkSeen(msg.MsgID, 24*time.Hour))
+
+	err := srv.fanOutToDevices(context.Background(), msg)
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 1, counters.Queued.Load(), "approval_request must bypass dedup")
+	seen, err := outboxHasEntry(outbox, "dev-a", msg.MsgID)
+	require.NoError(t, err)
+	assert.True(t, seen, "approval_request must have an outbox entry despite dedup-seen")
+}
+
+// outboxHasEntry reports whether the outbox contains an entry for (deviceID, msgID).
+func outboxHasEntry(outbox *push.Outbox, deviceID, msgID string) (bool, error) {
+	return push.OutboxHasEntry(outbox, deviceID, msgID)
 }

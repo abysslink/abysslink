@@ -39,6 +39,7 @@ import (
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/metrics"
 	"github.com/abysslink/abysslink/internal/notifyv2"
+	"github.com/abysslink/abysslink/internal/push"
 	"github.com/abysslink/abysslink/internal/session"
 	"github.com/abysslink/abysslink/internal/shell"
 )
@@ -137,6 +138,13 @@ type Server struct {
 	// ackReceived counts BACK-07 ack receipts (memory-only, reset on restart).
 	ackReceived atomic.Uint64
 
+	// Phase 29 push gateway (D-06 / D-10 / D-19).
+	// outbox is the bbolt-backed persistent send queue; nil when the daemon
+	// starts without a configured outbox (graceful degrade: fan-out is skipped).
+	// gatewayCounters are the six D-19 atomic metrics reported on GET /status.
+	outbox          *push.Outbox
+	gatewayCounters *push.GatewayCounters
+
 	contentMu     sync.Mutex
 	contentLive   bool
 	contentHost   string
@@ -182,6 +190,107 @@ func (s *Server) SetExecCounter(fn func() uint64) { s.execCount = fn }
 // session_registry.enabled is true; nil-safe: when unset (or set to nil),
 // handleSessions reports "registry: disabled" with an empty sessions list.
 func (s *Server) SetSessionRegistry(src SessionSource) { s.sessionSource = src }
+
+// SetOutbox injects the Phase 29 push outbox and gateway counter set.
+// Called by the composition root before Run. When nil, fanOutToDevices is a
+// no-op so a daemon without a configured push outbox still starts cleanly
+// (no push fan-out, just the existing ntfy/legacy path).
+func (s *Server) SetOutbox(o *push.Outbox, c *push.GatewayCounters) {
+	s.outbox = o
+	s.gatewayCounters = c
+}
+
+// fanOutToDevices fans out msg to all active enrolled devices via the persistent
+// push outbox (D-10). For each active device with a push token:
+//   - Dedup check: if msg_id is already in the dedup bucket and kind is NOT
+//     approval_request → skip (D-07 / Phase 27 D-09).
+//   - Ceiling check: if the device is at its hourly wake ceiling and kind is NOT
+//     approval_request → skip and increment CeilingDropped (D-05 / research Q3).
+//   - Enqueue: store an outboxEntry in the bbolt outbox with NextRetryUnix=now
+//     (immediate first attempt); increment Queued counter.
+//
+// fanOutToDevices is intentionally fast (bbolt writes are the only I/O); the
+// async retry goroutine (RunOutboxRetry) owns the actual provider-send path.
+// Called from handleNotifyV2 AFTER the ntfy delivery (existing pipeline runs
+// first; push adds an extra wake channel on top).
+//
+// nil-safe: returns immediately when the outbox or device store is not wired.
+func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) error {
+	if s.outbox == nil || s.gatewayCounters == nil || s.devices == nil {
+		return nil // no push outbox wired — graceful degrade
+	}
+
+	// Dedup check for non-approval_request: skip the entire fan-out if this
+	// msg_id has already been dispatched (D-07 / Phase 27 D-09 carried forward).
+	// approval_request is always exempt from dedup.
+	if msg.Kind != notifyv2.KindApprovalRequest {
+		seen, err := s.outbox.DedupSeen(msg.MsgID)
+		if err != nil {
+			slog.Warn("daemon: fanout dedup check failed; skipping fan-out", "msg_id", msg.MsgID, "err", err)
+			return nil
+		}
+		if seen {
+			slog.Debug("daemon: fanout dedup skip", "msg_id", msg.MsgID)
+			return nil
+		}
+	}
+
+	// Serialize msg to JSON for the outbox MetaJSON field (routing metadata only).
+	metaJSON, err := json.Marshal(msg)
+	if err != nil {
+		slog.Warn("daemon: fanout msg marshal failed", "msg_id", msg.MsgID, "err", err)
+		return nil
+	}
+
+	records := s.devices.List()
+	for _, r := range records {
+		if r.Revoked || r.PushToken == "" {
+			continue // skip revoked or token-less devices
+		}
+		// Per-device ceiling check for non-approval_request (D-05 / research Q3).
+		if msg.Kind != notifyv2.KindApprovalRequest {
+			allowed, cerr := s.outbox.CeilingCheck(r.ID, msg.Kind)
+			if cerr != nil {
+				slog.Warn("daemon: fanout ceiling check failed; skipping device",
+					"device_id", r.ID, "err", cerr)
+				continue
+			}
+			if !allowed {
+				s.gatewayCounters.CeilingDropped.Add(1)
+				slog.Debug("daemon: fanout ceiling drop",
+					"device_id", r.ID, "msg_id", msg.MsgID, "kind", msg.Kind)
+				continue
+			}
+		}
+
+		// PushToken is the opaque device identity. The current enrollment uses
+		// "unifiedpush" as the default platform (the sovereign sovereign path,
+		// D-18). When APNs/FCM enrollment is added (v5 app), the device record
+		// will carry a platform field; for now all enrolled devices are
+		// unifiedpush (their PushToken IS the ntfy endpoint URL).
+		platform := "unifiedpush"
+
+		cid := push.CollapseID(msg.MsgID, msg.Session.Session, msg.Kind)
+		entry := push.OutboxEntry{
+			Platform:       platform,
+			ProviderToken:  r.PushToken, // secret-class — never log (D-17)
+			MsgID:          msg.MsgID,
+			Title:          msg.Title,
+			MetaJSON:       string(metaJSON),
+			Attempts:       0,
+			FirstTriedUnix: time.Now().Unix(),
+			NextRetryUnix:  time.Now().Unix(), // immediate first attempt
+			CollapseID:     cid,
+		}
+		if err := s.outbox.Enqueue(r.ID, entry); err != nil {
+			slog.Warn("daemon: fanout enqueue failed",
+				"device_id", r.ID, "msg_id", msg.MsgID, "err", err)
+			continue
+		}
+		s.gatewayCounters.Queued.Add(1)
+	}
+	return nil
+}
 
 // Run listens on the Unix socket and starts watchers until ctx is cancelled.
 // On cancellation it waits for the graceful shutdown (connection drain +
@@ -429,6 +538,12 @@ func (s *Server) handleNotifyV2(w http.ResponseWriter, r *http.Request, raw []by
 		return
 	}
 
+	// Phase 29 push fan-out (D-10): enqueue to all enrolled devices via the
+	// persistent push outbox after the ntfy delivery succeeds. nil-safe: no-op
+	// when the outbox is not wired (daemon started without Phase 29 push config).
+	// Errors are logged internally; fan-out failure does not 500 the caller.
+	_ = s.fanOutToDevices(context.WithoutCancel(r.Context()), msg)
+
 	// Mirror the v1 ring-adder with METADATA ONLY (T-19-19): msg_id, kind,
 	// pane — never anything body-like (the schema has no body field anyway).
 	// The recorded priority is the post-render ntfy numeric value ("3"/"4"/"5"
@@ -491,6 +606,17 @@ type daemonStatusResponse struct {
 	// posture from cli.CollectDoctorFindings, not this endpoint. Consumers MUST
 	// NOT read the zeroed doctor summary as a "0 fatal" all-clear (WR-05).
 	PostureComplete bool `json:"posture_complete"`
+
+	// Phase 29 push gateway counters (D-19): aggregate delivery metrics.
+	// All six fields are omitempty so the JSON stays backward-compatible when
+	// the push outbox is not wired (zero values are omitted). No device token,
+	// provider credential, or per-device detail is ever included (D-17 / T-29-04-4).
+	GatewayQueued   int `json:"gateway_queued,omitempty"`
+	GatewaySent     int `json:"gateway_sent,omitempty"`
+	GatewayAccepted int `json:"gateway_provider_accepted,omitempty"`
+	GatewayPruned   int `json:"gateway_pruned_tokens,omitempty"`
+	GatewayCeiling  int `json:"gateway_ceiling_dropped,omitempty"`
+	GatewayBackoff  int `json:"gateway_backoff_pending,omitempty"`
 }
 
 // daemonDoctorSummary is the per-severity doctor finding count in /status.
@@ -586,6 +712,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		gateExecs = s.execCount()
 	}
 
+	// Phase 29 gateway counters (D-19): read from the atomic fields. When the
+	// outbox is not wired all counters stay 0 and are omitted (omitempty).
+	var (
+		gwQueued   int
+		gwSent     int
+		gwAccepted int
+		gwPruned   int
+		gwCeiling  int
+		gwBackoff  int
+	)
+	if s.gatewayCounters != nil {
+		gwQueued = int(s.gatewayCounters.Queued.Load())             //nolint:gosec // G115: counter is non-negative
+		gwSent = int(s.gatewayCounters.Sent.Load())                 //nolint:gosec // G115: counter is non-negative
+		gwAccepted = int(s.gatewayCounters.ProviderAccepted.Load()) //nolint:gosec // G115: counter is non-negative
+		gwPruned = int(s.gatewayCounters.PrunedTokens.Load())       //nolint:gosec // G115: counter is non-negative
+		gwCeiling = int(s.gatewayCounters.CeilingDropped.Load())    //nolint:gosec // G115: counter is non-negative
+		gwBackoff = int(s.gatewayCounters.BackoffPending.Load())    //nolint:gosec // G115: counter is non-negative
+	}
+
 	resp := daemonStatusResponse{
 		Version:    daemonVersion,
 		Backend:    backendType,
@@ -606,6 +751,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// consumers do not read the zeroed doctor summary as a genuine "0 fatal"
 		// all-clear on a security-posture endpoint (WR-05). Reachable is now real.
 		PostureComplete: false,
+		// Phase 29 push gateway counters (D-19). Zero values are omitted (omitempty).
+		GatewayQueued:   gwQueued,
+		GatewaySent:     gwSent,
+		GatewayAccepted: gwAccepted,
+		GatewayPruned:   gwPruned,
+		GatewayCeiling:  gwCeiling,
+		GatewayBackoff:  gwBackoff,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

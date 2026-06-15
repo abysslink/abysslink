@@ -45,8 +45,13 @@ const (
 	backoffCap  = 5 * time.Minute // D-08: exponential backoff cap
 )
 
-// outboxEntry is the JSON-serialized value stored per (device, msg_id) in the
+// OutboxEntry is the JSON-serialized value stored per (device, msg_id) in the
 // outbox bucket. ProviderToken is secret-class and must never appear in logs.
+// Exported so the daemon composition root and fan-out path can construct and
+// Enqueue entries without needing to duplicate the struct definition.
+type OutboxEntry = outboxEntry
+
+// outboxEntry is the internal storage type for OutboxEntry.
 type outboxEntry struct {
 	Platform       string `json:"platform"`
 	ProviderToken  string `json:"provider_token"` // secret-class — never log (D-17)
@@ -294,6 +299,23 @@ func (o *Outbox) CeilingIncr(deviceID string, defaultLimit int) error {
 		}
 		return b.Put([]byte(deviceID), data)
 	})
+}
+
+// OutboxHasEntry reports whether the outbox bucket contains an entry for the
+// given (deviceID, msgID) pair. Exported for whitebox test assertions in
+// sibling packages (e.g. internal/daemon fan-out tests).
+func OutboxHasEntry(o *Outbox, deviceID, msgID string) (bool, error) {
+	key := outboxKey(deviceID, msgID)
+	var found bool
+	err := o.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketOutbox)
+		if b == nil {
+			return nil
+		}
+		found = b.Get(key) != nil
+		return nil
+	})
+	return found, err
 }
 
 // NextBackoff returns a random duration in [0, min(cap, base*2^attempt)) using
