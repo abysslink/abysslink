@@ -183,6 +183,13 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	// reorders the established families.
 	findings = append(findings, contentStoreDoctorFindings(ctx, cc.cfg)...)
 
+	// Push-gateway posture (Phase 29 / PUSH-06): 10 checks covering cred
+	// accessibility (from daemon context), file permission / cloud-location floor,
+	// experimental flag awareness, stale token surface, ntfy.sh sovereignty gap,
+	// iOS UnifiedPush gap, and content-store bind-floor runtime recheck. Appended
+	// after content-store so the two unix-socket seam calls are co-located.
+	findings = append(findings, pushGatewayDoctorFindings(ctx, cc.cfg)...)
+
 	return findings
 }
 

@@ -84,6 +84,11 @@ type statusDaemonExtras struct {
 	AckReceived  *uint64             `json:"ack_received,omitempty"`
 	ContentStore json.RawMessage     `json:"content_store,omitempty"`
 	Devices      []statusDeviceEntry `json:"devices,omitempty"`
+	// GatewayCredsStatus is populated by the daemon's /status handler when the
+	// push gateway is wired (Phase 29 / PUSH-06). Values: "ok" (creds loaded),
+	// "unavailable" (creds missing/inaccessible), or "" (older daemon, field absent).
+	// The push-creds-keychain doctor check reads this field.
+	GatewayCredsStatus string `json:"gateway_creds_status,omitempty"`
 }
 
 // fetchDaemonStatus GETs /status from the local abysslinkd over its Unix

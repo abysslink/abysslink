@@ -170,28 +170,27 @@ func TestDoctorPushCredsFilePerms600(t *testing.T) {
 
 // TestDoctorPushCredsFileLocation verifies that a creds file under the iCloud Drive
 // directory emits a FATAL finding for push-creds-file-location.
+// The test creates a real file inside a temp directory structured to match the
+// iCloud Drive prefix pattern, then overrides the cloudSyncedPrefixesFunc seam
+// so the check sees the temp dir as "cloud-synced" without needing to write to
+// the real ~/Library/Mobile Documents path (which is protected by macOS sandbox).
 func TestDoctorPushCredsFileLocation(t *testing.T) {
 	withStubDaemonStatus(t, func(context.Context) (*statusDaemonExtras, error) {
 		return extrasWithCredsStatus("ok"), nil
 	})
-	home, err := os.UserHomeDir()
-	require.NoError(t, err)
 
-	// Create an iCloud Drive directory for testing.
-	icloudDir := filepath.Join(home, "Library", "Mobile Documents", "test-app")
-	// We do NOT actually create this file — we just check the path detection.
-	// But to avoid "file not found" FATAL (wrong check), let's override the path
-	// and provide a temp file to simulate location check.
-	// Instead, test with a fake path that simulates the cloud location check.
-	// The implementation must check the configured path against cloud prefixes
-	// before trying to stat it, or we can create a real file in a cloud-like dir.
-	// Let's create the dir if HOME is accessible and write a temp file there.
-	if err := os.MkdirAll(icloudDir, 0o700); err != nil {
-		t.Skipf("cannot create iCloud path for test: %v", err)
-	}
-	cloudFile := filepath.Join(icloudDir, "gateway-creds-test.json")
+	// Create a temp dir that mimics the iCloud Drive prefix.
+	fakeICloudBase := t.TempDir()
+	fakeICloudDir := filepath.Join(fakeICloudBase, "Library", "Mobile Documents", "test-app")
+	require.NoError(t, os.MkdirAll(fakeICloudDir, 0o700))
+	cloudFile := filepath.Join(fakeICloudDir, "gateway-creds.json")
 	require.NoError(t, os.WriteFile(cloudFile, []byte(`{}`), 0o600))
-	t.Cleanup(func() { _ = os.Remove(cloudFile) })
+
+	// Override the home-dir lookup to return our temp dir so checkCredsFileLocation
+	// sees fakeICloudBase as HOME and thus detects the iCloud prefix correctly.
+	origFn := userHomeDirFn
+	userHomeDirFn = func() (string, error) { return fakeICloudBase, nil }
+	t.Cleanup(func() { userHomeDirFn = origFn })
 
 	cfg := config.Defaults()
 	cfg.Gateway.FCM.Enabled = true
