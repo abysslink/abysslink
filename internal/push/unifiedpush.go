@@ -123,7 +123,7 @@ func (g *UnifiedPushGateway) Send(ctx context.Context, w Wake) error {
 			req.SetBasicAuth("admin", password)
 		case kerr != nil && !errors.Is(kerr, secrets.ErrNotFound):
 			slog.Warn("push: unifiedpush: keychain read failed; sending without auth", "err", kerr)
-		// ErrNotFound and empty password: send without auth — silently degrade.
+			// ErrNotFound and empty password: send without auth — silently degrade.
 		}
 	}
 
@@ -136,7 +136,7 @@ func (g *UnifiedPushGateway) Send(ctx context.Context, w Wake) error {
 	if err != nil {
 		return fmt.Errorf("unifiedpush: POST: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // response body close error is non-actionable on read path
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
