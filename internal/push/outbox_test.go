@@ -176,6 +176,71 @@ func TestDedupSweepEmptyBucket(t *testing.T) {
 	assert.NoError(t, o.SweepDedup(), "sweep on empty DB must not error")
 }
 
+// TestOutboxSurvivesRestart proves the PUSH-02 "survive daemon restart" clause:
+// dedup marks, the per-device ceiling count, and queued outbox entries all live
+// in the bbolt file, so a process restart (close + reopen the same path) must
+// preserve them. This guards against an accidental regression to in-memory
+// state, which would silently re-allow deduped wakes and reset the ceiling on
+// every daemon bounce.
+func TestOutboxSurvivesRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "restart.db")
+	open := func() *bbolt.DB {
+		db, err := bbolt.Open(dbPath, 0o600, &bbolt.Options{Timeout: time.Second})
+		require.NoError(t, err, "open bbolt at %s", dbPath)
+		return db
+	}
+
+	const deviceID = "dev-restart"
+	const limit = 2
+
+	// --- First "process": write dedup, fill the ceiling, queue an entry. ---
+	o1 := NewOutbox(open())
+	require.NoError(t, o1.MarkSeen("msg-persist", dedupTTL))
+	require.NoError(t, o1.CeilingIncr(deviceID, limit)) // count=1
+	require.NoError(t, o1.CeilingIncr(deviceID, limit)) // count=2 == limit
+	require.NoError(t, o1.Enqueue(deviceID, sampleEntry("msg-persist")))
+	require.NoError(t, o1.db.Close(), "close DB to simulate daemon shutdown")
+
+	// --- Second "process": reopen the SAME file. ---
+	o2 := NewOutbox(open())
+	t.Cleanup(func() { _ = o2.db.Close() })
+
+	// Dedup mark survived: a re-delivery of msg-persist is still deduped.
+	seen, err := o2.DedupSeen("msg-persist")
+	require.NoError(t, err)
+	assert.True(t, seen, "dedup mark must survive restart")
+
+	// Ceiling count survived: the device is still at the limit, so a
+	// non-exempt wake is rejected (the restart did not reset the window).
+	allowed, err := o2.CeilingCheck(deviceID, notifyv2.KindNeedsInput)
+	require.NoError(t, err)
+	assert.False(t, allowed, "ceiling count must survive restart (still at limit)")
+
+	// approval_request stays exempt across the restart.
+	allowed, err = o2.CeilingCheck(deviceID, notifyv2.KindApprovalRequest)
+	require.NoError(t, err)
+	assert.True(t, allowed, "approval_request must remain exempt after restart")
+
+	// Queued outbox entry survived: the bbolt key persists and decodes back to
+	// the same entry (read via raw View — Dequeue only deletes, no read-back API).
+	var got outboxEntry
+	var found bool
+	require.NoError(t, o2.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketOutbox)
+		if b == nil {
+			return nil
+		}
+		v := b.Get(outboxKey(deviceID, "msg-persist"))
+		if v == nil {
+			return nil
+		}
+		found = true
+		return json.Unmarshal(v, &got)
+	}))
+	require.True(t, found, "queued outbox entry must survive restart")
+	assert.Equal(t, "msg-persist", got.MsgID)
+}
+
 // TestCeilingCheck verifies the per-device ceiling enforcement:
 // count=59 → allowed; count=60 → not allowed; approval_request always allowed.
 func TestCeilingCheck(t *testing.T) {
