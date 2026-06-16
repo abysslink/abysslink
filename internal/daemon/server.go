@@ -287,7 +287,9 @@ func (s *Server) fanOutToDevices(ctx context.Context, msg notifyv2.Message) erro
 // ceiling increment) lives here. Counter/log semantics are unchanged
 // (WR-01/02/05): every drop/skip path that schedules no retry increments
 // FanoutErrors, a genuine ceiling rejection increments CeilingDropped, and the
-// per-device window is incremented at enqueue (not at delivery).
+// per-device window is incremented atomically at the ceiling admission check
+// (CeilingCheckAndIncr, IN-01) — not at delivery, and no longer as a separate
+// post-enqueue step.
 func (s *Server) enqueueDeviceWake(msg notifyv2.Message, r device.Record, metaJSON string) {
 	if r.Revoked || r.PushToken == "" {
 		return // skip revoked or token-less devices
