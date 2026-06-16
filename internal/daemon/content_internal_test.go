@@ -213,6 +213,84 @@ func TestMintBootstrap_CountedInCap(t *testing.T) {
 		"bootstrap entries must be counted by the 512-cap (drop-oldest across both kinds)")
 }
 
+// --- Phase 30: kindApprove / kindDeny capability-URL kinds ---
+
+// TestMintApprove_KindCheck verifies mintApprove stores entries with
+// kindApprove and that a cross-class lookup via kindDeny returns a miss without
+// consuming the token (BACK-09 invariant applied to kindApprove/kindDeny).
+func TestMintApprove_KindCheck(t *testing.T) {
+	cs := newContentStore(nil)
+	const reqID = "req-id-01"
+	token, _ := cs.mintApprove(reqID, time.Minute)
+
+	// Same-class hit (non-consuming).
+	got, ok := cs.lookupKind(token, kindApprove, false)
+	require.True(t, ok, "lookupKind(kindApprove, consume=false) must find the token")
+	assert.Equal(t, reqID, got, "body must be the requestID")
+
+	// Cross-class miss: probe via kindDeny must NOT burn the approve token.
+	_, ok = cs.lookupKind(token, kindDeny, true)
+	assert.False(t, ok, "lookupKind(kindDeny) on an approve token must miss")
+
+	// Approve token must still be present.
+	got, ok = cs.lookupKind(token, kindApprove, false)
+	require.True(t, ok, "approve token must survive the cross-kind probe")
+	assert.Equal(t, reqID, got)
+}
+
+// TestMintDeny_PrefixDistinct proves approve and deny tokens carry different
+// prefixes ("ablk_ok_" vs "ablk_no_") and that they are visually distinguishable.
+func TestMintDeny_PrefixDistinct(t *testing.T) {
+	cs := newContentStore(nil)
+	approveToken, _ := cs.mintApprove("req-id-a", time.Minute)
+	denyToken, _ := cs.mintDeny("req-id-d", time.Minute)
+
+	assert.True(t, strings.HasPrefix(approveToken, "ablk_ok_"),
+		"approve token must carry the ablk_ok_ prefix, got %q", approveToken)
+	assert.True(t, strings.HasPrefix(denyToken, "ablk_no_"),
+		"deny token must carry the ablk_no_ prefix, got %q", denyToken)
+	assert.NotEqual(t, approveToken, denyToken, "approve and deny tokens must be distinct")
+}
+
+// TestDropOldest_ApproveEvictableBeforeBootstrap proves that when the store is
+// full of kindApprove tokens, minting a kindBootstrap token evicts an approve
+// entry (not the bootstrap entry) — the phase-30 eviction priority: approve
+// and deny tokens are evictable before bootstrap (same priority as content).
+func TestDropOldest_ApproveEvictableBeforeBootstrap(t *testing.T) {
+	clk := newContentClock()
+	cs := newContentStore(clk.now)
+
+	// Fill the store to the cap with kindApprove tokens.
+	for i := 0; i < maxContentEntries; i++ {
+		cs.mintApprove(fmt.Sprintf("req-%d", i), time.Hour)
+		clk.advance(time.Millisecond)
+	}
+	require.Equal(t, maxContentEntries, cs.len(), "store must be at cap")
+
+	// Mint a bootstrap token: it must evict an approve entry, not a bootstrap.
+	bootTok, _ := cs.mintBootstrap("bundle", time.Hour)
+	assert.Equal(t, maxContentEntries, cs.len(), "store must stay at cap")
+
+	// The bootstrap token must still be fetchable (not evicted).
+	body, ok := cs.lookupKind(bootTok, kindBootstrap, true)
+	require.True(t, ok, "bootstrap must survive when approve entries are evictable")
+	assert.Equal(t, "bundle", body)
+}
+
+// TestApproveExpiry_404 verifies that an expired approve token returns a miss
+// from lookupKind (constant-work expiry enforcement).
+func TestApproveExpiry_404(t *testing.T) {
+	clk := newContentClock()
+	cs := newContentStore(clk.now)
+
+	token, _ := cs.mintApprove("req-expire", 1*time.Millisecond)
+	clk.advance(5 * time.Millisecond)
+
+	_, ok := cs.lookupKind(token, kindApprove, true)
+	assert.False(t, ok, "expired approve token must miss (constant-work 404)")
+	assert.Equal(t, 0, cs.len(), "expired entry must be pruned on lookup")
+}
+
 // TestDropOldest_SparesBootstrapUnderContentFlood proves the BACK-09 eviction
 // invariant: a pending (not-yet-fetched) bootstrap token must SURVIVE a flood of
 // content tokens, even though it is the oldest + longest-lived entry. A
