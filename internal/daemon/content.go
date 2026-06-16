@@ -60,6 +60,21 @@ const (
 	// kindBootstrap is a BACK-09 first-contact credential-bundle entry
 	// (bearer-LESS /enroll/).
 	kindBootstrap entryKind = "bootstrap"
+	// kindApprove is a single-use approve-button capability URL (Phase 30 D-14).
+	// Served bearer-LESS by GET /approve/{token}; resolves pendingReq to Approved.
+	kindApprove entryKind = "approve"
+	// kindDeny is a single-use deny-button capability URL (Phase 30 D-14).
+	// Served bearer-LESS by GET /deny/{token}; resolves pendingReq to Denied.
+	kindDeny entryKind = "deny"
+)
+
+const (
+	// approveTokenPrefix namespaces approve-button capability URLs so they are
+	// visually distinguishable from other token types in debug surfaces. The
+	// suffix is 16 bytes crypto/rand base64url no-pad (≥128-bit entropy).
+	approveTokenPrefix = "ablk_ok_"
+	// denyTokenPrefix namespaces deny-button capability URLs.
+	denyTokenPrefix = "ablk_no_"
 )
 
 // contentEntry is one minted token→body binding. Single-purpose: a token maps
@@ -131,6 +146,20 @@ func (c *contentStore) mintContent(body string, ttl time.Duration) (string, time
 // bootstrapTokenPrefix and is served bearer-LESS by GET /enroll/{token}.
 func (c *contentStore) mintBootstrap(body string, ttl time.Duration) (string, time.Time) {
 	return c.mintKind(bootstrapTokenPrefix, kindBootstrap, body, ttl)
+}
+
+// mintApprove stores requestID under a fresh single-use approve-button
+// capability URL token valid for ttl (Phase 30 D-14). Served bearer-LESS by
+// GET /approve/{token}; resolves pendingReq to Approved on lookup.
+func (c *contentStore) mintApprove(requestID string, ttl time.Duration) (string, time.Time) {
+	return c.mintKind(approveTokenPrefix, kindApprove, requestID, ttl)
+}
+
+// mintDeny stores requestID under a fresh single-use deny-button capability
+// URL token valid for ttl (Phase 30 D-14). Served bearer-LESS by
+// GET /deny/{token}; resolves pendingReq to Denied on lookup.
+func (c *contentStore) mintDeny(requestID string, ttl time.Duration) (string, time.Time) {
+	return c.mintKind(denyTokenPrefix, kindDeny, requestID, ttl)
 }
 
 // getContent returns the body bound to token, or ("", false) when the token
@@ -210,12 +239,16 @@ func (c *contentStore) dropOldestLocked() {
 	var oldestKind entryKind
 	first := true
 	for tok, e := range c.entries {
-		// A content candidate always beats a bootstrap one; within the same
-		// class the earliest mint wins. So the selection converges to the
-		// oldest content entry, falling back to the oldest bootstrap entry only
-		// when no content entry exists.
+		// Eviction preference order (lowest = evict first):
+		// 1. kindContent, kindApprove, kindDeny  — evictable at the same priority
+		// 2. kindBootstrap — spared while any content/approve/deny entry exists
+		// Within the same priority class the earliest mint wins. This ensures
+		// bootstrap tokens (rare, long-lived first-contact credentials) are
+		// never dropped while approve/deny/content tokens exist (BACK-09 + D-14).
+		isEvictable := e.kind == kindContent || e.kind == kindApprove || e.kind == kindDeny
+		oldestIsBootstrap := oldestKind == kindBootstrap
 		better := first ||
-			(oldestKind == kindBootstrap && e.kind == kindContent) ||
+			(oldestIsBootstrap && isEvictable) ||
 			(oldestKind == e.kind && e.minted.Before(oldest))
 		if better {
 			oldestTok, oldest, oldestKind, first = tok, e.minted, e.kind, false
