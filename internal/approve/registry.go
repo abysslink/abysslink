@@ -33,6 +33,14 @@ const (
 	stateTimeout  uint32 = 3
 )
 
+// StateApproved and StateDenied are exported aliases for the CAS state
+// constants so callers in other packages (e.g. daemon) can pass the
+// correct value to Registry.Resolve without using magic numbers.
+const (
+	StateApproved = stateApproved
+	StateDenied   = stateDenied
+)
+
 // ErrDenied is returned by Wait when the request was denied (either explicitly
 // or via headless timeout).
 var ErrDenied = errors.New("approve: request denied")
