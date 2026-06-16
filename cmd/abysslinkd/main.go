@@ -396,6 +396,38 @@ func startAnchorWriter(ctx context.Context, kc secrets.KeychainStore) {
 	}()
 }
 
+// dedupSweepInterval is the steady-state cadence for the push-outbox dedup
+// sweep (D-07). Hourly in production; overridable by tests via startDedupSweeper.
+const dedupSweepInterval = 1 * time.Hour
+
+// startDedupSweeper launches the periodic push-outbox dedup sweep goroutine
+// (D-07, T-29-01-5 / T-29-04-3). The 24h dedup TTL alone does not reclaim
+// bbolt space: DedupSeen returning false on an expired key does NOT delete it —
+// only SweepDedup does. Without a periodic sweep a long-uptime daemon
+// accumulates expired dedup entries ("degenerate growth"), reclaimed only on
+// restart. The startup sweep in wirePushOutbox handles the boot case; this
+// ticker handles the steady state. It shares the outbox handle's lifetime:
+// both this goroutine and the retry goroutine exit on ctx.Done(), and the
+// retry goroutine owns the deferred bbolt close — so this sweeper must not
+// outlive ctx. A sweep racing a closed DB returns an error (never a panic),
+// which is logged and harmless on shutdown.
+func startDedupSweeper(ctx context.Context, outbox *push.Outbox, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if sweepErr := outbox.SweepDedup(); sweepErr != nil {
+					slog.Warn("abysslinkd: push dedup sweep failed", "err", sweepErr)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
 // xdgStateHome returns the XDG_STATE_HOME base directory, defaulting to
 // ~/.local/state when the environment variable is unset. It is the canonical
 // location for abysslinkd runtime state files (bbolt outbox, devices.json).
@@ -486,6 +518,10 @@ func wirePushOutbox(ctx context.Context, cfg *config.Config, srv *daemon.Server,
 	if sweepErr := outbox.SweepDedup(); sweepErr != nil {
 		slog.Warn("abysslinkd: push dedup sweep failed at startup", "err", sweepErr)
 	}
+	// D-07: also sweep hourly. The TTL alone never deletes expired keys —
+	// only SweepDedup does — so the steady-state daemon needs a periodic sweep
+	// to bound bbolt growth (T-29-01-5 / T-29-04-3).
+	startDedupSweeper(ctx, outbox, dedupSweepInterval)
 
 	// Build the gateway map. UnifiedPush is always registered (sovereign path,
 	// D-18). APNs and FCM are registered only when enabled in config (D-14).

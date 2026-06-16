@@ -36,8 +36,8 @@ var (
 )
 
 // DefaultCeiling is the default per-device wakes-per-hour limit (D-05). It is
-// exported so the daemon fan-out path can pass it to CeilingIncr at enqueue
-// time (WR-02) using the same constant the runner uses.
+// exported so the daemon fan-out path can pass it to CeilingCheckAndIncr at
+// admission time (WR-02 / IN-01) using the same constant the runner uses.
 const DefaultCeiling = 60
 
 // Outbox constants (D-05, D-07, D-08).
