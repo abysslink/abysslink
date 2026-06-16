@@ -522,9 +522,27 @@ Plans:
   4. Every approve/deny decision is audit-chained as request-ID + action hash (never caller free-text); the `GatedRunner` flips from observe-only to enforcing with daemon-internal commands bypassing the gate (self-deadlock rule); phone approval is an alternative satisfier of the existing `--apply` confirm gate, never a weakener of dry-run default
   5. Claude Code permission prompts route through the loop via the PermissionRequest hook — quarantined in the claudecode module, zero Claude coupling in approve/notify/gate
 
-**Plans**: TBD
+**Plans**: 5 plans
 
-**Notes:** DEEP RESEARCH FLAG — TOCTOU closure-hashing design, CAS resolution semantics, capability-URL tier policy, and upstream Claude hook bugs (#12176, #19298) need phase-level design work before tasks are cut. Demoable even if Phase 29 slips (rides existing ntfy).
+Plans:
+**Wave 1** *(parallel)*
+
+- [ ] 30-01-PLAN.md — internal/approve leaf package: CAS registry, HMAC signing, tier constants (APPR-01, APPR-02, APPR-03, APPR-04)
+- [ ] 30-02-PLAN.md — daemon approve extensions: kindApprove/kindDeny, handleApprove/handleDeny, unix-socket IPC, /status counters (APPR-02, APPR-03, APPR-04)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 30-03-PLAN.md — gate.go enforcing flip + notifyv2 Actions[] un-drop + ntfy X-Actions header (APPR-01, APPR-05)
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 30-04-PLAN.md — config YAML keys + claudecode hook writers + abysslink approve CLI subcommand (APPR-05, APPR-06)
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 30-05-PLAN.md — AST coupling tests + make lint test integration gate (APPR-05, APPR-06)
+
+**Notes:** DEEP RESEARCH FLAG — TOCTOU closure-hashing design, CAS resolution semantics, capability-URL tier policy, and upstream Claude hook bugs (#12176, #19298) resolved in 30-RESEARCH.md. Demoable even if Phase 29 slips (rides existing ntfy).
 
 ### Phase 31: Agent Kill-Switch ("Apoptosis")
 
