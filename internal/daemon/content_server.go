@@ -500,7 +500,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if len(s.approveHMACKey) > 0 {
 		if !approve.VerifyApproveURL(s.approveHMACKey, requestID, "approve", closureHash, hmacSig) {
 			slog.Warn("daemon: approve HMAC mismatch — returning uniform 404",
-				"request_id", requestID[:8])
+				"request_id", reqIDPrefix(requestID))
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -511,28 +511,31 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	won := s.approveRegistry.Resolve(requestID, approve.StateApproved)
 	if !won {
 		slog.Debug("daemon: late approve resolution ignored — already resolved",
-			"request_id", requestID[:8])
+			"request_id", reqIDPrefix(requestID))
 	}
 
-	// Audit receipt (APPR-03): content is hashed by Append; raw values never reach the log.
-	if s.auditApp != nil {
-		receipt := []byte(requestID + "\n" + "approve" + "\n" + hex.EncodeToString(closureHash[:]))
-		if err := s.auditApp.Append("approve-decision", "request:"+requestID[:8], receipt, false); err != nil {
-			// Non-fatal: log at Warn; the approval is already registered (CAS won above).
-			slog.Warn("daemon: approve audit append failed", "err", err)
+	// IN-03: gate audit + counter mutations on won so a lost-CAS late tap is
+	// a pure no-op (no double audit receipt, no double counter).
+	if won {
+		// Audit receipt (APPR-03): content is hashed by Append; raw values never reach the log.
+		if s.auditApp != nil {
+			receipt := []byte(requestID + "\n" + "approve" + "\n" + hex.EncodeToString(closureHash[:]))
+			if err := s.auditApp.Append("approve-decision", "request:"+reqIDPrefix(requestID), receipt, false); err != nil {
+				// Non-fatal: log at Warn; the approval is already registered (CAS won above).
+				slog.Warn("daemon: approve audit append failed", "err", err)
+			}
 		}
+		// Counters: increment approved, decrement pending.
+		s.approveApproved.Add(1)
+		s.approvePending.Add(-1)
 	}
-
-	// Counters: increment approved, decrement pending.
-	s.approveApproved.Add(1)
-	s.approvePending.Add(-1)
 
 	// Cache-Control: no-store; short JSON response (no full requestID or URL).
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{
 		"approved":   true,
-		"request_id": requestID[:8],
+		"request_id": reqIDPrefix(requestID),
 	}); err != nil {
 		slog.Debug("daemon: approve response encode failed", "err", err)
 	}
@@ -555,25 +558,21 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lookup deny HMAC sig. The deny sig is stored under a side-channel key
-	// (requestID+":deny") set by handleApproveRequest.
-	denySigRequestID := requestID + ":deny"
-	hmacSig, closureHash, _, lookOK := s.approveRegistry.Lookup(denySigRequestID)
+	// CR-03: look up the deny HMAC sig via LookupDeny, which retrieves the
+	// denyHmacSig stored on the main entry (signed over the real closure hash).
+	// The previous side-channel (requestID+":deny" with a zero closure hash)
+	// caused every phone-deny to fail HMAC verification (fail-open deny defect).
+	hmacSig, closureHash, _, lookOK := s.approveRegistry.LookupDeny(requestID)
 	if !lookOK {
-		// Fall back to looking up the main request entry (deny sig may have been
-		// stored directly on the main entry in some test setups).
-		hmacSig, closureHash, _, lookOK = s.approveRegistry.Lookup(requestID)
-		if !lookOK {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
+		w.WriteHeader(http.StatusNotFound)
+		return
 	}
 
 	// HMAC verify (D-16, T-30-11).
 	if len(s.approveHMACKey) > 0 {
 		if !approve.VerifyApproveURL(s.approveHMACKey, requestID, "deny", closureHash, hmacSig) {
 			slog.Warn("daemon: deny HMAC mismatch — returning uniform 404",
-				"request_id", requestID[:8])
+				"request_id", reqIDPrefix(requestID))
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -582,18 +581,21 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	won := s.approveRegistry.Resolve(requestID, approve.StateDenied)
 	if !won {
 		slog.Debug("daemon: late deny resolution ignored — already resolved",
-			"request_id", requestID[:8])
+			"request_id", reqIDPrefix(requestID))
 	}
 
-	if s.auditApp != nil {
-		receipt := []byte(requestID + "\n" + "deny" + "\n" + hex.EncodeToString(closureHash[:]))
-		if err := s.auditApp.Append("approve-decision", "request:"+requestID[:8], receipt, false); err != nil {
-			slog.Warn("daemon: deny audit append failed", "err", err)
+	// IN-03: gate audit + counter mutations on won so a lost-CAS late tap is
+	// a pure no-op (no double audit receipt, no double counter decrement).
+	if won {
+		if s.auditApp != nil {
+			receipt := []byte(requestID + "\n" + "deny" + "\n" + hex.EncodeToString(closureHash[:]))
+			if err := s.auditApp.Append("approve-decision", "request:"+reqIDPrefix(requestID), receipt, false); err != nil {
+				slog.Warn("daemon: deny audit append failed", "err", err)
+			}
 		}
+		s.approveDenied.Add(1)
+		s.approvePending.Add(-1)
 	}
-
-	s.approveDenied.Add(1)
-	s.approvePending.Add(-1)
 
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")

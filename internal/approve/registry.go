@@ -74,6 +74,7 @@ type pendingReq struct {
 	tier        TierLevel
 	ch          chan Resolution // buffered(1), written exactly once on resolution
 	hmacSig     string          // stored for handler verify at resolution time (D-16)
+	denyHmacSig string          // deny-specific HMAC sig (CR-03: eliminates zero-hash side-channel)
 }
 
 // resolve attempts a single CAS transition from statePending to newState.
@@ -142,6 +143,10 @@ func NewRegistry(now func() time.Time) *Registry {
 // (APPR-04, D-07). Otherwise it stores the request and returns the *pendingReq
 // so the caller can pass it to Wait.
 //
+// hmacSig is the approve-action HMAC signature; denyHmacSig is the deny-action
+// HMAC signature. Both are stored on the single entry (CR-03: eliminates the
+// zero-hash side-channel that caused deny HMAC to always fail in production).
+//
 // The returned *pendingReq is the live state object; callers must not mutate its
 // fields directly (they are either immutable after Open or CAS-guarded).
 func (r *Registry) Open(requestID string, closureHash [32]byte, declared TierLevel, hmacSig string, opts ...OpenOption) (*pendingReq, error) {
@@ -167,6 +172,43 @@ func (r *Registry) Open(requestID string, closureHash [32]byte, declared TierLev
 		hmacSig:     hmacSig,
 	}
 	// statePending is the zero value for atomic.Uint32; no explicit Store needed.
+
+	r.mu.Lock()
+	r.pending[requestID] = req
+	r.mu.Unlock()
+
+	return req, nil
+}
+
+// OpenWithDenySig registers a new pending approval request with both the
+// approve HMAC signature and the deny HMAC signature stored on the same entry.
+// This eliminates the side-channel (CR-03): previously the deny sig was stored
+// in a separate registry entry keyed requestID+":deny" with a zero closure hash,
+// causing HMAC verification to always fail. Now both sigs are on the main entry.
+//
+// All invariants of Open apply; denyHmacSig is stored alongside hmacSig.
+func (r *Registry) OpenWithDenySig(requestID string, closureHash [32]byte, declared TierLevel, hmacSig, denyHmacSig string, opts ...OpenOption) (*pendingReq, error) {
+	opt := &openOption{}
+	for _, o := range opts {
+		o(opt)
+	}
+
+	effective := declared
+	if opt.actionName != "" {
+		effective = Tier(declared, opt.actionName, nil)
+	}
+	if effective == TierCritical {
+		return nil, ErrCriticalTierTTYOnly
+	}
+
+	req := &pendingReq{
+		requestID:   requestID,
+		closureHash: closureHash,
+		tier:        effective,
+		ch:          make(chan Resolution, 1),
+		hmacSig:     hmacSig,
+		denyHmacSig: denyHmacSig,
+	}
 
 	r.mu.Lock()
 	r.pending[requestID] = req
@@ -211,19 +253,26 @@ func (r *Registry) Wait(ctx context.Context, req *pendingReq, hasTTY bool) (Reso
 		if hasTTY {
 			return Resolution{}, ErrTimeout
 		}
-		// Headless: force deny. Ignore the bool return — if another goroutine
-		// already resolved (unlikely here), the channel already has one entry
-		// and we simply don't block.
-		req.resolve(stateDenied) //nolint:errcheck // resolve returns bool, not error
-		// Drain the channel if our resolve() won — so the caller gets a clean
-		// Approved:false result. If we lost the CAS race the channel already
-		// has the winner's result; don't drain it (leave it for the next Wait).
-		select {
-		case res := <-req.ch:
-			_ = res // we already know it's denied
-		default:
+		// Headless: attempt to win the deny CAS. The bool return tells us
+		// whether we won — only drain the channel when WE resolved it (WR-04:
+		// if a concurrent Resolve(stateApproved) already won and pushed a
+		// Resolution{Approved:true}, we must NOT discard it and fabricate a deny).
+		won := req.resolve(stateDenied)
+		if won {
+			// We won: drain the one entry we just pushed so the channel is clean.
+			select {
+			case <-req.ch:
+			default:
+			}
+			return Resolution{Approved: false}, ErrDenied
 		}
-		return Resolution{Approved: false}, ErrDenied
+		// We lost the CAS: another goroutine already resolved this request.
+		// Read its actual resolution from the channel instead of fabricating deny.
+		res := <-req.ch
+		if res.Approved {
+			return res, nil
+		}
+		return res, ErrDenied
 	}
 }
 
@@ -264,6 +313,21 @@ func (r *Registry) Lookup(requestID string) (hmacSig string, closureHash [32]byt
 		return "", [32]byte{}, TierBenign, false
 	}
 	return req.hmacSig, req.closureHash, req.tier, true
+}
+
+// LookupDeny retrieves the deny-specific HMAC sig and closure hash stored on
+// a pending request (CR-03). It is used by handleDeny to verify the deny
+// capability URL without a side-channel. Returns ("", [32]byte{}, TierBenign, false)
+// if the request is not found.
+func (r *Registry) LookupDeny(requestID string) (denyHmacSig string, closureHash [32]byte, tier TierLevel, ok bool) {
+	r.mu.Lock()
+	req, found := r.pending[requestID]
+	r.mu.Unlock()
+
+	if !found {
+		return "", [32]byte{}, TierBenign, false
+	}
+	return req.denyHmacSig, req.closureHash, req.tier, true
 }
 
 // Token returns an ApprovalToken for the given request, suitable for threading

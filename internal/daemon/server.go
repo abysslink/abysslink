@@ -506,9 +506,61 @@ func (s *Server) buildUnixMux() *http.ServeMux {
 	// Phase 30 approve IPC (WR-04): unix-socket only — NEVER on content mux.
 	// POST /approve/request: mint approve+deny capability URLs, register pending req.
 	// GET /approve/wait/{id}: long-poll until resolution or timeout.
+	// POST /approve/resolve/{id}: CLI TTY arm resolves via this route (CR-02).
 	mux.HandleFunc("POST /approve/request", s.handleApproveRequest)
 	mux.HandleFunc("GET /approve/wait/{id}", s.handleApproveWait)
+	mux.HandleFunc("POST /approve/resolve/{id}", s.handleApproveResolve)
 	return mux
+}
+
+// handleApproveResolve serves POST /approve/resolve/{id}?action=approve|deny on
+// the unix socket ONLY (WR-04). It is the D-03 TTY-arm endpoint: the CLI's
+// promptTTY posts here to resolve the shared CAS registry entry so the concurrent
+// phone-arm (GET /approve/wait/{id}) unblocks correctly. CAS ensures only the
+// first-answer-wins across both arms (CR-02).
+//
+// SECURITY: this route is unix-socket-only (chmod 0600, local trust root) — no
+// authentication beyond the unix socket is needed. The action must be exactly
+// "approve" or "deny"; any other value returns 400.
+func (s *Server) handleApproveResolve(w http.ResponseWriter, r *http.Request) {
+	requestID := r.PathValue("id")
+	if requestID == "" {
+		http.Error(w, "request_id is required", http.StatusBadRequest)
+		return
+	}
+	if s.approveRegistry == nil {
+		http.Error(w, "approve registry not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	action := r.URL.Query().Get("action")
+	var newState uint32
+	switch action {
+	case "approve":
+		newState = approve.StateApproved
+	case "deny":
+		newState = approve.StateDenied
+	default:
+		http.Error(w, `action must be "approve" or "deny"`, http.StatusBadRequest)
+		return
+	}
+
+	won := s.approveRegistry.Resolve(requestID, newState)
+	if !won {
+		slog.Debug("daemon: approve/resolve: late or lost CAS — already resolved",
+			"request_id", reqIDPrefix(requestID), "action", action)
+		// Return 200 even on a lost CAS: the request resolved (just not by us).
+		// The CLI should treat this as a successful resolve, not an error (D-03).
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"resolved": true,
+		"won":      won,
+		"action":   action,
+	}); err != nil {
+		slog.Warn("daemon: approve/resolve encode failed", "err", err)
+	}
 }
 
 // approveTTLDuration returns the TTL for approve/deny capability URLs: the
@@ -581,11 +633,14 @@ func decodeApproveRequest(w http.ResponseWriter, r *http.Request) (approveReques
 	return req, closureHash, true
 }
 
-// openApproveRegistryEntry registers the approve+deny entries in the registry.
-// The approve HMAC sig is stored on the main entry (for handleApprove to verify);
-// the deny HMAC sig is stored on a side-channel keyed requestID+":deny" (for
-// handleDeny). Extracted from handleApproveRequest to keep cyclomatic complexity
-// below the gocyclo ceiling.
+// openApproveRegistryEntry registers the pending request in the approve registry
+// with both the approve and deny HMAC sigs stored on the single entry (CR-03:
+// eliminates the side-channel that signed the deny URL over the real closure hash
+// but stored it against a zero hash, causing HMAC verification to always fail).
+// The registry's OpenWithDenySig call stores both sigs on the main entry keyed
+// by requestID only; handleDeny uses LookupDeny to retrieve the deny sig.
+// Extracted from handleApproveRequest to keep cyclomatic complexity below the
+// gocyclo ceiling.
 func (s *Server) openApproveRegistryEntry(requestID string, closureHash [32]byte, tier approve.TierLevel, action string) (string, string, error) {
 	var approveSig, denySig string
 	if len(s.approveHMACKey) > 0 {
@@ -594,21 +649,34 @@ func (s *Server) openApproveRegistryEntry(requestID string, closureHash [32]byte
 	} else {
 		slog.Warn("daemon: approve HMAC key not set — capability URLs lack integrity signature (D-16 defense-in-depth absent)")
 	}
-	if _, err := s.approveRegistry.Open(requestID, closureHash, tier, approveSig,
+	if _, err := s.approveRegistry.OpenWithDenySig(requestID, closureHash, tier, approveSig, denySig,
 		approve.WithActionName(action)); err != nil {
 		return "", "", err
 	}
-	// Side-channel: store deny sig under requestID+":deny" so handleDeny can
-	// look it up without adding a second field to pendingReq.
-	if denySig != "" {
-		denySigKey := requestID + ":deny"
-		var zeroClosure [32]byte
-		if _, err2 := s.approveRegistry.Open(denySigKey, zeroClosure, approve.TierBenign, denySig); err2 != nil {
-			slog.Debug("daemon: deny sig side-channel open failed", "err", err2)
-		}
-	}
 	return approveSig, denySig, nil
 }
+
+// reqIDPrefix returns the first 8 bytes of requestID for log/audit targets —
+// never the full ID (T-30-06). Guards against short IDs (WR-02).
+func reqIDPrefix(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+// configExtraCritical returns s.cfg.Approval.ExtraCritical when cfg is set,
+// or nil when cfg is nil. Extracted to keep handleApproveRequest flat (CR-05).
+func (s *Server) configExtraCritical() []string {
+	if s.cfg != nil {
+		return s.cfg.Approval.ExtraCritical
+	}
+	return nil
+}
+
+// defaultContentPort is the default content-listener port. Named here so
+// handleApproveRequest uses it instead of the magic literal 2587 (IN-02).
+const defaultContentPort = 2587
 
 // handleApproveRequest serves POST /approve/request on the unix socket ONLY
 // (WR-04). It validates the request, force-upgrades tier, mints capability URLs,
@@ -623,8 +691,13 @@ func (s *Server) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Force-upgrade tier: check in-code critical patterns + extraCritical.
-	effectiveTier := approve.Tier(approve.TierLevel(req.DeclaredTier), req.Action, req.ExtraCritical)
+	// Force-upgrade tier: check in-code critical patterns + client extraCritical
+	// + YAML-configured cfg.Approval.ExtraCritical (CR-05). Merge daemon-side
+	// extra_critical FIRST so the operator's YAML config is always enforced
+	// regardless of what the client sends. YAML may only tighten, never loosen
+	// (CLAUDE.md invariant) — the server merging overrides any client omission.
+	extra := append(append([]string(nil), req.ExtraCritical...), s.configExtraCritical()...)
+	effectiveTier := approve.Tier(approve.TierLevel(req.DeclaredTier), req.Action, extra)
 	if effectiveTier == approve.TierCritical {
 		http.Error(w, `{"error":"critical tier actions require TTY approval (D-07)"}`, http.StatusForbidden)
 		return
@@ -635,8 +708,25 @@ func (s *Server) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestID := notifyv2.NewMsgID()
+	// IN-02: check content listener liveness BEFORE minting tokens or opening
+	// the registry entry, so we don't create a pending entry that can never
+	// receive a resolution via a capability URL.
+	s.contentMu.Lock()
+	live, advertiseHost, port := s.contentLive, s.contentAdvertiseHost, s.contentPort
+	s.contentMu.Unlock()
+	if !live {
+		http.Error(w, "content listener not live — approve capability URLs unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if advertiseHost == "" {
+		advertiseHost = "127.0.0.1"
+	}
+	if port == 0 {
+		port = defaultContentPort
+	}
+
 	if _, _, err := s.openApproveRegistryEntry(requestID, closureHash, effectiveTier, req.Action); err != nil {
-		slog.Warn("daemon: approve registry open failed", "request_id", requestID[:8], "err", err)
+		slog.Warn("daemon: approve registry open failed", "request_id", reqIDPrefix(requestID), "err", err)
 		http.Error(w, "approve registry open failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -646,22 +736,13 @@ func (s *Server) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 	denyToken, _ := s.content.mintDeny(requestID, ttl)
 	s.approvePending.Add(1)
 
-	s.contentMu.Lock()
-	advertiseHost, port := s.contentAdvertiseHost, s.contentPort
-	s.contentMu.Unlock()
-	if advertiseHost == "" {
-		advertiseHost = "127.0.0.1"
-	}
-	if port == 0 {
-		port = 2587
-	}
 	hostPort := net.JoinHostPort(advertiseHost, strconv.Itoa(port))
 	approveURL := "https://" + hostPort + "/approve/" + approveToken
 	denyURL := "https://" + hostPort + "/deny/" + denyToken
 
 	// Log only safe metadata — never URLs, tokens, or full requestID (T-30-10).
 	slog.Info("daemon: approve request opened",
-		"request_id", requestID[:8], "tier", effectiveTier, "ttl_seconds", int(ttl/time.Second))
+		"request_id", reqIDPrefix(requestID), "tier", effectiveTier, "ttl_seconds", int(ttl/time.Second))
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(approveRequestResponse{
@@ -683,8 +764,9 @@ type approveWaitResponse struct {
 // handleApproveWait serves GET /approve/wait/{id} on the unix socket ONLY
 // (WR-04). It long-polls the approve registry until the request resolves or
 // the context expires. On timeout it returns 408; on resolution it returns 200.
-// hasTTY is always false on the unix-socket path — the CLI's TTY fallback is
-// handled CLI-side, not daemon-side.
+// On not-found it returns 404 (WR-06: distinguishes "unknown request" from
+// "explicitly denied"). hasTTY is always false on the unix-socket path — the
+// CLI's TTY fallback is handled CLI-side, not daemon-side.
 func (s *Server) handleApproveWait(w http.ResponseWriter, r *http.Request) {
 	requestID := r.PathValue("id")
 	if requestID == "" {
@@ -697,29 +779,14 @@ func (s *Server) handleApproveWait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up the pending request.
-	hmacSig, closureHash, tier, ok := s.approveRegistry.Lookup(requestID)
-	if !ok {
-		http.Error(w, `{"error":"request not found"}`, http.StatusNotFound)
-		return
-	}
-	// Reconstruct the pendingReq accessor: we need to call Wait, which takes
-	// a *pendingReq. Since pendingReq is unexported, we use a helper approach:
-	// resolve the pending req by re-looking it up and calling Wait via the
-	// registry's exported Wait method that takes a request ID.
-	// The approve.Registry.Wait takes *pendingReq which is unexported.
-	// DESIGN ADJUSTMENT: We need to expose a WaitByID method or similar.
-	// We'll use a timeout context and poll the registry for resolution.
-	_ = hmacSig
-	_ = closureHash
-	_ = tier
-
 	// Build a timeout context from the configured approval timeout.
 	timeout := s.approveTimeoutDuration()
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	// Poll via WaitByID — we need this method on Registry.
+	// WaitByID blocks until the request resolves, times out, or the context
+	// is cancelled. A not-found error returns 404 (WR-06: "request not found"
+	// must not be conflated with "explicitly denied" as a 200 approved:false).
 	res, waitErr := s.approveRegistry.WaitByID(ctx, requestID, false)
 	if waitErr != nil {
 		if errors.Is(waitErr, approve.ErrTimeout) || errors.Is(waitErr, context.DeadlineExceeded) {
@@ -731,13 +798,26 @@ func (s *Server) handleApproveWait(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		// ErrDenied — treat as a valid denial response (200 with approved:false).
+		if errors.Is(waitErr, approve.ErrDenied) {
+			// Explicitly denied — 200 with approved:false (WR-06).
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(approveWaitResponse{
+				Approved:  false,
+				RequestID: reqIDPrefix(requestID),
+			}); err != nil {
+				slog.Warn("daemon: approve wait encode failed", "err", err)
+			}
+			return
+		}
+		// Not found (request expired/pruned/unknown) — 404 (WR-06).
+		http.Error(w, `{"error":"request not found or expired"}`, http.StatusNotFound)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(approveWaitResponse{
 		Approved:  res.Approved,
-		RequestID: requestID[:8],
+		RequestID: reqIDPrefix(requestID),
 	}); err != nil {
 		slog.Warn("daemon: approve wait encode failed", "err", err)
 	}

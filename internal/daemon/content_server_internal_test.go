@@ -1379,6 +1379,8 @@ func TestHandleApprove_ValidResolves(t *testing.T) {
 
 // TestHandleDeny_ValidResolves proves that GET /deny/{validToken} returns 200
 // and resolves the pending request to denied.
+// Updated for CR-03: deny sig is stored on the main entry via OpenWithDenySig
+// (not the old side-channel with a zero closure hash).
 func TestHandleDeny_ValidResolves(t *testing.T) {
 	s, ts := newApproveTestServer(t)
 	logPath := filepath.Join(t.TempDir(), "audit-deny.log")
@@ -1387,9 +1389,11 @@ func TestHandleDeny_ValidResolves(t *testing.T) {
 	requestID := notifyv2.NewMsgID()
 	var closureHash [32]byte
 	closureHash[0] = 0xDE
-	// Open with deny HMAC sig so handleDeny can verify it.
+	// CR-03: store both sigs on the main entry via OpenWithDenySig so that
+	// handleDeny can retrieve the deny sig via LookupDeny (real closure hash).
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
 	denySig := approve.SignApproveURL(s.approveHMACKey, requestID, "deny", closureHash)
-	_, err := s.approveRegistry.Open(requestID, closureHash, approve.TierSensitive, denySig)
+	_, err := s.approveRegistry.OpenWithDenySig(requestID, closureHash, approve.TierSensitive, approveSig, denySig)
 	require.NoError(t, err)
 
 	approveTTL := 150 * time.Second
@@ -1625,6 +1629,186 @@ func doUnixGet(t *testing.T, s *Server, path string) *http.Response {
 	resp, err := ts.Client().Do(req)
 	require.NoError(t, err)
 	return resp
+}
+
+// doUnixPostQuery sends a POST with query params to the server's unix mux.
+func doUnixPostQuery(t *testing.T, s *Server, path string) *http.Response {
+	t.Helper()
+	mux := s.buildUnixMux()
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		ts.URL+path, nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// TestHandleApproveResolve_CR02_RouteExists proves that POST /approve/resolve/{id}
+// is registered and resolves the CAS entry so the phone arm's WaitByID unblocks
+// (CR-02). Prior to this fix the route was missing — Go 1.22+ ServeMux returned
+// 404, the daemon never resolved the TTY arm's answer, and D-03 was not delivered.
+func TestHandleApproveResolve_CR02_RouteExists(t *testing.T) {
+	s := newUnixTestServer(t)
+
+	// Register a pending request directly (no HTTP round-trip needed).
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	closureHash[1] = 0xAB
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	denySig := approve.SignApproveURL(s.approveHMACKey, requestID, "deny", closureHash)
+	_, err := s.approveRegistry.OpenWithDenySig(requestID, closureHash, approve.TierSensitive, approveSig, denySig)
+	require.NoError(t, err)
+
+	// POST /approve/resolve/{id}?action=approve via the unix mux.
+	resp := doUnixPostQuery(t, s, "/approve/resolve/"+requestID+"?action=approve")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"POST /approve/resolve/{id} must return 200 (CR-02: route was missing before fix)")
+
+	var result struct {
+		Resolved bool   `json:"resolved"`
+		Won      bool   `json:"won"`
+		Action   string `json:"action"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.True(t, result.Resolved, "resolved must be true")
+	assert.True(t, result.Won, "won must be true on first resolution")
+	assert.Equal(t, "approve", result.Action)
+}
+
+// TestHandleApproveResolve_CR02_DenyPath proves POST /approve/resolve/{id}?action=deny
+// resolves the entry to denied and unblocks the phone arm's WaitByID (D-03 deny path).
+func TestHandleApproveResolve_CR02_DenyPath(t *testing.T) {
+	s := newUnixTestServer(t)
+
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	denySig := approve.SignApproveURL(s.approveHMACKey, requestID, "deny", closureHash)
+	_, err := s.approveRegistry.OpenWithDenySig(requestID, closureHash, approve.TierSensitive, approveSig, denySig)
+	require.NoError(t, err)
+
+	// Start WaitByID in background — it must unblock when deny is resolved.
+	waitDone := make(chan approve.Resolution, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		res, _ := s.approveRegistry.WaitByID(ctx, requestID, false)
+		waitDone <- res
+	}()
+
+	resp := doUnixPostQuery(t, s, "/approve/resolve/"+requestID+"?action=deny")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	select {
+	case res := <-waitDone:
+		assert.False(t, res.Approved, "WaitByID must see denied resolution")
+	case <-time.After(3 * time.Second):
+		t.Fatal("WaitByID did not unblock after POST /approve/resolve?action=deny")
+	}
+}
+
+// TestHandleDenyViaProductionPath_CR03_NoHMACFailure proves that the deny flow
+// through the PRODUCTION path (handleApproveRequest → openApproveRegistryEntry →
+// handleDeny) succeeds HMAC verification (CR-03). Prior to this fix, the deny
+// sig was signed over the real closure hash but stored against a zero hash —
+// causing HMAC to always fail (fail-open deny defect). This test goes through
+// the real openApproveRegistryEntry code path, not a hand-rolled Open call.
+func TestHandleDenyViaProductionPath_CR03_NoHMACFailure(t *testing.T) {
+	s, contentTS := newApproveTestServer(t)
+	// Need content listener marked live so handleApproveRequest doesn't 503.
+	markContentLive(s, "127.0.0.1", 8443)
+
+	// POST /approve/request to trigger openApproveRegistryEntry (production path).
+	var closureHash [32]byte
+	closureHash[0] = 0xCF
+	body := `{"action":"safe-tool","closure_hash":"` + fmt.Sprintf("%x", closureHash) + `","declared_tier":1}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode, "POST /approve/request must succeed")
+
+	var approveReq struct {
+		RequestID string `json:"request_id"`
+		DenyURL   string `json:"deny_url"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&approveReq))
+	require.NotEmpty(t, approveReq.RequestID, "request_id must be non-empty")
+	require.NotEmpty(t, approveReq.DenyURL, "deny_url must be non-empty")
+
+	// Extract the deny token from the DenyURL (path: /deny/{token}).
+	parts := strings.SplitN(approveReq.DenyURL, "/deny/", 2)
+	require.Len(t, parts, 2, "deny_url must contain /deny/ path segment")
+	denyToken := parts[1]
+
+	// GET /deny/{token} via the content mux — this exercises handleDeny and
+	// LookupDeny (CR-03). It MUST NOT return 404 (HMAC mismatch).
+	resp := doDenyGet(t, contentTS, denyToken)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"GET /deny/{token} through production path must return 200 (CR-03: deny HMAC must pass)")
+}
+
+// TestHandleApproveRequest_CR05_ExtraCriticalEnforced proves that
+// cfg.Approval.ExtraCritical configured in the YAML/daemon config is enforced
+// server-side by handleApproveRequest (CR-05). Prior to this fix the daemon
+// silently ignored cfg.Approval.ExtraCritical; a matching action returned 200
+// (approvable from phone) instead of 403 (TTY-only).
+func TestHandleApproveRequest_CR05_ExtraCriticalEnforced(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Approval.ExtraCritical = []string{"super-secret-tool"}
+	cn := &captureNotifier{}
+	s := NewServer(cn, nil, cfg)
+	s.SetDeviceStore(&fakeDeviceStore{bearer: testBearer, rec: device.Record{ID: "01DEVICEULIDXXXXXXXXXXXXXX", Name: "phone"}})
+	s.SetAuditAppender(audit.New(filepath.Join(t.TempDir(), "audit.log")))
+	s.SetApproveHMACKey([]byte("test-hmac-key-for-approve-tests"))
+	reg := approve.NewRegistry(nil)
+	s.SetApproveRegistry(reg)
+	markContentLive(s, "127.0.0.1", 8443)
+
+	// The action "super-secret-tool" matches cfg.Approval.ExtraCritical.
+	var closureHash [32]byte
+	body := `{"action":"super-secret-tool","closure_hash":"` + fmt.Sprintf("%x", closureHash) + `","declared_tier":1}`
+	resp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode,
+		"CR-05: action matching cfg.Approval.ExtraCritical must return 403 (critical tier = TTY only)")
+}
+
+// TestHandleApproveRequest_CR05_NonMatchingActionNotBlocked proves that
+// actions NOT matching cfg.Approval.ExtraCritical are not blocked (CR-05
+// tightens only matching patterns, does not block everything).
+func TestHandleApproveRequest_CR05_NonMatchingActionNotBlocked(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Approval.ExtraCritical = []string{"super-secret-tool"}
+	cn := &captureNotifier{}
+	s := NewServer(cn, nil, cfg)
+	s.SetDeviceStore(&fakeDeviceStore{bearer: testBearer, rec: device.Record{ID: "01DEVICEULIDXXXXXXXXXXXXXX", Name: "phone"}})
+	s.SetAuditAppender(audit.New(filepath.Join(t.TempDir(), "audit.log")))
+	s.SetApproveHMACKey([]byte("test-hmac-key-for-approve-tests"))
+	reg := approve.NewRegistry(nil)
+	s.SetApproveRegistry(reg)
+	markContentLive(s, "127.0.0.1", 8443)
+
+	var closureHash [32]byte
+	body := `{"action":"safe-tool","closure_hash":"` + fmt.Sprintf("%x", closureHash) + `","declared_tier":1}`
+	resp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"CR-05: non-matching action must not be blocked by cfg.Approval.ExtraCritical")
+}
+
+// TestHandleApproveWait_WR06_NotFoundReturns404 proves that GET /approve/wait/{id}
+// returns 404 when the request is not found, rather than 200 with approved:false
+// (WR-06: "request not found" must not be conflated with "explicitly denied").
+func TestHandleApproveWait_WR06_NotFoundReturns404(t *testing.T) {
+	s := newUnixTestServer(t)
+	resp := doUnixGet(t, s, "/approve/wait/nonexistent-request-id-xyz")
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode,
+		"WR-06: a not-found request must return 404, not 200 with approved:false")
 }
 
 // doUnixGetWithTimeout sends a GET with a short context timeout to test 408.
