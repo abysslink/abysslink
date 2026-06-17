@@ -40,10 +40,6 @@ import (
 // values without importing internal/approve by a qualified name repeatedly.
 type approveToken = approve.ApprovalToken
 
-// fakeApproveRegistry implements approve.Registry for tests that need an
-// enforcing gate but don't need the registry to do anything.
-type fakeApproveRegistry struct{}
-
 // fakeInner is a sentinel-returning shell.Runner: every method returns the
 // exact configured Result/Stream/error so pass-through fidelity can assert
 // identity, not just equivalence. Safe for concurrent use.
@@ -268,7 +264,7 @@ func TestGated_ShadowMode(t *testing.T) {
 // ErrApprovalRequired; inner.Run must NOT be called; counter still incremented.
 func TestGated_EnforcingNoToken(t *testing.T) {
 	inner := &fakeInner{}
-	fakeReg := &fakeApproveRegistry{}
+	fakeReg := approve.NewRegistry(nil)
 	g := New(inner, WithLogger(discardLogger()), WithEnforcing(fakeReg))
 	ctx := context.Background() // no token attached
 
@@ -282,7 +278,7 @@ func TestGated_EnforcingNoToken(t *testing.T) {
 // ErrClosureHashMismatch; inner.Run must NOT be called.
 func TestGated_ClosureHashMismatch(t *testing.T) {
 	inner := &fakeInner{}
-	fakeReg := &fakeApproveRegistry{}
+	fakeReg := approve.NewRegistry(nil)
 	g := New(inner, WithLogger(discardLogger()), WithEnforcing(fakeReg))
 
 	wrongHash := [32]byte{} // all zeros — never matches real closureHash
@@ -298,7 +294,7 @@ func TestGated_ClosureHashMismatch(t *testing.T) {
 // inner.Run IS called.
 func TestGated_ClosureHashMatch(t *testing.T) {
 	inner := &fakeInner{res: shell.Result{Stdout: "matched"}}
-	fakeReg := &fakeApproveRegistry{}
+	fakeReg := approve.NewRegistry(nil)
 	g := New(inner, WithLogger(discardLogger()), WithEnforcing(fakeReg))
 
 	correctHash := closureHash("echo", []string{"hello"})
