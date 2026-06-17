@@ -116,6 +116,11 @@ func newApproveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approve",
 		Short: "Claude Code hook executor (approve loop — invoked by hooks, not directly by users)",
+		Example: `  # PreToolUse hook (configured automatically by 'abysslink up --apply'):
+  abysslink approve --check --blocking < hook.json
+
+  # PermissionRequest hook executor:
+  abysslink approve --permission-request < hook.json`,
 		Long: `abysslink approve is invoked by Claude Code hooks configured by 'abysslink up --apply'.
 It is not meant to be run directly by users.
 
