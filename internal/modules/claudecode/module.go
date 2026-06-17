@@ -42,6 +42,18 @@ var notifyHookCommand = hookBinary() + ` notify "Claude needs you" "waiting for 
 // stopHookCommand fires when a Claude Code session ends.
 var stopHookCommand = hookBinary() + ` notify "Claude stopped" "Session ended"`
 
+// preToolUseHookCommand is the PreToolUse hook that blocks tool execution
+// pending phone or TTY approval when gate.enforcing=true.
+// Exit 2 is the Claude Code blocking mechanism (#19298 workaround).
+// Only written to settings.json when Gate.Enforcing=true (D-04).
+var preToolUseHookCommand = hookBinary() + ` approve --check --blocking` //nolint:gochecknoglobals // gochecknoglobals: package-level var is a test/injection seam; mirrors notifyHookCommand pattern
+
+// permissionRequestHookCommand is the PermissionRequest hook that fires a
+// fast non-blocking notification trigger when gate.enforcing=true.
+// Returns allow immediately (#12176 workaround — must return within ~1s).
+// Only written to settings.json when Gate.Enforcing=true (D-04).
+var permissionRequestHookCommand = hookBinary() + ` approve --permission-request` //nolint:gochecknoglobals // gochecknoglobals: package-level var is a test/injection seam; mirrors notifyHookCommand pattern
+
 const (
 	keychainService = "abysslink"
 	keychainAccount = "anthropic-api-key"
@@ -192,7 +204,61 @@ func (m *Module) detectHooks(data []byte) []modules.Finding {
 			Message:  fmt.Sprintf("~/.claude/settings.json missing abysslink notify Notification hook (expected command: %q)", notifyHookCommand),
 		})
 	}
+	// Approve hooks are only required when gate.enforcing=true (D-04).
+	if m.cfg.Gate.Enforcing {
+		if !hasApproveHook(data, "PreToolUse") {
+			findings = append(findings, modules.Finding{
+				Module: "claudecode", Check: "approve_pretooluse_hook_configured",
+				Severity: modules.SeverityWarning,
+				Message:  "~/.claude/settings.json missing abysslink approve PreToolUse hook — run `abysslink up --apply` to configure",
+			})
+		}
+		if !hasApproveHook(data, "PermissionRequest") {
+			findings = append(findings, modules.Finding{
+				Module: "claudecode", Check: "approve_permissionrequest_hook_configured",
+				Severity: modules.SeverityWarning,
+				Message:  "~/.claude/settings.json missing abysslink approve PermissionRequest hook — run `abysslink up --apply` to configure",
+			})
+		}
+	}
 	return findings
+}
+
+// hasApproveHook returns true if the settings.json data contains an abysslink
+// approve command under the given event key (PreToolUse or PermissionRequest).
+func hasApproveHook(data []byte, eventKey string) bool {
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false
+	}
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	entries, ok := hooks[eventKey].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, entry := range entries {
+		entryMap, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		innerHooks, ok := entryMap["hooks"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, h := range innerHooks {
+			hMap, ok := h.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if cmd, ok := hMap["command"].(string); ok && strings.Contains(cmd, "abysslink approve") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasNotificationHook returns true if the settings.json contains a Notification
@@ -252,8 +318,10 @@ func mergeHookEntry(existing interface{}, command string) []interface{} {
 	})
 }
 
-// hookEntryIsAbysslink returns true if the hook entry contains an abysslink
-// notify command — used to identify our own entries for idempotent replacement.
+// hookEntryIsAbysslink returns true if the hook entry contains any abysslink
+// command — used to identify our own entries for idempotent replacement.
+// Matches both "abysslink notify" (Stop/Notification hooks) and
+// "abysslink approve" (PreToolUse/PermissionRequest hooks, APPR-06).
 func hookEntryIsAbysslink(entry interface{}) bool {
 	entryMap, ok := entry.(map[string]interface{})
 	if !ok {
@@ -268,7 +336,8 @@ func hookEntryIsAbysslink(entry interface{}) bool {
 		if !ok {
 			continue
 		}
-		if cmd, ok := hMap["command"].(string); ok && strings.Contains(cmd, "abysslink notify") {
+		if cmd, ok := hMap["command"].(string); ok &&
+			(strings.Contains(cmd, "abysslink notify") || strings.Contains(cmd, "abysslink approve")) {
 			return true
 		}
 	}
@@ -411,6 +480,17 @@ func (m *Module) Apply(ctx context.Context) error {
 		existingHooks["Notification"] = mergeHookEntry(existingHooks["Notification"], notifyHookCommand)
 	}
 	existingHooks["Stop"] = mergeHookEntry(existingHooks["Stop"], stopHookCommand)
+
+	// Approve hooks are written only when gate.enforcing=true (D-04).
+	// PreToolUse + exit 2 is the primary blocking mechanism (#19298 workaround).
+	// PermissionRequest is a fast non-blocking notification trigger (#12176 workaround).
+	// Quarantine invariant: this is the ONLY place Claude-specific hook logic lives;
+	// internal/approve and internal/gate import nothing Claude-specific (APPR-06).
+	if m.cfg.Gate.Enforcing {
+		existingHooks["PreToolUse"] = mergeHookEntry(existingHooks["PreToolUse"], preToolUseHookCommand)
+		existingHooks["PermissionRequest"] = mergeHookEntry(existingHooks["PermissionRequest"], permissionRequestHookCommand)
+	}
+
 	existing["hooks"] = existingHooks
 
 	data, err := json.MarshalIndent(existing, "", "  ")
@@ -544,13 +624,13 @@ func readSettingsForRemoval(home, settingsPath string) ([]byte, error) {
 	return raw, nil
 }
 
-// pruneAbysslinkHooks removes abysslink notify entries from the given hooks map
-// (mutates in place) for the "Stop" and "Notification" event keys.
+// pruneAbysslinkHooks removes abysslink notify and approve entries from the
+// given hooks map (mutates in place) for all event keys abysslink owns.
 // Returns human-readable descriptors for each removed entry.
 // Event keys whose arrays become empty are deleted from the map.
 func pruneAbysslinkHooks(hooks map[string]interface{}) []string {
 	var removed []string
-	for _, eventKey := range []string{"Stop", "Notification"} {
+	for _, eventKey := range []string{"Stop", "Notification", "PreToolUse", "PermissionRequest"} {
 		entries, ok := hooks[eventKey].([]interface{})
 		if !ok {
 			continue
