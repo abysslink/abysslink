@@ -767,6 +767,30 @@ func (s *Server) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 	slog.Info("daemon: approve request opened",
 		"request_id", reqIDPrefix(requestID), "tier", effectiveTier, "ttl_seconds", int(ttl/time.Second))
 
+	// Deliver the approval request to the phone as an ACTIONABLE notification:
+	// KindApprovalRequest with Approve/Deny capability-URL buttons bound to THIS
+	// requestID — the same registry entry the CLI's GET /approve/wait blocks on.
+	// Routed through the standard v2 dispatch + push fan-out (ntfy X-Actions
+	// buttons + device wake), exactly like POST /notify. Without this the minted
+	// capability URLs never leave the daemon and the phone has no button to tap
+	// (the loop is closed only at the HTTP-response level otherwise).
+	approveMsg := notifyv2.Message{
+		V:     2,
+		MsgID: requestID,
+		Kind:  notifyv2.KindApprovalRequest,
+		Title: "approve " + req.Action + "?",
+		Actions: []notifyv2.Action{
+			{ID: "approve", Label: "Approve", URL: approveURL},
+			{ID: "deny", Label: "Deny", URL: denyURL},
+		},
+	}
+	notifyCtx := context.WithoutCancel(r.Context())
+	if derr := s.dispatch.dispatch(notifyCtx, approveMsg, originExplicit, notifyv2.RenderOpts{}); derr != nil {
+		slog.Warn("daemon: approve notification dispatch failed",
+			"request_id", reqIDPrefix(requestID), "err", derr)
+	}
+	_ = s.fanOutToDevices(notifyCtx, approveMsg)
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(approveRequestResponse{
 		RequestID:  requestID,

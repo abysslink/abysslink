@@ -52,12 +52,6 @@ type preToolUseInput struct {
 	ToolInput json.RawMessage `json:"tool_input"`
 }
 
-// permissionRequestInput is the stdin JSON shape for a PermissionRequest
-// hook invocation. Only tool_name is used; all other fields are ignored.
-type permissionRequestInput struct {
-	ToolName string `json:"tool_name"`
-}
-
 // approveRequestPayload is the POST /approve/request JSON body.
 type approveRequestPayload struct {
 	Action        string   `json:"action"`
@@ -282,40 +276,13 @@ func runApprovePermissionRequest(ctx context.Context) error {
 		return nil // exit 0; Claude's default stands; PreToolUse --check is the real gate
 	}
 
-	var input permissionRequestInput
-	if len(stdinBytes) > 0 {
-		_ = json.Unmarshal(stdinBytes, &input) // best-effort; tool_name may be empty
-	}
-
-	// Fire notification asynchronously (fire-and-forget).
-	// We do NOT wait for this to complete (#12176: must return < 1s).
-	if input.ToolName != "" {
-		go func() {
-			sockPath := daemon.SocketPath()
-			if sockPath == "" {
-				return
-			}
-			notifyCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			hc := daemonHTTPClient(sockPath, approveDialTimeout)
-			body, _ := json.Marshal(map[string]interface{}{
-				"v":     2,
-				"kind":  "approval_request",
-				"title": "approve " + input.ToolName + "?",
-				"body":  "Claude Code is requesting permission to use " + input.ToolName,
-			})
-			req, err := http.NewRequestWithContext(notifyCtx, http.MethodPost, "http://unix/notify", bytes.NewReader(body))
-			if err != nil {
-				return
-			}
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := hc.Do(req)
-			if err != nil {
-				return
-			}
-			defer func() { _ = resp.Body.Close() }()
-		}()
-	}
+	// PermissionRequest is the fast non-blocking arm (#12176): it must return
+	// within ~1s, so it sends NO notification. The actionable approve/deny
+	// notification — with the capability-URL buttons bound to the request — is
+	// sent by the daemon when the PreToolUse --check arm opens the request via
+	// POST /approve/request (see daemon.handleApproveRequest). This arm only
+	// returns the fast allow so PreToolUse + exit 2 remains the real gate.
+	_ = stdinBytes // already validated above for the WR-05 fail-closed check; body not needed here
 
 	// Write allow JSON to stdout immediately (#12176 workaround).
 	// The PreToolUse hook will do the actual blocking.

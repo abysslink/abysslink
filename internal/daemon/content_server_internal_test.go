@@ -1711,6 +1711,38 @@ func TestHandleApproveResolve_CR02_DenyPath(t *testing.T) {
 	}
 }
 
+// TestHandleApproveRequest_SendsButtonedNotification proves the last-mile wiring:
+// POST /approve/request delivers an actionable notification to the phone carrying
+// the Approve/Deny capability-URL buttons bound to the request. Without this the
+// minted URLs never leave the daemon and the phone has no button to tap.
+func TestHandleApproveRequest_SendsButtonedNotification(t *testing.T) {
+	s := newUnixTestServer(t)
+	cn, ok := s.notifier.(*captureNotifier)
+	require.True(t, ok, "test server must use captureNotifier")
+
+	body := `{"action":"Bash","closure_hash":"` +
+		"000000000000000000000000000000000000000000000000000000000000000a" +
+		`","declared_tier":1}`
+	resp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var rr struct {
+		ApproveURL string `json:"approve_url"`
+		DenyURL    string `json:"deny_url"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&rr))
+	require.NotEmpty(t, rr.ApproveURL)
+	require.NotEmpty(t, rr.DenyURL)
+
+	notes := cn.all()
+	require.GreaterOrEqual(t, len(notes), 1, "POST /approve/request must send a phone notification")
+	last := notes[len(notes)-1]
+	require.Len(t, last.Actions, 2, "notification must carry exactly the Approve and Deny buttons")
+	urls := []string{last.Actions[0].URL, last.Actions[1].URL}
+	assert.Contains(t, urls, rr.ApproveURL, "an action button must carry the approve capability URL")
+	assert.Contains(t, urls, rr.DenyURL, "an action button must carry the deny capability URL")
+}
+
 // TestApproveLoop_D03_ConcurrentRace_ExactlyOneWins is the automatable core of
 // UAT item 3: the phone arm (capability URL tap) and the TTY arm (POST
 // /approve/resolve) contend on the same CAS registry entry simultaneously, and
