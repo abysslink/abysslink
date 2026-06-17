@@ -32,8 +32,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/abysslink/abysslink/internal/approve"
 	"github.com/abysslink/abysslink/internal/shell"
 )
+
+// approveToken is a test alias so test code can construct ApprovalToken
+// values without importing internal/approve by a qualified name repeatedly.
+type approveToken = approve.ApprovalToken
+
+// fakeApproveRegistry implements approve.Registry for tests that need an
+// enforcing gate but don't need the registry to do anything.
+type fakeApproveRegistry struct{}
 
 // fakeInner is a sentinel-returning shell.Runner: every method returns the
 // exact configured Result/Stream/error so pass-through fidelity can assert
@@ -239,6 +248,110 @@ func TestClosureHash_Stability(t *testing.T) {
 		h := closureHash("sh", []string{"/nonexistent/path/to/script.sh"})
 		assert.NotEqual(t, [32]byte{}, h, "record must degrade to fallback values, never fail")
 	})
+}
+
+// TestGated_ShadowMode: gate constructed with no WithEnforcing — must never
+// block, must call inner, must increment counter (D-04 shadow default).
+func TestGated_ShadowMode(t *testing.T) {
+	inner := &fakeInner{res: shell.Result{Stdout: "ok"}}
+	g := New(inner, WithLogger(discardLogger()))
+	ctx := context.Background()
+
+	res, err := g.Run(ctx, "echo", "hello")
+	require.NoError(t, err)
+	assert.Equal(t, "ok", res.Stdout)
+	assert.Contains(t, inner.seen(), "Run", "inner must be called in shadow mode")
+	assert.Equal(t, uint64(1), g.Count(), "counter incremented in shadow mode")
+}
+
+// TestGated_EnforcingNoToken: enforcing gate + no ApprovalToken in ctx →
+// ErrApprovalRequired; inner.Run must NOT be called; counter still incremented.
+func TestGated_EnforcingNoToken(t *testing.T) {
+	inner := &fakeInner{}
+	fakeReg := &fakeApproveRegistry{}
+	g := New(inner, WithLogger(discardLogger()), WithEnforcing(fakeReg))
+	ctx := context.Background() // no token attached
+
+	_, err := g.Run(ctx, "echo", "hello")
+	require.ErrorIs(t, err, ErrApprovalRequired)
+	assert.NotContains(t, inner.seen(), "Run", "inner must NOT be called when token is missing")
+	assert.Equal(t, uint64(1), g.Count(), "counter still incremented even on enforcing refusal")
+}
+
+// TestGated_ClosureHashMismatch: enforcing gate + wrong ClosureHash in token →
+// ErrClosureHashMismatch; inner.Run must NOT be called.
+func TestGated_ClosureHashMismatch(t *testing.T) {
+	inner := &fakeInner{}
+	fakeReg := &fakeApproveRegistry{}
+	g := New(inner, WithLogger(discardLogger()), WithEnforcing(fakeReg))
+
+	wrongHash := [32]byte{} // all zeros — never matches real closureHash
+	tok := &approveToken{ClosureHash: wrongHash}
+	ctx := WithApprovalToken(context.Background(), tok)
+
+	_, err := g.Run(ctx, "echo", "hello")
+	require.ErrorIs(t, err, ErrClosureHashMismatch)
+	assert.NotContains(t, inner.seen(), "Run", "inner must NOT be called on hash mismatch")
+}
+
+// TestGated_ClosureHashMatch: enforcing gate + correct ClosureHash →
+// inner.Run IS called.
+func TestGated_ClosureHashMatch(t *testing.T) {
+	inner := &fakeInner{res: shell.Result{Stdout: "matched"}}
+	fakeReg := &fakeApproveRegistry{}
+	g := New(inner, WithLogger(discardLogger()), WithEnforcing(fakeReg))
+
+	correctHash := closureHash("echo", []string{"hello"})
+	tok := &approveToken{ClosureHash: correctHash}
+	ctx := WithApprovalToken(context.Background(), tok)
+
+	res, err := g.Run(ctx, "echo", "hello")
+	require.NoError(t, err)
+	assert.Equal(t, "matched", res.Stdout)
+	assert.Contains(t, inner.seen(), "Run", "inner must be called on hash match")
+}
+
+// TestGated_InternalBypass: gate constructed with plain New (no WithEnforcing) —
+// must delegate without any approval check, even if other instances have a
+// registry. This proves the D-40 structural bypass: enforcing is purely at
+// construction time, never toggleable after construction.
+func TestGated_InternalBypass(t *testing.T) {
+	inner := &fakeInner{res: shell.Result{Stdout: "bypass"}}
+	// plain New — no WithEnforcing
+	g := New(inner, WithLogger(discardLogger()))
+	ctx := context.Background() // no token
+
+	res, err := g.Run(ctx, "tmux", "-CC", "attach-session")
+	require.NoError(t, err)
+	assert.Equal(t, "bypass", res.Stdout, "daemon-internal runner must never block")
+	assert.Contains(t, inner.seen(), "Run")
+}
+
+// TestGated_TokenInContext: WithApprovalToken/approvalTokenFromCtx round-trip.
+func TestGated_TokenInContext(t *testing.T) {
+	tok := &approveToken{ClosureHash: [32]byte{1, 2, 3}}
+	ctx := WithApprovalToken(context.Background(), tok)
+	got, ok := approvalTokenFromCtx(ctx)
+	require.True(t, ok, "token must be found after WithApprovalToken")
+	assert.Equal(t, tok, got)
+
+	_, ok2 := approvalTokenFromCtx(context.Background())
+	assert.False(t, ok2, "empty ctx must return false")
+}
+
+// TestGated_CounterShadow: shadow mode increments Count() on every Run (Phase
+// 27 behavior preserved across all five methods).
+func TestGated_CounterShadow(t *testing.T) {
+	inner := &fakeInner{stream: &shell.Stream{}}
+	g := New(inner, WithLogger(discardLogger()))
+	ctx := context.Background()
+
+	_, _ = g.Run(ctx, "true")
+	_, _ = g.RunWithStdin(ctx, strings.NewReader(""), "cat")
+	_ = g.RunInteractive(ctx, "true")
+	_, _ = g.RunWithEnv(ctx, nil, "true")
+	_, _ = g.RunStream(ctx, "tmux", "-CC")
+	assert.Equal(t, uint64(5), g.Count(), "all five methods must increment in shadow mode")
 }
 
 // TestGate_NoOSExecImport enforces the CLAUDE.md monopoly at the source level:
