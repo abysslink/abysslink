@@ -59,7 +59,7 @@ type Gated struct {
 	inner     shell.Runner
 	log       *slog.Logger
 	count     atomic.Uint64
-	enforcing bool             // when true, Run checks ctx for ApprovalToken and re-verifies closure hash; default false per D-04
+	enforcing bool              // when true, Run checks ctx for ApprovalToken and re-verifies closure hash; default false per D-04
 	registry  *approve.Registry // daemon-side approve registry client; only meaningful when enforcing==true; never set on the daemon-internal runner (D-40 structural bypass)
 }
 

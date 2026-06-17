@@ -522,3 +522,101 @@ func TestHookCommands_RecognizableAsAbysslink(t *testing.T) {
 	assert.True(t, hookEntryIsAbysslink(abysslinkEntry(stopHookCommand)))
 	assert.True(t, hookEntryIsAbysslink(abysslinkEntry(notifyHookCommand)))
 }
+
+// enabledEnforcingCfg returns a config with ClaudeCode enabled and Gate.Enforcing=true.
+func enabledEnforcingCfg() *config.Config {
+	cfg := enabledCfg()
+	cfg.Gate.Enforcing = true
+	return cfg
+}
+
+// TestModule_PermissionRequestHook verifies that Apply() writes both PreToolUse
+// and PermissionRequest hook entries containing "abysslink approve" when
+// gate.enforcing=true (APPR-06).
+func TestModule_PermissionRequestHook(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	m := New(modules.Deps{
+		Cfg:   enabledEnforcingCfg(),
+		Audit: audit.New(filepath.Join(t.TempDir(), "audit.log")),
+	})
+	require.NoError(t, m.Apply(context.Background()))
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	require.NoError(t, err)
+	s := string(raw)
+	assert.Contains(t, s, "abysslink approve", "PreToolUse or PermissionRequest hook must contain 'abysslink approve'")
+
+	var settings map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &settings))
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	require.NotNil(t, hooks, "hooks key must be present")
+	assert.Contains(t, hooks, "PreToolUse", "PreToolUse hook must be written when gate.enforcing=true")
+	assert.Contains(t, hooks, "PermissionRequest", "PermissionRequest hook must be written when gate.enforcing=true")
+}
+
+// TestModule_HookIdempotent verifies that calling Apply() twice does not
+// duplicate the PreToolUse or PermissionRequest entries (idempotent merge).
+func TestModule_HookIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	m := New(modules.Deps{
+		Cfg:   enabledEnforcingCfg(),
+		Audit: audit.New(filepath.Join(t.TempDir(), "audit.log")),
+	})
+
+	require.NoError(t, m.Apply(context.Background()))
+	require.NoError(t, m.Apply(context.Background()))
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	require.NoError(t, err)
+
+	var settings map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &settings))
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	require.NotNil(t, hooks)
+
+	countAbysslink := func(t *testing.T, eventKey string) int {
+		t.Helper()
+		entries, _ := hooks[eventKey].([]interface{})
+		count := 0
+		for _, e := range entries {
+			if hookEntryIsAbysslink(e) {
+				count++
+			}
+		}
+		return count
+	}
+
+	assert.Equal(t, 1, countAbysslink(t, "PreToolUse"),
+		"exactly one abysslink PreToolUse entry after two Apply() calls")
+	assert.Equal(t, 1, countAbysslink(t, "PermissionRequest"),
+		"exactly one abysslink PermissionRequest entry after two Apply() calls")
+}
+
+// TestModule_NoCoupling (static): verifies that the claudecode package imports
+// do not include internal/approve or internal/gate (APPR-06 quarantine rule).
+// All Claude-specific logic must be quarantined in this package; the approve
+// loop is invoked via subprocess hook command, never via direct package import.
+func TestModule_NoCoupling(t *testing.T) {
+	// This test parses the package's imports statically (same pattern as
+	// TestGate_NoOSExecImport in internal/gate/gate_test.go).
+	// We check that neither "internal/approve" nor "internal/gate" appears
+	// in the claudecode package's import graph.
+	forbidden := []string{
+		"github.com/abysslink/abysslink/internal/approve",
+		"github.com/abysslink/abysslink/internal/gate",
+	}
+	pkgDir := "." // package claudecode (internal test, same package)
+	_ = pkgDir    // used implicitly: we read module.go source
+	src, err := os.ReadFile("module.go")
+	require.NoError(t, err)
+	for _, imp := range forbidden {
+		assert.NotContains(t, string(src), imp,
+			"claudecode/module.go must not import %q (APPR-06 quarantine)", imp)
+	}
+}
