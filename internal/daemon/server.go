@@ -545,8 +545,31 @@ func (s *Server) handleApproveResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture the closure hash BEFORE resolving so the audit receipt records it
+	// even if a concurrent waiter (handleApproveWait) prunes the entry the instant
+	// it observes the resolution.
+	_, closureHash, _, _ := s.approveRegistry.Lookup(requestID)
+
 	won := s.approveRegistry.Resolve(requestID, newState)
-	if !won {
+	if won {
+		// APPR-03: a TTY resolution is an explicit user decision — audit it and
+		// update the counters, exactly like the capability-URL path
+		// (handleApprove/handleDeny). Gated on won so a lost-CAS late tap is a
+		// pure no-op (no double audit receipt, no double counter). Without this a
+		// TTY approval/deny bypassed the audit log and left approve_pending stuck.
+		if s.auditApp != nil {
+			receipt := []byte(requestID + "\n" + action + "\n" + hex.EncodeToString(closureHash[:]))
+			if err := s.auditApp.Append("approve-decision", "request:"+reqIDPrefix(requestID), receipt, false); err != nil {
+				slog.Warn("daemon: approve/resolve audit append failed", "err", err)
+			}
+		}
+		if newState == approve.StateApproved {
+			s.approveApproved.Add(1)
+		} else {
+			s.approveDenied.Add(1)
+		}
+		s.approvePending.Add(-1)
+	} else {
 		slog.Debug("daemon: approve/resolve: late or lost CAS — already resolved",
 			"request_id", reqIDPrefix(requestID), "action", action)
 		// Return 200 even on a lost CAS: the request resolved (just not by us).
@@ -778,6 +801,14 @@ func (s *Server) handleApproveWait(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"approve registry not available"}`, http.StatusServiceUnavailable)
 		return
 	}
+
+	// Prune the pending entry once this waiter is done — the waiter is the
+	// lifecycle owner. The capability-URL/TTY resolvers must NOT prune (a waiter
+	// that has not yet looked up the entry would miss the resolution and 404 a
+	// genuine approval). Memory-only by design (D-11): a crashed CLI with no
+	// waiter leaves one bounded entry that a daemon restart clears. Prune is a
+	// no-op on an unknown ID, so the not-found path below is safe too.
+	defer s.approveRegistry.Prune(requestID)
 
 	// Build a timeout context from the configured approval timeout.
 	timeout := s.approveTimeoutDuration()

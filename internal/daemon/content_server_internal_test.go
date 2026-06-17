@@ -1711,6 +1711,181 @@ func TestHandleApproveResolve_CR02_DenyPath(t *testing.T) {
 	}
 }
 
+// TestApproveLoop_D03_ConcurrentRace_ExactlyOneWins is the automatable core of
+// UAT item 3: the phone arm (capability URL tap) and the TTY arm (POST
+// /approve/resolve) contend on the same CAS registry entry simultaneously, and
+// exactly one wins. It asserts the single-resolution invariants end-to-end
+// across both real muxes: approve_pending returns to 0, exactly one of
+// approved/denied increments, and exactly one audit receipt is written (no
+// double-count, no double-audit on the lost-CAS arm — IN-03).
+func TestApproveLoop_D03_ConcurrentRace_ExactlyOneWins(t *testing.T) {
+	s := newUnixTestServer(t)
+	logPath := filepath.Join(t.TempDir(), "audit-race.log")
+	s.SetAuditAppender(audit.New(logPath))
+
+	// Open a pending request through the production path (pending=1).
+	body := `{"action":"race-action","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000009" +
+		`","declared_tier":1}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode)
+	var rr struct {
+		RequestID  string `json:"request_id"`
+		ApproveURL string `json:"approve_url"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&rr))
+	u, err := url.Parse(rr.ApproveURL)
+	require.NoError(t, err)
+	token := strings.TrimPrefix(u.Path, "/approve/")
+
+	contentTS := httptest.NewServer(s.buildContentMux())
+	defer contentTS.Close()
+	unixTS := httptest.NewServer(s.buildUnixMux())
+	defer unixTS.Close()
+
+	// Two arms fire simultaneously: phone approves via capability URL; TTY denies
+	// via the resolve route. CAS guarantees exactly one is recorded.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, contentTS.URL+"/approve/"+token, nil)
+		if resp, e := http.DefaultClient.Do(req); e == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, unixTS.URL+"/approve/resolve/"+rr.RequestID+"?action=deny", nil)
+		if resp, e := http.DefaultClient.Do(req); e == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	close(start)
+	wg.Wait()
+
+	// Exactly one resolution recorded across both arms.
+	statusResp := doUnixGet(t, s, "/status")
+	defer func() { _ = statusResp.Body.Close() }()
+	var st struct {
+		ApprovePending  int64  `json:"approve_pending"`
+		ApproveApproved uint64 `json:"approve_approved"`
+		ApproveDenied   uint64 `json:"approve_denied"`
+	}
+	require.NoError(t, json.NewDecoder(statusResp.Body).Decode(&st))
+	assert.Equal(t, int64(0), st.ApprovePending, "approve_pending must return to 0 after exactly one resolution")
+	assert.Equal(t, uint64(1), st.ApproveApproved+st.ApproveDenied,
+		"exactly one arm must win the CAS (no double-count on the lost arm)")
+
+	// Exactly one audit receipt — the losing arm must not write one (IN-03).
+	log, err := os.ReadFile(logPath) //nolint:gosec // test-owned temp path
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(log), `"op":"approve-decision"`),
+		"exactly one audit receipt for the single winning resolution")
+}
+
+// TestHandleApproveResolve_AuditsAndCounts proves the TTY-resolve path
+// (POST /approve/resolve/{id}) writes an audit receipt and updates the
+// approve counters, exactly like the capability-URL path. Before this fix the
+// TTY decision bypassed the audit log (APPR-03) and left approve_pending stuck.
+func TestHandleApproveResolve_AuditsAndCounts(t *testing.T) {
+	s := newUnixTestServer(t)
+	logPath := filepath.Join(t.TempDir(), "audit-resolve.log")
+	s.SetAuditAppender(audit.New(logPath))
+
+	// POST /approve/request → approve_pending++ via the production path.
+	body := `{"action":"file-write","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000007" +
+		`","declared_tier":1}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode)
+	var rr struct {
+		RequestID string `json:"request_id"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&rr))
+	require.NotEmpty(t, rr.RequestID)
+
+	// Resolve via the TTY route.
+	resolveResp := doUnixPostQuery(t, s, "/approve/resolve/"+rr.RequestID+"?action=approve")
+	defer func() { _ = resolveResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resolveResp.StatusCode)
+
+	// Audit receipt must be written.
+	log, err := os.ReadFile(logPath) //nolint:gosec // test-owned temp path
+	require.NoError(t, err)
+	assert.Contains(t, string(log), `"op":"approve-decision"`,
+		"TTY resolve must write an approve-decision audit receipt (APPR-03)")
+
+	// Counters: approved=1, pending back to 0.
+	statusResp := doUnixGet(t, s, "/status")
+	defer func() { _ = statusResp.Body.Close() }()
+	var st struct {
+		ApprovePending  int64  `json:"approve_pending"`
+		ApproveApproved uint64 `json:"approve_approved"`
+		ApproveDenied   uint64 `json:"approve_denied"`
+	}
+	require.NoError(t, json.NewDecoder(statusResp.Body).Decode(&st))
+	assert.Equal(t, int64(0), st.ApprovePending, "TTY resolve must decrement approve_pending")
+	assert.Equal(t, uint64(1), st.ApproveApproved, "TTY approve must increment approve_approved")
+	assert.Equal(t, uint64(0), st.ApproveDenied)
+}
+
+// TestHandleApproveWait_PrunesEntry proves the waiter (handleApproveWait) prunes
+// the pending registry entry once it completes — the entry is the lifecycle
+// owner's to release. Without this every resolved request leaked one struct in
+// the pending map until daemon restart.
+func TestHandleApproveWait_PrunesEntry(t *testing.T) {
+	s := newUnixTestServer(t)
+
+	body := `{"action":"safe-action","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000008" +
+		`","declared_tier":1}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode)
+	var rr struct {
+		RequestID string `json:"request_id"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&rr))
+	require.NotEmpty(t, rr.RequestID)
+
+	// Start the waiter, then resolve it so the waiter returns and prunes.
+	waitDone := make(chan int, 1)
+	go func() {
+		wr := doUnixGet(t, s, "/approve/wait/"+rr.RequestID)
+		_ = wr.Body.Close()
+		waitDone <- wr.StatusCode
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	resolveResp := doUnixPostQuery(t, s, "/approve/resolve/"+rr.RequestID+"?action=approve")
+	_ = resolveResp.Body.Close()
+
+	select {
+	case code := <-waitDone:
+		require.Equal(t, http.StatusOK, code, "wait must return 200 on approval")
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait did not return after resolution")
+	}
+
+	// The deferred Prune runs as the handler unwinds; poll briefly for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, _, _, ok := s.approveRegistry.Lookup(rr.RequestID); !ok {
+			break // pruned
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("registry entry was not pruned after the waiter completed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestHandleDenyViaProductionPath_CR03_NoHMACFailure proves that the deny flow
 // through the PRODUCTION path (handleApproveRequest → openApproveRegistryEntry →
 // handleDeny) succeeds HMAC verification (CR-03). Prior to this fix, the deny

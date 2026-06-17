@@ -245,16 +245,7 @@ func runApproveCheck(ctx context.Context, blocking bool) error {
 	}()
 
 	// TTY arm: if we have a controlling terminal, open /dev/tty and prompt.
-	hasTTY := hasTTYAvailable()
-	if hasTTY {
-		go func() {
-			approved := promptTTY(approveCtx, sockPath, reqResp.RequestID, input.ToolName)
-			select {
-			case resultCh <- approved:
-			default:
-			}
-		}()
-	}
+	launchTTYArm(approveCtx, sockPath, reqResp.RequestID, input.ToolName, resultCh)
 
 	// Select: wait for first answer or timeout.
 	select {
@@ -392,14 +383,44 @@ func waitApproveResult(ctx context.Context, hc *http.Client, requestID string) b
 	return out.Approved
 }
 
+// launchTTYArm starts the D-03 TTY approval arm when a controlling terminal is
+// available. It reports its answer on resultCh ONLY when it won the daemon CAS
+// (authoritative). When it loses the CAS (the phone arm resolved first), the
+// resolve fails, or no TTY is present, it stays silent so the phone arm reports
+// the daemon's authoritative decision — never a contradictory local answer.
+func launchTTYArm(ctx context.Context, sockPath, requestID, toolName string, resultCh chan<- bool) {
+	if !hasTTYAvailable() {
+		return
+	}
+	go func() {
+		approved, authoritative := promptTTY(ctx, sockPath, requestID, toolName)
+		if !authoritative {
+			return
+		}
+		select {
+		case resultCh <- approved:
+		default:
+		}
+	}()
+}
+
 // promptTTY opens /dev/tty directly (not os.Stdin which holds hook JSON),
 // prompts the user, then POSTs to /approve/resolve/{id} on the daemon so the
-// CAS registry entry is resolved — same registry as the phone arm (D-03).
-// Returns true if the user typed 'y'/'Y'; false on any other input or error.
-func promptTTY(ctx context.Context, sockPath, requestID, toolName string) bool {
+// CAS registry entry is resolved — the same registry as the phone arm (D-03).
+//
+// It returns (approved, authoritative). authoritative is true ONLY when this TTY
+// arm WON the daemon CAS — i.e. the daemon recorded this answer as the decision.
+// When authoritative is false (the phone arm resolved first, the user did not
+// answer, or the resolve POST failed) the caller MUST NOT report this arm's
+// answer: the phone arm's GET /approve/wait returns the daemon's authoritative
+// resolution instead. This prevents the two arms from reporting contradictory
+// results (D-03 first-answer-wins consistency) — previously promptTTY returned
+// its LOCAL answer regardless of the CAS outcome, so a TTY "deny" racing a phone
+// "approve" could make the CLI exit deny even though the daemon approved.
+func promptTTY(ctx context.Context, sockPath, requestID, toolName string) (approved bool, authoritative bool) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0) //nolint:gosec // G304: /dev/tty is a well-known device, not user input
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer func() { _ = tty.Close() }()
 
@@ -419,10 +440,10 @@ func promptTTY(ctx context.Context, sockPath, requestID, toolName string) bool {
 	select {
 	case line = <-doneCh:
 	case <-ctx.Done():
-		return false
+		return false, false
 	}
 
-	approved := line == "y" || line == "Y"
+	approved = line == "y" || line == "Y"
 
 	// Resolve the same CAS registry entry via the daemon so the phone arm's
 	// concurrent WaitByID unblocks — CAS ensures only the first answer wins.
@@ -435,29 +456,36 @@ func promptTTY(ctx context.Context, sockPath, requestID, toolName string) bool {
 	hc := daemonHTTPClient(sockPath, approveDialTimeout)
 	resolveReq, err := http.NewRequestWithContext(ctx, http.MethodPost, resolveURL, nil)
 	if err != nil {
-		// CR-02: a failed resolve means the daemon-side entry was NOT resolved.
-		// This should never happen (it's a URL-build failure), but if it does we
-		// return false (deny) rather than falsely claiming the action was approved.
-		slog.Warn("approve: build resolve request failed — denying", "err", err)
-		return false
+		// URL-build failure (should never happen). We cannot confirm the daemon
+		// recorded our answer — defer to the phone arm (fail-closed).
+		slog.Warn("approve: build resolve request failed — deferring to phone arm", "err", err)
+		return approved, false
 	}
 	resp, doErr := hc.Do(resolveReq)
 	if doErr != nil {
-		// CR-02: a failed resolve POST means the daemon may not have resolved the
-		// entry. To preserve the first-answer-wins invariant, log and return the
-		// LOCAL decision — the phone arm will time out and the registry entry will
-		// eventually be pruned. This is fail-closed: a deny local answer that
-		// fails to propagate leaves the phone waiting; an approve that fails to
-		// propagate results in a timeout deny on the phone arm (safe).
-		slog.Warn("approve: POST /approve/resolve failed — local answer may not unblock phone arm", "err", doErr)
-		return approved
+		// The resolve POST failed: the daemon may not have resolved the entry, so
+		// we cannot claim our answer is the decision. Defer to the phone arm — its
+		// wait will time out to a deny if nothing else resolves (fail-closed).
+		slog.Warn("approve: POST /approve/resolve failed — deferring to phone arm", "err", doErr)
+		return approved, false
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slog.Warn("approve: POST /approve/resolve returned non-2xx", "status", resp.StatusCode)
-		// Return local decision but note the phone arm may still be blocking.
+		slog.Warn("approve: POST /approve/resolve returned non-2xx — deferring to phone arm", "status", resp.StatusCode)
+		return approved, false
 	}
-	return approved
+
+	// Parse the CAS outcome: won=true means THIS arm's answer is the recorded
+	// decision; won=false means the phone arm already resolved it — defer so the
+	// phone arm reports the authoritative answer rather than our (now stale) local one.
+	var rr struct {
+		Won bool `json:"won"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rr); err != nil {
+		slog.Warn("approve: decode resolve response failed — deferring to phone arm", "err", err)
+		return approved, false
+	}
+	return approved, rr.Won
 }
 
 // hasTTYAvailable returns true if a controlling terminal is available for
