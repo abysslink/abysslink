@@ -214,9 +214,27 @@ func TestResolve_LateApproveRejected(t *testing.T) {
 	}
 }
 
-// TestApprove_NoClaude enforces that no non-test source file in internal/approve
-// imports claudecode or os/exec — zero Claude coupling at the source level.
+// TestApprove_NoClaude enforces the APPR-06 quarantine structurally: no
+// non-test source file in internal/approve may import claudecode, gate,
+// daemon, or any modules/* package. The approve package is a pure leaf —
+// consumers import it, never the reverse.
+//
+// Forbidden import strings:
+//   - "claudecode"  — approve must never pull in any Claude-specific code
+//   - "internal/gate"  — gate imports approve, not the reverse
+//   - "internal/daemon"  — approve has no daemon IPC dependency
+//   - "internal/modules"  — approve must not import any module package
+//   - "os/exec"  — all exec calls go through shell.Runner
 func TestApprove_NoClaude(t *testing.T) {
+	forbidden := []string{
+		"claudecode",
+		"modules/claude",
+		"internal/gate",
+		"internal/daemon",
+		"internal/modules",
+		"os/exec",
+	}
+
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
 
@@ -227,16 +245,14 @@ func TestApprove_NoClaude(t *testing.T) {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		f, perr := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
-		require.NoError(t, perr)
+		f, perr := parser.ParseFile(fset, name, nil, parser.ImportsOnly|parser.ParseComments)
+		require.NoError(t, perr, "failed to parse %s", name)
 		for _, imp := range f.Imports {
 			path := imp.Path.Value
-			assert.NotEqual(t, `"os/exec"`, path,
-				"%s must not import os/exec (use shell.ResolvePath)", name)
-			assert.NotContains(t, path, "claudecode",
-				"%s must not import claudecode (zero Claude coupling)", name)
-			assert.NotContains(t, path, "modules/claude",
-				"%s must not import claude modules", name)
+			for _, bad := range forbidden {
+				assert.NotContains(t, path, bad,
+					"%s must not import %q (APPR-06 quarantine: approve is a leaf package)", name, bad)
+			}
 		}
 		checked++
 	}

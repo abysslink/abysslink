@@ -373,3 +373,33 @@ func TestGate_NoOSExecImport(t *testing.T) {
 	}
 	assert.Positive(t, checked, "expected at least one non-test source file to check")
 }
+
+// TestGate_NoClaude enforces the APPR-06 quarantine: internal/gate must never
+// import claudecode. The gate package may import internal/approve (its downstream
+// dependency) but must never import the claudecode consumer module — doing so
+// would create a forbidden circular dependency in the architecture.
+//
+// Forbidden import strings:
+//   - "claudecode"  — gate must never pull in Claude-specific code
+func TestGate_NoClaude(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	checked := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, perr := parser.ParseFile(fset, name, nil, parser.ImportsOnly|parser.ParseComments)
+		require.NoError(t, perr, "failed to parse %s", name)
+		for _, imp := range f.Imports {
+			path := imp.Path.Value
+			assert.NotContains(t, path, "claudecode",
+				"%s must not import claudecode (APPR-06: gate is a generic mechanism, not Claude-specific)", name)
+		}
+		checked++
+	}
+	assert.Positive(t, checked, "expected at least one non-test source file to check")
+}
