@@ -126,8 +126,10 @@ Two modes:
                             Exit 2 is the Claude Code PreToolUse blocking mechanism (#19298).
 
   --permission-request      PermissionRequest hook executor. Reads PermissionRequest JSON
-                            from stdin, fires a notification asynchronously (non-blocking),
-                            writes allow JSON to stdout immediately, exits 0.
+                            from stdin, writes allow JSON to stdout immediately, exits 0.
+                            It sends NO notification — the actionable approve/deny
+                            notification (with the capability-URL buttons) is sent by the
+                            daemon when --check opens the request via POST /approve/request.
                             (#12176 workaround: PermissionRequest deny is unreliable; use
                              PreToolUse + exit 2 for blocking instead.)`,
 		SilenceUsage:  true,
