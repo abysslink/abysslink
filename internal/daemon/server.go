@@ -778,7 +778,8 @@ func (s *Server) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 		V:     2,
 		MsgID: requestID,
 		Kind:  notifyv2.KindApprovalRequest,
-		Title: "approve " + req.Action + "?",
+		Host:  s.hostname,
+		Title: "Approve " + req.Action + "?",
 		Actions: []notifyv2.Action{
 			{ID: "approve", Label: "Approve", URL: approveURL},
 			{ID: "deny", Label: "Deny", URL: denyURL},

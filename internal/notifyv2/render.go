@@ -169,6 +169,18 @@ func renderTitle(m Message) string {
 // to tmux literal forms) so pane content cannot reach this function through a
 // validated message. Callers must Validate before Render.
 func renderBody(m Message, opts RenderOpts) string {
+	// KindApprovalRequest gets a clean, human-facing body for the phone approval
+	// card — not the developer "kind:/host:/ids:" dump. The actionable choice is
+	// the Approve/Deny buttons; the body never includes those literal words (the
+	// anti-leak guard TestRender_ActionsDropped_NoURL asserts button text never
+	// bleeds into the text fields).
+	if m.Kind == KindApprovalRequest {
+		if h := strings.TrimSpace(m.Host); h != "" {
+			return "Permission requested on " + h + ". Respond from your phone."
+		}
+		return "Permission requested. Respond from your phone."
+	}
+
 	var lines []string
 
 	var crumb []string

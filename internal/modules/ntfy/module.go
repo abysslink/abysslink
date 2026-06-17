@@ -21,9 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/config"
@@ -209,7 +213,66 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		})
 	}
 
+	// Reachability probe — the universal fix for the macOS Docker-Desktop trap.
+	// A container can be running and its config can name the tailnet IP, yet the
+	// port never actually publishes (config-only checks all pass), so phone
+	// notifications are silently dropped. Catch it by dialing the tailnet IP:port.
+	if f := m.reachabilityFinding(ctx); f != nil {
+		findings = append(findings, *f)
+	}
+
 	return findings, nil
+}
+
+// reachabilityFinding probes whether ntfy actually answers on the tailnet
+// IP:port and returns the matching finding (nil when the tailnet IP cannot be
+// resolved — e.g. tailscale not up). Extracted from Detect to keep it under the
+// gocyclo ceiling.
+func (m *Module) reachabilityFinding(ctx context.Context) *modules.Finding {
+	ip, err := m.getTailnetIP(ctx)
+	if err != nil || ip == "" {
+		return nil
+	}
+	port := m.cfg.Modules.Ntfy.ListenPort()
+	if m.probeNtfyReachable(ctx, ip, port) {
+		return &modules.Finding{
+			Module:   m.Name(),
+			Check:    "reachable",
+			Severity: modules.SeverityOK,
+			Message:  fmt.Sprintf("reachable: ntfy answers on the tailnet at %s:%d", ip, port),
+		}
+	}
+	msg := fmt.Sprintf("ntfy is configured for %s:%d but is UNREACHABLE there — phone notifications are being silently dropped", ip, port)
+	if m.plat.OS() == "darwin" && m.ntfyDockerRunning(ctx) {
+		msg += ". On Docker Desktop for Mac a container cannot publish to a host interface IP; run ntfy natively bound to the tailnet IP, or bridge " +
+			fmt.Sprintf("%s:%d -> 127.0.0.1:%d", ip, port, port)
+	}
+	return &modules.Finding{
+		Module:   m.Name(),
+		Check:    "reachable",
+		Severity: modules.SeverityWarning,
+		Message:  msg,
+	}
+}
+
+// probeNtfyReachable reports whether the ntfy server actually answers on
+// ip:port over the tailnet. It GETs the health endpoint with a short timeout;
+// any transport error or non-2xx means unreachable. This is an HTTP request,
+// not a shell command, so it does not go through shell.Runner.
+func (m *Module) probeNtfyReachable(ctx context.Context, ip string, port int) bool {
+	url := "http://" + net.JoinHostPort(ip, strconv.Itoa(port)) + "/v1/health"
+	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G107: health probe to the tailnet IP (from `tailscale ip`) + configured port; tailnet-only internal reachability check
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
 // hasWildcardListen returns true if the config contains a listen-http line that
