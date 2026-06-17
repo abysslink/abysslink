@@ -89,8 +89,21 @@ type Config struct {
 	// UnifiedPush defaults enabled (D-18 sovereign path).
 	Gateway GatewayConfig `yaml:"gateway"`
 
+	// Gate holds the Phase 30 gate-enforcing configuration.
+	// Gate.Enforcing defaults false (shadow mode per D-04).
+	Gate GateConfig `yaml:"gate"`
+
 	// Approval holds the Phase 30 approve-loop configuration.
 	Approval ApprovalConfig `yaml:"approval"`
+}
+
+// GateConfig holds Phase 30 gate-enforcing settings.
+// Enforcing ships false (shadow mode per D-04); flip true to enable phone
+// approve blocking. NEVER changes daemon-internal runner behavior (D-40).
+type GateConfig struct {
+	// Enforcing ships false (shadow mode per D-04). Set true to block tool
+	// executions through the phone approve loop. Zero value is safe (observe-only).
+	Enforcing bool `yaml:"enforcing"`
 }
 
 // ApprovalConfig holds Phase 30 approve-loop settings.
@@ -98,8 +111,15 @@ type Config struct {
 // the daemon times out the request (default 120s; the CLI gate falls back to
 // TTY after a timeout in hasTTY mode). Capability URL TTL = TimeoutSeconds+30s.
 type ApprovalConfig struct {
-	// TimeoutSeconds is the approval wait timeout. 0 means the default (120s).
+	// TimeoutSeconds is the approval wait timeout. Default 120; floor 10; TTY
+	// fallback fires on timeout when tty is available; headless resolves to deny
+	// (D-09/D-10).
 	TimeoutSeconds int `yaml:"timeout_seconds"`
+	// ExtraCritical is a YAML-configured list of additional action-name
+	// substrings to force to TierCritical. YAML may only ADD to CriticalPatterns
+	// (tighten), never remove (D-08); entries are appended to
+	// approve.CriticalPatterns at gate initialization.
+	ExtraCritical []string `yaml:"extra_critical,omitempty"`
 }
 
 // Content-store defaults and bounds (Phase 28, BACK-06). The TTL bounds are a
@@ -663,6 +683,19 @@ func Defaults() *Config {
 				Enabled: true,
 			},
 		},
+		// Gate defaults (Phase 30, D-04):
+		//   Enforcing ships false (shadow mode) — explicitly set so YAML round-trips
+		//   correctly and doc-comment on the struct is the canonical description.
+		Gate: GateConfig{
+			Enforcing: false,
+		},
+		// Approval defaults (Phase 30, D-09):
+		//   TimeoutSeconds=120 (2 min window for phone response);
+		//   ExtraCritical=nil (no YAML-configured extra criticals by default).
+		Approval: ApprovalConfig{
+			TimeoutSeconds: 120,
+			ExtraCritical:  nil,
+		},
 	}
 }
 
@@ -816,6 +849,7 @@ func Validate(cfg *Config) error {
 		validateSessionRegistry,
 		ValidateContentStore,
 		ValidateGateway,
+		validateApproval,
 	} {
 		if err := validate(cfg); err != nil {
 			return err
@@ -1092,6 +1126,33 @@ func validateSessionRegistry(cfg *Config) error {
 	if _, err := regexp.Compile(cfg.SessionRegistry.PromptRegex); err != nil {
 		return fmt.Errorf("config: session_registry.prompt_regex %q does not compile: %w",
 			cfg.SessionRegistry.PromptRegex, err)
+	}
+	return nil
+}
+
+// validateApproval enforces Phase 30 approval timeout bounds (D-09).
+//
+//   - approval.timeout_seconds, when non-zero (i.e. explicitly set), must be
+//     >= 10 (floor: prevents an instant-deny denial-of-service attack where a
+//     very short timeout races before the phone can open the notification) and
+//     <= 3600 (1 hour: prevents an indefinitely-blocking --apply session).
+//   - A zero value is the "use the default" idiom (Defaults() sets 120s); it
+//     is accepted by this validator and resolved downstream by EffectiveTimeout.
+//   - Gate.Enforcing is a bool; any value is valid; no validation needed.
+//   - ExtraCritical entries are strings; the approve package enforces
+//     non-empty-string on use; empty YAML list is also valid (no patterns added).
+func validateApproval(cfg *Config) error {
+	ts := cfg.Approval.TimeoutSeconds
+	if ts == 0 {
+		return nil // zero means "use default 120s" — valid
+	}
+	if ts < 10 {
+		return fmt.Errorf("config: approval.timeout_seconds %d must be >= 10 "+
+			"(floor prevents instant-deny denial-of-service)", ts)
+	}
+	if ts > 3600 {
+		return fmt.Errorf("config: approval.timeout_seconds %d must be <= 3600 "+
+			"(1 hour maximum)", ts)
 	}
 	return nil
 }
