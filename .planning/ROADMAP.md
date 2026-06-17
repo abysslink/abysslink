@@ -61,7 +61,7 @@ Phases 22, 23, 23.1, 23.2, 24, 25, 26 (7 phases, 29 plans) — closes the 2026-0
 - [x] **Phase 28: Device Enrollment v2 & Tailnet Content Delivery** - per-device revocable credentials (token/bearer/SSH cert, panic-wired) + tailnet-only content store + ack receipts + safe fallback titles (implemented 2026-06-11 via Fable multi-agent build outside the GSD plan loop; 3 adversarial review passes; cross-process revoke-race + FetchRef TLS-host fixes; see 28-SUMMARY.md) (completed 2026-06-11)
 - [x] **Phase 28.1: Device SSH CA sshd Integration** - auto-wire `TrustedUserCAKeys` to the device CA + enforce revocation via an `ssh-keygen -k` KRL referenced by `RevokedKeys`, both through the existing hardened-sshd reconcile path (DEVC-05/06; closes Phase 28's manual-CA-copy-paste + dead `RevokedSerials()` threads) (completed 2026-06-14)
 - [x] **Phase 29: Push Gateway & Outbox** - push.Gateway interface + bbolt outbox; UnifiedPush/ntfy sovereign path shipped working, APNs/FCM interface-complete experimental (completed 2026-06-15)
-- [ ] **Phase 30: Phone Approve Loop** - signed single-use approve/deny bound to execution-closure hash, GatedRunner flips enforcing, pre-app bridges with tier policy, claudecode consumer
+- [ ] **Phase 30: Phone Approve Loop** - signed single-use approve/deny bound to execution-closure hash, GatedRunner flips enforcing, pre-app bridges with tier policy, claudecode consumer (plans complete + verified 5/5; awaiting human UAT 2026-06-17)
 - [ ] **Phase 31: Agent Kill-Switch ("Apoptosis")** - budget module: notify → SIGSTOP-then-ask → kill ladder, shadow-mode default, pgid kill, rollback offer, flight-recorder cast hash in audit chain
 - [ ] **Phase 32: Supply-Chain Depth & Trimmed Fortify** - SLSA L3 + Scorecard + Syft/Grype/VEX, doctor external version floors, cheap MED gaps, at-risk profile + dead-man switch
 - [ ] **Phase 33: Distribution & Public Launch** - Homebrew cask + AUR pinned to attested artifacts; quickstart fire-drill, claims audit, real-device sovereign push test gate the Show HN launch
@@ -527,20 +527,20 @@ Plans:
 Plans:
 **Wave 1** *(parallel)*
 
-- [ ] 30-01-PLAN.md — internal/approve leaf package: CAS registry, HMAC signing, tier constants (APPR-01, APPR-02, APPR-03, APPR-04)
-- [ ] 30-02-PLAN.md — daemon approve extensions: kindApprove/kindDeny, handleApprove/handleDeny, unix-socket IPC, /status counters (APPR-02, APPR-03, APPR-04)
+- [x] 30-01-PLAN.md — internal/approve leaf package: CAS registry, HMAC signing, tier constants (APPR-01, APPR-02, APPR-03, APPR-04)
+- [x] 30-02-PLAN.md — daemon approve extensions: kindApprove/kindDeny, handleApprove/handleDeny, unix-socket IPC, /status counters (APPR-02, APPR-03, APPR-04)
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 30-03-PLAN.md — gate.go enforcing flip + notifyv2 Actions[] un-drop + ntfy X-Actions header (APPR-01, APPR-05)
+- [x] 30-03-PLAN.md — gate.go enforcing flip + notifyv2 Actions[] un-drop + ntfy X-Actions header (APPR-01, APPR-05)
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 30-04-PLAN.md — config YAML keys + claudecode hook writers + abysslink approve CLI subcommand (APPR-05, APPR-06)
+- [x] 30-04-PLAN.md — config YAML keys + claudecode hook writers + abysslink approve CLI subcommand (APPR-05, APPR-06)
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 30-05-PLAN.md — AST coupling tests + make lint test integration gate (APPR-05, APPR-06)
+- [x] 30-05-PLAN.md — AST coupling tests + make lint test integration gate (APPR-05, APPR-06)
 
 **Notes:** DEEP RESEARCH FLAG — TOCTOU closure-hashing design, CAS resolution semantics, capability-URL tier policy, and upstream Claude hook bugs (#12176, #19298) resolved in 30-RESEARCH.md. Demoable even if Phase 29 slips (rides existing ntfy).
 
@@ -633,7 +633,7 @@ Phases execute in numeric order: 1 → … → 21 → 22 → 23 → 23.1 → 23.
 | 28. Device Enrollment v2 & Tailnet Content Delivery | n/a (Fable build) | Complete | 2026-06-11 |
 | 28.1 Device SSH CA sshd Integration | 2/2 | Complete   | 2026-06-14 |
 | 29. Push Gateway & Outbox | 5/5 | Complete    | 2026-06-15 |
-| 30. Phone Approve Loop | 0/? | Not started | - |
+| 30. Phone Approve Loop | 5/5 | Complete   | 2026-06-17 |
 | 31. Agent Kill-Switch ("Apoptosis") | 0/? | Not started | - |
 | 32. Supply-Chain Depth & Trimmed Fortify | 0/? | Not started | - |
 | 33. Distribution & Public Launch | 0/? | Not started | - |
