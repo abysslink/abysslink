@@ -88,6 +88,18 @@ type Config struct {
 	// (notify.gateway.* per SPEC §12). APNs and FCM default disabled (D-14);
 	// UnifiedPush defaults enabled (D-18 sovereign path).
 	Gateway GatewayConfig `yaml:"gateway"`
+
+	// Approval holds the Phase 30 approve-loop configuration.
+	Approval ApprovalConfig `yaml:"approval"`
+}
+
+// ApprovalConfig holds Phase 30 approve-loop settings.
+// TimeoutSeconds is the wall-clock window the phone has to approve/deny before
+// the daemon times out the request (default 120s; the CLI gate falls back to
+// TTY after a timeout in hasTTY mode). Capability URL TTL = TimeoutSeconds+30s.
+type ApprovalConfig struct {
+	// TimeoutSeconds is the approval wait timeout. 0 means the default (120s).
+	TimeoutSeconds int `yaml:"timeout_seconds"`
 }
 
 // Content-store defaults and bounds (Phase 28, BACK-06). The TTL bounds are a

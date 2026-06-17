@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/approve"
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
@@ -455,7 +457,151 @@ func (s *Server) buildContentMux() *http.ServeMux {
 	mux.HandleFunc("GET /content/{token}", s.handleContent)
 	mux.HandleFunc("GET /enroll/{token}", s.handleBootstrap) // BACK-09: bearer-LESS first-contact pull
 	mux.HandleFunc("POST /ack", s.handleAck)
+	// Phase 30: bearer-LESS approve/deny capability-URL handlers (APPR-04).
+	// These are on the content mux (network-exposed HTTPS) — the phone reaches
+	// them by tapping the capability URL the daemon sends in the notification.
+	mux.HandleFunc("GET /approve/{token}", s.handleApprove)
+	mux.HandleFunc("GET /deny/{token}", s.handleDeny)
 	return mux
+}
+
+// handleApprove serves GET /approve/{token} (APPR-04): bearer-LESS, constant-
+// work, single-use. Token entropy is the only credential (256-bit, base64url);
+// HMAC verification is defense-in-depth (D-16). A valid lookup CAS-resolves the
+// pending request to Approved, writes an audit receipt (APPR-03), and returns 200.
+// All miss paths (unknown/expired/wrong-kind token, HMAC mismatch, unknown request)
+// return a uniform empty-body 404 — no oracle distinguishes miss types (T-30-07/08).
+func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
+	// Cap body (defense in depth — GET carries no meaningful body).
+	r.Body = http.MaxBytesReader(w, r.Body, maxAckBody)
+	token := r.PathValue("token")
+
+	// lookupKind: kind checked BEFORE the single-use consume (BACK-09 invariant).
+	// A deny token presented here is a cross-kind miss that burns nothing (T-30-08).
+	requestID, found := s.content.lookupKind(token, kindApprove, true)
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if s.approveRegistry == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+
+	// Lookup stored HMAC sig + closureHash for D-16 verification.
+	hmacSig, closureHash, _, lookOK := s.approveRegistry.Lookup(requestID)
+	if !lookOK {
+		// Request not found in registry (expired/pruned) — uniform 404, no oracle.
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	// HMAC verify (D-16, T-30-11): mismatch → uniform 404, same as any miss.
+	if len(s.approveHMACKey) > 0 {
+		if !approve.VerifyApproveURL(s.approveHMACKey, requestID, "approve", closureHash, hmacSig) {
+			slog.Warn("daemon: approve HMAC mismatch — returning uniform 404",
+				"request_id", requestID[:8])
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+	}
+
+	// CAS resolve: first-answer-wins (APPR-02). A false return means another
+	// goroutine already won; log and return 200 (late tap is not an error).
+	won := s.approveRegistry.Resolve(requestID, approve.StateApproved)
+	if !won {
+		slog.Debug("daemon: late approve resolution ignored — already resolved",
+			"request_id", requestID[:8])
+	}
+
+	// Audit receipt (APPR-03): content is hashed by Append; raw values never reach the log.
+	if s.auditApp != nil {
+		receipt := []byte(requestID + "\n" + "approve" + "\n" + hex.EncodeToString(closureHash[:]))
+		if err := s.auditApp.Append("approve-decision", "request:"+requestID[:8], receipt, false); err != nil {
+			// Non-fatal: log at Warn; the approval is already registered (CAS won above).
+			slog.Warn("daemon: approve audit append failed", "err", err)
+		}
+	}
+
+	// Counters: increment approved, decrement pending.
+	s.approveApproved.Add(1)
+	s.approvePending.Add(-1)
+
+	// Cache-Control: no-store; short JSON response (no full requestID or URL).
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"approved":   true,
+		"request_id": requestID[:8],
+	}); err != nil {
+		slog.Debug("daemon: approve response encode failed", "err", err)
+	}
+}
+
+// handleDeny serves GET /deny/{token} (APPR-04): identical structure to
+// handleApprove but resolves the pending request to Denied. The audit receipt
+// uses action="deny" and the denied counter increments.
+func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAckBody)
+	token := r.PathValue("token")
+
+	requestID, found := s.content.lookupKind(token, kindDeny, true)
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if s.approveRegistry == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+
+	// Lookup deny HMAC sig. The deny sig is stored under a side-channel key
+	// (requestID+":deny") set by handleApproveRequest.
+	denySigRequestID := requestID + ":deny"
+	hmacSig, closureHash, _, lookOK := s.approveRegistry.Lookup(denySigRequestID)
+	if !lookOK {
+		// Fall back to looking up the main request entry (deny sig may have been
+		// stored directly on the main entry in some test setups).
+		hmacSig, closureHash, _, lookOK = s.approveRegistry.Lookup(requestID)
+		if !lookOK {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+	}
+
+	// HMAC verify (D-16, T-30-11).
+	if len(s.approveHMACKey) > 0 {
+		if !approve.VerifyApproveURL(s.approveHMACKey, requestID, "deny", closureHash, hmacSig) {
+			slog.Warn("daemon: deny HMAC mismatch — returning uniform 404",
+				"request_id", requestID[:8])
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+	}
+
+	won := s.approveRegistry.Resolve(requestID, approve.StateDenied)
+	if !won {
+		slog.Debug("daemon: late deny resolution ignored — already resolved",
+			"request_id", requestID[:8])
+	}
+
+	if s.auditApp != nil {
+		receipt := []byte(requestID + "\n" + "deny" + "\n" + hex.EncodeToString(closureHash[:]))
+		if err := s.auditApp.Append("approve-decision", "request:"+requestID[:8], receipt, false); err != nil {
+			slog.Warn("daemon: deny audit append failed", "err", err)
+		}
+	}
+
+	s.approveDenied.Add(1)
+	s.approvePending.Add(-1)
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"approved": false,
+	}); err != nil {
+		slog.Debug("daemon: deny response encode failed", "err", err)
+	}
 }
 
 // verifyRequestBearer extracts the Authorization: Bearer credential and

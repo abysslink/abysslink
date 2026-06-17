@@ -41,6 +41,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/abysslink/abysslink/internal/approve"
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
@@ -1278,52 +1279,6 @@ func newApproveTestServer(t *testing.T) (*Server, *httptest.Server) {
 	return s, ts
 }
 
-// mintApproveRequestForTest mints an approve+deny token pair in the server's
-// content store and registers a pendingReq in the approve registry.
-// Returns approveToken, denyToken, requestID.
-func mintApproveRequestForTest(t *testing.T, s *Server) (approveToken, denyToken, requestID string) {
-	t.Helper()
-	requestID = notifyv2.NewMsgID()
-	var closureHash [32]byte
-	closureHash[0] = 0xAB // non-zero for test distinguishability
-
-	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
-	denySig := approve.SignApproveURL(s.approveHMACKey, requestID, "deny", closureHash)
-
-	_, err := s.approveRegistry.Open(requestID, closureHash, approve.TierSensitive, approveSig,
-		approve.WithActionName("test-action"))
-	require.NoError(t, err)
-	// Also store deny sig — use a separate registry entry trick: Open again
-	// won't work for same ID. Instead store the deny sig via a helper on the
-	// pendingReq stored in the registry. Since Lookup only returns the single
-	// hmacSig stored at Open time, we need to store the approve sig for approve
-	// lookups and deny sig for deny lookups.
-	// We'll use the convention: store approve sig in pendingReq.hmacSig for
-	// approve verification, and store deny sig separately.
-	// For test purposes: re-open with deny sig to simulate the pair store.
-	// Actually the plan stores approve hmacSig in Open() for handleApprove.
-	// For handleDeny, we need the deny sig. We'll store denyHMACSig
-	// in a separate field on pendingReq — but pendingReq only has one hmacSig.
-	// The plan says handleApproveRequest stores BOTH sigs on the pendingReq.
-	// For now, store approveSig in Open(). The test for deny will need a different approach.
-	// Let's use a simpler model: store approveSig in Open for approve lookups;
-	// for deny, we call VerifyApproveURL with "deny" action against approveSig (which will fail)
-	// OR we accept that the deny handler also uses the hmacSig field for its own verify.
-	// The plan says: denyHMACSig stored on pendingReq — but Open only takes one hmacSig.
-	// SOLUTION: we'll call Open twice: first for approve, then for deny under a different
-	// requestID. But for the test we only need one pendingReq for both.
-	// Let's store BOTH sigs as a concatenation or use a dedicated deny field.
-	// SIMPLEST: store approveHMACSig in hmacSig; add denyHMACSig field to pendingReq.
-	// For the test: we'll set it up so that the test works with the implementation.
-	_ = approveSig
-	_ = denySig
-
-	approveTTL := 150 * time.Second
-	approveToken, _ = s.content.mintApprove(requestID, approveTTL)
-	denyToken, _ = s.content.mintDeny(requestID, approveTTL)
-	return approveToken, denyToken, requestID
-}
-
 // doApproveGet issues a GET /approve/{token} to the content mux.
 func doApproveGet(t *testing.T, ts *httptest.Server, token string) *http.Response {
 	t.Helper()
@@ -1499,7 +1454,10 @@ func TestHandleApproveWait_Resolves(t *testing.T) {
 	require.NotEmpty(t, result.RequestID)
 
 	// Step 2: start long-poll in background.
-	waitDone := make(chan struct{ code int; approved bool }, 1)
+	waitDone := make(chan struct {
+		code     int
+		approved bool
+	}, 1)
 	go func() {
 		waitResp := doUnixGet(t, s, "/approve/wait/"+result.RequestID)
 		defer func() { _ = waitResp.Body.Close() }()
@@ -1507,7 +1465,10 @@ func TestHandleApproveWait_Resolves(t *testing.T) {
 			Approved bool `json:"approved"`
 		}
 		_ = json.NewDecoder(waitResp.Body).Decode(&res)
-		waitDone <- struct{ code int; approved bool }{waitResp.StatusCode, res.Approved}
+		waitDone <- struct {
+			code     int
+			approved bool
+		}{waitResp.StatusCode, res.Approved}
 	}()
 
 	// Give the waiter time to block.
@@ -1522,7 +1483,7 @@ func TestHandleApproveWait_Resolves(t *testing.T) {
 	contentMuxTS := httptest.NewServer(s.buildContentMux())
 	defer contentMuxTS.Close()
 
-	approveResp, err := http.Get(contentMuxTS.URL + "/approve/" + token) //nolint:noctx
+	approveResp, err := http.Get(contentMuxTS.URL + "/approve/" + token) //nolint:noctx // test-only: context not needed for in-process httptest server
 	require.NoError(t, err)
 	_ = approveResp.Body.Close()
 
@@ -1596,7 +1557,7 @@ func TestApproveStatus_Counters(t *testing.T) {
 	contentMuxTS := httptest.NewServer(s.buildContentMux())
 	defer contentMuxTS.Close()
 
-	approveResp, err := http.Get(contentMuxTS.URL + "/approve/" + token) //nolint:noctx
+	approveResp, err := http.Get(contentMuxTS.URL + "/approve/" + token) //nolint:noctx // test-only: context not needed for in-process httptest server
 	require.NoError(t, err)
 	_ = approveResp.Body.Close()
 	require.Equal(t, http.StatusOK, approveResp.StatusCode)

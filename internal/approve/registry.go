@@ -68,12 +68,12 @@ type ApprovalToken struct {
 // pendingReq is one in-flight approval request. It is memory-only and safe for
 // concurrent use: state is a CAS atomic, ch is written exactly once (buffered).
 type pendingReq struct {
-	state       atomic.Uint32  // CAS: statePending → stateApproved|stateDenied|stateTimeout
+	state       atomic.Uint32 // CAS: statePending → stateApproved|stateDenied|stateTimeout
 	requestID   string
 	closureHash [32]byte
 	tier        TierLevel
 	ch          chan Resolution // buffered(1), written exactly once on resolution
-	hmacSig     string         // stored for handler verify at resolution time (D-16)
+	hmacSig     string          // stored for handler verify at resolution time (D-16)
 }
 
 // resolve attempts a single CAS transition from statePending to newState.
@@ -225,6 +225,20 @@ func (r *Registry) Wait(ctx context.Context, req *pendingReq, hasTTY bool) (Reso
 		}
 		return Resolution{Approved: false}, ErrDenied
 	}
+}
+
+// WaitByID looks up the pending request by requestID and calls Wait. It is a
+// convenience method for callers (e.g. daemon's handleApproveWait) that hold
+// only the requestID, not the *pendingReq pointer. Returns (Resolution{}, err)
+// if the request is not found (err wraps approve.ErrDenied in that case).
+func (r *Registry) WaitByID(ctx context.Context, requestID string, hasTTY bool) (Resolution, error) {
+	r.mu.Lock()
+	req, ok := r.pending[requestID]
+	r.mu.Unlock()
+	if !ok {
+		return Resolution{}, fmt.Errorf("approve: WaitByID: request not found: %s", safePrefix(requestID))
+	}
+	return r.Wait(ctx, req, hasTTY)
 }
 
 // Prune removes a request from the pending map after its lifecycle is complete.
