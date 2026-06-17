@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/approve"
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
@@ -455,7 +457,222 @@ func (s *Server) buildContentMux() *http.ServeMux {
 	mux.HandleFunc("GET /content/{token}", s.handleContent)
 	mux.HandleFunc("GET /enroll/{token}", s.handleBootstrap) // BACK-09: bearer-LESS first-contact pull
 	mux.HandleFunc("POST /ack", s.handleAck)
+	// Phase 30: bearer-LESS approve/deny capability-URL handlers (APPR-04).
+	// These are on the content mux (network-exposed HTTPS) — the phone reaches
+	// them by tapping the capability URL the daemon sends in the notification.
+	mux.HandleFunc("GET /approve/{token}", s.handleApprove)
+	mux.HandleFunc("GET /deny/{token}", s.handleDeny)
 	return mux
+}
+
+// handleApprove serves GET /approve/{token} (APPR-04): bearer-LESS, constant-
+// work, single-use. Token entropy is the only credential (256-bit, base64url);
+// HMAC verification is defense-in-depth (D-16). A valid lookup CAS-resolves the
+// pending request to Approved, writes an audit receipt (APPR-03), and returns 200.
+// All miss paths (unknown/expired/wrong-kind token, HMAC mismatch, unknown request)
+// return a uniform empty-body 404 — no oracle distinguishes miss types (T-30-07/08).
+func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
+	// Cap body (defense in depth — GET carries no meaningful body).
+	r.Body = http.MaxBytesReader(w, r.Body, maxAckBody)
+	token := r.PathValue("token")
+
+	// lookupKind: kind checked BEFORE the single-use consume (BACK-09 invariant).
+	// A deny token presented here is a cross-kind miss that burns nothing (T-30-08).
+	requestID, found := s.content.lookupKind(token, kindApprove, true)
+	if !found {
+		s.writeApproveMiss(w, r)
+		return
+	}
+	if s.approveRegistry == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+
+	// Lookup stored HMAC sig + closureHash for D-16 verification.
+	hmacSig, closureHash, _, lookOK := s.approveRegistry.Lookup(requestID)
+	if !lookOK {
+		// Request not found in registry (expired/pruned) — uniform miss, no oracle.
+		s.writeApproveMiss(w, r)
+		return
+	}
+
+	// HMAC verify (D-16, T-30-11): mismatch → uniform miss, same as any miss.
+	if len(s.approveHMACKey) > 0 {
+		if !approve.VerifyApproveURL(s.approveHMACKey, requestID, "approve", closureHash, hmacSig) {
+			slog.Warn("daemon: approve HMAC mismatch — returning uniform 404",
+				"request_id", reqIDPrefix(requestID))
+			s.writeApproveMiss(w, r)
+			return
+		}
+	}
+
+	// CAS resolve: first-answer-wins (APPR-02). A false return means another
+	// goroutine already won; log and return 200 (late tap is not an error).
+	won := s.approveRegistry.Resolve(requestID, approve.StateApproved)
+	if !won {
+		slog.Debug("daemon: late approve resolution ignored — already resolved",
+			"request_id", reqIDPrefix(requestID))
+	}
+
+	// IN-03: gate audit + counter mutations on won so a lost-CAS late tap is
+	// a pure no-op (no double audit receipt, no double counter).
+	if won {
+		// Audit receipt (APPR-03): content is hashed by Append; raw values never reach the log.
+		if s.auditApp != nil {
+			receipt := []byte(requestID + "\n" + "approve" + "\n" + hex.EncodeToString(closureHash[:]))
+			if err := s.auditApp.Append("approve-decision", "request:"+reqIDPrefix(requestID), receipt, false); err != nil {
+				// Non-fatal: log at Warn; the approval is already registered (CAS won above).
+				slog.Warn("daemon: approve audit append failed", "err", err)
+			}
+		}
+		// Counters: increment approved, decrement pending.
+		s.approveApproved.Add(1)
+		s.approvePending.Add(-1)
+	}
+
+	// HTML confirmation for the phone (ntfy view tap opens Safari); JSON otherwise.
+	s.writeApproveResult(w, r, true, reqIDPrefix(requestID))
+}
+
+// handleDeny serves GET /deny/{token} (APPR-04): identical structure to
+// handleApprove but resolves the pending request to Denied. The audit receipt
+// uses action="deny" and the denied counter increments.
+func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAckBody)
+	token := r.PathValue("token")
+
+	requestID, found := s.content.lookupKind(token, kindDeny, true)
+	if !found {
+		s.writeApproveMiss(w, r)
+		return
+	}
+	if s.approveRegistry == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+
+	// CR-03: look up the deny HMAC sig via LookupDeny, which retrieves the
+	// denyHmacSig stored on the main entry (signed over the real closure hash).
+	// The previous side-channel (requestID+":deny" with a zero closure hash)
+	// caused every phone-deny to fail HMAC verification (fail-open deny defect).
+	hmacSig, closureHash, _, lookOK := s.approveRegistry.LookupDeny(requestID)
+	if !lookOK {
+		s.writeApproveMiss(w, r)
+		return
+	}
+
+	// HMAC verify (D-16, T-30-11).
+	if len(s.approveHMACKey) > 0 {
+		if !approve.VerifyApproveURL(s.approveHMACKey, requestID, "deny", closureHash, hmacSig) {
+			slog.Warn("daemon: deny HMAC mismatch — returning uniform 404",
+				"request_id", reqIDPrefix(requestID))
+			s.writeApproveMiss(w, r)
+			return
+		}
+	}
+
+	won := s.approveRegistry.Resolve(requestID, approve.StateDenied)
+	if !won {
+		slog.Debug("daemon: late deny resolution ignored — already resolved",
+			"request_id", reqIDPrefix(requestID))
+	}
+
+	// IN-03: gate audit + counter mutations on won so a lost-CAS late tap is
+	// a pure no-op (no double audit receipt, no double counter decrement).
+	if won {
+		if s.auditApp != nil {
+			receipt := []byte(requestID + "\n" + "deny" + "\n" + hex.EncodeToString(closureHash[:]))
+			if err := s.auditApp.Append("approve-decision", "request:"+reqIDPrefix(requestID), receipt, false); err != nil {
+				slog.Warn("daemon: deny audit append failed", "err", err)
+			}
+		}
+		s.approveDenied.Add(1)
+		s.approvePending.Add(-1)
+	}
+
+	// HTML confirmation for the phone (ntfy view tap opens Safari); JSON otherwise.
+	s.writeApproveResult(w, r, false, reqIDPrefix(requestID))
+}
+
+// wantsHTML reports whether the caller is a browser (the ntfy "view" tap opens
+// Safari, which sends Accept: text/html). Programmatic callers and tests send
+// */* or no Accept and get JSON.
+func wantsHTML(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// approvePageShell renders the self-contained HTML confirmation page shown after
+// a phone taps an approve/deny capability URL. Inline CSS, no external assets, no
+// JS, mobile-first, respects light/dark. Every interpolated value is a
+// compile-time constant or the safe 8-char request prefix (hex/ULID), so no
+// untrusted input reaches the markup.
+func approvePageShell(iconClass, icon, heading, sub, meta string) string {
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+		`<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">` +
+		`<title>` + heading + ` · abysslink</title><style>` +
+		`:root{color-scheme:light dark}*{box-sizing:border-box}` +
+		`body{margin:0;min-height:100svh;display:grid;place-items:center;padding:24px;` +
+		`font:17px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;` +
+		`background:#0b0f14;color:#e6edf3}` +
+		`@media(prefers-color-scheme:light){body{background:#f6f8fa;color:#1f2328}}` +
+		`.card{width:100%;max-width:360px;text-align:center;padding:40px 28px;border-radius:22px;` +
+		`background:color-mix(in srgb,currentColor 5%,transparent);` +
+		`border:1px solid color-mix(in srgb,currentColor 14%,transparent)}` +
+		`.icon{width:80px;height:80px;border-radius:50%;margin:0 auto 22px;display:grid;` +
+		`place-items:center;font-size:38px;line-height:1;color:#fff}` +
+		`.ok{background:#1f883d}.no{background:#cf222e}.muted{background:#6e7781}` +
+		`h1{margin:0 0 8px;font-size:25px;font-weight:650;letter-spacing:-.01em}` +
+		`p{margin:0;font-size:15px;opacity:.7}` +
+		`.meta{margin-top:24px;font-size:12px;opacity:.5}` +
+		`</style></head><body><div class="card">` +
+		`<div class="icon ` + iconClass + `">` + icon + `</div>` +
+		`<h1>` + heading + `</h1><p>` + sub + `</p>` +
+		`<div class="meta">` + meta + `</div></div></body></html>`
+}
+
+// approveResultPage is the confirmation page for a resolved request.
+func approveResultPage(approved bool, reqPrefix string) string {
+	if approved {
+		return approvePageShell("ok", "✓", "Approved", "The tool call will continue.", "abysslink · request "+reqPrefix)
+	}
+	return approvePageShell("no", "✕", "Denied", "The tool call was blocked.", "abysslink · request "+reqPrefix)
+}
+
+// approveMissPage is the uniform page for every miss reason — byte-identical so
+// it reveals nothing about why the link failed (no-oracle, T-30-07/08).
+func approveMissPage() string {
+	return approvePageShell("muted", "⌛", "Link no longer valid",
+		"This approval link was already used, has expired, or isn't recognized.", "abysslink")
+}
+
+// writeApproveMiss writes the uniform miss response: a no-oracle HTML page for a
+// browser, or an empty-body 404 for programmatic callers. Identical for every
+// miss reason so it never distinguishes miss types.
+func (s *Server) writeApproveMiss(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if wantsHTML(r) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprint(w, approveMissPage())
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
+}
+
+// writeApproveResult writes the 200 result: an HTML confirmation page for a
+// browser (the ntfy view tap), or compact JSON for programmatic callers.
+// reqPrefix is the safe 8-char request prefix — never the full ID/token.
+func (s *Server) writeApproveResult(w http.ResponseWriter, r *http.Request, approved bool, reqPrefix string) {
+	w.Header().Set("Cache-Control", "no-store")
+	if wantsHTML(r) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprint(w, approveResultPage(approved, reqPrefix))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"approved": approved, "request_id": reqPrefix}); err != nil {
+		slog.Debug("daemon: approve result encode failed", "err", err)
+	}
 }
 
 // verifyRequestBearer extracts the Authorization: Bearer credential and

@@ -18,8 +18,12 @@ package ntfy
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -513,4 +517,42 @@ func TestConfigureNative_CreatesStateDirAndTargetsConfig(t *testing.T) {
 	data, err := os.ReadFile(cfgPath)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `listen-http: "100.64.1.2:`)
+}
+
+// TestProbeNtfyReachable covers the doctor reachability probe (the universal
+// macOS Docker-Desktop fix): a live ntfy answers -> true; nothing listening
+// (the silent-drop case this check exists to catch) -> false.
+func TestProbeNtfyReachable(t *testing.T) {
+	m := New(modules.Deps{Cfg: config.Defaults()})
+
+	// Reachable: a server that answers /v1/health with 200.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	host, portStr, err := splitHostPortTest(u.Host)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+	assert.True(t, m.probeNtfyReachable(context.Background(), host, port),
+		"a live ntfy on host:port must probe as reachable")
+
+	// Unreachable: nothing listening (server closed) -> false.
+	srv.Close()
+	assert.False(t, m.probeNtfyReachable(context.Background(), host, port),
+		"a dead/unpublished ntfy must probe as unreachable (the silent-drop case)")
+}
+
+func splitHostPortTest(hostport string) (string, string, error) {
+	i := strings.LastIndexByte(hostport, ':')
+	if i < 0 {
+		return hostport, "", fmt.Errorf("no port in %q", hostport)
+	}
+	return hostport[:i], hostport[i+1:], nil
 }

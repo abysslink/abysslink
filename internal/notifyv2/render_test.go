@@ -165,25 +165,74 @@ func TestRender_ClickPassthrough(t *testing.T) {
 	assert.Empty(t, empty.Click)
 }
 
-// TestRender_ActionsDropped asserts D-18: actions are typed on the wire but
-// the ntfy renderer drops them entirely — no representation anywhere in the
-// note, and RenderedNote has no actions field at all this phase.
-func TestRender_ActionsDropped(t *testing.T) {
+// TestRender_ActionsDropped_NoURL asserts D-18 no-dead-buttons: actions without
+// a URL (not yet wired to the content store) are dropped — no representation
+// anywhere in the string fields, and Actions is nil.
+func TestRender_ActionsDropped_NoURL(t *testing.T) {
 	m := renderMsg()
+	m.Kind = notifyv2.KindApprovalRequest
+	m.Title = "approval required"
+	// Actions without URL — these should be dropped (D-18 no dead buttons).
 	m.Actions = []notifyv2.Action{{ID: "approve", Label: "Approve"}, {ID: "deny", Label: "Deny"}}
 	note := notifyv2.Render(m, notifyv2.RenderOpts{})
 
 	for _, field := range []string{note.Title, note.Body, note.Priority, note.Tags, note.Click} {
-		assert.NotContains(t, strings.ToLower(field), "approve")
-		assert.NotContains(t, strings.ToLower(field), "deny")
+		assert.NotContains(t, strings.ToLower(field), "approve",
+			"string fields must not contain approve button text")
+		assert.NotContains(t, strings.ToLower(field), "deny",
+			"string fields must not contain deny button text")
 	}
+	assert.Nil(t, note.Actions, "Actions must be nil when no URL is populated")
+}
 
+// TestRender_RenderedNoteFields verifies RenderedNote struct shape (Phase 30:
+// 6 fields including Actions).
+func TestRender_RenderedNoteFields(t *testing.T) {
 	typ := reflect.TypeFor[notifyv2.RenderedNote]()
-	require.Equal(t, 5, typ.NumField(), "RenderedNote has exactly 5 fields")
-	wantFields := []string{"Title", "Body", "Priority", "Tags", "Click"}
+	require.Equal(t, 6, typ.NumField(), "RenderedNote has exactly 6 fields after Phase 30")
+	wantFields := []string{"Title", "Body", "Priority", "Tags", "Click", "Actions"}
 	for i, name := range wantFields {
 		assert.Equal(t, name, typ.Field(i).Name)
 	}
+}
+
+// TestRender_ApprovalRequest_Actions: KindApprovalRequest with URL-populated
+// actions → note.Actions has 2 entries with correct Label+URL (D-18 un-drop).
+func TestRender_ApprovalRequest_Actions(t *testing.T) {
+	m := notifyv2.Message{
+		V:     2,
+		MsgID: validULID,
+		Kind:  notifyv2.KindApprovalRequest,
+		Host:  "rig-1",
+		Title: "approval required",
+		Actions: []notifyv2.Action{
+			{ID: "approve", Label: "Approve", URL: "https://example.ts.net/approve/ablk_ok_xxx"},
+			{ID: "deny", Label: "Deny", URL: "https://example.ts.net/deny/ablk_no_yyy"},
+		},
+	}
+	note := notifyv2.Render(m, notifyv2.RenderOpts{})
+
+	require.Len(t, note.Actions, 2, "both actions must be rendered")
+	assert.Equal(t, "Approve", note.Actions[0].Label)
+	assert.Equal(t, "https://example.ts.net/approve/ablk_ok_xxx", note.Actions[0].URL)
+	assert.Equal(t, "Deny", note.Actions[1].Label)
+	assert.Equal(t, "https://example.ts.net/deny/ablk_no_yyy", note.Actions[1].URL)
+}
+
+// TestRender_OtherKind_NoActions: non-approval messages have nil Actions.
+func TestRender_OtherKind_NoActions(t *testing.T) {
+	m := notifyv2.Message{
+		V:     2,
+		MsgID: validULID,
+		Kind:  notifyv2.KindNeedsInput,
+		Host:  "rig-1",
+		Title: "needs input",
+		Actions: []notifyv2.Action{
+			{ID: "approve", Label: "Approve", URL: "https://example.ts.net/approve/ablk_ok_xxx"},
+		},
+	}
+	note := notifyv2.Render(m, notifyv2.RenderOpts{})
+	assert.Nil(t, note.Actions, "non-approval kinds must have nil Actions even if Message.Actions is populated")
 }
 
 // kindTitles is the canonical safe verb phrase per kind, mirroring what

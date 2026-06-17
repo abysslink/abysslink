@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/approve"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/device"
@@ -152,6 +154,24 @@ type Server struct {
 	// Set once by the composition root via SetGatewayCredsStatus.
 	gatewayCredsStatus string
 
+	// Phase 30 approve/deny capability-URL loop (APPR-02/APPR-03/APPR-04).
+	// approveRegistry holds the in-flight pending approval requests; nil
+	// disables the approve capability routes gracefully (503 on the IPC paths,
+	// 404 on the content-mux approve/deny handlers).
+	approveRegistry *approve.Registry
+	// approveHMACKey is the HMAC key injected by the composition root for
+	// D-16 capability-URL integrity verification in handleApprove/handleDeny.
+	// When nil, HMAC verification is skipped with a warning (graceful degrade:
+	// approve still works, the defense-in-depth layer is absent).
+	approveHMACKey []byte
+	// approvePending is the count of currently-open pending approve requests
+	// (can go negative briefly in race; use int64).
+	approvePending atomic.Int64
+	// approveApproved counts requests resolved to approved since daemon start.
+	approveApproved atomic.Uint64
+	// approveDenied counts requests resolved to denied since daemon start.
+	approveDenied atomic.Uint64
+
 	contentMu     sync.Mutex
 	contentLive   bool
 	contentHost   string
@@ -214,6 +234,18 @@ func (s *Server) SetOutbox(o *push.Outbox, c *push.GatewayCounters) {
 // left unset (push gateway not wired), /status omits the field so an older-style
 // no-push daemon and a current push daemon stay distinguishable to doctor.
 func (s *Server) SetGatewayCredsStatus(status string) { s.gatewayCredsStatus = status }
+
+// SetApproveRegistry injects the Phase 30 pending-request registry used by the
+// approve/deny capability-URL handlers and the unix-socket approve IPC routes.
+// Called by the composition root before Run; nil-safe: without it the approve
+// routes return 503 (graceful degrade) while the daemon keeps running.
+func (s *Server) SetApproveRegistry(r *approve.Registry) { s.approveRegistry = r }
+
+// SetApproveHMACKey injects the HMAC key used for D-16 capability-URL integrity
+// verification in handleApprove/handleDeny. When nil, verification is skipped
+// with a warning (graceful degrade — approve still functions, defense-in-depth
+// absent). The key is the same audit-hmac keychain key as SignedAudit.
+func (s *Server) SetApproveHMACKey(key []byte) { s.approveHMACKey = key }
 
 // fanOutToDevices fans out msg to all active enrolled devices via the persistent
 // push outbox (D-10). For each active device with a push token:
@@ -383,17 +415,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("daemon: chmod socket: %w", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("/notify", s.handleNotify)
-	mux.HandleFunc("/status", s.handleStatus)
-	mux.HandleFunc("/sessions", s.handleSessions)
-	// BACK-09: the local staging seam. This route accepts a SECRET credential
-	// bundle in the request body, so it lives ONLY on this chmod-0600 unix
-	// socket (the local trust root) — NEVER on buildContentMux (the network TLS
-	// mux). Do not move it.
-	mux.HandleFunc("/enroll/stage", s.handleEnrollStage)
-
+	mux := s.buildUnixMux()
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTO, IdleTimeout: idleTO}
 
 	s.startWatchers(ctx)
@@ -464,6 +486,396 @@ func ensureSocketFree(path string) error {
 		return nil
 	default:
 		return fmt.Errorf("daemon: cannot verify whether socket %s is live: %w", path, err)
+	}
+}
+
+// buildUnixMux returns the unix-socket mux. Extracted from Run so tests can
+// construct it directly without starting a real listener. All routes here are
+// local-only (WR-04) — they MUST NOT be moved onto buildContentMux.
+func (s *Server) buildUnixMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/notify", s.handleNotify)
+	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/sessions", s.handleSessions)
+	// BACK-09: the local staging seam. This route accepts a SECRET credential
+	// bundle in the request body, so it lives ONLY on this chmod-0600 unix
+	// socket (the local trust root) — NEVER on buildContentMux (the network TLS
+	// mux). Do not move it.
+	mux.HandleFunc("/enroll/stage", s.handleEnrollStage)
+	// Phase 30 approve IPC (WR-04): unix-socket only — NEVER on content mux.
+	// POST /approve/request: mint approve+deny capability URLs, register pending req.
+	// GET /approve/wait/{id}: long-poll until resolution or timeout.
+	// POST /approve/resolve/{id}: CLI TTY arm resolves via this route (CR-02).
+	mux.HandleFunc("POST /approve/request", s.handleApproveRequest)
+	mux.HandleFunc("GET /approve/wait/{id}", s.handleApproveWait)
+	mux.HandleFunc("POST /approve/resolve/{id}", s.handleApproveResolve)
+	return mux
+}
+
+// handleApproveResolve serves POST /approve/resolve/{id}?action=approve|deny on
+// the unix socket ONLY (WR-04). It is the D-03 TTY-arm endpoint: the CLI's
+// promptTTY posts here to resolve the shared CAS registry entry so the concurrent
+// phone-arm (GET /approve/wait/{id}) unblocks correctly. CAS ensures only the
+// first-answer-wins across both arms (CR-02).
+//
+// SECURITY: this route is unix-socket-only (chmod 0600, local trust root) — no
+// authentication beyond the unix socket is needed. The action must be exactly
+// "approve" or "deny"; any other value returns 400.
+func (s *Server) handleApproveResolve(w http.ResponseWriter, r *http.Request) {
+	requestID := r.PathValue("id")
+	if requestID == "" {
+		http.Error(w, "request_id is required", http.StatusBadRequest)
+		return
+	}
+	if s.approveRegistry == nil {
+		http.Error(w, "approve registry not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	action := r.URL.Query().Get("action")
+	var newState uint32
+	switch action {
+	case "approve":
+		newState = approve.StateApproved
+	case "deny":
+		newState = approve.StateDenied
+	default:
+		http.Error(w, `action must be "approve" or "deny"`, http.StatusBadRequest)
+		return
+	}
+
+	// Capture the closure hash BEFORE resolving so the audit receipt records it
+	// even if a concurrent waiter (handleApproveWait) prunes the entry the instant
+	// it observes the resolution.
+	_, closureHash, _, _ := s.approveRegistry.Lookup(requestID)
+
+	won := s.approveRegistry.Resolve(requestID, newState)
+	if won {
+		// APPR-03: a TTY resolution is an explicit user decision — audit it and
+		// update the counters, exactly like the capability-URL path
+		// (handleApprove/handleDeny). Gated on won so a lost-CAS late tap is a
+		// pure no-op (no double audit receipt, no double counter). Without this a
+		// TTY approval/deny bypassed the audit log and left approve_pending stuck.
+		if s.auditApp != nil {
+			receipt := []byte(requestID + "\n" + action + "\n" + hex.EncodeToString(closureHash[:]))
+			if err := s.auditApp.Append("approve-decision", "request:"+reqIDPrefix(requestID), receipt, false); err != nil {
+				slog.Warn("daemon: approve/resolve audit append failed", "err", err)
+			}
+		}
+		if newState == approve.StateApproved {
+			s.approveApproved.Add(1)
+		} else {
+			s.approveDenied.Add(1)
+		}
+		s.approvePending.Add(-1)
+	} else {
+		slog.Debug("daemon: approve/resolve: late or lost CAS — already resolved",
+			"request_id", reqIDPrefix(requestID), "action", action)
+		// Return 200 even on a lost CAS: the request resolved (just not by us).
+		// The CLI should treat this as a successful resolve, not an error (D-03).
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"resolved": true,
+		"won":      won,
+		"action":   action,
+	}); err != nil {
+		slog.Warn("daemon: approve/resolve encode failed", "err", err)
+	}
+}
+
+// approveTTLDuration returns the TTL for approve/deny capability URLs: the
+// configured approval timeout plus a 30-second buffer so URLs don't expire
+// before the timeout fires. Default: 150s (120s + 30s).
+func (s *Server) approveTTLDuration() time.Duration {
+	if s.cfg != nil && s.cfg.Approval.TimeoutSeconds > 0 {
+		return time.Duration(s.cfg.Approval.TimeoutSeconds)*time.Second + 30*time.Second
+	}
+	return 150 * time.Second // default: 120s + 30s buffer
+}
+
+// approveTimeoutDuration returns the wait timeout for handleApproveWait (the
+// configured approval timeout; default 120s).
+func (s *Server) approveTimeoutDuration() time.Duration {
+	if s.cfg != nil && s.cfg.Approval.TimeoutSeconds > 0 {
+		return time.Duration(s.cfg.Approval.TimeoutSeconds) * time.Second
+	}
+	return 120 * time.Second
+}
+
+// approveRequestBody is the POST /approve/request JSON body.
+type approveRequestBody struct {
+	Action        string   `json:"action"`
+	ClosureHash   string   `json:"closure_hash"` // hex-encoded 32 bytes
+	DeclaredTier  int      `json:"declared_tier"`
+	ExtraCritical []string `json:"extra_critical"`
+}
+
+// approveRequestResponse is the POST /approve/request JSON response.
+type approveRequestResponse struct {
+	RequestID  string `json:"request_id"`
+	ApproveURL string `json:"approve_url"`
+	DenyURL    string `json:"deny_url"`
+	ExpiresAt  string `json:"expires_at"`
+}
+
+// decodeApproveRequest decodes + validates the POST /approve/request body.
+// Returns the request struct, parsed closure hash, and ok=false (with 4xx
+// already written) on any error. Extracted from handleApproveRequest to keep
+// that function under the gocyclo ceiling.
+func decodeApproveRequest(w http.ResponseWriter, r *http.Request) (approveRequestBody, [32]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAckBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var req approveRequestBody
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid approve request payload", http.StatusBadRequest)
+		return req, [32]byte{}, false
+	}
+	if strings.TrimSpace(req.Action) == "" {
+		http.Error(w, "action is required", http.StatusBadRequest)
+		return req, [32]byte{}, false
+	}
+	if len(req.ClosureHash) != 64 {
+		http.Error(w, "closure_hash must be 64 hex characters (32 bytes)", http.StatusBadRequest)
+		return req, [32]byte{}, false
+	}
+	closureHashBytes, err := hex.DecodeString(req.ClosureHash)
+	if err != nil || len(closureHashBytes) != 32 {
+		http.Error(w, "closure_hash is not valid hex", http.StatusBadRequest)
+		return req, [32]byte{}, false
+	}
+	if req.DeclaredTier < 0 || req.DeclaredTier > 2 {
+		http.Error(w, "declared_tier must be 0, 1, or 2", http.StatusBadRequest)
+		return req, [32]byte{}, false
+	}
+	var closureHash [32]byte
+	copy(closureHash[:], closureHashBytes)
+	return req, closureHash, true
+}
+
+// openApproveRegistryEntry registers the pending request in the approve registry
+// with both the approve and deny HMAC sigs stored on the single entry (CR-03:
+// eliminates the side-channel that signed the deny URL over the real closure hash
+// but stored it against a zero hash, causing HMAC verification to always fail).
+// The registry's OpenWithDenySig call stores both sigs on the main entry keyed
+// by requestID only; handleDeny uses LookupDeny to retrieve the deny sig.
+// Extracted from handleApproveRequest to keep cyclomatic complexity below the
+// gocyclo ceiling.
+func (s *Server) openApproveRegistryEntry(requestID string, closureHash [32]byte, tier approve.TierLevel, action string) (string, string, error) {
+	var approveSig, denySig string
+	if len(s.approveHMACKey) > 0 {
+		approveSig = approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+		denySig = approve.SignApproveURL(s.approveHMACKey, requestID, "deny", closureHash)
+	} else {
+		slog.Warn("daemon: approve HMAC key not set — capability URLs lack integrity signature (D-16 defense-in-depth absent)")
+	}
+	if _, err := s.approveRegistry.OpenWithDenySig(requestID, closureHash, tier, approveSig, denySig,
+		approve.WithActionName(action)); err != nil {
+		return "", "", err
+	}
+	return approveSig, denySig, nil
+}
+
+// reqIDPrefix returns the first 8 bytes of requestID for log/audit targets —
+// never the full ID (T-30-06). Guards against short IDs (WR-02).
+func reqIDPrefix(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+// configExtraCritical returns s.cfg.Approval.ExtraCritical when cfg is set,
+// or nil when cfg is nil. Extracted to keep handleApproveRequest flat (CR-05).
+func (s *Server) configExtraCritical() []string {
+	if s.cfg != nil {
+		return s.cfg.Approval.ExtraCritical
+	}
+	return nil
+}
+
+// defaultContentPort is the default content-listener port. Named here so
+// handleApproveRequest uses it instead of the magic literal 2587 (IN-02).
+const defaultContentPort = 2587
+
+// handleApproveRequest serves POST /approve/request on the unix socket ONLY
+// (WR-04). It validates the request, force-upgrades tier, mints capability URLs,
+// registers the pending request, and returns the approve/deny URLs to the CLI.
+// Critical-tier actions are rejected with 403 (D-07).
+//
+// SECURITY: capability URLs are never logged (T-30-10); only requestID[:8] and
+// tier are observable. No URL, token, or full requestID ever reaches slog.
+func (s *Server) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
+	req, closureHash, ok := decodeApproveRequest(w, r)
+	if !ok {
+		return
+	}
+
+	// Force-upgrade tier: check in-code critical patterns + client extraCritical
+	// + YAML-configured cfg.Approval.ExtraCritical (CR-05). Merge daemon-side
+	// extra_critical FIRST so the operator's YAML config is always enforced
+	// regardless of what the client sends. YAML may only tighten, never loosen
+	// (CLAUDE.md invariant) — the server merging overrides any client omission.
+	extra := append(append([]string(nil), req.ExtraCritical...), s.configExtraCritical()...)
+	effectiveTier := approve.Tier(approve.TierLevel(req.DeclaredTier), req.Action, extra)
+	if effectiveTier == approve.TierCritical {
+		http.Error(w, `{"error":"critical tier actions require TTY approval (D-07)"}`, http.StatusForbidden)
+		return
+	}
+	if s.approveRegistry == nil {
+		http.Error(w, "approve registry not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	requestID := notifyv2.NewMsgID()
+	// IN-02: check content listener liveness BEFORE minting tokens or opening
+	// the registry entry, so we don't create a pending entry that can never
+	// receive a resolution via a capability URL.
+	s.contentMu.Lock()
+	live, advertiseHost, port := s.contentLive, s.contentAdvertiseHost, s.contentPort
+	s.contentMu.Unlock()
+	if !live {
+		http.Error(w, "content listener not live — approve capability URLs unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if advertiseHost == "" {
+		advertiseHost = "127.0.0.1"
+	}
+	if port == 0 {
+		port = defaultContentPort
+	}
+
+	if _, _, err := s.openApproveRegistryEntry(requestID, closureHash, effectiveTier, req.Action); err != nil {
+		slog.Warn("daemon: approve registry open failed", "request_id", reqIDPrefix(requestID), "err", err)
+		http.Error(w, "approve registry open failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	ttl := s.approveTTLDuration()
+	approveToken, expiresAt := s.content.mintApprove(requestID, ttl)
+	denyToken, _ := s.content.mintDeny(requestID, ttl)
+	s.approvePending.Add(1)
+
+	hostPort := net.JoinHostPort(advertiseHost, strconv.Itoa(port))
+	approveURL := "https://" + hostPort + "/approve/" + approveToken
+	denyURL := "https://" + hostPort + "/deny/" + denyToken
+
+	// Log only safe metadata — never URLs, tokens, or full requestID (T-30-10).
+	slog.Info("daemon: approve request opened",
+		"request_id", reqIDPrefix(requestID), "tier", effectiveTier, "ttl_seconds", int(ttl/time.Second))
+
+	// Deliver the approval request to the phone as an ACTIONABLE notification:
+	// KindApprovalRequest with Approve/Deny capability-URL buttons bound to THIS
+	// requestID — the same registry entry the CLI's GET /approve/wait blocks on.
+	// Routed through the standard v2 dispatch + push fan-out (ntfy X-Actions
+	// buttons + device wake), exactly like POST /notify. Without this the minted
+	// capability URLs never leave the daemon and the phone has no button to tap
+	// (the loop is closed only at the HTTP-response level otherwise).
+	approveMsg := notifyv2.Message{
+		V:     2,
+		MsgID: requestID,
+		Kind:  notifyv2.KindApprovalRequest,
+		Host:  s.hostname,
+		Title: "Approve " + req.Action + "?",
+		Actions: []notifyv2.Action{
+			{ID: "approve", Label: "Approve", URL: approveURL},
+			{ID: "deny", Label: "Deny", URL: denyURL},
+		},
+	}
+	notifyCtx := context.WithoutCancel(r.Context())
+	if derr := s.dispatch.dispatch(notifyCtx, approveMsg, originExplicit, notifyv2.RenderOpts{}); derr != nil {
+		slog.Warn("daemon: approve notification dispatch failed",
+			"request_id", reqIDPrefix(requestID), "err", derr)
+	}
+	_ = s.fanOutToDevices(notifyCtx, approveMsg)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(approveRequestResponse{
+		RequestID:  requestID,
+		ApproveURL: approveURL,
+		DenyURL:    denyURL,
+		ExpiresAt:  expiresAt.UTC().Format(time.RFC3339),
+	}); err != nil {
+		slog.Warn("daemon: approve request encode failed", "err", err)
+	}
+}
+
+// approveWaitResponse is the GET /approve/wait/{id} JSON response.
+type approveWaitResponse struct {
+	Approved  bool   `json:"approved"`
+	RequestID string `json:"request_id"`
+}
+
+// handleApproveWait serves GET /approve/wait/{id} on the unix socket ONLY
+// (WR-04). It long-polls the approve registry until the request resolves or
+// the context expires. On timeout it returns 408; on resolution it returns 200.
+// On not-found it returns 404 (WR-06: distinguishes "unknown request" from
+// "explicitly denied"). hasTTY is always false on the unix-socket path — the
+// CLI's TTY fallback is handled CLI-side, not daemon-side.
+func (s *Server) handleApproveWait(w http.ResponseWriter, r *http.Request) {
+	requestID := r.PathValue("id")
+	if requestID == "" {
+		http.Error(w, "request_id is required", http.StatusBadRequest)
+		return
+	}
+
+	if s.approveRegistry == nil {
+		http.Error(w, `{"error":"approve registry not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	// Prune the pending entry once this waiter is done — the waiter is the
+	// lifecycle owner. The capability-URL/TTY resolvers must NOT prune (a waiter
+	// that has not yet looked up the entry would miss the resolution and 404 a
+	// genuine approval). Memory-only by design (D-11): a crashed CLI with no
+	// waiter leaves one bounded entry that a daemon restart clears. Prune is a
+	// no-op on an unknown ID, so the not-found path below is safe too.
+	defer s.approveRegistry.Prune(requestID)
+
+	// Build a timeout context from the configured approval timeout.
+	timeout := s.approveTimeoutDuration()
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	// WaitByID blocks until the request resolves, times out, or the context
+	// is cancelled. A not-found error returns 404 (WR-06: "request not found"
+	// must not be conflated with "explicitly denied" as a 200 approved:false).
+	res, waitErr := s.approveRegistry.WaitByID(ctx, requestID, false)
+	if waitErr != nil {
+		if errors.Is(waitErr, approve.ErrTimeout) || errors.Is(waitErr, context.DeadlineExceeded) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestTimeout)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":    "timeout",
+				"approved": false,
+			})
+			return
+		}
+		if errors.Is(waitErr, approve.ErrDenied) {
+			// Explicitly denied — 200 with approved:false (WR-06).
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(approveWaitResponse{
+				Approved:  false,
+				RequestID: reqIDPrefix(requestID),
+			}); err != nil {
+				slog.Warn("daemon: approve wait encode failed", "err", err)
+			}
+			return
+		}
+		// Not found (request expired/pruned/unknown) — 404 (WR-06).
+		http.Error(w, `{"error":"request not found or expired"}`, http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(approveWaitResponse{
+		Approved:  res.Approved,
+		RequestID: reqIDPrefix(requestID),
+	}); err != nil {
+		slog.Warn("daemon: approve wait encode failed", "err", err)
 	}
 }
 
@@ -644,6 +1056,15 @@ type daemonStatusResponse struct {
 	CertExpiry string              `json:"cert_expiry,omitempty"`
 	LastSeen   string              `json:"last_seen,omitempty"`
 	Uptime     string              `json:"uptime"`
+
+	// Phase 30 approve counters (APPR-02): current pending + totals since start.
+	// All three use omitempty so an older daemon that does not set the registry
+	// reports nothing rather than fabricated zeros. approvePending is int64
+	// (can momentarily go negative in a race); approve_approved/denied are
+	// monotonic uint64.
+	ApprovePending  int64  `json:"approve_pending,omitempty"`
+	ApproveApproved uint64 `json:"approve_approved,omitempty"`
+	ApproveDenied   uint64 `json:"approve_denied,omitempty"`
 
 	// GateExecsObserved is live: it reads the gate decorator's atomic counter
 	// via SetExecCounter — the count of module/consumer execs the observe-only
@@ -842,6 +1263,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// WR-01: real push-creds-keychain signal from the composition-root probe.
 		// Empty when the push gateway is not wired (omitempty drops it).
 		GatewayCredsStatus: s.gatewayCredsStatus,
+		// Phase 30 approve counters (APPR-02). Only reported when the approve
+		// registry is wired (non-nil); omitempty elides them on older daemons.
+		ApprovePending:  s.approvePending.Load(),
+		ApproveApproved: s.approveApproved.Load(),
+		ApproveDenied:   s.approveDenied.Load(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -75,12 +75,15 @@ type FetchRef struct {
 	TTLSeconds int    `json:"ttl_s"`
 }
 
-// Action is a typed approve/deny button. Typed and validated now; the ntfy
-// renderer drops actions until Phase 30 wires /approve (D-18 — no dead
-// buttons).
+// Action is a typed approve/deny button. Phase 30 wires /approve and these
+// are rendered as ntfy action buttons (D-18 un-dropped).
 type Action struct {
 	ID    string `json:"id"`
 	Label string `json:"label,omitempty"`
+	// URL is the single-use capability URL embedded in the ntfy button.
+	// For KindApprovalRequest: the approve/deny capability URL from the
+	// content store (ablk_ok_ / ablk_no_ prefixed, 256-bit). NEVER logged.
+	URL string `json:"url,omitempty"`
 }
 
 // NewMsgID returns a fresh ULID string for Message.MsgID, using explicit

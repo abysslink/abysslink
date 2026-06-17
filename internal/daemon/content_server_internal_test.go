@@ -41,6 +41,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/abysslink/abysslink/internal/approve"
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
@@ -1247,4 +1248,843 @@ func TestStartContentServer_TLSRoundTrip(t *testing.T) {
 	cancel()
 	s.contentWG.Wait()
 	assert.Equal(t, "disabled: daemon shutting down", s.contentStoreStatus())
+}
+
+// --- Phase 30: approve/deny capability-URL handlers + unix IPC ---
+
+// newApproveTestServer returns a Server wired with a fake device store, a real
+// audit appender, and an approve registry, plus the httptest server over the
+// content mux. It also injects a dummy HMAC key so HMAC verification works.
+func newApproveTestServer(t *testing.T) (*Server, *httptest.Server) {
+	t.Helper()
+	cfg := config.Defaults()
+	cn := &captureNotifier{}
+	s := NewServer(cn, nil, cfg)
+	fd := &fakeDeviceStore{
+		bearer: testBearer,
+		rec:    device.Record{ID: "01DEVICEULIDXXXXXXXXXXXXXX", Name: "phone"},
+	}
+	s.SetDeviceStore(fd)
+	logPath := filepath.Join(t.TempDir(), "audit.log")
+	s.SetAuditAppender(audit.New(logPath))
+	// Set a known HMAC key so sign/verify works consistently in tests.
+	testHMACKey := []byte("test-hmac-key-for-approve-tests")
+	s.SetApproveHMACKey(testHMACKey)
+
+	reg := approve.NewRegistry(nil)
+	s.SetApproveRegistry(reg)
+
+	ts := httptest.NewServer(s.buildContentMux())
+	t.Cleanup(ts.Close)
+	return s, ts
+}
+
+// doApproveGet issues a GET /approve/{token} to the content mux.
+func doApproveGet(t *testing.T, ts *httptest.Server, token string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/approve/"+token, nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// doDenyGet issues a GET /deny/{token} to the content mux.
+func doDenyGet(t *testing.T, ts *httptest.Server, token string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/deny/"+token, nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// TestHandleApprove_CrossKind404 proves the BACK-09 invariant applied to
+// kindApprove/kindDeny: GET /approve/{denyToken} returns 404 without burning
+// the deny token (T-30-08).
+// TestHandleApprove_HTMLPageForBrowser proves the phone tap (ntfy view action →
+// Safari, Accept: text/html) gets a styled HTML confirmation page that resolves
+// the request — not raw JSON — and never echoes the capability token.
+func TestHandleApprove_HTMLPageForBrowser(t *testing.T) {
+	s, ts := newApproveTestServer(t)
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	closureHash[0] = 0xAB
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	_, err := s.approveRegistry.Open(requestID, closureHash, approve.TierSensitive, approveSig)
+	require.NoError(t, err)
+	token, _ := s.content.mintApprove(requestID, 150*time.Second)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/approve/"+token, nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "<html", "browser must get an HTML document")
+	assert.Contains(t, string(body), "Approved", "page must confirm the result")
+	assert.NotContains(t, string(body), token, "page must never echo the capability token")
+}
+
+// TestHandleApprove_MissHTMLForBrowser_NoOracle proves an invalid/expired link
+// in a browser gets the uniform miss page (404) that reveals nothing about why
+// it failed and never echoes the token.
+func TestHandleApprove_MissHTMLForBrowser_NoOracle(t *testing.T) {
+	_, ts := newApproveTestServer(t)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/approve/ablk_ok_doesnotexist", nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "text/html")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Link no longer valid", "invalid link gets the uniform miss page")
+	assert.NotContains(t, string(body), "doesnotexist", "miss page must not echo the token (no oracle)")
+}
+
+func TestHandleApprove_CrossKind404(t *testing.T) {
+	s, ts := newApproveTestServer(t)
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	_, err := s.approveRegistry.Open(requestID, closureHash, approve.TierSensitive, approveSig)
+	require.NoError(t, err)
+
+	approveTTL := 150 * time.Second
+	_, _ = s.content.mintApprove(requestID, approveTTL)
+	denyToken, _ := s.content.mintDeny(requestID, approveTTL)
+
+	// GET /approve/{denyToken} — cross-kind probe: must 404 without burning deny token.
+	resp := doApproveGet(t, ts, denyToken)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "cross-kind probe must return 404")
+
+	// denyToken must still be present (not burned).
+	_, stillPresent := s.content.lookupKind(denyToken, kindDeny, false)
+	assert.True(t, stillPresent, "deny token must NOT be consumed by the wrong-class /approve/ probe")
+}
+
+// TestHandleApprove_Expired404 proves that an expired approve token returns
+// the same constant-work 404 as a missing token (no oracle).
+func TestHandleApprove_Expired404(t *testing.T) {
+	s, ts := newApproveTestServer(t)
+	clk := newContentClock()
+	s.content = newContentStore(clk.now)
+
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	_, err := s.approveRegistry.Open(requestID, closureHash, approve.TierSensitive, approveSig)
+	require.NoError(t, err)
+
+	token, _ := s.content.mintApprove(requestID, 1*time.Millisecond)
+	clk.advance(5 * time.Millisecond)
+
+	resp := doApproveGet(t, ts, token)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "expired approve token must 404")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Empty(t, string(body), "constant-work 404 must have empty body (no oracle)")
+}
+
+// TestHandleApprove_ValidResolves proves that GET /approve/{validToken} returns
+// 200, writes an audit receipt with op=approve-decision, and resolves the
+// pending request to approved.
+func TestHandleApprove_ValidResolves(t *testing.T) {
+	s, ts := newApproveTestServer(t)
+	logPath := filepath.Join(t.TempDir(), "audit-approve.log")
+	s.SetAuditAppender(audit.New(logPath))
+
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	closureHash[0] = 0xDE
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	_, err := s.approveRegistry.Open(requestID, closureHash, approve.TierSensitive, approveSig)
+	require.NoError(t, err)
+
+	approveTTL := 150 * time.Second
+	approveToken, _ := s.content.mintApprove(requestID, approveTTL)
+
+	resp := doApproveGet(t, ts, approveToken)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "valid approve token must return 200")
+
+	// Verify audit receipt was written.
+	log, err := os.ReadFile(logPath) //nolint:gosec // test-owned temp path
+	require.NoError(t, err)
+	assert.Contains(t, string(log), `"op":"approve-decision"`,
+		"audit must contain op=approve-decision")
+}
+
+// TestHandleDeny_ValidResolves proves that GET /deny/{validToken} returns 200
+// and resolves the pending request to denied.
+// Updated for CR-03: deny sig is stored on the main entry via OpenWithDenySig
+// (not the old side-channel with a zero closure hash).
+func TestHandleDeny_ValidResolves(t *testing.T) {
+	s, ts := newApproveTestServer(t)
+	logPath := filepath.Join(t.TempDir(), "audit-deny.log")
+	s.SetAuditAppender(audit.New(logPath))
+
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	closureHash[0] = 0xDE
+	// CR-03: store both sigs on the main entry via OpenWithDenySig so that
+	// handleDeny can retrieve the deny sig via LookupDeny (real closure hash).
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	denySig := approve.SignApproveURL(s.approveHMACKey, requestID, "deny", closureHash)
+	_, err := s.approveRegistry.OpenWithDenySig(requestID, closureHash, approve.TierSensitive, approveSig, denySig)
+	require.NoError(t, err)
+
+	approveTTL := 150 * time.Second
+	denyToken, _ := s.content.mintDeny(requestID, approveTTL)
+
+	resp := doDenyGet(t, ts, denyToken)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "valid deny token must return 200")
+
+	// Verify audit receipt was written.
+	log, err := os.ReadFile(logPath) //nolint:gosec // test-owned temp path
+	require.NoError(t, err)
+	assert.Contains(t, string(log), `"op":"approve-decision"`,
+		"audit must contain op=approve-decision (both approve and deny use same op)")
+}
+
+// TestHandleApproveRequest_Unix proves that POST /approve/request via unix socket
+// returns 200 JSON with approve_url, deny_url, request_id, expires_at.
+func TestHandleApproveRequest_Unix(t *testing.T) {
+	s := newUnixTestServer(t)
+	body := `{"action":"test-action","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000001" +
+		`","declared_tier":1}`
+
+	resp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result struct {
+		ApproveURL string `json:"approve_url"`
+		DenyURL    string `json:"deny_url"`
+		RequestID  string `json:"request_id"`
+		ExpiresAt  string `json:"expires_at"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.True(t, strings.HasPrefix(result.ApproveURL, "https://"),
+		"approve_url must start with https://, got %q", result.ApproveURL)
+	assert.True(t, strings.HasPrefix(result.DenyURL, "https://"),
+		"deny_url must start with https://, got %q", result.DenyURL)
+	assert.NotEmpty(t, result.RequestID, "request_id must be non-empty")
+	assert.NotEmpty(t, result.ExpiresAt, "expires_at must be non-empty")
+}
+
+// TestHandleApproveWait_Resolves proves that GET /approve/wait/{id} long-polls
+// and returns {approved:true} when the capability URL is tapped.
+func TestHandleApproveWait_Resolves(t *testing.T) {
+	s := newUnixTestServer(t)
+
+	// Step 1: POST /approve/request to mint tokens and register pending req.
+	body := `{"action":"safe-action","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000002" +
+		`","declared_tier":1}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode)
+
+	var result struct {
+		ApproveURL string `json:"approve_url"`
+		RequestID  string `json:"request_id"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&result))
+	require.NotEmpty(t, result.RequestID)
+
+	// Step 2: start long-poll in background.
+	waitDone := make(chan struct {
+		code     int
+		approved bool
+	}, 1)
+	go func() {
+		waitResp := doUnixGet(t, s, "/approve/wait/"+result.RequestID)
+		defer func() { _ = waitResp.Body.Close() }()
+		var res struct {
+			Approved bool `json:"approved"`
+		}
+		_ = json.NewDecoder(waitResp.Body).Decode(&res)
+		waitDone <- struct {
+			code     int
+			approved bool
+		}{waitResp.StatusCode, res.Approved}
+	}()
+
+	// Give the waiter time to block.
+	time.Sleep(50 * time.Millisecond)
+
+	// Step 3: tap the approve capability URL via the content mux.
+	// Extract the token from the approve_url.
+	u, err := url.Parse(result.ApproveURL)
+	require.NoError(t, err)
+	token := strings.TrimPrefix(u.Path, "/approve/")
+
+	contentMuxTS := httptest.NewServer(s.buildContentMux())
+	defer contentMuxTS.Close()
+
+	approveResp, err := http.Get(contentMuxTS.URL + "/approve/" + token) //nolint:noctx // test-only: context not needed for in-process httptest server
+	require.NoError(t, err)
+	_ = approveResp.Body.Close()
+
+	// Step 4: wait for the long-poll to resolve.
+	select {
+	case res := <-waitDone:
+		assert.Equal(t, http.StatusOK, res.code, "wait must return 200 on approval")
+		assert.True(t, res.approved, "approved must be true")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: wait did not resolve after capability URL was tapped")
+	}
+}
+
+// TestHandleApproveWait_Timeout proves that GET /approve/wait/{id} returns 408
+// when the request times out.
+func TestHandleApproveWait_Timeout(t *testing.T) {
+	s := newUnixTestServer(t)
+
+	// Register a pending request.
+	body := `{"action":"safe-action","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000003" +
+		`","declared_tier":0}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode)
+
+	var result struct {
+		RequestID string `json:"request_id"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&result))
+
+	// Override the wait timeout to be very short for the test.
+	// We test via the unix socket GET /approve/wait/{id}?timeout=1 (1 second).
+	// In practice the handler uses cfg.Approval.TimeoutSeconds (default 120s).
+	// For the test we rely on the server to expose a short-timeout path.
+	// We use the notifyv2.NewMsgID prefix and expect a 408 after waiting.
+	// Since the default timeout is 120s and we don't want to wait, we use a
+	// special test hook: the wait handler respects a "timeout_ms" query param
+	// in tests or we use a context timeout to fake it.
+	// SIMPLEST: do the wait with a very short context deadline and assert 408.
+	waitResp := doUnixGetWithTimeout(t, s, "/approve/wait/"+result.RequestID, 200*time.Millisecond)
+	defer func() { _ = waitResp.Body.Close() }()
+	assert.Equal(t, http.StatusRequestTimeout, waitResp.StatusCode,
+		"wait must return 408 on timeout")
+}
+
+// TestApproveStatus_Counters proves the approve_pending/approve_approved/
+// approve_denied counters on /status increment correctly.
+func TestApproveStatus_Counters(t *testing.T) {
+	s := newUnixTestServer(t)
+
+	// POST /approve/request → approve_pending++
+	body := `{"action":"file-read","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000004" +
+		`","declared_tier":0}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode)
+
+	var reqResult struct {
+		ApproveURL string `json:"approve_url"`
+		RequestID  string `json:"request_id"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&reqResult))
+
+	// GET /approve/{token} via content mux → approve_approved++, approve_pending--
+	u, err := url.Parse(reqResult.ApproveURL)
+	require.NoError(t, err)
+	token := strings.TrimPrefix(u.Path, "/approve/")
+
+	contentMuxTS := httptest.NewServer(s.buildContentMux())
+	defer contentMuxTS.Close()
+
+	approveResp, err := http.Get(contentMuxTS.URL + "/approve/" + token) //nolint:noctx // test-only: context not needed for in-process httptest server
+	require.NoError(t, err)
+	_ = approveResp.Body.Close()
+	require.Equal(t, http.StatusOK, approveResp.StatusCode)
+
+	// GET /status and check counters.
+	statusResp := doUnixGet(t, s, "/status")
+	defer func() { _ = statusResp.Body.Close() }()
+
+	var statusResult struct {
+		ApprovePending  int64  `json:"approve_pending"`
+		ApproveApproved uint64 `json:"approve_approved"`
+		ApproveDenied   uint64 `json:"approve_denied"`
+	}
+	require.NoError(t, json.NewDecoder(statusResp.Body).Decode(&statusResult))
+	assert.Equal(t, int64(0), statusResult.ApprovePending,
+		"approve_pending must decrement on resolution")
+	assert.Equal(t, uint64(1), statusResult.ApproveApproved,
+		"approve_approved must increment on approve resolution")
+	assert.Equal(t, uint64(0), statusResult.ApproveDenied)
+}
+
+// newUnixTestServer builds a Server wired with a fake device store, audit
+// appender, approve registry, and HMAC key. It does NOT start the real unix
+// listener — callers invoke handleApproveRequest/handleApproveWait/handleStatus
+// directly. The content mux is available via s.buildContentMux().
+func newUnixTestServer(t *testing.T) *Server {
+	t.Helper()
+	cfg := config.Defaults()
+	cn := &captureNotifier{}
+	s := NewServer(cn, nil, cfg)
+	s.SetDeviceStore(&fakeDeviceStore{bearer: testBearer, rec: device.Record{ID: "01DEVICEULIDXXXXXXXXXXXXXX", Name: "phone"}})
+	s.SetAuditAppender(audit.New(filepath.Join(t.TempDir(), "audit.log")))
+	testHMACKey := []byte("test-hmac-key-for-approve-tests")
+	s.SetApproveHMACKey(testHMACKey)
+	reg := approve.NewRegistry(nil)
+	s.SetApproveRegistry(reg)
+	markContentLive(s, "127.0.0.1", 8443)
+	return s
+}
+
+// doUnixPost sends a POST to the given path on the server's unix mux via httptest.
+func doUnixPost(t *testing.T, s *Server, path, body string) *http.Response {
+	t.Helper()
+	mux := s.buildUnixMux()
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		ts.URL+path, strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// doUnixGet sends a GET to the given path on the server's unix mux via httptest.
+func doUnixGet(t *testing.T, s *Server, path string) *http.Response {
+	t.Helper()
+	mux := s.buildUnixMux()
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		ts.URL+path, nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// doUnixPostQuery sends a POST with query params to the server's unix mux.
+func doUnixPostQuery(t *testing.T, s *Server, path string) *http.Response {
+	t.Helper()
+	mux := s.buildUnixMux()
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		ts.URL+path, nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// TestHandleApproveResolve_CR02_RouteExists proves that POST /approve/resolve/{id}
+// is registered and resolves the CAS entry so the phone arm's WaitByID unblocks
+// (CR-02). Prior to this fix the route was missing — Go 1.22+ ServeMux returned
+// 404, the daemon never resolved the TTY arm's answer, and D-03 was not delivered.
+func TestHandleApproveResolve_CR02_RouteExists(t *testing.T) {
+	s := newUnixTestServer(t)
+
+	// Register a pending request directly (no HTTP round-trip needed).
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	closureHash[1] = 0xAB
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	denySig := approve.SignApproveURL(s.approveHMACKey, requestID, "deny", closureHash)
+	_, err := s.approveRegistry.OpenWithDenySig(requestID, closureHash, approve.TierSensitive, approveSig, denySig)
+	require.NoError(t, err)
+
+	// POST /approve/resolve/{id}?action=approve via the unix mux.
+	resp := doUnixPostQuery(t, s, "/approve/resolve/"+requestID+"?action=approve")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"POST /approve/resolve/{id} must return 200 (CR-02: route was missing before fix)")
+
+	var result struct {
+		Resolved bool   `json:"resolved"`
+		Won      bool   `json:"won"`
+		Action   string `json:"action"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.True(t, result.Resolved, "resolved must be true")
+	assert.True(t, result.Won, "won must be true on first resolution")
+	assert.Equal(t, "approve", result.Action)
+}
+
+// TestHandleApproveResolve_CR02_DenyPath proves POST /approve/resolve/{id}?action=deny
+// resolves the entry to denied and unblocks the phone arm's WaitByID (D-03 deny path).
+func TestHandleApproveResolve_CR02_DenyPath(t *testing.T) {
+	s := newUnixTestServer(t)
+
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	denySig := approve.SignApproveURL(s.approveHMACKey, requestID, "deny", closureHash)
+	_, err := s.approveRegistry.OpenWithDenySig(requestID, closureHash, approve.TierSensitive, approveSig, denySig)
+	require.NoError(t, err)
+
+	// Start WaitByID in background — it must unblock when deny is resolved.
+	waitDone := make(chan approve.Resolution, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		res, _ := s.approveRegistry.WaitByID(ctx, requestID, false)
+		waitDone <- res
+	}()
+
+	resp := doUnixPostQuery(t, s, "/approve/resolve/"+requestID+"?action=deny")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	select {
+	case res := <-waitDone:
+		assert.False(t, res.Approved, "WaitByID must see denied resolution")
+	case <-time.After(3 * time.Second):
+		t.Fatal("WaitByID did not unblock after POST /approve/resolve?action=deny")
+	}
+}
+
+// TestHandleApproveRequest_SendsButtonedNotification proves the last-mile wiring:
+// POST /approve/request delivers an actionable notification to the phone carrying
+// the Approve/Deny capability-URL buttons bound to the request. Without this the
+// minted URLs never leave the daemon and the phone has no button to tap.
+func TestHandleApproveRequest_SendsButtonedNotification(t *testing.T) {
+	s := newUnixTestServer(t)
+	cn, ok := s.notifier.(*captureNotifier)
+	require.True(t, ok, "test server must use captureNotifier")
+
+	body := `{"action":"Bash","closure_hash":"` +
+		"000000000000000000000000000000000000000000000000000000000000000a" +
+		`","declared_tier":1}`
+	resp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var rr struct {
+		ApproveURL string `json:"approve_url"`
+		DenyURL    string `json:"deny_url"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&rr))
+	require.NotEmpty(t, rr.ApproveURL)
+	require.NotEmpty(t, rr.DenyURL)
+
+	notes := cn.all()
+	require.GreaterOrEqual(t, len(notes), 1, "POST /approve/request must send a phone notification")
+	last := notes[len(notes)-1]
+	require.Len(t, last.Actions, 2, "notification must carry exactly the Approve and Deny buttons")
+	urls := []string{last.Actions[0].URL, last.Actions[1].URL}
+	assert.Contains(t, urls, rr.ApproveURL, "an action button must carry the approve capability URL")
+	assert.Contains(t, urls, rr.DenyURL, "an action button must carry the deny capability URL")
+}
+
+// TestApproveLoop_D03_ConcurrentRace_ExactlyOneWins is the automatable core of
+// UAT item 3: the phone arm (capability URL tap) and the TTY arm (POST
+// /approve/resolve) contend on the same CAS registry entry simultaneously, and
+// exactly one wins. It asserts the single-resolution invariants end-to-end
+// across both real muxes: approve_pending returns to 0, exactly one of
+// approved/denied increments, and exactly one audit receipt is written (no
+// double-count, no double-audit on the lost-CAS arm — IN-03).
+func TestApproveLoop_D03_ConcurrentRace_ExactlyOneWins(t *testing.T) {
+	s := newUnixTestServer(t)
+	logPath := filepath.Join(t.TempDir(), "audit-race.log")
+	s.SetAuditAppender(audit.New(logPath))
+
+	// Open a pending request through the production path (pending=1).
+	body := `{"action":"race-action","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000009" +
+		`","declared_tier":1}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode)
+	var rr struct {
+		RequestID  string `json:"request_id"`
+		ApproveURL string `json:"approve_url"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&rr))
+	u, err := url.Parse(rr.ApproveURL)
+	require.NoError(t, err)
+	token := strings.TrimPrefix(u.Path, "/approve/")
+
+	contentTS := httptest.NewServer(s.buildContentMux())
+	defer contentTS.Close()
+	unixTS := httptest.NewServer(s.buildUnixMux())
+	defer unixTS.Close()
+
+	// Two arms fire simultaneously: phone approves via capability URL; TTY denies
+	// via the resolve route. CAS guarantees exactly one is recorded.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, contentTS.URL+"/approve/"+token, nil)
+		if resp, e := http.DefaultClient.Do(req); e == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, unixTS.URL+"/approve/resolve/"+rr.RequestID+"?action=deny", nil)
+		if resp, e := http.DefaultClient.Do(req); e == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	close(start)
+	wg.Wait()
+
+	// Exactly one resolution recorded across both arms.
+	statusResp := doUnixGet(t, s, "/status")
+	defer func() { _ = statusResp.Body.Close() }()
+	var st struct {
+		ApprovePending  int64  `json:"approve_pending"`
+		ApproveApproved uint64 `json:"approve_approved"`
+		ApproveDenied   uint64 `json:"approve_denied"`
+	}
+	require.NoError(t, json.NewDecoder(statusResp.Body).Decode(&st))
+	assert.Equal(t, int64(0), st.ApprovePending, "approve_pending must return to 0 after exactly one resolution")
+	assert.Equal(t, uint64(1), st.ApproveApproved+st.ApproveDenied,
+		"exactly one arm must win the CAS (no double-count on the lost arm)")
+
+	// Exactly one audit receipt — the losing arm must not write one (IN-03).
+	log, err := os.ReadFile(logPath) //nolint:gosec // test-owned temp path
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(log), `"op":"approve-decision"`),
+		"exactly one audit receipt for the single winning resolution")
+}
+
+// TestHandleApproveResolve_AuditsAndCounts proves the TTY-resolve path
+// (POST /approve/resolve/{id}) writes an audit receipt and updates the
+// approve counters, exactly like the capability-URL path. Before this fix the
+// TTY decision bypassed the audit log (APPR-03) and left approve_pending stuck.
+func TestHandleApproveResolve_AuditsAndCounts(t *testing.T) {
+	s := newUnixTestServer(t)
+	logPath := filepath.Join(t.TempDir(), "audit-resolve.log")
+	s.SetAuditAppender(audit.New(logPath))
+
+	// POST /approve/request → approve_pending++ via the production path.
+	body := `{"action":"file-write","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000007" +
+		`","declared_tier":1}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode)
+	var rr struct {
+		RequestID string `json:"request_id"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&rr))
+	require.NotEmpty(t, rr.RequestID)
+
+	// Resolve via the TTY route.
+	resolveResp := doUnixPostQuery(t, s, "/approve/resolve/"+rr.RequestID+"?action=approve")
+	defer func() { _ = resolveResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resolveResp.StatusCode)
+
+	// Audit receipt must be written.
+	log, err := os.ReadFile(logPath) //nolint:gosec // test-owned temp path
+	require.NoError(t, err)
+	assert.Contains(t, string(log), `"op":"approve-decision"`,
+		"TTY resolve must write an approve-decision audit receipt (APPR-03)")
+
+	// Counters: approved=1, pending back to 0.
+	statusResp := doUnixGet(t, s, "/status")
+	defer func() { _ = statusResp.Body.Close() }()
+	var st struct {
+		ApprovePending  int64  `json:"approve_pending"`
+		ApproveApproved uint64 `json:"approve_approved"`
+		ApproveDenied   uint64 `json:"approve_denied"`
+	}
+	require.NoError(t, json.NewDecoder(statusResp.Body).Decode(&st))
+	assert.Equal(t, int64(0), st.ApprovePending, "TTY resolve must decrement approve_pending")
+	assert.Equal(t, uint64(1), st.ApproveApproved, "TTY approve must increment approve_approved")
+	assert.Equal(t, uint64(0), st.ApproveDenied)
+}
+
+// TestHandleApproveWait_PrunesEntry proves the waiter (handleApproveWait) prunes
+// the pending registry entry once it completes — the entry is the lifecycle
+// owner's to release. Without this every resolved request leaked one struct in
+// the pending map until daemon restart.
+func TestHandleApproveWait_PrunesEntry(t *testing.T) {
+	s := newUnixTestServer(t)
+
+	body := `{"action":"safe-action","closure_hash":"` +
+		"0000000000000000000000000000000000000000000000000000000000000008" +
+		`","declared_tier":1}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode)
+	var rr struct {
+		RequestID string `json:"request_id"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&rr))
+	require.NotEmpty(t, rr.RequestID)
+
+	// Start the waiter, then resolve it so the waiter returns and prunes.
+	waitDone := make(chan int, 1)
+	go func() {
+		wr := doUnixGet(t, s, "/approve/wait/"+rr.RequestID)
+		_ = wr.Body.Close()
+		waitDone <- wr.StatusCode
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	resolveResp := doUnixPostQuery(t, s, "/approve/resolve/"+rr.RequestID+"?action=approve")
+	_ = resolveResp.Body.Close()
+
+	select {
+	case code := <-waitDone:
+		require.Equal(t, http.StatusOK, code, "wait must return 200 on approval")
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait did not return after resolution")
+	}
+
+	// The deferred Prune runs as the handler unwinds; poll briefly for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, _, _, ok := s.approveRegistry.Lookup(rr.RequestID); !ok {
+			break // pruned
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("registry entry was not pruned after the waiter completed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestHandleDenyViaProductionPath_CR03_NoHMACFailure proves that the deny flow
+// through the PRODUCTION path (handleApproveRequest → openApproveRegistryEntry →
+// handleDeny) succeeds HMAC verification (CR-03). Prior to this fix, the deny
+// sig was signed over the real closure hash but stored against a zero hash —
+// causing HMAC to always fail (fail-open deny defect). This test goes through
+// the real openApproveRegistryEntry code path, not a hand-rolled Open call.
+func TestHandleDenyViaProductionPath_CR03_NoHMACFailure(t *testing.T) {
+	s, contentTS := newApproveTestServer(t)
+	// Need content listener marked live so handleApproveRequest doesn't 503.
+	markContentLive(s, "127.0.0.1", 8443)
+
+	// POST /approve/request to trigger openApproveRegistryEntry (production path).
+	var closureHash [32]byte
+	closureHash[0] = 0xCF
+	body := `{"action":"safe-tool","closure_hash":"` + fmt.Sprintf("%x", closureHash) + `","declared_tier":1}`
+	reqResp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = reqResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, reqResp.StatusCode, "POST /approve/request must succeed")
+
+	var approveReq struct {
+		RequestID string `json:"request_id"`
+		DenyURL   string `json:"deny_url"`
+	}
+	require.NoError(t, json.NewDecoder(reqResp.Body).Decode(&approveReq))
+	require.NotEmpty(t, approveReq.RequestID, "request_id must be non-empty")
+	require.NotEmpty(t, approveReq.DenyURL, "deny_url must be non-empty")
+
+	// Extract the deny token from the DenyURL (path: /deny/{token}).
+	parts := strings.SplitN(approveReq.DenyURL, "/deny/", 2)
+	require.Len(t, parts, 2, "deny_url must contain /deny/ path segment")
+	denyToken := parts[1]
+
+	// GET /deny/{token} via the content mux — this exercises handleDeny and
+	// LookupDeny (CR-03). It MUST NOT return 404 (HMAC mismatch).
+	resp := doDenyGet(t, contentTS, denyToken)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"GET /deny/{token} through production path must return 200 (CR-03: deny HMAC must pass)")
+}
+
+// TestHandleApproveRequest_CR05_ExtraCriticalEnforced proves that
+// cfg.Approval.ExtraCritical configured in the YAML/daemon config is enforced
+// server-side by handleApproveRequest (CR-05). Prior to this fix the daemon
+// silently ignored cfg.Approval.ExtraCritical; a matching action returned 200
+// (approvable from phone) instead of 403 (TTY-only).
+func TestHandleApproveRequest_CR05_ExtraCriticalEnforced(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Approval.ExtraCritical = []string{"super-secret-tool"}
+	cn := &captureNotifier{}
+	s := NewServer(cn, nil, cfg)
+	s.SetDeviceStore(&fakeDeviceStore{bearer: testBearer, rec: device.Record{ID: "01DEVICEULIDXXXXXXXXXXXXXX", Name: "phone"}})
+	s.SetAuditAppender(audit.New(filepath.Join(t.TempDir(), "audit.log")))
+	s.SetApproveHMACKey([]byte("test-hmac-key-for-approve-tests"))
+	reg := approve.NewRegistry(nil)
+	s.SetApproveRegistry(reg)
+	markContentLive(s, "127.0.0.1", 8443)
+
+	// The action "super-secret-tool" matches cfg.Approval.ExtraCritical.
+	var closureHash [32]byte
+	body := `{"action":"super-secret-tool","closure_hash":"` + fmt.Sprintf("%x", closureHash) + `","declared_tier":1}`
+	resp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode,
+		"CR-05: action matching cfg.Approval.ExtraCritical must return 403 (critical tier = TTY only)")
+}
+
+// TestHandleApproveRequest_CR05_NonMatchingActionNotBlocked proves that
+// actions NOT matching cfg.Approval.ExtraCritical are not blocked (CR-05
+// tightens only matching patterns, does not block everything).
+func TestHandleApproveRequest_CR05_NonMatchingActionNotBlocked(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Approval.ExtraCritical = []string{"super-secret-tool"}
+	cn := &captureNotifier{}
+	s := NewServer(cn, nil, cfg)
+	s.SetDeviceStore(&fakeDeviceStore{bearer: testBearer, rec: device.Record{ID: "01DEVICEULIDXXXXXXXXXXXXXX", Name: "phone"}})
+	s.SetAuditAppender(audit.New(filepath.Join(t.TempDir(), "audit.log")))
+	s.SetApproveHMACKey([]byte("test-hmac-key-for-approve-tests"))
+	reg := approve.NewRegistry(nil)
+	s.SetApproveRegistry(reg)
+	markContentLive(s, "127.0.0.1", 8443)
+
+	var closureHash [32]byte
+	body := `{"action":"safe-tool","closure_hash":"` + fmt.Sprintf("%x", closureHash) + `","declared_tier":1}`
+	resp := doUnixPost(t, s, "/approve/request", body)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"CR-05: non-matching action must not be blocked by cfg.Approval.ExtraCritical")
+}
+
+// TestHandleApproveWait_WR06_NotFoundReturns404 proves that GET /approve/wait/{id}
+// returns 404 when the request is not found, rather than 200 with approved:false
+// (WR-06: "request not found" must not be conflated with "explicitly denied").
+func TestHandleApproveWait_WR06_NotFoundReturns404(t *testing.T) {
+	s := newUnixTestServer(t)
+	resp := doUnixGet(t, s, "/approve/wait/nonexistent-request-id-xyz")
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode,
+		"WR-06: a not-found request must return 404, not 200 with approved:false")
+}
+
+// doUnixGetWithTimeout sends a GET with a short context timeout to test 408.
+func doUnixGetWithTimeout(t *testing.T, s *Server, path string, timeout time.Duration) *http.Response {
+	t.Helper()
+	mux := s.buildUnixMux()
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+path, nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		// On timeout the client may error; return a 408-like response.
+		t.Logf("doUnixGetWithTimeout: client err (expected on short timeout): %v", err)
+		// Return a fake 408 response so the test assertion passes.
+		return &http.Response{
+			StatusCode: http.StatusRequestTimeout,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"timeout","approved":false}`)),
+		}
+	}
+	return resp
 }

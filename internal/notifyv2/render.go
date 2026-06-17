@@ -21,19 +21,24 @@ import (
 	"unicode/utf8"
 )
 
+// RenderedAction carries one ntfy action button. The URL is a 256-bit
+// single-use capability token — never log it, never persist it. Phase 30
+// populates this for KindApprovalRequest messages (D-18 un-dropped).
+type RenderedAction struct {
+	Label string // "Approve" or "Deny"
+	URL   string // single-use capability URL — NEVER logged
+}
+
 // RenderedNote is the string output of Render: everything the ntfy delivery
 // path (internal/modules/notify) needs to compose a request. Header names
 // live in the delivery module — this package produces strings only.
-//
-// There is deliberately no actions field: Message.Actions are typed and
-// validated on the wire but dropped by this renderer until Phase 30 wires
-// /approve (D-18 — no dead buttons).
 type RenderedNote struct {
 	Title    string
 	Body     string
 	Priority string
 	Tags     string
 	Click    string
+	Actions  []RenderedAction // nil unless KindApprovalRequest with populated Actions[]
 }
 
 // RenderOpts carries display-only enrichment the caller resolved out-of-band
@@ -85,16 +90,39 @@ const (
 // Render produces the ntfy representation of m. Pure function: no I/O, no
 // logging, no mutation.
 //
-// Message.Actions are deliberately not rendered (D-18): typed and validated
-// on the wire today, surfaced as buttons only when Phase 30 wires /approve.
+// For KindApprovalRequest messages with populated Actions[], the returned
+// RenderedNote.Actions carries one RenderedAction per action button. The ntfy
+// delivery module translates these to X-Actions: headers (D-18 un-dropped,
+// Phase 30).
 func Render(m Message, opts RenderOpts) RenderedNote {
-	return RenderedNote{
+	note := RenderedNote{
 		Title:    renderTitle(m),
 		Body:     renderBody(m, opts),
 		Priority: priorityFor(m),
 		Tags:     kindTags[m.Kind],
 		Click:    opts.Click, // D-16: verbatim passthrough; empty stays empty
 	}
+	if m.Kind == KindApprovalRequest && len(m.Actions) > 0 {
+		note.Actions = renderActions(m.Actions)
+	}
+	return note
+}
+
+// renderActions maps Message.Actions to []RenderedAction for the ntfy
+// X-Actions: header. Only actions with a non-empty URL are included — an
+// action without a URL cannot produce a working button (D-18).
+func renderActions(actions []Action) []RenderedAction {
+	out := make([]RenderedAction, 0, len(actions))
+	for _, a := range actions {
+		if a.URL == "" {
+			continue // no capability URL yet — omit the button (D-18 no dead buttons)
+		}
+		out = append(out, RenderedAction{Label: a.Label, URL: a.URL})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // fallbackTitle is the BACK-08 guarantee: a push wake must NEVER render an
@@ -141,6 +169,18 @@ func renderTitle(m Message) string {
 // to tmux literal forms) so pane content cannot reach this function through a
 // validated message. Callers must Validate before Render.
 func renderBody(m Message, opts RenderOpts) string {
+	// KindApprovalRequest gets a clean, human-facing body for the phone approval
+	// card — not the developer "kind:/host:/ids:" dump. The actionable choice is
+	// the Approve/Deny buttons; the body never includes those literal words (the
+	// anti-leak guard TestRender_ActionsDropped_NoURL asserts button text never
+	// bleeds into the text fields).
+	if m.Kind == KindApprovalRequest {
+		if h := strings.TrimSpace(m.Host); h != "" {
+			return "Permission requested on " + h + ". Respond from your phone."
+		}
+		return "Permission requested. Respond from your phone."
+	}
+
 	var lines []string
 
 	var crumb []string

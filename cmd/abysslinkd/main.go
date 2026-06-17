@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	bbolt "go.etcd.io/bbolt"
 	"tailscale.com/client/local"
 
+	"github.com/abysslink/abysslink/internal/approve"
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
@@ -66,12 +68,15 @@ func (d directNotifier) Send(ctx context.Context, title, body string) error {
 
 // SendNote delivers a pre-rendered v2 note via the module's direct backend on
 // the same per-rig topic with the same keychain credentials (D-20: no
-// transport changes beyond the X-Click leg).
+// transport changes beyond the X-Click leg). For KindApprovalRequest messages,
+// n.Actions is bridged to SendOptions.Actions so the ntfy delivery module
+// emits the X-Actions: header with Approve/Deny buttons (Phase 30, D-18).
 func (d directNotifier) SendNote(ctx context.Context, n notifyv2.RenderedNote) error {
 	return d.m.SendDirectWithOptions(ctx, n.Title, n.Body, notify.SendOptions{
 		Priority: n.Priority,
 		Tags:     n.Tags,
 		Click:    n.Click,
+		Actions:  n.Actions,
 	})
 }
 
@@ -143,12 +148,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Base/gated runner split (D-38, D-40): module/consumer execs flow through
-	// the observe-only gate decorator; daemon-internal plumbing keeps the
-	// ungated base runner — see the D-40 comment at daemon.NewServer below.
-	base := &shell.ExecRunner{}
-	gated := gate.New(base)
-
+	// Config is loaded first so gate and approve wiring can read cfg.Gate.Enforcing
+	// and cfg.Approval before anything else is built (CR-01, CR-04).
 	cfg, err := config.Load(configPath())
 	if err != nil {
 		slog.Error("abysslinkd: invalid config — refusing to start", "err", err)
@@ -165,6 +166,35 @@ func main() {
 	if cfg.Gateway.FCM.Enabled {
 		slog.Warn("abysslinkd: FCM push leg is EXPERIMENTAL — disabled by default (D-14); ensure GCP service-account credentials are configured")
 	}
+
+	// CR-01: build the approve registry before the gated runner so both share
+	// the same *approve.Registry instance. The registry is injected into the
+	// daemon server via wireApproveDeps (below) and into the gated runner via
+	// gate.WithEnforcing when cfg.Gate.Enforcing is true (CR-04).
+	approveReg := approve.NewRegistry(nil)
+
+	// Base/gated runner split (D-38, D-40): module/consumer execs flow through
+	// the observe-only gate decorator; daemon-internal plumbing keeps the
+	// ungated base runner — see the D-40 comment at daemon.NewServer below.
+	//
+	// CR-04: enforcing mode is gated on cfg.Gate.Enforcing (default false per
+	// D-04). The same *approve.Registry from CR-01 is shared.
+	//
+	// LIMITATION (CR-04): enforcing mode blocks all execs with ErrApprovalRequired
+	// unless the caller threads an ApprovalToken into the exec context via
+	// gate.WithApprovalToken. The full token-threading path (approve loop →
+	// receive token → re-inject into exec ctx) is not yet wired end-to-end for
+	// module/consumer execs. Until it is, cfg.Gate.Enforcing=true will reject ALL
+	// module execs — only set it when the token-threading path is complete.
+	// The flag defaults false; enabling it intentionally is the operator's
+	// explicit choice. See Phase 31 for the full token path.
+	base := &shell.ExecRunner{}
+	gateOpts := []gate.Option{}
+	if cfg.Gate.Enforcing {
+		gateOpts = append(gateOpts, gate.WithEnforcing(approveReg))
+		slog.Warn("abysslinkd: gate enforcing mode ENABLED — all module execs require an ApprovalToken in ctx (Phase 31 token-threading path incomplete; use with caution)")
+	}
+	gated := gate.New(base, gateOpts...)
 
 	kc, kerr := secrets.NewStore(ctx, gated)
 	if kerr != nil {
@@ -196,6 +226,13 @@ func main() {
 	// visible right here in the wiring — and not runtime-toggleable.
 	srv := daemon.NewServer(directNotifier{m: nm}, base, cfg)
 	srv.SetExecCounter(gated.Count)
+
+	// CR-01: wire the approve registry and HMAC key into the daemon server.
+	// The registry is the same instance threaded into the gated runner above.
+	// The HMAC key is read from the keychain (reusing the audit-hmac key per
+	// SetApproveHMACKey doc). Fail-soft: if the keychain is absent, capability
+	// URLs still work; the HMAC layer (D-16 defense-in-depth) is just absent.
+	wireApproveDeps(ctx, srv, approveReg, kc)
 
 	// Phase 28 content listener deps (BACK-06/BACK-07): the enrolled-device
 	// store (bearer gate + /status devices block), the audit appender for
@@ -332,6 +369,47 @@ func wireContentDeps(srv *daemon.Server, cfg *config.Config, kc secrets.Keychain
 	srv.SetAuditAppender(aud)
 	srv.SetContentTLS(contentTLSProvider(cfg))
 	return devStore
+}
+
+// wireApproveDeps injects the Phase 30 approve registry and HMAC key into the
+// daemon server (CR-01). The registry is the same instance shared with the gated
+// runner (so the gate enforcing check and the IPC approve/wait handlers operate
+// on the same in-memory state). The HMAC key is read from the keychain — the
+// same "abysslink"/"audit-hmac" key SignedAudit uses — and injected for D-16
+// capability-URL integrity verification. Fails soft: a missing keychain or an
+// absent/malformed key is logged and skipped; the approve routes still work,
+// they just lack the HMAC defense-in-depth layer.
+func wireApproveDeps(ctx context.Context, srv *daemon.Server, reg *approve.Registry, kc secrets.KeychainStore) {
+	srv.SetApproveRegistry(reg)
+	if kc == nil {
+		slog.Warn("abysslinkd: keychain unavailable — approve HMAC key not wired (D-16 defense-in-depth absent)")
+		return
+	}
+	key, err := loadApproveHMACKey(ctx, kc)
+	if err != nil {
+		slog.Warn("abysslinkd: approve HMAC key unavailable — capability-URL integrity check disabled (D-16 defense-in-depth absent)", "err", err)
+		return
+	}
+	srv.SetApproveHMACKey(key)
+	slog.Info("abysslinkd: approve registry and HMAC key wired (Phase 30 phone-approve loop active)")
+}
+
+// loadApproveHMACKey loads and hex-decodes the audit-hmac key from the
+// keychain. It uses the same service/account as internal/audit.SignedAudit
+// ("abysslink"/"audit-hmac") per the SetApproveHMACKey doc.
+func loadApproveHMACKey(ctx context.Context, kc secrets.KeychainStore) ([]byte, error) {
+	hexKey, err := kc.Get(ctx, "abysslink", "audit-hmac")
+	if err != nil {
+		return nil, fmt.Errorf("keychain get abysslink/audit-hmac: %w", err)
+	}
+	key, err := hex.DecodeString(hexKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode audit-hmac key: %w", err)
+	}
+	if len(key) == 0 {
+		return nil, fmt.Errorf("audit-hmac key is empty")
+	}
+	return key, nil
 }
 
 // contentTLSProvider returns the content listener's TLS provider: the
