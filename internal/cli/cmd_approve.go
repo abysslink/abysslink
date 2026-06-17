@@ -275,12 +275,20 @@ func runApproveCheck(ctx context.Context, blocking bool) error {
 // Per #12176 workaround: must return within ~1s. Strategy: fire notification
 // asynchronously (goroutine) and immediately return allow JSON to stdout.
 // The PreToolUse hook (--check) is the actual blocking gate.
+//
+// WR-05: on a stdin read error the fast-allow path is skipped (do NOT emit
+// allow on an input failure — a security tool must not default-allow on error).
+// The PreToolUse --check gate is the authoritative blocking path; when stdin
+// is unreadable, the safest response is to not allow and let Claude's default
+// behaviour stand. We return nil (exit 0) so Claude Code does not treat it as
+// an unexpected hook failure, but we write no allow JSON.
 func runApprovePermissionRequest(ctx context.Context) error {
 	// Read stdin — the PermissionRequest hook JSON.
 	stdinBytes, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		slog.Warn("approve: read PermissionRequest stdin", "err", err)
-		// Fall through — still write allow JSON (non-blocking path)
+		// WR-05: do NOT fall through to allow — emit no allow JSON on read error.
+		slog.Warn("approve: read PermissionRequest stdin failed — not emitting allow (WR-05)", "err", err)
+		return nil // exit 0; Claude's default stands; PreToolUse --check is the real gate
 	}
 
 	var input permissionRequestInput
@@ -418,7 +426,7 @@ func promptTTY(ctx context.Context, sockPath, requestID, toolName string) bool {
 
 	// Resolve the same CAS registry entry via the daemon so the phone arm's
 	// concurrent WaitByID unblocks — CAS ensures only the first answer wins.
-	// The /approve/resolve/{id} endpoint accepts action=approve or action=deny.
+	// The POST /approve/resolve/{id} endpoint was added in CR-02.
 	resolveAction := "deny"
 	if approved {
 		resolveAction = "approve"
@@ -426,11 +434,28 @@ func promptTTY(ctx context.Context, sockPath, requestID, toolName string) bool {
 	resolveURL := "http://unix/approve/resolve/" + requestID + "?action=" + resolveAction
 	hc := daemonHTTPClient(sockPath, approveDialTimeout)
 	resolveReq, err := http.NewRequestWithContext(ctx, http.MethodPost, resolveURL, nil)
-	if err == nil {
-		resp, doErr := hc.Do(resolveReq)
-		if doErr == nil {
-			defer func() { _ = resp.Body.Close() }()
-		}
+	if err != nil {
+		// CR-02: a failed resolve means the daemon-side entry was NOT resolved.
+		// This should never happen (it's a URL-build failure), but if it does we
+		// return false (deny) rather than falsely claiming the action was approved.
+		slog.Warn("approve: build resolve request failed — denying", "err", err)
+		return false
+	}
+	resp, doErr := hc.Do(resolveReq)
+	if doErr != nil {
+		// CR-02: a failed resolve POST means the daemon may not have resolved the
+		// entry. To preserve the first-answer-wins invariant, log and return the
+		// LOCAL decision — the phone arm will time out and the registry entry will
+		// eventually be pruned. This is fail-closed: a deny local answer that
+		// fails to propagate leaves the phone waiting; an approve that fails to
+		// propagate results in a timeout deny on the phone arm (safe).
+		slog.Warn("approve: POST /approve/resolve failed — local answer may not unblock phone arm", "err", doErr)
+		return approved
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Warn("approve: POST /approve/resolve returned non-2xx", "status", resp.StatusCode)
+		// Return local decision but note the phone arm may still be blocking.
 	}
 	return approved
 }

@@ -549,15 +549,38 @@ func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, 
 // opens the URL in a browser on the phone — docs.ntfy.sh/publish/#action-buttons).
 // URLs are single-use capability tokens — they are placed in the header and
 // NEVER logged. Returns "" when actions is empty.
+//
+// WR-03: ntfy parses X-Actions on "," (field separator) and ";" (action
+// separator). Labels and URLs that contain these delimiters — or control
+// characters — could inject extra action buttons or corrupt the header on
+// wire-controllable v2 payloads. safeActionField rejects unsafe characters;
+// an action whose label or URL fails the check is silently skipped.
 func buildActionsHeader(actions []notifyv2.RenderedAction) string {
 	if len(actions) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(actions))
 	for _, a := range actions {
+		if !safeActionField(a.Label) || !safeActionField(a.URL) {
+			slog.Warn("notify: skipping action with unsafe label/URL (delimiter-injection guard, WR-03)")
+			continue
+		}
 		parts = append(parts, "view, "+a.Label+", "+a.URL)
 	}
 	return strings.Join(parts, "; ")
+}
+
+// safeActionField reports whether s is safe for inclusion in an ntfy X-Actions
+// header field. It rejects any string containing "," ";" or control characters
+// (bytes < 0x20 or == 0x7f) to prevent delimiter injection (WR-03).
+func safeActionField(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == ',' || b == ';' || b < 0x20 || b == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // encodeNtfyHeader returns s unchanged when it is pure printable ASCII;
