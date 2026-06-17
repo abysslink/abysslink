@@ -513,21 +513,22 @@ func TestSendMessage_DaemonRejection_SurfacesError(t *testing.T) {
 	assert.Zero(t, directHits, "a daemon rejection must NOT fall back to direct delivery")
 }
 
-// TestBuildActionsHeader_HTTPGetSilentTap pins the approve/deny button UX: each
-// action is an ntfy "http" action with method=GET (the /approve|/deny routes are
-// GET-only) and clear=true (dismiss the notification on a successful tap) — so a
-// tap resolves the request silently in the background instead of opening a browser.
-func TestBuildActionsHeader_HTTPGetSilentTap(t *testing.T) {
+// TestBuildActionsHeader_ViewOpensURL pins the approve/deny button UX: each
+// action is an ntfy "view" action (opens the capability URL on tap — portable to
+// iOS, where background "http" actions are unreliable) with clear=true to dismiss
+// the notification once tapped. The daemon serves an HTML confirmation page at the
+// URL, so the tap resolves the request and shows a result.
+func TestBuildActionsHeader_ViewOpensURL(t *testing.T) {
 	h := buildActionsHeader([]notifyv2.RenderedAction{
 		{Label: "Approve", URL: "https://rig.ts.net:2587/approve/ablk_ok_x"},
 		{Label: "Deny", URL: "https://rig.ts.net:2587/deny/ablk_no_y"},
 	})
 	assert.Equal(t,
-		"http, Approve, https://rig.ts.net:2587/approve/ablk_ok_x, method=GET, clear=true; "+
-			"http, Deny, https://rig.ts.net:2587/deny/ablk_no_y, method=GET, clear=true",
+		"view, Approve, https://rig.ts.net:2587/approve/ablk_ok_x, clear=true; "+
+			"view, Deny, https://rig.ts.net:2587/deny/ablk_no_y, clear=true",
 		h)
-	// No "view" action (would open a browser to raw JSON — bad UX).
-	assert.NotContains(t, h, "view,")
+	// No "http" background action (unreliable on iOS).
+	assert.NotContains(t, h, "http,")
 }
 
 // TestBuildActionsHeader_DropsUnsafe keeps the WR-03 delimiter-injection guard:
@@ -538,5 +539,5 @@ func TestBuildActionsHeader_DropsUnsafe(t *testing.T) {
 		{Label: "Deny", URL: "https://rig.ts.net/deny/y"},
 	})
 	assert.NotContains(t, h, "Ap;prove", "label with a ';' delimiter must be dropped")
-	assert.Contains(t, h, "http, Deny,", "safe action must survive")
+	assert.Contains(t, h, "view, Deny,", "safe action must survive")
 }

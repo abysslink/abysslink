@@ -545,14 +545,14 @@ func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, 
 }
 
 // buildActionsHeader composes the ntfy X-Actions: header value from
-// RenderedActions. Each entry becomes an ntfy "http" action that fires a
-// background GET to the single-use capability URL on tap — no browser opens,
-// the request resolves silently, and clear=true dismisses the notification on
-// success (docs.ntfy.sh/publish/#action-buttons). The /approve|/deny routes are
-// GET-only, so method=GET is REQUIRED (ntfy http actions default to POST). http
-// actions fire only on an explicit tap (no link-preview pre-fetch), so the
-// single-use token is safe. URLs are placed in the header and NEVER logged.
-// Returns "" when actions is empty.
+// RenderedActions. Each entry becomes an ntfy "view" action that OPENS the
+// single-use capability URL on tap (docs.ntfy.sh/publish/#action-buttons), and
+// clear=true dismisses the notification once tapped. We use "view" (not "http")
+// deliberately: ntfy's iOS app does not reliably fire background "http" actions,
+// so a "view" that opens the URL in Safari is the portable choice — and the
+// daemon serves a clean HTML confirmation page at /approve|/deny so the tap
+// resolves the request AND shows the user a result. URLs are placed in the
+// header and NEVER logged. Returns "" when actions is empty.
 //
 // WR-03: ntfy parses X-Actions on "," (field separator) and ";" (action
 // separator). Labels and URLs that contain these delimiters — or control
@@ -569,7 +569,7 @@ func buildActionsHeader(actions []notifyv2.RenderedAction) string {
 			slog.Warn("notify: skipping action with unsafe label/URL (delimiter-injection guard, WR-03)")
 			continue
 		}
-		parts = append(parts, "http, "+a.Label+", "+a.URL+", method=GET, clear=true")
+		parts = append(parts, "view, "+a.Label+", "+a.URL+", clear=true")
 	}
 	return strings.Join(parts, "; ")
 }

@@ -1302,6 +1302,54 @@ func doDenyGet(t *testing.T, ts *httptest.Server, token string) *http.Response {
 // TestHandleApprove_CrossKind404 proves the BACK-09 invariant applied to
 // kindApprove/kindDeny: GET /approve/{denyToken} returns 404 without burning
 // the deny token (T-30-08).
+// TestHandleApprove_HTMLPageForBrowser proves the phone tap (ntfy view action →
+// Safari, Accept: text/html) gets a styled HTML confirmation page that resolves
+// the request — not raw JSON — and never echoes the capability token.
+func TestHandleApprove_HTMLPageForBrowser(t *testing.T) {
+	s, ts := newApproveTestServer(t)
+	requestID := notifyv2.NewMsgID()
+	var closureHash [32]byte
+	closureHash[0] = 0xAB
+	approveSig := approve.SignApproveURL(s.approveHMACKey, requestID, "approve", closureHash)
+	_, err := s.approveRegistry.Open(requestID, closureHash, approve.TierSensitive, approveSig)
+	require.NoError(t, err)
+	token, _ := s.content.mintApprove(requestID, 150*time.Second)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/approve/"+token, nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "<html", "browser must get an HTML document")
+	assert.Contains(t, string(body), "Approved", "page must confirm the result")
+	assert.NotContains(t, string(body), token, "page must never echo the capability token")
+}
+
+// TestHandleApprove_MissHTMLForBrowser_NoOracle proves an invalid/expired link
+// in a browser gets the uniform miss page (404) that reveals nothing about why
+// it failed and never echoes the token.
+func TestHandleApprove_MissHTMLForBrowser_NoOracle(t *testing.T) {
+	_, ts := newApproveTestServer(t)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/approve/ablk_ok_doesnotexist", nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "text/html")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Link no longer valid", "invalid link gets the uniform miss page")
+	assert.NotContains(t, string(body), "doesnotexist", "miss page must not echo the token (no oracle)")
+}
+
 func TestHandleApprove_CrossKind404(t *testing.T) {
 	s, ts := newApproveTestServer(t)
 	requestID := notifyv2.NewMsgID()
