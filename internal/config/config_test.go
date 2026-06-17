@@ -804,3 +804,36 @@ func TestGatewayValidateOK(t *testing.T) {
 	cfg.Gateway.UnifiedPush.Enabled = true
 	require.NoError(t, config.Validate(cfg))
 }
+
+// TestDefaultConfig_Gate verifies that Defaults() returns Gate.Enforcing=false
+// (shadow mode per D-04 — enforcing is opt-in, never the default).
+func TestDefaultConfig_Gate(t *testing.T) {
+	cfg := config.Defaults()
+	assert.False(t, cfg.Gate.Enforcing, "Gate.Enforcing must default to false (shadow mode per D-04)")
+}
+
+// TestDefaultConfig_Approval verifies that Defaults() returns the correct
+// approval defaults: TimeoutSeconds=120, ExtraCritical nil/empty (D-09).
+func TestDefaultConfig_Approval(t *testing.T) {
+	cfg := config.Defaults()
+	assert.Equal(t, 120, cfg.Approval.TimeoutSeconds, "Approval.TimeoutSeconds must default to 120 (D-09)")
+	assert.Empty(t, cfg.Approval.ExtraCritical, "Approval.ExtraCritical must default to nil/empty")
+}
+
+// TestValidate_ApprovalTimeoutFloor verifies that Validate() rejects a
+// TimeoutSeconds below the 10-second floor (D-09 floor prevents instant-deny DoS).
+func TestValidate_ApprovalTimeoutFloor(t *testing.T) {
+	cfg := validObsBaseConfig()
+	cfg.Approval.TimeoutSeconds = 5 // below 10s floor
+	err := config.Validate(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "approval.timeout_seconds")
+}
+
+// TestValidate_ApprovalTimeoutOK verifies that Validate() accepts a
+// TimeoutSeconds value above the floor (D-09).
+func TestValidate_ApprovalTimeoutOK(t *testing.T) {
+	cfg := validObsBaseConfig()
+	cfg.Approval.TimeoutSeconds = 30 // above floor
+	require.NoError(t, config.Validate(cfg))
+}
