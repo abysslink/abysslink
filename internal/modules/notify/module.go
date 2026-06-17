@@ -286,6 +286,20 @@ type SendOptions struct {
 	// Click maps to the ntfy X-Click header; opens the URL on tap; empty =
 	// omit the header (D-16: the dispatcher composes an ssh:// deep link).
 	Click string
+	// Actions carries approve/deny button descriptors for KindApprovalRequest
+	// messages. Each entry is rendered as a "view, Label, URL" action button
+	// in the ntfy X-Actions: header (Phase 30, D-18 un-drop, APPR-04).
+	// URLs are single-use capability tokens — they are set in the header and
+	// NEVER logged.
+	Actions []notifyv2.RenderedAction
+}
+
+// isZero reports whether all fields of SendOptions are at their zero values.
+// Used to detect the "no per-message overrides" fast path for socket delivery.
+// The Actions field is a slice (not comparable with ==) so we check it
+// explicitly rather than using struct equality.
+func (o SendOptions) isZero() bool {
+	return o.Priority == "" && o.Tags == "" && o.Topic == "" && o.Click == "" && len(o.Actions) == 0
 }
 
 // validTopicRe constrains a topic override to the ntfy topic charset so a
@@ -326,8 +340,8 @@ func (m *Module) SendWithOptions(ctx context.Context, title, body string, opts S
 	// Fast path: hand off to a running abysslinkd over its Unix socket — but
 	// only when no per-message options are set. The daemon's delivery backend
 	// carries title+body only, so routing an option-bearing message through it
-	// would silently drop priority/tags/topic (the CLI-04 bug, relocated).
-	if opts == (SendOptions{}) {
+	// would silently drop priority/tags/topic/actions (the CLI-04 bug, relocated).
+	if opts.isZero() {
 		dc := daemon.NewClient()
 		err := dc.Send(ctx, daemon.NotifyRequest{
 			Title: title,
@@ -495,6 +509,9 @@ func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, 
 	if opts.Click != "" {
 		req.Header.Set("X-Click", opts.Click)
 	}
+	if v := buildActionsHeader(opts.Actions); v != "" {
+		req.Header.Set("X-Actions", v)
+	}
 
 	// Attach basic auth from keychain if credentials are configured.
 	if m.keychain != nil {
@@ -525,6 +542,22 @@ func (m *Module) SendDirectWithOptions(ctx context.Context, title, body string, 
 	// in logs verbatim (no secrets on observable surfaces — AUD-04).
 	slog.Info("notification sent", "title_len", len(title), "topic", topic)
 	return nil
+}
+
+// buildActionsHeader composes the ntfy X-Actions: header value from
+// RenderedActions. Each entry becomes "view, Label, URL" (ntfy "view" type
+// opens the URL in a browser on the phone — docs.ntfy.sh/publish/#action-buttons).
+// URLs are single-use capability tokens — they are placed in the header and
+// NEVER logged. Returns "" when actions is empty.
+func buildActionsHeader(actions []notifyv2.RenderedAction) string {
+	if len(actions) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(actions))
+	for _, a := range actions {
+		parts = append(parts, "view, "+a.Label+", "+a.URL)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // encodeNtfyHeader returns s unchanged when it is pure printable ASCII;

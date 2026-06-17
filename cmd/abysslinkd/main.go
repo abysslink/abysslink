@@ -66,12 +66,15 @@ func (d directNotifier) Send(ctx context.Context, title, body string) error {
 
 // SendNote delivers a pre-rendered v2 note via the module's direct backend on
 // the same per-rig topic with the same keychain credentials (D-20: no
-// transport changes beyond the X-Click leg).
+// transport changes beyond the X-Click leg). For KindApprovalRequest messages,
+// n.Actions is bridged to SendOptions.Actions so the ntfy delivery module
+// emits the X-Actions: header with Approve/Deny buttons (Phase 30, D-18).
 func (d directNotifier) SendNote(ctx context.Context, n notifyv2.RenderedNote) error {
 	return d.m.SendDirectWithOptions(ctx, n.Title, n.Body, notify.SendOptions{
 		Priority: n.Priority,
 		Tags:     n.Tags,
 		Click:    n.Click,
+		Actions:  n.Actions,
 	})
 }
 
