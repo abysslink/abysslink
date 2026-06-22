@@ -163,6 +163,14 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	// canonical order and avoids double-emission (this is the only call site).
 	findings = append(findings, versionFloorFindings(ctx, cc.runner)...)
 
+	// Bespoke SUPL-04 transport floor detectors (cmd_doctor_floors.go): the
+	// Tailscale statedir-when-locked FATAL gate and the OpenSSH version + PQ-KEX
+	// WARN advisories. Appended right after the data-driven versionFloor rows so
+	// every transport-floor finding surfaces together; this is the only call
+	// site (no double-emission).
+	findings = append(findings, tailscaleStatedirFinding(ctx, cc.runner))
+	findings = append(findings, opensshFloorFindings(ctx, cc.runner)...)
+
 	// Device CA/KRL drift findings (DEVC-05/DEVC-06 success criterion 5). Read-
 	// only: compares the installed /etc/ssh CA-trust file + KRL against the
 	// current device store. Gated on openssh-fallback mode (a tailscale-SSH

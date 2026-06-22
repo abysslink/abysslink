@@ -95,6 +95,59 @@ type Config struct {
 
 	// Approval holds the Phase 30 approve-loop configuration.
 	Approval ApprovalConfig `yaml:"approval"`
+
+	// Budget holds the Phase 31 agent budget / apoptosis configuration (KILL-01).
+	// Config-validation half of D-01a two-part split: this field carries YAML
+	// threshold validation; the runtime watcher engine lives at internal/budget.
+	Budget BudgetConfig `yaml:"budget"`
+
+	// Deadman holds the Phase 32 dead-man switch configuration (SUPL-06).
+	// Opt-in / OFF by default (32-CONTEXT.md): a daemon-hosted no-contact timer
+	// fires the deadman lockdown after IntervalHours of silence. Zero IntervalHours
+	// resolves to the locked 24h default at runtime.
+	Deadman DeadmanConfig `yaml:"deadman"`
+}
+
+// DeadmanConfig holds Phase 32 dead-man switch settings (SUPL-06).
+// The switch is OPT-IN and ships OFF (Enabled=false) per 32-CONTEXT.md — a
+// false trigger that disarms agents while the operator is present is an
+// availability risk, so it never defaults on. When Enabled, the daemon hosts a
+// no-contact timer that fires the deadman lockdown after IntervalHours of
+// silence; a `deadman heartbeat` resets the deadline. IntervalHours zero
+// resolves to the locked 24h default at runtime — the timer never reads a
+// sub-floor interval from config (Validate rejects an enabled switch below 1h).
+type DeadmanConfig struct {
+	// Enabled gates the daemon-hosted dead-man timer. Ships false (opt-in,
+	// 32-CONTEXT.md). The zero value is safe (no timer goroutine, never fires).
+	Enabled bool `yaml:"enabled"`
+	// IntervalHours is the no-contact window before lockdown fires. Zero means
+	// the compiled-in default of 24h (DeadmanDefaultIntervalHours). Floor 1h
+	// when Enabled — an absurdly small interval would lockdown the operator's
+	// own agents almost immediately, so Validate rejects it.
+	IntervalHours int `yaml:"interval_hours,omitempty"`
+}
+
+// DeadmanDefaultIntervalHours is the locked default no-contact interval (24h,
+// 32-CONTEXT.md). A zero/unset IntervalHours on an enabled switch resolves to
+// this value. It is also the value `deadman enable` writes when the operator
+// supplies no explicit --interval-hours.
+const DeadmanDefaultIntervalHours = 24
+
+// DeadmanIntervalFloorHours is the minimum allowed no-contact interval for an
+// enabled dead-man switch (1h). Validate rejects an enabled switch below this
+// floor — a sub-hour interval would disarm the operator's own agents during a
+// short break, defeating the opt-in intent (T-32-25 availability).
+const DeadmanIntervalFloorHours = 1
+
+// ResolvedIntervalHours returns the effective no-contact interval in hours: the
+// configured IntervalHours, or DeadmanDefaultIntervalHours (24) when it is zero.
+// It does NOT validate the floor (Validate does that on load); it is the single
+// place the 24h default is applied so the daemon and the `deadman` CLI agree.
+func (d DeadmanConfig) ResolvedIntervalHours() int {
+	if d.IntervalHours <= 0 {
+		return DeadmanDefaultIntervalHours
+	}
+	return d.IntervalHours
 }
 
 // GateConfig holds Phase 30 gate-enforcing settings.
@@ -120,6 +173,54 @@ type ApprovalConfig struct {
 	// (tighten), never remove (D-08); entries are appended to
 	// approve.CriticalPatterns at gate initialization.
 	ExtraCritical []string `yaml:"extra_critical,omitempty"`
+}
+
+// BudgetConfig holds Phase 31 agent budget / apoptosis settings (KILL-01).
+// This is the config-validation half of the D-01a two-part split: YAML threshold
+// validation and Defaults() seeding live here; the runtime watcher engine lives
+// at internal/budget (peer of internal/gate / internal/approve).
+// All thresholds default to shadow-mode values; the escalation ladder is
+// explicitly opt-in (Ladder: false by default — D-05).
+type BudgetConfig struct {
+	// WallClockMinutes is the wall-clock run limit before a threshold trip.
+	// Zero means the compiled-in default 30m. Floor 1m.
+	WallClockMinutes int `yaml:"wall_clock_minutes,omitempty"`
+	// LoopN is the number of identical closure-hash repeats in the sliding
+	// window that constitutes a loop. Zero means default 8. Floor 2.
+	LoopN int `yaml:"loop_n,omitempty"`
+	// LoopWindow is the command-count sliding window size. Zero means default 20.
+	// Floor 5.
+	LoopWindow int `yaml:"loop_window,omitempty"`
+	// Ladder enables the full escalation ladder (notify → SIGSTOP → kill).
+	// Default false (shadow mode — D-05). Set true to enable SIGSTOP on threshold.
+	Ladder bool `yaml:"ladder"`
+	// KillGraceSeconds is the SIGTERM grace period before SIGKILL in the kill
+	// ladder. Zero means default 5. Floor 1, ceiling 30.
+	KillGraceSeconds int `yaml:"kill_grace_seconds,omitempty"`
+	// MinimizeAgentEnv opts the armed-agent spawn into the B10-minimized
+	// environment (WR-01 / T-32-14). When true, the armed agent process is
+	// spawned with only the B10 allowlist (PATH/HOME plus the curated
+	// keyless-supply-chain set) so secret-bearing parent env vars (API keys,
+	// ntfy topic credentials) do not leak into the untrusted agent. Default
+	// false preserves full-env inheritance, because typical agents (claude,
+	// aider) legitimately read provider API keys from their environment —
+	// minimizing by default would break them. Opt in only when the agent does
+	// not need parent secrets.
+	MinimizeAgentEnv bool `yaml:"minimize_agent_env,omitempty"`
+	// TokenTiers configures the optional local JSONL token-spend parser (D-04).
+	// Nil/disabled by default; JSONLPath must be set to enable.
+	TokenTiers *BudgetTokenTiers `yaml:"token_tiers,omitempty"`
+}
+
+// BudgetTokenTiers configures the opt-in token-spend observation path (D-04).
+// Off by default. JSONLPath must be set to enable.
+type BudgetTokenTiers struct {
+	// JSONLPath is the local Claude Code JSONL session log path.
+	JSONLPath string `yaml:"jsonl_path,omitempty"`
+	// WarnTokens is the soft tier (notify only) token count. Zero = disabled.
+	WarnTokens int `yaml:"warn_tokens,omitempty"`
+	// StopTokens is the hard tier (trip the ladder) token count. Zero = disabled.
+	StopTokens int `yaml:"stop_tokens,omitempty"`
 }
 
 // Content-store defaults and bounds (Phase 28, BACK-06). The TTL bounds are a
@@ -696,6 +797,26 @@ func Defaults() *Config {
 			TimeoutSeconds: 120,
 			ExtraCritical:  nil,
 		},
+		// Budget defaults (Phase 31, D-04/D-05):
+		//   Shadow mode: Ladder=false (observe + notify only; hard kill is opt-in).
+		//   WallClockMinutes=30, LoopN=8, LoopWindow=20, KillGraceSeconds=5.
+		//   TokenTiers=nil (token-spend tiers off by default — D-04).
+		Budget: BudgetConfig{
+			WallClockMinutes: 30,
+			LoopN:            8,
+			LoopWindow:       20,
+			KillGraceSeconds: 5,
+			Ladder:           false, // shadow mode by default — D-05
+		},
+		// Deadman defaults (Phase 32, SUPL-06 / 32-CONTEXT.md):
+		//   Enabled=false — the switch is OPT-IN and ships OFF (a false trigger
+		//   that disarms agents while the operator is present is an availability
+		//   risk). IntervalHours=0 resolves to the locked 24h default at runtime;
+		//   it is left zero here so the emitted default config reads
+		//   `deadman: {enabled: false}` rather than pinning a magic number.
+		Deadman: DeadmanConfig{
+			Enabled: false,
+		},
 	}
 }
 
@@ -792,6 +913,13 @@ func Write(path string, cfg *Config) error {
 		return fmt.Errorf("config: create directory: %w", err)
 	}
 
+	// B9 (T-32-16): rotate any below-floor ntfy topic to ≥128 bits before
+	// persisting. Above-floor and custom topics are left untouched; a live topic
+	// is only ever rotated here, when config is being written anyway.
+	if err := enforceNtfyTopicEntropyFloor(cfg); err != nil {
+		return fmt.Errorf("config: write: %w", err)
+	}
+
 	data, err := Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("config: write: %w", err)
@@ -850,6 +978,8 @@ func Validate(cfg *Config) error {
 		ValidateContentStore,
 		ValidateGateway,
 		validateApproval,
+		validateBudget,
+		validateDeadman,
 	} {
 		if err := validate(cfg); err != nil {
 			return err
@@ -1153,6 +1283,51 @@ func validateApproval(cfg *Config) error {
 	if ts > 3600 {
 		return fmt.Errorf("config: approval.timeout_seconds %d must be <= 3600 "+
 			"(1 hour maximum)", ts)
+	}
+	return nil
+}
+
+// validateBudget enforces Phase 31 budget threshold bounds (KILL-01, T-31-01).
+//
+// Zero values mean "use the compiled-in default" (D-04 idiom — Defaults() seeds
+// the real values at load time). Non-zero values are bounds-checked:
+//   - wall_clock_minutes: floor 1 (< 1 would fire immediately before any work).
+//   - loop_n: floor 2 (1 repeat in a window is not a loop by definition).
+//   - loop_window: floor 5 (a window < 5 cannot be statistically meaningful).
+//   - kill_grace_seconds: floor 1, ceiling 30 (too short risks losing unsaved
+//     work; too long defeats the ladder's purpose).
+func validateBudget(cfg *Config) error {
+	b := cfg.Budget
+	if b.WallClockMinutes != 0 && b.WallClockMinutes < 1 {
+		return fmt.Errorf("config: budget.wall_clock_minutes %d must be >= 1", b.WallClockMinutes)
+	}
+	if b.LoopN != 0 && b.LoopN < 2 {
+		return fmt.Errorf("config: budget.loop_n %d must be >= 2", b.LoopN)
+	}
+	if b.LoopWindow != 0 && b.LoopWindow < 5 {
+		return fmt.Errorf("config: budget.loop_window %d must be >= 5", b.LoopWindow)
+	}
+	if g := b.KillGraceSeconds; g != 0 && (g < 1 || g > 30) {
+		return fmt.Errorf("config: budget.kill_grace_seconds %d must be between 1 and 30", g)
+	}
+	return nil
+}
+
+// validateDeadman checks the dead-man switch settings (SUPL-06). The switch is
+// opt-in, so a DISABLED switch never constrains the interval (a stale
+// interval_hours under a disabled switch is harmless). When ENABLED, a non-zero
+// IntervalHours must be at or above the 1h floor — an absurdly small interval
+// would lockdown the operator's own agents during a short break, defeating the
+// switch (T-32-25 availability). A zero IntervalHours is always valid (it
+// resolves to the locked 24h default at runtime).
+func validateDeadman(cfg *Config) error {
+	d := cfg.Deadman
+	if !d.Enabled {
+		return nil
+	}
+	if d.IntervalHours != 0 && d.IntervalHours < DeadmanIntervalFloorHours {
+		return fmt.Errorf("config: deadman.interval_hours %d must be >= %d (the no-contact floor); 0 means the %dh default",
+			d.IntervalHours, DeadmanIntervalFloorHours, DeadmanDefaultIntervalHours)
 	}
 	return nil
 }

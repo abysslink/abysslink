@@ -14,58 +14,22 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # SLSA Build L3: the build + provenance attestation run in an ISOLATED
+  # reusable workflow (release-build.yml). L3 requires id-token+attestations on
+  # BOTH the caller (here) AND the reusable job (Pitfall 2). secrets: inherit
+  # passes GITHUB_TOKEN through to goreleaser. The reusable workflow surfaces a
+  # `version` output so sign/publish keep referencing needs.build.outputs.version
+  # unchanged. The previous standalone `attest` (SLSA L2) job has been REMOVED:
+  # the reusable workflow now owns provenance via actions/attest-build-provenance,
+  # so retaining the old job would emit a duplicate provenance (Pitfall 4).
   build:
-    name: Build & SBOM
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: Build & SBOM (reusable, SLSA L3)
+    uses: ./.github/workflows/release-build.yml
     permissions:
-      contents: read      # checkout only; no write access
-    outputs:
-      version: ${{ steps.meta.outputs.version }}
-    steps:
-      - name: Harden runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            api.github.com:443
-            proxy.golang.org:443
-            sum.golang.org:443
-            objects.githubusercontent.com:443
-            github.com:443
-
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 0  # goreleaser needs full history for changelog
-
-      - name: Set up Go
-        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version: "1.26"
-          cache: true
-
-      - name: Install Syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-
-      - name: Run GoReleaser (build + SBOM only, no signing)
-        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
-        with:
-          version: "~> v2"
-          args: release --clean --skip=sign
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract version tag
-        id: meta
-        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload dist artifacts for subsequent jobs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: dist
-          path: dist/
-          retention-days: 1
+      contents: read
+      id-token: write
+      attestations: write
+    secrets: inherit
 
   sign:
     name: Sign (cosign v3 bundle)
@@ -121,15 +85,20 @@ jobs:
             gh release upload "${tag}" "${bundle}" --clobber
           done
 
-  attest:
-    name: SLSA L2 Provenance (actions/attest)
+  verify:
+    name: Verify SLSA L3 provenance (gh attestation verify --signer-workflow)
+    # Post-build L3 GATE: re-verify the provenance the reusable workflow just
+    # produced, binding trust to the exact isolated workflow path. A non-zero
+    # exit fails this job, which blocks `publish` — no tampered or
+    # wrong-provenance artifact can ever be published. This is the CI half of
+    # the same fail-closed contract `abysslink verify`/`upgrade` enforce
+    # client-side.
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     permissions:
-      contents: read
-      attestations: write  # publish SLSA provenance attestation
-      id-token: write      # OIDC token required by actions/attest
+      contents: read       # read release assets via the API
+      attestations: read   # gh attestation verify fetches the provenance bundle
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
@@ -141,6 +110,7 @@ jobs:
             github.com:443
             fulcio.sigstore.dev:443
             rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
 
       - name: Download dist artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -148,28 +118,39 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Generate SLSA L2 provenance
-        # Binds the attestation to the exact source commit SHA (github.sha) —
-        # immutable for tag pushes (Pitfall 15 mitigation). SLSA Build L2.
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
-        with:
-          subject-path: |
-            dist/*_checksums.txt
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.deb
-            dist/*.rpm
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify provenance for released artifacts
+        # gh is pre-installed on ubuntu-latest runners. We verify at least two
+        # distinct artifacts (amd64 + arm64) so a provenance gap on either arch
+        # fails the gate. --signer-workflow pins trust to release-build.yml; a
+        # non-zero exit here blocks publish (fail-closed).
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          command -v gh >/dev/null 2>&1 || { echo "gh CLI not found — cannot verify provenance (fail-closed)"; exit 1; }
+          tag="${{ needs.build.outputs.version }}"
+          bare="${tag#v}"
+          for art in \
+            "dist/abysslink_${bare}_linux_amd64.tar.gz" \
+            "dist/abysslink_${bare}_linux_arm64.tar.gz" \
+            "dist/abysslink_${bare}_darwin_arm64.tar.gz"; do
+            echo "::group::verify ${art}"
+            gh attestation verify "${art}" \
+              --owner abysslink \
+              --signer-workflow abysslink/abysslink/.github/workflows/release-build.yml
+            echo "::endgroup::"
+          done
 
   publish:
-    name: Publish release (gate draft on sign + attest)
-    # Only flip the draft to published AFTER both the cosign bundle (sign)
-    # and the SLSA provenance (attest) jobs succeed. This guarantees no
-    # published release ever exists without its .bundle and provenance,
-    # closing the partial-signing availability gap (WR-02): install.sh
-    # hard-fails when the bundle is missing, so a published-but-unsigned
-    # release would be un-installable.
-    needs: [build, sign, attest]
+    name: Publish release (gate draft on sign + verify)
+    # Only flip the draft to published AFTER the cosign bundle (sign) AND the
+    # SLSA L3 provenance verify gate succeed. This guarantees no published
+    # release ever exists without its .bundle and independently-verified
+    # provenance, closing the partial-signing availability gap (WR-02):
+    # install.sh hard-fails when the bundle is missing, so a published-but-
+    # unsigned release would be un-installable. Provenance is generated inside
+    # the reusable `build` job; `verify` re-checks it before publish.
+    needs: [build, sign, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

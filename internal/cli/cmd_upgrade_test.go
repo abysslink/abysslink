@@ -19,12 +19,14 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +64,52 @@ func TestUpgradeCheckFlagDocumentsExitCode(t *testing.T) {
 	require.NotNil(t, f)
 	assert.Contains(t, f.Usage, "exit 3", "--check usage must name the distinct exit code")
 	require.NotNil(t, cmd.Flags().Lookup("force"), "--force (downgrade override) must be registered")
+}
+
+// TestVerifyUpgradeArtifact_ProvenanceFailAborts covers the fail-closed
+// contract on the upgrade --apply path: when cosign passes but the SLSA
+// provenance leg (`gh attestation verify`) fails, verifyUpgradeArtifact must
+// return an error so the caller never reaches the atomic-replace step. The
+// MockRunner scripts cosign exit 0 then gh exit 1.
+func TestVerifyUpgradeArtifact_ProvenanceFailAborts(t *testing.T) {
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "Verified OK"}},           // cosign
+		shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "no attestations found"}}, // gh attestation verify
+	)
+	err := verifyUpgradeArtifact(context.Background(), runner,
+		"checksums.txt", "checksums.txt.bundle", "abysslink_1.2.3_linux_amd64.tar.gz")
+	require.Error(t, err, "a provenance failure must abort the upgrade before install")
+	assert.Contains(t, err.Error(), "provenance")
+
+	calls := runner.RecordedCalls()
+	require.Len(t, calls, 2, "both cosign and gh must have been invoked")
+	assert.Equal(t, "cosign", calls[0].Name)
+	assert.Equal(t, "gh", calls[1].Name)
+}
+
+// TestVerifyUpgradeArtifact_NoGHAborts covers the gh-absent fail-closed
+// decision on the upgrade path (Open Question 2).
+func TestVerifyUpgradeArtifact_NoGHAborts(t *testing.T) {
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "Verified OK"}}, // cosign
+		shell.Call{Err: errors.New(`exec: "gh": executable file not found in $PATH`)},
+	)
+	err := verifyUpgradeArtifact(context.Background(), runner,
+		"checksums.txt", "checksums.txt.bundle", "abysslink_1.2.3_linux_amd64.tar.gz")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gh not found")
+}
+
+// TestVerifyUpgradeArtifact_AllOK is the happy path: cosign + provenance both
+// pass, no error.
+func TestVerifyUpgradeArtifact_AllOK(t *testing.T) {
+	runner := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "Verified OK"}},
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "Verification succeeded!"}},
+	)
+	err := verifyUpgradeArtifact(context.Background(), runner,
+		"checksums.txt", "checksums.txt.bundle", "abysslink_1.2.3_linux_amd64.tar.gz")
+	require.NoError(t, err)
 }
 
 // writeTarGz writes a .tar.gz containing one regular file named "abysslink"

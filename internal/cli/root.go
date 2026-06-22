@@ -143,6 +143,8 @@ Run 'abysslink <command> --help' for details on any command.`,
 	opsCmds := []*cobra.Command{
 		newNotifyCmd(),
 		newApproveCmd(),
+		newArmCmd(),
+		newDeadmanCmd(),
 		newWatchCmd(),
 		newACLCmd(),
 		newLockCmd(),

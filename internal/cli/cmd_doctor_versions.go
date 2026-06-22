@@ -99,6 +99,38 @@ var versionFloors = []versionFloor{
 		checkID:   "tmux-version",
 		severity:  floorSevWarn, // D-27: registry is optional — never FATAL
 	},
+	{
+		// Tailscale transport floor (SUPL-04): below 1.98.1 is a FATAL
+		// fail-closed gate — a downgraded tailscaled is an elevation risk.
+		// No CVE id is cited (capability/security-boundary floor), so the
+		// FATAL message uses the no-CVE branch in fatalMessage.
+		component: "Tailscale",
+		binary:    "tailscale",
+		verArgs:   []string{"version"},
+		minVer:    "1.98.1",
+		checkID:   "tailscale-version",
+		// severity zero value = floorSevFatal (fail-closed).
+	},
+	{
+		// NetBird CLIENT floor (SUPL-04): distinct from the server-side
+		// nb-version check in netbird_doctor.go. Below 0.57.0 is FATAL.
+		component: "NetBird (client)",
+		binary:    "netbird",
+		verArgs:   []string{"version"},
+		minVer:    "0.57.0",
+		checkID:   "nb-client-version",
+		// severity zero value = floorSevFatal (fail-closed).
+	},
+	{
+		// EternalTerminal prefer-mosh capability floor (SUPL-04): below 6.2.0
+		// is WARN, never FATAL — mosh provides a working fallback transport.
+		component: "EternalTerminal",
+		binary:    "et",
+		verArgs:   []string{"--version"},
+		minVer:    "6.2.0",
+		checkID:   "et-version",
+		severity:  floorSevWarn,
+	},
 }
 
 // versionFloorFindings probes each entry in versionFloors via the supplied
@@ -200,7 +232,11 @@ func probeFailMessage(f versionFloor, detail string) string {
 		return fmt.Sprintf("%s: %s — version is unknown; upgrade to >= %s (%s, CVSS %s) to be safe",
 			f.checkID, detail, f.minVer, f.cve, f.cvss)
 	}
-	return fmt.Sprintf("%s: %s — version is unknown; the session registry needs %s >= %s (D-27)",
+	if f.checkID == "tmux-version" {
+		return fmt.Sprintf("%s: %s — version is unknown; the session registry needs %s >= %s (D-27)",
+			f.checkID, detail, f.component, f.minVer)
+	}
+	return fmt.Sprintf("%s: %s — version is unknown; upgrade %s to >= %s to meet the floor",
 		f.checkID, detail, f.component, f.minVer)
 }
 
@@ -213,22 +249,44 @@ func belowFloorMessage(f versionFloor, ver string) string {
 	return fatalMessage(f, ver)
 }
 
-// warnMessage builds the WARN-severity capability-floor message (D-27): it
-// names the found version, the floor, and exactly what degrades — the daemon
-// still runs (D-26), so this is never a FATAL.
+// warnMessage builds the WARN-severity capability-floor message: it names the
+// found version, the floor, and what degrades — the system stays operable, so
+// this is never a FATAL.
+//
+// The tmux session-registry floor (D-26/D-27) keeps its bespoke wording; every
+// other capability row (e.g. EternalTerminal prefer-mosh) gets a generic
+// "below floor — capability degraded, fallback exists" message so a new WARN
+// row never inherits tmux-specific copy.
 func warnMessage(f versionFloor, ver string) string {
+	if f.checkID == "tmux-version" {
+		return fmt.Sprintf(
+			"%s: %s %s is below the %s capability floor — the session registry requires tmux >= %s "+
+				"(attach-session -f client flags); below it notifications lose session identity and "+
+				"GET /sessions reports unsupported; the daemon still runs (D-26/D-27)",
+			f.checkID, f.component, ver, f.minVer, f.minVer,
+		)
+	}
 	return fmt.Sprintf(
-		"%s: %s %s is below the %s capability floor — the session registry requires tmux >= %s "+
-			"(attach-session -f client flags); below it notifications lose session identity and "+
-			"GET /sessions reports unsupported; the daemon still runs (D-26/D-27)",
-		f.checkID, f.component, ver, f.minVer, f.minVer,
+		"%s: %s %s is below the v%s capability floor — upgrade %s to >= %s; "+
+			"a working fallback exists so this is advisory, not fail-closed",
+		f.checkID, f.component, ver, f.minVer, f.component, f.minVer,
 	)
 }
 
 // fatalMessage builds the kind-appropriate FATAL message (D-10).
 // Protocol CVEs: instruct to upgrade the tool binary.
 // Stdlib-vendored CVEs: additionally note that a Go rebuild against patched stdlib closes it.
+// No-CVE security floors (e.g. Tailscale 1.98.1): a plain "below minimum —
+// upgrade" message; never fabricate a "(, CVSS ) unauthenticated RCE" string.
 func fatalMessage(f versionFloor, ver string) string {
+	if f.cve == "" {
+		// Security/transport floor without a cited CVE — fail-closed but do not
+		// print misleading empty CVE/CVSS parens.
+		return fmt.Sprintf(
+			"%s: %s %s is below minimum v%s (security floor) — upgrade %s to >= %s",
+			f.checkID, f.component, ver, f.minVer, f.component, f.minVer,
+		)
+	}
 	base := fmt.Sprintf(
 		"%s: %s %s is below minimum v%s (%s, CVSS %s unauthenticated RCE) — upgrade %s to >= %s",
 		f.checkID, f.component, ver, f.minVer, f.cve, f.cvss, f.component, f.minVer,

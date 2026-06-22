@@ -41,6 +41,39 @@ func seededAuditStore(t *testing.T) *secrets.MockStore {
 	return kc
 }
 
+// TestBackupSymlink verifies B5 (T-32-15): Backup refuses a symlinked source.
+// Reading through a freshly-swapped symlink at src would let an attacker exfil
+// an out-of-path file into the .bak (and into the chain hash). The O_NOFOLLOW
+// open refuses the link rather than following it.
+func TestBackupSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside.secret")
+	require.NoError(t, os.WriteFile(outside, []byte("SECRET"), 0o600))
+
+	src := filepath.Join(dir, "src.conf")
+	require.NoError(t, os.Symlink(outside, src))
+
+	_, err := audit.Backup(src)
+	require.Error(t, err, "Backup must refuse a symlinked source (no read-through)")
+}
+
+// TestBackupWithChainSymlink mirrors TestBackupSymlink for the chained path.
+func TestBackupWithChainSymlink(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	kc := seededAuditStore(t)
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+
+	outside := filepath.Join(dir, "outside.secret")
+	require.NoError(t, os.WriteFile(outside, []byte("SECRET"), 0o600))
+	src := filepath.Join(dir, "src.conf")
+	require.NoError(t, os.Symlink(outside, src))
+
+	_, err = audit.BackupWithChain(context.Background(), src, sa)
+	require.Error(t, err, "BackupWithChain must refuse a symlinked source")
+}
+
 // --- Task 1: BackupWithChain and BackupsFromChain ---
 
 // TestBackupWithChain_AppendsChainEntry verifies that BackupWithChain creates a

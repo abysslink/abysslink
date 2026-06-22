@@ -47,6 +47,79 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	return lw.buf.Write(p)
 }
 
+// minimalEnvExact is the allowlist of exact environment-variable names a child
+// process spawned via RunMinimal inherits. It is deliberately small (B10 /
+// T-32-14): a child binary should see only what it needs, never the parent's
+// full os.Environ() (which can carry API keys, tokens, ntfy topic credentials).
+//
+// The set is curated to keep the keyless supply-chain flows working under
+// minimization (Pitfall 5 / T-32-18):
+//   - PATH, HOME: every tool needs these to find binaries and a config/home dir.
+//   - SSH_AUTH_SOCK: git over SSH and any agent-backed signing.
+//   - GIT_TERMINAL_PROMPT: already set to "0" by arm_cmd.go's git calls.
+//   - TMPDIR: cosign/gh write transient material under TMPDIR.
+//   - HTTPS_PROXY/HTTP_PROXY/NO_PROXY (and lowercase): cosign/gh reach Sigstore
+//     and GitHub over HTTPS; corporate proxies must still apply.
+//   - GITHUB_TOKEN/GH_TOKEN: `gh attestation verify` authenticates to the API.
+//
+// This is an ALLOWLIST, not a denylist: a newly-introduced parent var does NOT
+// pass through by default (a denylist would leak it). Prefix families that the
+// keyless flows need (SIGSTORE_*, XDG_*, etc.) are handled by minimalEnvPrefixes.
+var minimalEnvExact = map[string]bool{
+	"PATH":                true,
+	"HOME":                true,
+	"SSH_AUTH_SOCK":       true,
+	"GIT_TERMINAL_PROMPT": true,
+	"TMPDIR":              true,
+	"HTTPS_PROXY":         true,
+	"HTTP_PROXY":          true,
+	"NO_PROXY":            true,
+	"https_proxy":         true,
+	"http_proxy":          true,
+	"no_proxy":            true,
+	"GITHUB_TOKEN":        true,
+	"GH_TOKEN":            true,
+	"GH_HOST":             true,
+}
+
+// minimalEnvPrefixes is the allowed-prefix half of the B10 env allowlist. A var
+// whose key starts with one of these prefixes passes through minimization:
+//   - SIGSTORE_*: cosign Sigstore endpoint overrides (Rekor/Fulcio/OIDC URLs).
+//   - XDG_*: gh/cosign honour XDG base dirs for config/cache/state.
+//   - COSIGN_*: cosign experimental/keyless toggles.
+//
+// Like minimalEnvExact this is strictly an allowlist — only these families pass.
+var minimalEnvPrefixes = []string{
+	"SIGSTORE_",
+	"XDG_",
+	"COSIGN_",
+}
+
+// buildMinimalEnv filters parent (KEY=VALUE lines, e.g. os.Environ()) down to
+// the B10 allowlist: a var passes iff its key is in minimalEnvExact or matches
+// a minimalEnvPrefixes entry. Everything else is dropped, so secret-bearing or
+// unknown future vars never reach the child by default (allowlist, not denylist).
+func buildMinimalEnv(parent []string) []string {
+	out := make([]string, 0, len(minimalEnvExact))
+	for _, e := range parent {
+		k, _, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		if minimalEnvExact[k] {
+			out = append(out, e)
+			continue
+		}
+		for _, p := range minimalEnvPrefixes {
+			if strings.HasPrefix(k, p) {
+				out = append(out, e)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // ExecRunner is the production Runner that invokes real binaries via os/exec.
 // internal/shell is the only PACKAGE in the codebase allowed to import
 // os/exec (CLAUDE.md hard rule); within it, this file and stream.go are the
@@ -59,6 +132,41 @@ type ExecRunner struct{}
 // is cancelled before completion.
 func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: shell.Runner is the project-sanctioned exec abstraction (CLAUDE.md); argv is exec'd directly with no shell, never sh -c
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &limitedWriter{buf: &stdout, cap: maxSubprocessOutput}
+	cmd.Stderr = &limitedWriter{buf: &stderr, cap: maxSubprocessOutput}
+
+	err := cmd.Run()
+	if err != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+			return Result{
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String(),
+				ExitCode: exitErr.ExitCode(),
+			}, nil
+		}
+		return Result{}, err
+	}
+	return Result{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: 0,
+	}, nil
+}
+
+// RunMinimal executes name with args exactly like Run, but the child receives a
+// MINIMIZED environment built from the B10 allowlist (buildMinimalEnv) instead
+// of inheriting the parent's full os.Environ() (T-32-14). Use it for child
+// processes that do not need the parent's secret-bearing environment — the env
+// is reduced to PATH/HOME plus the curated keyless-supply-chain set, so a leaked
+// API key / token / ntfy topic credential in the parent never reaches the child.
+//
+// Run/RunWithEnv keep their full-inheritance semantics so callers that rely on
+// the complete environment (or pass explicit overrides) are unaffected; this is
+// the surgical, opt-in chokepoint for env minimization.
+func (r *ExecRunner) RunMinimal(ctx context.Context, name string, args ...string) (Result, error) {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: shell.Runner is the project-sanctioned exec abstraction (CLAUDE.md); argv is exec'd directly with no shell, never sh -c
+	cmd.Env = buildMinimalEnv(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedWriter{buf: &stdout, cap: maxSubprocessOutput}
 	cmd.Stderr = &limitedWriter{buf: &stderr, cap: maxSubprocessOutput}

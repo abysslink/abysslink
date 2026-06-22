@@ -522,6 +522,77 @@ func findingsSeverityFlags(findings []modules.Finding) (hasFatal, hasWarn bool) 
 	return hasFatal, hasWarn
 }
 
+// atRiskTightenedChecks is the set of check IDs the `--profile at-risk` strict
+// profile escalates from WARN to FATAL (SUPL-06 / E8): disk encryption, the
+// ntfy bind/loopback posture, the listener-bind (Tailnet Lock / tailnet-IP
+// binding) gate, and the SUPL-04 external-transport + Tailnet-Lock-statedir
+// version floors. The profile only TIGHTENS — it never downgrades an existing
+// FATAL — so a check already FATAL by default stays FATAL.
+var atRiskTightenedChecks = map[string]bool{
+	// Disk encryption (FileVault / LUKS).
+	"sec-disk-encryption": true,
+	// ntfy bind posture (tailnet-IP-only; no loopback port mapping).
+	"ntfy-bind":     true,
+	"ntfy-loopback": true,
+	// Listener bind (daemon/metrics tailnet-IP binding — the Tailnet-Lock-
+	// adjacent network-exposure gate).
+	"sec-listener-bind": true,
+	// SUPL-04 version floors + Tailnet Lock signing statedir.
+	"tailscale-version":  true,
+	"nb-client-version":  true,
+	"et-version":         true,
+	"tailscale-statedir": true,
+	"openssh-version":    true,
+	"openssh-pqkex":      true,
+}
+
+// deadmanRequiredCheck is the check ID for the at-risk FATAL finding emitted
+// when the dead-man switch is not configured.
+const deadmanRequiredCheck = "deadman-required"
+
+// applyDoctorProfile dispatches on the --profile flag and applies the matching
+// severity profile to findings. An empty/unknown profile is a no-op (returns the
+// input unchanged), so the default doctor path is unaffected. Extracted from the
+// RunE to keep newDoctorCmd below the gocyclo ceiling.
+func applyDoctorProfile(cmd *cobra.Command, findings []modules.Finding, cfg *config.Config) []modules.Finding {
+	if profile, _ := cmd.Flags().GetString("profile"); profile == "at-risk" {
+		return tightenAtRiskProfile(findings, cfg)
+	}
+	return findings
+}
+
+// tightenAtRiskProfile applies the `--profile at-risk` strict posture to a
+// collected findings slice (SUPL-06 / E8). It:
+//
+//   - upgrades the severity of every check in atRiskTightenedChecks from WARN to
+//     FATAL (and ONLY WARN→FATAL — an OK finding stays OK, an existing FATAL
+//     stays FATAL; the profile never loosens, T-32-28); and
+//   - appends a FATAL deadman-required finding when the dead-man switch is not
+//     enabled (cfg.Deadman.Enabled == false), so an at-risk operator without the
+//     switch fails closed.
+//
+// It returns a NEW slice; the input is not mutated, so the default (no-profile)
+// path is unaffected. The caller recomputes findingsSeverityFlags on the result
+// so the exit code reflects the strict profile.
+func tightenAtRiskProfile(findings []modules.Finding, cfg *config.Config) []modules.Finding {
+	out := make([]modules.Finding, 0, len(findings)+1)
+	for _, f := range findings {
+		if f.Severity == modules.SeverityWarning && atRiskTightenedChecks[f.Check] {
+			f.Severity = modules.SeverityFatal // tighten WARN→FATAL only
+		}
+		out = append(out, f)
+	}
+	if cfg == nil || !cfg.Deadman.Enabled {
+		out = append(out, modules.Finding{
+			Module:   "deadman",
+			Check:    deadmanRequiredCheck,
+			Severity: modules.SeverityFatal,
+			Message:  "the at-risk profile requires the dead-man switch to be configured; it is currently OFF",
+		})
+	}
+	return out
+}
+
 // doctorHumanOutput renders findings grouped by module and prints them via p.
 // Returns (hasFatal, hasWarn).
 func doctorHumanOutput(p Printer, findings []modules.Finding) (hasFatal, hasWarn bool) {
@@ -631,6 +702,13 @@ Exit codes:
 				printerInfo(p, "")
 			}
 
+			// --profile at-risk: tighten the defined checks to FATAL and require
+			// the dead-man switch configured (SUPL-06 / E8). Applied AFTER the
+			// fan-out merge so remote-rig findings are tightened too, and BEFORE
+			// the severity-flag computation so the exit code reflects the strict
+			// profile. The default (empty) profile leaves findings unchanged.
+			findings = applyDoctorProfile(cmd, findings, cc.cfg)
+
 			// CLI-06: exit codes must be identical in JSON and human mode —
 			// compute severity flags BEFORE branching on output format so
 			// `--json doctor` carries the same 0/1/2 contract documented in help.
@@ -669,6 +747,8 @@ Exit codes:
 	}
 	cmd.Flags().Bool("offline", false,
 		"Skip checks that need the network (supply-chain artifact downloads); they report WARN instead")
+	cmd.Flags().String("profile", "",
+		"Severity profile: \"at-risk\" tightens disk-encryption/ntfy-bind/listener-bind/version floors to FATAL and requires the dead-man switch")
 	return cmd
 }
 
@@ -892,14 +972,25 @@ func findingFix(check string) string {
 		// Version-floor checks (DOC-04) — keyed by versionFloor.checkID from cmd_doctor_versions.go.
 		"ntfy-version": "Upgrade ntfy to >= 2.21 (CVE-2026-39087 fix): see https://github.com/binwiederhier/ntfy/releases — stop container, pull new image, restart; or: brew upgrade ntfy",
 		"tmux-version": "Upgrade tmux to >= 3.2 for session-typed notifications (D-27): brew upgrade tmux  (or your distro package manager); the daemon runs fine without it",
-		"nb-zitadel":   "Remove the default ZITADEL admin account: run the ZITADEL cleanup script to delete zitadel-admin@ user",
-		"nb-mgmt-bind": "Set metricsListenAddress: 127.0.0.1:9090 in NetBird config.yaml to prevent public metrics exposure",
-		"nb-key-type":  "Revoke reusable or expired setup keys via the NetBird dashboard; re-mint one-off keys with explicit expiry",
-		"nb-api-auth":  "Set or rotate the NetBird API key: abysslink server netbird init --apply (re-init prints the new key)",
-		"nb-proc-user": "Ensure netbird-server runs as a non-root service user: check systemd User= in the unit file",
-		"nb-runtime":   "Install a container runtime: brew install --cask docker  (or colima: brew install colima && colima start)",
-		"nb-sshcheck":  "", // permanent WARN — SSHCheck not available on NetBird; no fix possible
-		"nb-lock":      "", // permanent WARN — Tailnet Lock (TKA) is not available on NetBird; no fix possible
+		// SUPL-04 external transport floors. Tailscale / NetBird-client below
+		// floor are FATAL (fail-closed); EternalTerminal is WARN (prefer-mosh).
+		"tailscale-version": "Upgrade Tailscale to >= 1.98.1: brew upgrade tailscale  (or download from https://pkgs.tailscale.com) — below the floor is a fail-closed security gate",
+		"nb-client-version": "Upgrade the NetBird client to >= 0.57.0: see https://github.com/netbirdio/netbird/releases  (or your package manager); below the floor is fail-closed",
+		"et-version":        "Upgrade EternalTerminal to >= 6.2.0 to prefer the ET transport: brew upgrade eternal-terminal  — advisory only; mosh remains a working fallback",
+		// SUPL-04 bespoke transport-floor detectors (cmd_doctor_floors.go).
+		"tailscale-statedir": "Run tailscaled with a persistent statedir (systemd default /var/lib/tailscale, or set TS_STATE_DIR) — Tailnet Lock signing checks are not enforced without it; this is a fail-closed gate",
+		"openssh-version":    "Upgrade OpenSSH to >= 10.0 for post-quantum key exchange: brew upgrade openssh  (or your distro package manager) — advisory; mosh remains a working fallback",
+		"openssh-pqkex":      "Upgrade OpenSSH to >= 10.0 so ssh -Q kex lists mlkem768x25519-sha256 (post-quantum KEX) — advisory; mosh remains a working fallback",
+		"nb-zitadel":         "Remove the default ZITADEL admin account: run the ZITADEL cleanup script to delete zitadel-admin@ user",
+		"nb-mgmt-bind":       "Set metricsListenAddress: 127.0.0.1:9090 in NetBird config.yaml to prevent public metrics exposure",
+		"nb-key-type":        "Revoke reusable or expired setup keys via the NetBird dashboard; re-mint one-off keys with explicit expiry",
+		"nb-api-auth":        "Set or rotate the NetBird API key: abysslink server netbird init --apply (re-init prints the new key)",
+		"nb-proc-user":       "Ensure netbird-server runs as a non-root service user: check systemd User= in the unit file",
+		"nb-runtime":         "Install a container runtime: brew install --cask docker  (or colima: brew install colima && colima start)",
+		"nb-sshcheck":        "", // permanent WARN — SSHCheck not available on NetBird; no fix possible
+		"nb-lock":            "", // permanent WARN — Tailnet Lock (TKA) is not available on NetBird; no fix possible
+		// Dead-man switch (SUPL-06) — required under --profile at-risk.
+		"deadman-required": "abysslink deadman enable --apply",
 		// Fleet isolation checks (mr-* checks).
 		"mr-rig-isolation":   "abysslink enroll rig <name> --apply  (re-pushes the rig-to-rig ACL deny)",
 		"mr-topic-isolation": "Give each rig a unique ntfy_topic in abysslink.yaml",

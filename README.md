@@ -127,6 +127,7 @@ The mesh-VPN model means **your phone and laptop talk directly to each other.** 
 - **Sandboxed where the OS allows it** — Linux Landlock confines filesystem access for sensitive operations.
 - **Per-device, revocable credentials** — `abysslink enroll phone` mints a per-device push token, a bearer credential, and a short-lived **SSH certificate** from an in-process CA (keys in the OS keychain). When the daemon is reachable it stages the bundle and prints one single-use QR your phone scans to pull every credential over the tailnet (no key hand-copying); the one-time secret box still prints as the source of truth, and `--qr` is the offline per-credential fallback. `abysslink panic` and `abysslink device revoke` revoke them atomically — the daemon stops honouring the bearer immediately and `sshd` rejects the revoked certificate (via an auto-installed CA-trust + revocation list). Device `last_seen` is tracked and stale devices are flagged.
 - **Emergency kill switch** — `abysslink panic` tears down the VPN session, revokes the phone's auth key, and destroys the local API key in seconds, with **no confirmation prompt**.
+- **Agent Apoptosis** — `abysslink arm -- claude` wraps an AI agent with a wall-clock and loop-budget monitor. When a threshold trips, the ladder fires from your phone: SIGSTOP → approve/kill dialog → optional rollback to the pre-arm git snapshot. Freeze a runaway AI agent from your pocket without touching the laptop.
 
 ---
 
@@ -402,6 +403,8 @@ Security defaults that only *warn* get clicked through. These are enforced in co
 ### Threats &amp; mitigations
 
 Run `abysslink threat-model` to print this table with the live ✓/✗ status of each defense **on your machine**.
+
+See [who-sees-what](docs/who-sees-what.md) for a per-push-path data visibility breakdown (UnifiedPush sovereign / FCM / ntfy.sh-relayed iOS).
 
 | Threat | Mitigation |
 |---|---|

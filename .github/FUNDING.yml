@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+#
+# Drafted — GitHub Sponsors not yet enabled (operator toggles in GitHub UI post-launch-gates).
+# Once Sponsors is live at github.com/sponsors/, this file makes the "Sponsor" button appear
+# on the repo page. Committing this file alone does NOT enable payment processing.
+# See LAUNCH.md §GitHub Sponsors for the enable procedure.
+
+github: [abysslink]

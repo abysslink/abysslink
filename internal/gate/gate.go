@@ -21,11 +21,13 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/abysslink/abysslink/internal/approve"
@@ -61,6 +63,12 @@ type Gated struct {
 	count     atomic.Uint64
 	enforcing bool              // when true, Run checks ctx for ApprovalToken and re-verifies closure hash; default false per D-04
 	registry  *approve.Registry // daemon-side approve registry client; only meaningful when enforcing==true; never set on the daemon-internal runner (D-40 structural bypass)
+
+	// mu protects observer. SetObserver is called once at arm time;
+	// record() reads it on every exec. A mutex shard is the simplest
+	// correct choice: observer is set rarely and read frequently.
+	mu       sync.Mutex
+	observer func([32]byte) // non-nil when a budget.Watcher has registered (KILL-01, D-03)
 }
 
 // ctxKey is the unexported context-value key for ApprovalToken. The
@@ -126,6 +134,17 @@ func New(inner shell.Runner, opts ...Option) *Gated {
 // daemon's GET /status as gate_execs_observed, proving the seam intercepts
 // every module/consumer exec before Phase 30 makes it load-bearing.
 func (g *Gated) Count() uint64 { return g.count.Load() }
+
+// SetObserver registers a non-blocking callback called by record() with the
+// computed closure hash after each exec is observed. It replaces any previous
+// callback. A nil fn deregisters. The callback must not block; panics are
+// recovered silently (same T-27-17 rule: the observer must never fail or block
+// an exec). Used by budget.Watcher for loop detection (KILL-01, D-03).
+func (g *Gated) SetObserver(fn func([32]byte)) {
+	g.mu.Lock()
+	g.observer = fn
+	g.mu.Unlock()
+}
 
 // requiresApproval reports whether an exec in enforcing mode must carry an
 // ApprovalToken. Phase 30: all execs require approval in enforcing mode.
@@ -215,6 +234,35 @@ func (g *Gated) RunStream(ctx context.Context, name string, args ...string) (*sh
 	return g.inner.RunStream(ctx, name, args...)
 }
 
+// RunArmed delegates to the inner runner if it implements shell.ArmedRunner.
+// This allows gate.Gated to satisfy shell.ArmedRunner when its inner runner is
+// a *shell.ExecRunner (the production composition root). The gate deliberately
+// does NOT enforce approval or record the armed spawn: RunArmed starts a
+// long-running process monitored by the budget watcher, not a discrete tool
+// call observable as a single exec event (D-01a, KILL-03).
+func (g *Gated) RunArmed(ctx context.Context, name string, args ...string) (*shell.ArmedHandle, error) {
+	ar, ok := g.inner.(shell.ArmedRunner)
+	if !ok {
+		return nil, fmt.Errorf("gate: inner runner %T does not implement ArmedRunner — cannot arm process", g.inner)
+	}
+	return ar.RunArmed(ctx, name, args...)
+}
+
+// RunArmedMinimal delegates to the inner runner if it implements
+// shell.ArmedMinimalRunner, mirroring RunArmed. This preserves the D-38
+// decoration chain so the production composition root (Gated wrapping
+// *shell.ExecRunner) can reach the B10 env-minimized armed spawn when the
+// operator opts in (Budget.MinimizeAgentEnv). Like RunArmed it deliberately does
+// NOT enforce approval or record the spawn: the armed process is a long-running,
+// budget-watcher-monitored run, not a discrete exec event (D-01a, KILL-03).
+func (g *Gated) RunArmedMinimal(ctx context.Context, name string, args ...string) (*shell.ArmedHandle, error) {
+	ar, ok := g.inner.(shell.ArmedMinimalRunner)
+	if !ok {
+		return nil, fmt.Errorf("gate: inner runner %T does not implement ArmedMinimalRunner — cannot arm process with minimized env", g.inner)
+	}
+	return ar.RunArmedMinimal(ctx, name, args...)
+}
+
 // record emits one slog debug line per observed exec carrying the method,
 // binary name, and the first 8 bytes (hex) of the argv and closure sha256
 // hashes — NEVER raw argv, which can carry user paths, hostnames, and
@@ -231,6 +279,19 @@ func (g *Gated) record(method, name string, args []string) {
 		"closure_sha256", hex.EncodeToString(closure[:8]),
 	)
 	g.count.Add(1)
+
+	// Notify the observer (budget.Watcher loop-detection tap, KILL-01 D-03).
+	// Read under lock, call outside lock so the observer cannot deadlock on g.mu.
+	// Panics are recovered: the observer must never fail or block an exec (T-27-17).
+	g.mu.Lock()
+	fn := g.observer
+	g.mu.Unlock()
+	if fn != nil {
+		func() {
+			defer func() { _ = recover() }()
+			fn(closure)
+		}()
+	}
 }
 
 // argvHash is sha256 over name and args joined with a NUL separator.
@@ -289,6 +350,15 @@ func writeField(h hash.Hash, field []byte) {
 	binary.BigEndian.PutUint64(lenBuf[:], uint64(len(field)))
 	_, _ = h.Write(lenBuf[:])
 	_, _ = h.Write(field)
+}
+
+// ClosureHashOf is an exported wrapper over closureHash for use by cmd_arm.go.
+// It computes the D-39 execution-closure hash for the given command and args
+// (resolved binary path + length-prefixed argv fields + optional script hash),
+// without exposing the internal closureHash function. Used by the arm command
+// to compute the arm-time closure hash for APPR request binding (Pitfall 6).
+func ClosureHashOf(name string, args []string) [32]byte {
+	return closureHash(name, args)
 }
 
 // scriptContentHash returns the sha256 of args[0]'s content when args[0]

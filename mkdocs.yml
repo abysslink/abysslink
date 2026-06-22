@@ -18,6 +18,7 @@ theme:
 
 nav:
   - Home: index.md
+  - "Why Abysslink": why-abysslink.md
   - Quickstart: quickstart.md
   - Modules:
     - Tailscale: modules/tailscale.md
@@ -30,10 +31,14 @@ nav:
   - Security:
     - Threat Model: security/threat-model.md
     - Hardening: security/hardening.md
+    - "Claims Audit": claims-audit.md
+    - "Who Sees What": who-sees-what.md
   - Operations:
     - Troubleshooting: operations/troubleshooting.md
     - FAQ: operations/faq.md
-  - Contributing: contributing.md
+  - Contributing:
+    - Contributing: contributing.md
+    - "Built with AI": ai-story.md
 
 markdown_extensions:
   - admonition

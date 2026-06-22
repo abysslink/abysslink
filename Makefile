@@ -34,6 +34,7 @@ LDFLAGS    := -s -w \
 
 .PHONY: build test lint cover release install clean conformance security-audit repro-check
 .PHONY: check-webui-isolation check-webui-build-tags check-htmx-sri vendor-htmx security-gosec
+.PHONY: vex-suppression-proof
 
 ## build: compile CLI and daemon binaries (reproducible: SOURCE_DATE_EPOCH from git)
 build:
@@ -193,3 +194,29 @@ security-audit: build
 		&& echo "OK: no telemetry imports found" \
 		|| (echo "FAIL: telemetry imports found (see above)"; exit 1)
 	@echo "=== Security audit complete ==="
+
+## vex-suppression-proof: prove a VEX suppression actually fires (SUPL-03, Pitfall 3)
+# Runs Grype over the fixture SBOM twice: WITHOUT --vex the known advisory
+# (CVE-2020-26160 in the fixture's jwt-go package) must appear and grype must
+# FAIL; WITH --vex the PURL-matching not_affected statement must suppress it and
+# grype must PASS. If the WITHOUT run ever passes or the WITH run ever fails, the
+# PURL match is wrong (silent-suppression bug) and CI must not be trusted.
+# Requires `grype` on PATH (CI installs it pinned; install locally to run this).
+# This is the executable form of 32-VALIDATION.md's SUPL-03 Manual-Only entry.
+vex-suppression-proof:
+	@command -v grype >/dev/null 2>&1 || { echo "grype not on PATH — install grype to run the suppression proof"; exit 2; }
+	@echo "=== VEX suppression proof (SUPL-03) ==="
+	@echo "--- 1/2: WITHOUT --vex (advisory MUST appear; grype MUST fail) ---"
+	@if grype "sbom:security/vex/testdata/known-advisory.spdx.json" --fail-on high; then \
+		echo "FAIL: grype passed WITHOUT --vex — fixture advisory not detected; the proof is meaningless"; exit 1; \
+	else \
+		echo "OK: grype failed WITHOUT --vex (advisory detected as expected)"; \
+	fi
+	@echo "--- 2/2: WITH --vex (advisory MUST be suppressed; grype MUST pass) ---"
+	@if grype "sbom:security/vex/testdata/known-advisory.spdx.json" \
+		--vex security/vex/testdata/known-advisory.openvex.json --fail-on high; then \
+		echo "OK: grype passed WITH --vex (suppression fired — PURL match correct)"; \
+	else \
+		echo "FAIL: grype failed WITH --vex — suppression did NOT fire. PURL mismatch (Pitfall 3): compare the SBOM externalRef PURL with the VEX product @id."; exit 1; \
+	fi
+	@echo "=== VEX suppression proven to fire ==="

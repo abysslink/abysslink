@@ -93,6 +93,30 @@ func TestWriteFile_NoLeftoverTempOnSuccess(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "temp file must be renamed away")
 }
 
+// TestWriteSymlinkTOCTOU verifies B5 (T-32-15): a symlink at the target path is
+// refused. The Lstat guard rejects a symlink that exists at check time; the
+// O_NOFOLLOW open in the backup/write path closes the residual window where a
+// symlink is swapped in AFTER the Lstat — the open fails (ELOOP) rather than
+// following the link to an out-of-path file. We assert the link target is never
+// written through.
+func TestWriteSymlinkTOCTOU(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside.secret")
+	require.NoError(t, os.WriteFile(outside, []byte("ORIGINAL"), 0o600)) //nolint:gosec // test fixture under temp dir
+
+	target := filepath.Join(dir, "target.conf")
+	require.NoError(t, os.Symlink(outside, target))
+
+	a := audit.New(filepath.Join(dir, "audit.log"))
+	err := a.WriteFile(target, []byte("ATTACKER"), 0o600, false)
+	require.Error(t, err, "writing through a symlinked target must be refused")
+
+	// The link's target file must be untouched — the write did not follow it.
+	got, rerr := os.ReadFile(outside) //nolint:gosec // test fixture under temp dir
+	require.NoError(t, rerr)
+	assert.Equal(t, "ORIGINAL", string(got), "write must not have followed the symlink to the outside file")
+}
+
 func TestDefaultLogPath_HonorsXDGStateHome(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
