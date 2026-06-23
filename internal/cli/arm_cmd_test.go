@@ -384,8 +384,14 @@ func TestArm_LadderMode_ApproveResume(t *testing.T) {
 		2*time.Second, 10*time.Millisecond, "expected SIGSTOP after ladder trip")
 
 	// Resolve the pending request as approved via the PRODUCTION registry.
-	reqID := prodWatcher.LastRequestID()
-	require.NotEmpty(t, reqID, "expected a pending request ID after SIGSTOP (production registry opened a request)")
+	// The request opens asynchronously in the ladder goroutine after SIGSTOP, so
+	// poll for it rather than reading once — the single-shot read raced on loaded
+	// CI runners (observed flaky on macos-latest).
+	var reqID string
+	require.Eventually(t, func() bool {
+		reqID = prodWatcher.LastRequestID()
+		return reqID != ""
+	}, 2*time.Second, 10*time.Millisecond, "expected a pending request ID after SIGSTOP (production registry opened a request)")
 	require.True(t, prodReg.Resolve(reqID, approve.StateApproved), "resolve approved should succeed")
 
 	// SIGCONT must follow the Approve tap — proving the approve loop is reachable.
