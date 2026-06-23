@@ -560,8 +560,13 @@ func TestWatcher_LadderMode_ApproveResume(t *testing.T) {
 	// Simulate phone Approve tap: resolve the pending request as approved.
 	// The watcher opens a request via reg.OpenWithDenySig. We need to find the
 	// request ID via the watcher's LastRequestID helper.
-	reqID := w.LastRequestID()
-	require.NotEmpty(t, reqID, "expected a pending request ID after SIGSTOP")
+	// The request opens asynchronously after SIGSTOP, so poll rather than
+	// reading once (single-shot read raced on loaded CI).
+	var reqID string
+	require.Eventually(t, func() bool {
+		reqID = w.LastRequestID()
+		return reqID != ""
+	}, 2*time.Second, 10*time.Millisecond, "expected a pending request ID after SIGSTOP")
 	ok := reg.Resolve(reqID, approve.StateApproved)
 	require.True(t, ok, "expected resolve to succeed")
 
@@ -758,8 +763,13 @@ func TestWatcher_LadderMode_DenyKill(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "expected SIGSTOP")
 
 	// Simulate phone Deny tap.
-	reqID := w.LastRequestID()
-	require.NotEmpty(t, reqID, "expected a pending request ID")
+	// The request opens asynchronously after SIGSTOP, so poll rather than
+	// reading once (single-shot read raced on loaded CI).
+	var reqID string
+	require.Eventually(t, func() bool {
+		reqID = w.LastRequestID()
+		return reqID != ""
+	}, 2*time.Second, 10*time.Millisecond, "expected a pending request ID")
 	ok := reg.Resolve(reqID, approve.StateDenied)
 	require.True(t, ok, "expected resolve to succeed")
 
