@@ -68,6 +68,27 @@ Phases 22, 23, 23.1, 23.2, 24, 25, 26 (7 phases, 29 plans) — closes the 2026-0
 
 ---
 
+## v4.1.0 — Surface & Depths 🚧 IN PROGRESS (started 2026-06-24)
+
+**Milestone goal:** Three equal-weight threads — (A) replace the v1 guided journey + 8-stage `init` wizard with a polished on-brand interactive TUI (the *surface*); (B) clear the full deferred at-risk security backlog (the *depths*); (C) post-launch hardening/polish from real launch feedback. Every new security item strengthens a floor; no floor weakens. The CLI stays free OSS forever.
+
+**Immutable floors carried (unchanged):** `--dry-run` default; secrets never on argv / never in audit; ntfy + listeners bind tailnet IP only (the loopback OAuth callback is a same-host rendezvous on `127.0.0.1`, distinct from the tailnet-bind rule); Tailnet Lock on by default, disablement secrets printed once never stored; FileVault/LUKS fail-closed; SSH `checkPeriod` 12h; only `internal/cli` writes stdout/stderr via `Printer`; all exec via `shell.Runner`; all file mutations via `internal/audit`; no Claude coupling in core modules; push payload = routing metadata only.
+
+**Scope decisions (2026-06-24, research-driven):** duress = non-destructive decoy config only (destructive wipe dropped — theater + self-DoS); hardware keys = macOS Secure Enclave default + FIDO2 opt-in, both cgo-free shell-out (`CGO_ENABLED=0` floor); browser spawn routed through the existing `shell.Runner` openURL/`shell.LookPath` (not `pkg/browser`'s `os/exec` — pkg/browser allowed for detection only); attestation = local boot-state reads only (no cloud/remote verifier).
+
+**Structure:** 6 phases (34–39), continuing the phase numbering from v4.0.0 (last phase 33). Compressed from the 7-phase research proposal per coarse granularity — TUI theme + IO boundary + banner + CGO=0 guard fold into Phase 34 (foundation); the flow layer, `init` rebuild, `journey.go` deletion, browser hand-off and `gallery` merge into Phase 35; Secure Memory + the highest-risk HMAC-key rotation stay together in Phase 36 (mlock underpins rotation); hardware keys + local attestation merge into Phase 37 (both depend on MEM, both cgo-free shell-out); backlog closure B1/B2/B8 + at-risk doctor coverage is the independent low-cost Phase 38; the cross-thread duress/decoy join folds together with post-launch polish in the closing Phase 39. All research ordering invariants hold: theme/IO boundary before the flow (everything consumes the theme; the boundary prevents `Printer` regressions); MEM before ROT and before HWK; duress last (needs the new flow AND the security providers).
+
+**Research flags (deep research at phase planning):** Phase 36 (HMAC epoch'd-chain design — the single highest-risk item: versioned epochs, in-chain marker signed by the OLD key, per-entry key selection, no false TAMPERED); Phase 37 (cgo-free per-platform hardware-key + attestation paths); Phase 38 (real-hardware FileVault mid-encryption string literals — known gap until verified); Phase 39 (duress threat model — casual-coercion, NOT forensic plausible-deniability).
+
+- [ ] **Phase 34: TUI Foundation** - Abyss two-tone `*huh.Theme` + reusable lipgloss styles + go-figure banner (NO_COLOR/non-truecolor degrade) + Printer/huh IO boundary wired first + CGO_ENABLED=0 four-target cross-build CI guard
+- [ ] **Phase 35: Browser Hand-off & Wizard Flow** - composable `internal/flow` steps threading one typed FlowState; `init` rebuilt on the flow layer + `journey.go` deleted; glamour-rendered results via Printer; `internal/browser` fire-and-forget + RFC 8252 loopback OAuth callback (+PKCE); cyan spinner + bordered framing + footer + hidden `gallery`
+- [ ] **Phase 36: Secure Memory & Audit HMAC-Key Rotation** - `SecureBytes` mlock/zeroize in `internal/secrets` (honest WARN on RLIMIT_MEMLOCK, defense-in-depth framing); versioned audit-chain key epochs + `rotate audit-hmac --apply` (marker signed by OLD key, old keys retained) + `sec-` doctor checks — HIGHEST-RISK, research-flagged
+- [ ] **Phase 37: Hardware-Backed Keys & Local Attestation** - macOS Secure Enclave + FIDO2 opt-in `HardwareKeyProvider` (cgo-free `ssh-keygen` shell-out through `shell.Runner`, fail-closed, key-kind in `status`); `internal/attest` local boot-state reads (csrutil/SIP, SecureBoot/TPM PCR) fail-closed tri-state in `doctor`/`--profile at-risk` — research-flagged
+- [ ] **Phase 38: Backlog Closure & Doctor Coverage** - B1 Tailnet Lock WARN → hard gate w/ explicit override; B2 FileVault mid-encryption fail-closed (string-literal real-hardware gap flagged); B8 per-rig fleet HMAC domain separation; every new v4.1 footgun gets a paired `sec-` doctor check wired into `--profile at-risk` (tightened to FATAL)
+- [ ] **Phase 39: Duress/Decoy & Post-Launch Polish** - non-destructive decoy config (constant-time compare, panic-paired, indistinguishability check, honest casual-coercion threat-model copy, audit-logged without leaking which credential); quickstart < 10 min re-measured against the new TUI; launch-feedback doctor gaps closed; no-telemetry / no-scope-creep held — research-flagged (duress threat model)
+
+---
+
 ## Phase Details
 
 ### Phase 1: Repo Bootstrap
@@ -593,12 +614,109 @@ Plans:
 
 **Notes:** Apple Developer account paperwork (enrollment, Developer ID signing for Gatekeeper, .p8 for the experimental APNs leg) starts in parallel at milestone start and is consumed here and in Phase 29 — it never blocks the critical path; the quarantine-hook fallback covers the cask if signing lags. Launch is a tested artifact with its own acceptance criteria, not marketing executed after engineering: gates 2–4 above decide the launch date.
 
+### Phase 34: TUI Foundation
+
+**Goal**: Establish the Abyss two-tone visual identity and the Printer/huh IO boundary as the single, tested foundation every later TUI step consumes — before any wizard flow exists — so theme drift, NO_COLOR crashes, and a silently-broken static binary are caught here
+**Depends on**: Phase 33 (v4.0.0 complete — first phase of v4.1.0)
+**Requirements**: TUI-01, TUI-02, TUI-08
+**Success Criteria** (what must be TRUE):
+
+  1. Every form/title/selection rendered through the new theme shows the Abyss identity — cyan accent/nav/titles, violet active selection, steel muted — sourced from one `internal/ui/theme.go` (the only place colors are defined), with huh field names verified against the pinned `huh v1.0.0` (not guessed)
+  2. The two-tone slant banner ("ABYSS" cyan / "LINK" violet) renders inside a rounded border on a truecolor terminal and degrades to readable plain/dim output under `NO_COLOR`, a non-truecolor `$TERM`, or a dumb terminal — and never crashes in any of those modes
+  3. The Printer/huh IO boundary is in place: live huh `.Run()` is gated behind `interactive()` and isolated so deterministic output still flows through `internal/cli.Printer`; existing `--json`/non-TTY output stays byte-stable (no regression)
+  4. A `CGO_ENABLED=0` cross-build CI check compiles the binary for all four targets (darwin/amd64, darwin/arm64, linux/amd64, linux/arm64) and fails the build if a TUI dependency pulls in cgo
+
+**Plans**: TBD
+**UI hint**: yes
+
+### Phase 35: Browser Hand-off & Wizard Flow
+
+**Goal**: Replace the v1 journey + 8-stage `init` wizard with a composable, on-brand guided flow built on the Phase 34 theme — one typed `FlowState`, no globals — and add a paranoid-by-default browser hand-off (fire-and-forget plus an RFC 8252 loopback OAuth callback) so the new `init` is the complete, demo-ready surface
+**Depends on**: Phase 34 (consumes the theme, banner, and IO boundary)
+**Requirements**: TUI-03, TUI-04, TUI-05, TUI-06, TUI-07, BRWS-01, BRWS-02, BRWS-03
+**Success Criteria** (what must be TRUE):
+
+  1. `abysslink init` runs end-to-end on the new flow layer (`internal/flow/` composable steps returning `*huh.Form`/`*huh.Group`, threading one `FlowState`); `internal/cli/journey.go` no longer exists; wizard logic has moved out of `cmd_init.go` into a thin command + steps
+  2. Headless `--yes`/`--json`/non-TTY `init` paths stay non-blocking and byte-stable (no live form ever blocks CI), and results/help/markdown render through glamour to a string emitted via `Printer` (ANSI auto-stripped under `--json`) — no raw `fmt.Println`
+  3. A browser hand-off step opens a URL through the existing `shell.Runner` openURL/`shell.LookPath` opener (not `pkg/browser`'s `os/exec`) and a huh confirm resumes the flow when the user returns
+  4. The OAuth/callback step runs a loopback server on `127.0.0.1` + an ephemeral random free port, validates `state`/`nonce` + PKCE before accepting, honors a `context` timeout and ctrl-c cancellation, shuts the server down after the callback, and returns the auth code into `FlowState`; the listener can never bind a non-loopback address (rejected at the config schema level — no YAML knob exposes it)
+  5. Async/browser-wait steps show a cyan huh spinner inside a bordered padded container with the persistent steel footer hint; a hidden `gallery` / `--theme-preview` command renders the sample group under the Abyss theme without running the full flow
+
+**Plans**: TBD
+**UI hint**: yes
+
+### Phase 36: Secure Memory & Audit HMAC-Key Rotation
+
+**Goal**: Land the foundational in-memory secret handling (mlock/zeroize) and then the single highest-risk security item of the milestone — versioned audit-chain HMAC-key rotation that never flags pre-rotation history as TAMPERED
+**Depends on**: Phase 33 (security track; independent of the TUI thread — but `SecureBytes` must precede rotation, so they ship together)
+**Requirements**: MEM-01, MEM-02, ROT-01, ROT-02, ROT-03
+**Success Criteria** (what must be TRUE):
+
+  1. A `SecureBytes` type (memguard-backed, pure-Go) in `internal/secrets` holds in-memory secrets mlock'd + zeroized on free; when `RLIMIT_MEMLOCK` prevents locking it surfaces an honest WARN (never a silent no-op), and it is framed as defense-in-depth with no "never hits disk" claim; the audit HMAC key is cached as `SecureBytes` in `internal/audit/signed.go`
+  2. After `abysslink rotate audit-hmac --apply`, the audit chain contains an in-chain rotation marker signed by the OLD key, a new key is generated and stored in the keychain, the chain is re-anchored, and old keys are retained (never deleted); the rotation secret is printed once and never stored
+  3. Verifying a chain that spans multiple key epochs selects the key by per-entry epoch/key-ID and reports every pre-rotation entry as VALID — no false TAMPERED — proven by a multi-epoch regression test
+  4. `sec-` doctor checks report mlock availability and the current key epoch + rotation health
+
+**Plans**: TBD
+
+**Notes:** DEEP RESEARCH FLAG — the audit chain has no key-ID field today, so naive rotation flags ALL history TAMPERED. Detailed epoch design (versioned key epochs, in-chain marker signed by the old key, per-entry key selection on verify, never delete old keys) plus multi-epoch regression tests must be resolved in writing at phase planning. `SecureBytes` is best-effort (Go GC moves buffers) — defense-in-depth framing only, no hard guarantee.
+
+### Phase 37: Hardware-Backed Keys & Local Attestation
+
+**Goal**: Add genuine hardware-backed key support (macOS Secure Enclave default, FIDO2 opt-in) and local boot/device attestation — all cgo-free shell-out through `shell.Runner`, all fail-closed — building on the Phase 36 secure secret handling
+**Depends on**: Phase 36 (consumes `SecureBytes`/secure handling and the `sec-` doctor pattern)
+**Requirements**: HWK-01, HWK-02, HWK-03, HWK-04, ATT-01, ATT-02
+**Success Criteria** (what must be TRUE):
+
+  1. A `HardwareKeyProvider` interface sits beside `KeychainStore`; the macOS Secure Enclave provider creates a non-exportable key via cgo-free shell-out (`ssh-keygen -w`/`sc_auth`) and the FIDO2 opt-in provider uses `ssh-keygen -t ed25519-sk` (OpenSSH ≥10 floor) — both routed through `shell.Runner`, no cgo, no `os/exec` bypass
+  2. Hardware-key use fails closed — it never silently falls back to a software key; the active key kind is surfaced in `abysslink status` and a `sec-` doctor check
+  3. `abysslink enroll` offers the hardware-key option inside the new flow (Phase 35)
+  4. `internal/attest` reads local boot state only — macOS `csrutil`/SIP, Linux SecureBoot EFI var + TPM PCR via `tpm2_quote` (or `go-tpm`) — through `shell.Runner`, with no network and no SaaS verifier
+  5. Attestation is fail-closed tri-state (tool missing/error ⇒ WARN, never false-OK) and surfaced in `doctor` + `--profile at-risk`
+
+**Plans**: TBD
+
+**Notes:** DEEP RESEARCH FLAG — `CGO_ENABLED=0` disqualifies every in-process FIDO2/PIV/Secure-Enclave binding (go-libfido2, sks, go-piv all need cgo); confirm the cgo-free per-platform shell-out path (`ssh-keygen -t ed25519-sk`, Secure-Enclave CLI, `csrutil`/`tpm2_quote`) at planning. Platform attestation + Secure-Enclave behavioral claims are pending real-hardware confirmation — fixture-driven + fail-closed until verified. Attestation is local-only by floor; the cloud/remote verifier is out of scope (no-SaaS/no-telemetry).
+
+### Phase 38: Backlog Closure & Doctor Coverage
+
+**Goal**: Clear the deferred MED backlog (B1/B2/B8) and guarantee the immutable guide rule for the whole milestone — every new v4.1 footgun has a paired `sec-` doctor check wired into `--profile at-risk` — as the independent, low-cost track
+**Depends on**: Phase 33 (largely independent; sequenced after the security providers so the new footgun checks can reference them, but the B-item fixes themselves stand alone)
+**Requirements**: BKLG-01, BKLG-02, BKLG-03, BKLG-04
+**Success Criteria** (what must be TRUE):
+
+  1. B1 — the Tailnet Lock WARN becomes a hard gate (no longer silently skippable), with an explicit override flag to consciously bypass it
+  2. B2 — FileVault mid-encryption detection (`fdesetup`/`diskutil` string literals) fails closed; the real-hardware string-literal confirmation is flagged as a known gap until verified (fail-closed regardless)
+  3. B8 — per-rig fleet HMAC framing is domain-separated so cross-rig audit entries cannot be confused or replayed across rigs
+  4. Every new v4.1 footgun (decoy, hardware keys, attestation, rotation, mlock) has a paired `sec-` doctor check wired into `--profile at-risk`, and the at-risk profile tightens the new items to FATAL
+
+**Plans**: TBD
+
+**Notes:** DEEP RESEARCH FLAG (B2 only) — the FileVault mid-encryption `fdesetup`/`diskutil` string literals need real-hardware confirmation; until then the check is fixture-driven and fails closed. This phase carries the immutable guide rule (a `doctor` check for EVERY footgun) for the whole milestone, so it is sequenced after the Phase 36/37 security features land their footguns.
+
+### Phase 39: Duress/Decoy & Post-Launch Polish
+
+**Goal**: Ship the one cross-thread security feature — a non-destructive duress/decoy config that needs both the new flow (Phase 35) and the security providers/panic wiring — and fold in post-launch hardening and polish driven by real v4.0.0 launch feedback, holding every floor at milestone close
+**Depends on**: Phase 35 (new flow), Phase 36/37 (security providers), Phase 38 (the paired-doctor-check rule + at-risk profile)
+**Requirements**: DUR-01, DUR-02, DUR-03, POL-01, POL-02, POL-03
+**Success Criteria** (what must be TRUE):
+
+  1. An alternate (decoy) credential unlocks a benign rig view that hides the real fleet/session state; credential comparison is constant-time; no destructive wipe path exists anywhere
+  2. The decoy is paired with the existing panic/kill-switch so degradation is real (not cosmetic), and a decoy-vs-real indistinguishability check guards against trivial detection; duress activation is audit-logged without leaking which credential was used
+  3. Honest threat-model copy ships in docs + `doctor` — framed as the casual-coercion model, explicitly NOT forensic plausible-deniability
+  4. An onboarding-friction pass keeps quickstart < 10 min for a fresh install, re-measured against the new TUI `init`; doctor-coverage gaps surfaced by the first real v4.0.0 installs are closed
+  5. No-telemetry and no-scope-creep are held — polish only, with no new always-on network surface introduced
+
+**Plans**: TBD
+
+**Notes:** DEEP RESEARCH FLAG — the duress threat model (casual-coercion, NOT forensic plausible-deniability) must be designed in writing at phase planning; destructive duress wipe is DROPPED (security theater + self-DoS + detectable) — non-destructive decoy only. This is the milestone's only cross-thread join: it cannot start until the new flow AND the security providers exist. POL-02 specifics are captured from launch feedback at planning time.
+
 ---
 
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → … → 21 → 22 → 23 → 23.1 → 23.2 → 24 → 25 → 26 → 27 → 28 → 28.1 → 29 → 30 → 31 → 32 → 33 (Phase 32 is a CI/pipeline track parallelizable with 27–31, but must complete before 33)
+Phases execute in numeric order: 1 → … → 27 → 28 → 28.1 → 29 → 30 → 31 → 32 → 33 → 34 → 35 → 36 → 37 → 38 → 39. v4.1.0 (34–39): the TUI thread (34 → 35) and the security thread (36 → 37) are independent and parallelizable; Phase 38 (backlog closure) is largely independent but sequenced after 36/37 so the new-footgun doctor checks can reference the new features; Phase 39 (duress/decoy + polish) is the cross-thread join and must come last (it needs the new flow from 35 AND the security providers from 36/37).
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -637,6 +755,12 @@ Phases execute in numeric order: 1 → … → 21 → 22 → 23 → 23.1 → 23.
 | 31. Agent Kill-Switch ("Apoptosis") | 5/5 | Complete | 2026-06-18 |
 | 32. Supply-Chain Depth & Trimmed Fortify | 7/7 | Complete (release-proofs at v4 tag) | 2026-06-20 |
 | 33. Distribution & Public Launch | 3/3 | Complete (human-gated: LNCH-02/04/05/06 operator) | 2026-06-21 |
+| 34. TUI Foundation | 0/? | Not started | - |
+| 35. Browser Hand-off & Wizard Flow | 0/? | Not started | - |
+| 36. Secure Memory & Audit HMAC-Key Rotation | 0/? | Not started | - |
+| 37. Hardware-Backed Keys & Local Attestation | 0/? | Not started | - |
+| 38. Backlog Closure & Doctor Coverage | 0/? | Not started | - |
+| 39. Duress/Decoy & Post-Launch Polish | 0/? | Not started | - |
 
 ### Phase 23.1: Doctor probe-failure honesty — no false-OK on unknown or failed probes and no double-emit (INSERTED)
 
