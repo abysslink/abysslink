@@ -53,6 +53,7 @@ jobs:
             raw.githubusercontent.com:443
             toolbox-data.anchore.io:443
             grype.anchore.io:443
+            get.anchore.io:443
             proxy.golang.org:443
             sum.golang.org:443
             golang.org:443
@@ -116,9 +117,16 @@ jobs:
         # statement in security/vex/. --fail-on high => High+Critical fail unless
         # VEX-suppressed; Medium and below are reported but warn-only.
         run: |
+          # grype --vex takes a FILE per flag (not a directory). Pass the auto
+          # govulncheck doc plus each hand-written security/vex/*.openvex.json
+          # (none today — testdata/ fixtures are excluded by the glob).
+          vex_args=(--vex dist/govulncheck.openvex.json)
+          shopt -s nullglob
+          for f in security/vex/*.openvex.json; do vex_args+=(--vex "$f"); done
+          shopt -u nullglob
+          echo "VEX docs: ${vex_args[*]}"
           grype "sbom:dist/abysslink-source.spdx.json" \
-            --vex dist/govulncheck.openvex.json \
-            --vex security/vex \
+            "${vex_args[@]}" \
             --fail-on high
 
       - name: Enforce hand-written VEX 90-day freshness
