@@ -71,6 +71,11 @@ jobs:
           go-version: "1.26"
           cache: true
 
+      - name: Prepare dist/ (sbom-action output dir)
+        # sbom-action writes output-file: dist/... but does not create the parent
+        # dir; without this the SBOM is never written and the Grype step ENOENTs.
+        run: mkdir -p dist
+
       - name: Generate source SBOM (Syft)
         # SHA-pinned anchore/sbom-action (same SHA already used in release-build.yml).
         # Emits an SPDX-JSON SBOM of the source tree as the Grype scan target.
