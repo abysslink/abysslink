@@ -47,7 +47,7 @@ Phases 22, 23, 23.1, 23.2, 24, 25, 26 (7 phases, 29 plans) — closes the 2026-0
 
 ---
 
-## v4.0.0 — Launchpad 🚧 IN PROGRESS
+## v4.0.0 — Launchpad ✅ SHIPPED 2026-06-21 (merged via PR #38 on 2026-06-23; launch gates LNCH-02/04/05/06 operator-owned — see milestones/v4.0.0-MILESTONE-AUDIT.md + LAUNCH.md)
 
 **Milestone goal:** Ship the revenue substrate (session-aware notification backbone + phone approve loop + agent kill-switch) and launch Abysslink publicly. The CLI stays free OSS forever; every future paid product (mobile app first, v5, separate repo) sits on this milestone's platform.
 
@@ -62,9 +62,9 @@ Phases 22, 23, 23.1, 23.2, 24, 25, 26 (7 phases, 29 plans) — closes the 2026-0
 - [x] **Phase 28.1: Device SSH CA sshd Integration** - auto-wire `TrustedUserCAKeys` to the device CA + enforce revocation via an `ssh-keygen -k` KRL referenced by `RevokedKeys`, both through the existing hardened-sshd reconcile path (DEVC-05/06; closes Phase 28's manual-CA-copy-paste + dead `RevokedSerials()` threads) (completed 2026-06-14)
 - [x] **Phase 29: Push Gateway & Outbox** - push.Gateway interface + bbolt outbox; UnifiedPush/ntfy sovereign path shipped working, APNs/FCM interface-complete experimental (completed 2026-06-15)
 - [x] **Phase 30: Phone Approve Loop** - signed single-use approve/deny bound to execution-closure hash, GatedRunner flips enforcing, pre-app bridges with tier policy, claudecode consumer (plans complete + verified 5/5; awaiting human UAT 2026-06-17) (completed 2026-06-17)
-- [ ] **Phase 31: Agent Kill-Switch ("Apoptosis")** - budget module: notify → SIGSTOP-then-ask → kill ladder, shadow-mode default, pgid kill, rollback offer, flight-recorder cast hash in audit chain
-- [ ] **Phase 32: Supply-Chain Depth & Trimmed Fortify** - SLSA L3 + Scorecard + Syft/Grype/VEX, doctor external version floors, cheap MED gaps, at-risk profile + dead-man switch
-- [ ] **Phase 33: Distribution & Public Launch** - Homebrew cask + AUR pinned to attested artifacts; quickstart fire-drill, claims audit, real-device sovereign push test gate the Show HN launch
+- [x] **Phase 31: Agent Kill-Switch ("Apoptosis")** - budget module: notify → SIGSTOP-then-ask → kill ladder, shadow-mode default, pgid kill, rollback offer, flight-recorder cast hash in audit chain (5/5 plans; shipped ladder nil-panic closed in 31-05) (completed 2026-06-18)
+- [x] **Phase 32: Supply-Chain Depth & Trimmed Fortify** - SLSA L3 + Scorecard + Syft/Grype/VEX, doctor external version floors, cheap MED gaps, at-risk profile + dead-man switch (7/7 plans; 3 release-gated proofs fire at the v4 tag) (completed 2026-06-20)
+- [x] **Phase 33: Distribution & Public Launch** - Homebrew cask + AUR pinned to attested artifacts; quickstart fire-drill, claims audit, real-device sovereign push test gate the Show HN launch (3/3 plans; launch-ready artifacts built + verified 7/7 must-haves; LNCH-02/04/05/06 operator gates — see 33-VERIFICATION.md) (completed 2026-06-21)
 
 ---
 
@@ -634,9 +634,9 @@ Phases execute in numeric order: 1 → … → 21 → 22 → 23 → 23.1 → 23.
 | 28.1 Device SSH CA sshd Integration | 2/2 | Complete   | 2026-06-14 |
 | 29. Push Gateway & Outbox | 5/5 | Complete    | 2026-06-15 |
 | 30. Phone Approve Loop | 5/5 | Complete    | 2026-06-17 |
-| 31. Agent Kill-Switch ("Apoptosis") | 0/? | Not started | - |
-| 32. Supply-Chain Depth & Trimmed Fortify | 0/? | Not started | - |
-| 33. Distribution & Public Launch | 0/? | Not started | - |
+| 31. Agent Kill-Switch ("Apoptosis") | 5/5 | Complete | 2026-06-18 |
+| 32. Supply-Chain Depth & Trimmed Fortify | 7/7 | Complete (release-proofs at v4 tag) | 2026-06-20 |
+| 33. Distribution & Public Launch | 3/3 | Complete (human-gated: LNCH-02/04/05/06 operator) | 2026-06-21 |
 
 ### Phase 23.1: Doctor probe-failure honesty — no false-OK on unknown or failed probes and no double-emit (INSERTED)
 
