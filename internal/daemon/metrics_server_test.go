@@ -360,8 +360,17 @@ func TestMetricsServer_NoFabricatedPosture(t *testing.T) {
 	assert.Regexp(t, `abysslink_rig_reachable\{rig="[^"]+"\} 1`, body,
 		"reachable must be 1 from the REAL backend probe, not hardcoded")
 	assert.Contains(t, body, "abysslink_lock_status 1", "lock status is real (from config)")
-	assert.Contains(t, body, "abysslink_last_seen_timestamp",
-		"last_seen must be present after a successful probe")
+	// last_seen is recorded by an async backend probe, so re-scrape until it
+	// appears rather than asserting on the first body (raced on loaded CI).
+	assert.Eventually(t, func() bool {
+		resp, err := http.Get("http://127.0.0.1:" + itoa(port) + "/metrics") //nolint:gosec,noctx // test-local fixed URL
+		if err != nil {
+			return false
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, _ := io.ReadAll(resp.Body)
+		return strings.Contains(string(b), "abysslink_last_seen_timestamp")
+	}, 2*time.Second, 20*time.Millisecond, "last_seen must be present after a successful probe")
 }
 
 // TestMetricsServer_UnreachableBackendHonest verifies the fail-honest side of
