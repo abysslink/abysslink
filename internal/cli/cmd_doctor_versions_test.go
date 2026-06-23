@@ -212,13 +212,21 @@ func TestTmuxVersionFloor_BinaryMissing_Warn(t *testing.T) {
 // severity field: the zero value must preserve FATAL behavior for every
 // pre-existing CVE row in the table.
 func TestVersionFloor_ExistingRowsKeepFatal(t *testing.T) {
+	// Capability floors below their minimum degrade to WARN (the feature
+	// degrades but the system stays operable): tmux (D-27) and EternalTerminal
+	// (prefer-mosh — mosh fallback exists).
+	warnRows := map[string]bool{
+		"tmux-version": true,
+		"et-version":   true,
+	}
 	for _, f := range versionFloors {
-		if f.checkID == "tmux-version" {
-			assert.Equal(t, floorSevWarn, f.severity, "the tmux capability floor must be WARN severity (D-27)")
+		if warnRows[f.checkID] {
+			assert.Equal(t, floorSevWarn, f.severity,
+				"capability floor %q must be WARN severity", f.checkID)
 			continue
 		}
 		assert.Equal(t, floorSevFatal, f.severity,
-			"CVE row %q must keep FATAL severity (zero-value default)", f.checkID)
+			"CVE/security row %q must keep FATAL severity (zero-value default)", f.checkID)
 	}
 
 	// Behavioral: ntfy below floor is still FATAL with the severity field present.
@@ -230,4 +238,100 @@ func TestVersionFloor_ExistingRowsKeepFatal(t *testing.T) {
 	found := findFloorFinding(findings, "ntfy-version")
 	require.NotNil(t, found)
 	assert.Equal(t, modules.SeverityFatal, found.Severity, "ntfy below floor must stay FATAL")
+}
+
+// ── SUPL-04: Tailscale / NetBird-client / EternalTerminal floors ─────────────
+
+// okPrefix scripts benign passing probes for the leading table rows (ntfy, tmux)
+// so a focused probe of a later row supplies one Call per versionFloors entry in
+// table order. The trailing rows (after the row under test) are filled with an
+// at-floor OK so the MockRunner never errors on an unscripted over-call.
+func floorRunnerFor(target string, targetCall shell.Call) shell.Runner {
+	defaults := map[string]shell.Call{
+		"ntfy-version":      {Result: shell.Result{Stdout: "ntfy version 2.21.0\n", ExitCode: 0}},
+		"tmux-version":      {Result: shell.Result{Stdout: "tmux 3.6b\n", ExitCode: 0}},
+		"tailscale-version": {Result: shell.Result{Stdout: "1.98.5\n", ExitCode: 0}},
+		"nb-client-version": {Result: shell.Result{Stdout: "netbird version 0.73.1\n", ExitCode: 0}},
+		"et-version":        {Result: shell.Result{Stdout: "et version 6.2.11\n", ExitCode: 0}},
+	}
+	calls := make([]shell.Call, 0, len(versionFloors))
+	for _, f := range versionFloors {
+		if f.checkID == target {
+			calls = append(calls, targetCall)
+			continue
+		}
+		calls = append(calls, defaults[f.checkID])
+	}
+	return shell.NewMockRunner(calls...)
+}
+
+// TestVersionFloor_TailscaleBelowFloor_Fatal verifies Tailscale 1.98.0 → FATAL.
+func TestVersionFloor_TailscaleBelowFloor_Fatal(t *testing.T) {
+	runner := floorRunnerFor("tailscale-version",
+		shell.Call{Result: shell.Result{Stdout: "1.98.0\n", ExitCode: 0}})
+	found := findFloorFinding(versionFloorFindings(context.Background(), runner), "tailscale-version")
+	require.NotNil(t, found, "tailscale-version finding must be present")
+	assert.Equal(t, modules.SeverityFatal, found.Severity, "Tailscale 1.98.0 is below floor 1.98.1 — FATAL")
+}
+
+// TestVersionFloor_TailscaleAtFloor_OK verifies Tailscale 1.98.1 → OK.
+func TestVersionFloor_TailscaleAtFloor_OK(t *testing.T) {
+	runner := floorRunnerFor("tailscale-version",
+		shell.Call{Result: shell.Result{Stdout: "1.98.1\n", ExitCode: 0}})
+	found := findFloorFinding(versionFloorFindings(context.Background(), runner), "tailscale-version")
+	require.NotNil(t, found)
+	assert.Equal(t, modules.SeverityOK, found.Severity, "Tailscale 1.98.1 meets the floor — OK")
+}
+
+// TestVersionFloor_TailscaleUnprobeable_Warn verifies an exec error → WARN.
+func TestVersionFloor_TailscaleUnprobeable_Warn(t *testing.T) {
+	runner := floorRunnerFor("tailscale-version", shell.Call{Err: assert.AnError})
+	found := findFloorFinding(versionFloorFindings(context.Background(), runner), "tailscale-version")
+	require.NotNil(t, found)
+	assert.Equal(t, modules.SeverityWarning, found.Severity, "unprobeable Tailscale must WARN (fail-honest)")
+}
+
+// TestVersionFloor_NetBirdClientBelowFloor_Fatal verifies NetBird client 0.56.0 → FATAL.
+func TestVersionFloor_NetBirdClientBelowFloor_Fatal(t *testing.T) {
+	runner := floorRunnerFor("nb-client-version",
+		shell.Call{Result: shell.Result{Stdout: "netbird version 0.56.0\n", ExitCode: 0}})
+	found := findFloorFinding(versionFloorFindings(context.Background(), runner), "nb-client-version")
+	require.NotNil(t, found, "nb-client-version finding must be present (distinct from server nb-version)")
+	assert.Equal(t, modules.SeverityFatal, found.Severity, "NetBird client 0.56.0 is below floor 0.57.0 — FATAL")
+}
+
+// TestVersionFloor_NetBirdClientAtFloor_OK verifies NetBird client 0.57.0 → OK.
+func TestVersionFloor_NetBirdClientAtFloor_OK(t *testing.T) {
+	runner := floorRunnerFor("nb-client-version",
+		shell.Call{Result: shell.Result{Stdout: "netbird version 0.57.0\n", ExitCode: 0}})
+	found := findFloorFinding(versionFloorFindings(context.Background(), runner), "nb-client-version")
+	require.NotNil(t, found)
+	assert.Equal(t, modules.SeverityOK, found.Severity, "NetBird client 0.57.0 meets the floor — OK")
+}
+
+// TestVersionFloor_ETBelowFloor_Warn verifies EternalTerminal 6.1.0 → WARN
+// (prefer-mosh capability floor — mosh fallback exists, never FATAL).
+func TestVersionFloor_ETBelowFloor_Warn(t *testing.T) {
+	runner := floorRunnerFor("et-version",
+		shell.Call{Result: shell.Result{Stdout: "et version 6.1.0\n", ExitCode: 0}})
+	found := findFloorFinding(versionFloorFindings(context.Background(), runner), "et-version")
+	require.NotNil(t, found, "et-version finding must be present")
+	assert.Equal(t, modules.SeverityWarning, found.Severity, "EternalTerminal 6.1.0 below floor must WARN (prefer-mosh)")
+}
+
+// TestVersionFloor_ETAtFloor_OK verifies EternalTerminal 6.2.0 → OK.
+func TestVersionFloor_ETAtFloor_OK(t *testing.T) {
+	runner := floorRunnerFor("et-version",
+		shell.Call{Result: shell.Result{Stdout: "et version 6.2.0\n", ExitCode: 0}})
+	found := findFloorFinding(versionFloorFindings(context.Background(), runner), "et-version")
+	require.NotNil(t, found)
+	assert.Equal(t, modules.SeverityOK, found.Severity, "EternalTerminal 6.2.0 meets the floor — OK")
+}
+
+// TestVersionFloor_NewRowsHaveFixEntries verifies findingFix has remediation
+// text for the three new check IDs (DOC-04 — every floor check is fixable).
+func TestVersionFloor_NewRowsHaveFixEntries(t *testing.T) {
+	for _, check := range []string{"tailscale-version", "nb-client-version", "et-version"} {
+		assert.NotEmpty(t, findingFix(check), "findingFix must have a remediation entry for %q", check)
+	}
 }

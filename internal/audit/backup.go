@@ -32,7 +32,9 @@ import (
 // src already exposed, so mirroring its mode leaks nothing new.
 // It returns the path of the backup file on success.
 func Backup(src string) (string, error) {
-	content, err := os.ReadFile(src) //nolint:gosec // G304: src is an audit backup path derived from the target path, not user-controlled
+	// B5 (T-32-15): read with O_NOFOLLOW so a symlink swapped in at src after the
+	// caller's Lstat check is refused, never read through to an out-of-path file.
+	content, err := readNoFollow(src)
 	if err != nil {
 		return "", fmt.Errorf("audit: backup read %s: %w", src, err)
 	}
@@ -57,7 +59,8 @@ func Backup(src string) (string, error) {
 // (rollback) and the Append error is returned. The caller's mutation must also
 // abort on this error to preserve the append-before-write audit ordering.
 func BackupWithChain(ctx context.Context, src string, sa *SignedAudit) (string, error) {
-	content, err := os.ReadFile(src) //nolint:gosec // G304: src is an audit backup path derived from the target path, not user-controlled
+	// B5 (T-32-15): O_NOFOLLOW read — refuse a freshly-swapped symlink at src.
+	content, err := readNoFollow(src)
 	if err != nil {
 		return "", fmt.Errorf("audit: backup read %s: %w", src, err)
 	}

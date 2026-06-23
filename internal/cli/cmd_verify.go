@@ -32,6 +32,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// slsaOwner / slsaSignerWorkflow bind `gh attestation verify` to the exact
+// isolated reusable workflow that produces the release provenance (SLSA Build
+// L3). The owner scopes the attestation lookup; --signer-workflow is what
+// enforces that the provenance came from THIS pipeline and nothing else.
+const (
+	slsaOwner          = "abysslink"
+	slsaSignerWorkflow = "abysslink/abysslink/.github/workflows/release-build.yml"
+)
+
 // verifyResult is the JSON record emitted by `abysslink verify --json`.
 type verifyResult struct {
 	BundleOK bool `json:"bundle_ok"`
@@ -39,11 +48,39 @@ type verifyResult struct {
 	// release binary extracted from the signed-manifest-verified tarball. It is
 	// false in --bundle override (offline/test) mode, where no release
 	// artifacts are downloaded.
-	BinaryChecked bool   `json:"binary_checked"`
-	BinaryOK      bool   `json:"binary_ok"`
-	SLSAOK        bool   `json:"slsa_ok"`
-	Version       string `json:"version"`
-	Commit        string `json:"commit"`
+	BinaryChecked bool `json:"binary_checked"`
+	BinaryOK      bool `json:"binary_ok"`
+	// SLSAChecked is true when the fail-closed `gh attestation verify` leg ran
+	// (the network verify path). It is false in --bundle override (offline/test)
+	// mode, where provenance is only an advisory presence check via the API.
+	SLSAChecked bool   `json:"slsa_checked"`
+	SLSAOK      bool   `json:"slsa_ok"`
+	Version     string `json:"version"`
+	Commit      string `json:"commit"`
+}
+
+// verifyGHAttestation verifies the SLSA build provenance for target by invoking
+// `gh attestation verify --signer-workflow`, the ONLY verifier compatible with
+// actions/attest-build-provenance output (slsa-verifier rejects it). This is
+// the fail-closed contract: a non-zero exit (tampered/missing provenance) OR an
+// inability to execute gh (gh absent) both return an error — never a warning
+// that proceeds. All exec goes through shell.Runner per the CLAUDE.md hard rule.
+func verifyGHAttestation(ctx context.Context, runner shell.Runner, target, signerWorkflow string) error {
+	res, err := runner.Run(ctx, "gh", "attestation", "verify", target,
+		"--owner", slsaOwner,
+		"--signer-workflow", signerWorkflow,
+	)
+	if err != nil {
+		// A non-nil runner error means gh could not be executed (not on PATH).
+		// Fail closed with install guidance (Open Question 2).
+		return fmt.Errorf("gh not found or failed to execute — cannot verify SLSA provenance "+
+			"(install the GitHub CLI: https://cli.github.com): %w", err)
+	}
+	if res.ExitCode != 0 {
+		combined := strings.TrimSpace(res.Stdout + res.Stderr)
+		return fmt.Errorf("gh attestation verify exited %d (SLSA provenance missing or invalid): %s", res.ExitCode, combined)
+	}
+	return nil
 }
 
 // verifyCosignBundle verifies a cosign v3 bundle file against a target artifact.
@@ -171,30 +208,44 @@ func runVerify(ctx context.Context, p Printer, runner shell.Runner, opts verifyO
 		BundleOK:      bundleOK,
 		BinaryChecked: binaryChecked,
 		BinaryOK:      binaryOK,
+		SLSAChecked:   false,
 		SLSAOK:        false,
 		Version:       ver,
 		Commit:        commit,
 	}
 
-	// Informational SLSA provenance presence check (best-effort, never fatal).
-	// Skipped when a local bundle override is supplied (offline / test mode):
-	// the attestations API lookup requires network and is purely advisory.
+	// SLSA provenance leg.
+	//   • Network path (no --bundle): FAIL-CLOSED via `gh attestation verify
+	//     --signer-workflow`. A missing/invalid provenance — or an absent gh —
+	//     maps to a non-zero exit (the locked fail-closed decision, OQ2). The
+	//     tarball downloaded by verifySelfBinary is reused as the verify target.
+	//   • Offline --bundle path: only an advisory API presence check (no gh
+	//     requirement, purely informational, never fatal).
+	var slsaErr error
 	if opts.bundleOverride == "" {
+		res.SLSAChecked = true
+		tarball := fmt.Sprintf("abysslink_%s_%s_%s.tar.gz", ver, runtime.GOOS, runtime.GOARCH)
+		slsaErr = verifyGHAttestation(ctx, runner, filepath.Join(tmpDir, tarball), slsaSignerWorkflow)
+		res.SLSAOK = slsaErr == nil
+	} else {
 		res.SLSAOK = slsaProvenanceExists(ctx, checksumPath)
 	}
 
-	return emitVerifyResult(p, res, opts.jsonOut, verr, binErr)
+	return emitVerifyResult(p, res, opts.jsonOut, verr, binErr, slsaErr)
 }
 
 // emitVerifyResult renders the verification result (JSON or human) and maps
 // any bundle/binary failure to exit 1. Extracted from runVerify (gocyclo).
-func emitVerifyResult(p Printer, res verifyResult, jsonOut bool, verr, binErr error) error {
+func emitVerifyResult(p Printer, res verifyResult, jsonOut bool, verr, binErr, slsaErr error) error {
 	if jsonOut {
 		p.PrintJSON(res)
 	} else {
-		emitVerifyHuman(p, res, verr, binErr)
+		emitVerifyHuman(p, res, verr, binErr, slsaErr)
 	}
-	if !res.BundleOK || (res.BinaryChecked && !res.BinaryOK) {
+	// Fail-closed: any failed leg maps to a non-zero exit. The SLSA leg is
+	// fatal only when it was actually run (network path) — never in the
+	// advisory --bundle offline mode.
+	if !res.BundleOK || (res.BinaryChecked && !res.BinaryOK) || (res.SLSAChecked && !res.SLSAOK) {
 		return &exitError{code: exitCodeError}
 	}
 	return nil
@@ -281,7 +332,7 @@ func resolveVerifyArtifacts(ctx context.Context, tmpDir, ver, bundleOverride str
 }
 
 // emitVerifyHuman prints a human-readable verification summary.
-func emitVerifyHuman(p Printer, res verifyResult, verr, binErr error) {
+func emitVerifyHuman(p Printer, res verifyResult, verr, binErr, slsaErr error) {
 	printerInfo(p, styleBold.Render("abysslink verify")+"  "+styleMuted.Render("v"+res.Version))
 	if res.BundleOK {
 		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("cosign bundle verified (offline)"))
@@ -304,9 +355,19 @@ func emitVerifyHuman(p Printer, res verifyResult, verr, binErr error) {
 	default:
 		printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("binary self-check skipped (local --bundle mode or bundle verification failed)"))
 	}
-	if res.SLSAOK {
+	switch {
+	case res.SLSAChecked && res.SLSAOK:
+		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("SLSA provenance verified (gh attestation verify --signer-workflow)"))
+	case res.SLSAChecked:
+		// Fail-closed leg failed: this is fatal, not informational.
+		msg := "SLSA provenance verification FAILED"
+		if slsaErr != nil {
+			msg += ": " + slsaErr.Error()
+		}
+		printerInfo(p, "  "+iconFatalStr()+"  "+styleFatal.Render(msg))
+	case res.SLSAOK:
 		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("SLSA provenance attestation found"))
-	} else {
+	default:
 		printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("no SLSA provenance attestation found (informational)"))
 	}
 }

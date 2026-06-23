@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+#
+# LNCH-02 quickstart fire-drill — automated.
+#
+# Two jobs:
+#   nix-dryrun-vm : runs the dry-run quickstart drill inside a REAL fresh NixOS VM
+#                   (flake check quickstart-vm). No secrets, no mutation of anything
+#                   persistent. This is the verified, always-safe automated drill.
+#   ubuntu-apply  : the REAL mutating drill on an ephemeral Ubuntu runner — installs
+#                   via apt, satisfies the fail-closed disk-encryption gate with a
+#                   loopback-LUKS device, pre-authenticates Tailscale with an ephemeral
+#                   auth key, then runs `up --apply`. EXPERIMENTAL: this exercises every
+#                   converge leg (sshd hardening, ntfy, mosh, power, keychain) and will
+#                   likely need iteration on your CI before it is green. It only runs on
+#                   manual dispatch AND only when the TS_AUTHKEY secret is set, so it
+#                   never blocks normal CI. See docs/testing/ci-firedrill.md.
+#
+# Secrets (you set these in repo Settings -> Secrets and variables -> Actions; NEVER
+# committed): TS_AUTHKEY (Tailscale ephemeral, pre-authorized, tagged auth key),
+# optionally ABYSSLINK_TS_OAUTH_SECRET (admin-API OAuth client secret for ACL/device legs).
+
+name: firedrill
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC — dry-run drill only (apply needs dispatch + secret)
+
+permissions:
+  contents: read
+
+jobs:
+  nix-dryrun-vm:
+    name: nix dry-run fire-drill (fresh NixOS VM)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Enable KVM (NixOS VM tests need /dev/kvm)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build (flake builds clean — guards the vendorHash regression)
+        run: nix build .#abysslink -L
+
+      - name: Dry-run quickstart drill in a fresh NixOS VM
+        run: nix build .#checks.x86_64-linux.quickstart-vm -L
+
+  ubuntu-apply:
+    name: real --apply fire-drill (ephemeral Ubuntu runner) [experimental]
+    # Manual only — the mutating drill is never run on a schedule or push.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build abysslink
+        run: make build
+
+      - name: Run the real --apply fire-drill
+        env:
+          # Injected from CI secrets at runtime — never committed, never on argv.
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+          ABYSSLINK_TS_OAUTH_SECRET: ${{ secrets.ABYSSLINK_TS_OAUTH_SECRET }}
+          ABYSSLINK_FIREDRILL_I_UNDERSTAND: "1"
+          ABYSSLINK_EMAIL: "firedrill@example.com"
+        run: |
+          set -euo pipefail
+          if [ -z "${TS_AUTHKEY:-}" ]; then
+            echo "::notice::TS_AUTHKEY secret not set — skipping the --apply drill (dry-run job covers the rest)."
+            exit 0
+          fi
+
+          # 1. Satisfy the fail-closed disk-encryption gate with a loopback-LUKS
+          #    device. DiskEncryptionStatus passes when `lsblk` shows ANY crypt
+          #    device (verified: internal/platform/linux/platform.go hasCryptDevice).
+          #    This is a CI test fixture — a fresh real VM would use a LUKS root.
+          sudo apt-get update -y && sudo apt-get install -y cryptsetup-bin
+          dd if=/dev/zero of=/tmp/firedrill-luks.img bs=1M count=64
+          echo -n "firedrill-throwaway" | sudo cryptsetup luksFormat --batch-mode /tmp/firedrill-luks.img -
+          echo -n "firedrill-throwaway" | sudo cryptsetup luksOpen /tmp/firedrill-luks.img firedrill_crypt -
+          lsblk -o NAME,TYPE | grep crypt
+
+          # 2. Pre-authenticate Tailscale (abysslink's default backend Up does not
+          #    inject a key — verified: internal/backend/tailscale.go). The ephemeral
+          #    node auto-removes when the runner dies.
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey="${TS_AUTHKEY}" --ephemeral --hostname="ci-firedrill-${GITHUB_RUN_ID}" --ssh
+
+          # 3. Timed quickstart drill (init -> up --apply -> doctor -> enroll).
+          sudo -E ABYSSLINK_BIN="$PWD/abysslink" bash scripts/quickstart-firedrill.sh --apply
+
+      - name: Tailscale logout (cleanup)
+        if: always()
+        run: sudo tailscale logout || true

@@ -18,6 +18,9 @@ package shell
 
 import (
 	"bytes"
+	"context"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -52,4 +55,64 @@ func TestLimitedWriter_WriteUnderCap(t *testing.T) {
 	_, err := lw.Write([]byte("hello"))
 	require.NoError(t, err)
 	assert.Equal(t, "hello", buf.String())
+}
+
+// TestBuildMinimalEnv_Allowlist verifies B10: env minimization is an ALLOWLIST.
+// PATH/HOME and the keyless-flow vars pass through; a non-allowlisted (secret-
+// looking) parent var does NOT. A newly-introduced unknown var also does not
+// pass — proving this is an allowlist, not a denylist.
+func TestBuildMinimalEnv_Allowlist(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=/home/u",
+		"SSH_AUTH_SOCK=/tmp/agent.sock",
+		"GIT_TERMINAL_PROMPT=0",
+		"TMPDIR=/tmp",
+		"SIGSTORE_REKOR_URL=https://rekor.example",
+		"XDG_CONFIG_HOME=/home/u/.config",
+		"AWS_SECRET_ACCESS_KEY=super-secret", // must be filtered
+		"SOME_FUTURE_UNKNOWN_VAR=leak-me",    // must be filtered (allowlist proof)
+		"NTFY_TOPIC_CREDENTIAL=topic-secret", // must be filtered
+	}
+	got := buildMinimalEnv(parent)
+	gotKeys := map[string]string{}
+	for _, e := range got {
+		k, v, _ := strings.Cut(e, "=")
+		gotKeys[k] = v
+	}
+
+	// Keyless-flow + base vars present.
+	for _, k := range []string{"PATH", "HOME", "SSH_AUTH_SOCK", "GIT_TERMINAL_PROMPT", "TMPDIR", "SIGSTORE_REKOR_URL", "XDG_CONFIG_HOME"} {
+		_, ok := gotKeys[k]
+		assert.Truef(t, ok, "allowlisted var %s must pass through minimization", k)
+	}
+	// Secret-looking and unknown vars absent.
+	for _, k := range []string{"AWS_SECRET_ACCESS_KEY", "SOME_FUTURE_UNKNOWN_VAR", "NTFY_TOPIC_CREDENTIAL"} {
+		_, ok := gotKeys[k]
+		assert.Falsef(t, ok, "non-allowlisted var %s must NOT pass through (allowlist, not denylist)", k)
+	}
+}
+
+// TestRunMinimal_EnvAllowlist verifies B10 end-to-end: a child process spawned
+// through RunMinimal sees only the allowlisted environment. It spawns a Go test
+// helper (no sh -c) that prints its own environment, then asserts the secret var
+// is absent while PATH/HOME are present.
+func TestRunMinimal_EnvAllowlist(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("env helper assumes POSIX")
+	}
+
+	secret := "ABYSSLINK_SECRET_PROBE"
+	t.Setenv(secret, "leak-me")
+	t.Setenv("HOME", "/home/probe")
+
+	r := &ExecRunner{}
+	// `env` with no args prints the child environment, one VAR=VAL per line.
+	res, err := r.RunMinimal(context.Background(), "env")
+	require.NoError(t, err)
+	require.Equal(t, 0, res.ExitCode, "env should exit 0; stderr=%s", res.Stderr)
+
+	assert.NotContains(t, res.Stdout, secret+"=", "secret var must be absent from minimized child env")
+	assert.Contains(t, res.Stdout, "PATH=", "PATH must be present in minimized child env")
+	assert.Contains(t, res.Stdout, "HOME=/home/probe", "HOME must be present in minimized child env")
 }

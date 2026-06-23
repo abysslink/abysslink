@@ -4,6 +4,24 @@
 # OpenSSF Scorecard — supply-chain security posture analysis. Publishes results
 # to the public Scorecard API (api.securityscorecards.dev), which backs the
 # README scorecard badge, and uploads SARIF to the GitHub Security tab.
+#
+# BADGE POLICY (SUPL-02): The README Scorecard badge is added ONLY when the
+# published aggregate score is at/above the ~8 threshold. Below ~8 the badge is
+# left OUT of the README until the score recovers (a low badge is worse than no
+# badge). If a Scorecard badge is currently rendered in README.md while the
+# published score is below ~8, remove it until the score is >= 8.
+#
+# This is a BADGE gate, NOT a CI gate: there is deliberately NO "fail if score < N"
+# step here. Several Scorecard checks are structurally low for a solo/auditable
+# repo (Branch-Protection, etc.) and external probes (deps.dev, OSV) dip
+# transiently — hard-failing CI on the aggregate score would break the build for
+# reasons outside a contributor's control. The threshold governs the README badge
+# decision only. See SECURITY.md "## OpenSSF Scorecard" for the structurally-low
+# checks and their rationale.
+#
+# The Scorecard score is an INTERNAL quality signal and is NEVER cited in launch,
+# marketing, or Show-HN copy (feeds the Phase 33 claims audit; SECURITY.md restates
+# this policy).
 name: Scorecard
 
 on:

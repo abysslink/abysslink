@@ -30,7 +30,7 @@
             pname = "abysslink";
             inherit version;
             src = ./.;
-            vendorHash = "sha256-g9CB7I4+bjErPg5pEvNJjlxcxoszguXU9+q/WPEPtTw=";
+            vendorHash = "sha256-0HZ+Pd4FsPR/1f1PEvNj5GCCvlXpPms+jI7IwoEQZpk=";
             subPackages = [ "cmd/abysslink" "cmd/abysslinkd" ];
             ldflags = [
               "-s"
@@ -69,6 +69,39 @@
 
         checks = {
           build = self.packages.${system}.abysslink;
+        }
+        # LNCH-02 quickstart fire-drill in a REAL fresh NixOS VM. NixOS VM tests
+        # are Linux+KVM only, so guard the attribute off on darwin (where
+        # `testers.runNixOSTest` is unavailable). Runs in CI; covers the Linux
+        # half of the fire-drill. The macOS half stays operator-manual.
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          quickstart-vm = pkgs.testers.runNixOSTest {
+            name = "abysslink-quickstart-firedrill";
+            nodes.machine = { ... }: {
+              environment.systemPackages = [ self.packages.${system}.abysslink ];
+            };
+            testScript = ''
+              machine.start()
+              machine.wait_for_unit("multi-user.target")
+
+              # Rock-solid invariants on a pristine VM:
+              machine.succeed("abysslink version")
+              machine.succeed("abysslink up --help | grep -- --apply")
+              machine.succeed("abysslink enroll --help | grep -- phone")
+              machine.succeed("abysslink daemon --help | grep -- enable")
+              # doctor is read-only + fail-closed (may exit non-zero on an
+              # unencrypted VM disk); assert only that it emits findings JSON.
+              machine.succeed("abysslink --json doctor | grep -q severity")
+
+              # Full timed fire-drill harness — INFORMATIONAL (does not gate the
+              # check): `up --dry-run` may need a config on a bare box, so its
+              # output is logged, not asserted. The operator's --apply drill (with
+              # a Tailscale ephemeral auth key + LUKS-encrypted VM) is the gate.
+              print(machine.execute(
+                "ABYSSLINK_BIN=$(command -v abysslink) bash ${./scripts/quickstart-firedrill.sh}"
+              )[1])
+            '';
+          };
         };
       }
     );

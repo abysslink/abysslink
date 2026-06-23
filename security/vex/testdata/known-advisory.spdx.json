@@ -1,0 +1,41 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "abysslink-vex-suppression-proof-fixture",
+  "documentNamespace": "https://abysslink.dev/spdx/vex-suppression-proof-fixture",
+  "creationInfo": {
+    "created": "2026-06-20T00:00:00Z",
+    "creators": [
+      "Tool: abysslink-vex-fixture",
+      "Organization: Abysslink Contributors"
+    ]
+  },
+  "comment": "Minimal SPDX SBOM for the VEX suppression proof (SUPL-03, Pitfall 3). It contains exactly one package carrying a KNOWN advisory (dgrijalva/jwt-go v3.2.0 -> CVE-2020-26160 / GHSA-w73w-5m7g-f7qc). Grype matches this advisory off the PURL below. The paired not_affected VEX (known-advisory.openvex.json) must carry the SAME PURL exactly, or suppression silently fails. This fixture is NOT a real project dependency; it exists only to prove --vex suppression genuinely changes Grype's exit status.",
+  "packages": [
+    {
+      "name": "github.com/dgrijalva/jwt-go",
+      "SPDXID": "SPDXRef-Package-jwt-go",
+      "versionInfo": "v3.2.0+incompatible",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:golang/github.com/dgrijalva/jwt-go@v3.2.0+incompatible"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-Package-jwt-go",
+      "relationshipType": "DESCRIBES"
+    }
+  ]
+}

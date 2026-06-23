@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/secrets"
@@ -485,12 +486,18 @@ func (a *SignedAudit) appendAndRefreshLocked(ctx context.Context, in SignInput, 
 // bits — R2-W3), then appends the signed chain entry via appendNoRefresh. Used
 // by WriteFile's batched path (D-08).
 //
+// The source is read with O_NOFOLLOW (via readNoFollow), so a symlink swapped in
+// at targetPath AFTER the caller's Lstat is REFUSED (ELOOP) rather than read
+// through to an out-of-path file — B5 / T-32-15 parity with the unsigned path
+// (CR-01). This closes the check-then-act TOCTOU window on the SIGNED backup
+// path (keychain-backed config.Write → WriteFile → backupNoRefresh).
+//
 // MUST be called with a.mu already held and flock already acquired by the caller.
 // Does not refresh anchor or counter.
 func (a *SignedAudit) backupNoRefresh(ctx context.Context, targetPath string, dryRun bool) error {
-	content, err := os.ReadFile(targetPath) //nolint:gosec // G304: targetPath is an audit-controlled path, not user input
+	content, err := readNoFollow(targetPath)
 	if err != nil {
-		return fmt.Errorf("audit: backup read %s: %w", targetPath, err)
+		return fmt.Errorf("audit: backup read (no-follow) %s: %w", targetPath, err)
 	}
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	bakPath := fmt.Sprintf("%s.bak.%s", targetPath, stamp)
@@ -511,11 +518,18 @@ func (a *SignedAudit) backupNoRefresh(ctx context.Context, targetPath string, dr
 // chain-attested hash is computed from exactly the content that landed in the
 // .bak — no read-hash-reread window (R2-W1).
 //
+// The source is opened with O_RDONLY|O_NOFOLLOW so a symlink swapped in at
+// targetPath after the caller's Lstat is REFUSED (ELOOP), not followed: the
+// streamed bytes come from the O_NOFOLLOW-opened inode, not a re-resolved
+// symlink. This closes the B5 TOCTOU window on the streaming (upgrade /
+// large-binary) signed backup path (WriteFilePath → backupFileStreamingNoRefresh),
+// mirroring readNoFollow on the unsigned path (CR-01 / T-32-15).
+//
 // MUST be called with a.mu already held and flock already acquired by the caller.
 func (a *SignedAudit) backupFileStreamingNoRefresh(ctx context.Context, targetPath string) error {
-	in, err := os.Open(targetPath) //nolint:gosec // G304: targetPath is an audit-controlled path, not user input
+	in, err := os.OpenFile(targetPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: targetPath is an audit-controlled path; O_NOFOLLOW is the B5 mitigation refusing a swapped symlink
 	if err != nil {
-		return fmt.Errorf("audit: backup read %s: %w", targetPath, err)
+		return fmt.Errorf("audit: backup read (no-follow) %s: %w", targetPath, err)
 	}
 	defer func() { _ = in.Close() }()
 

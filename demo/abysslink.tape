@@ -44,5 +44,20 @@ Type "clear" Enter
 # 4 · The kill switch is one word — and it's reversible.
 Type "abysslink panic --help | sed -n '1,14p'"  Sleep 250ms  Enter
 Sleep 2.6s
+Type "clear" Enter
+
+# 5 · One-scan phone enrollment — credential pull without copy-pasting keys.
+Type "abysslink enroll phone --help | sed -n '1,16p'"  Sleep 250ms  Enter
+Sleep 2.6s
+Type "clear" Enter
+
+# 6 · Session-typed notification — the rig knows which pane needs attention.
+Type "abysslink notify --help | sed -n '1,13p'"  Sleep 250ms  Enter
+Sleep 2.6s
+Type "clear" Enter
+
+# 7 · Agent kill-switch (Apoptosis) — freeze a runaway agent from your pocket.
+Type "abysslink arm --help | sed -n '1,15p'"  Sleep 250ms  Enter
+Sleep 2.6s
 
 Sleep 1s

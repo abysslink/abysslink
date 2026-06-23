@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+#
+# Reusable build + SLSA Build L3 provenance workflow.
+#
+# This workflow is the L3 isolation boundary: the goreleaser build and the
+# `actions/attest-build-provenance` step run inside a callable reusable workflow
+# so neither the source under test nor the developer who pushed the tag can
+# influence the signing step. Verifying provenance with
+# `gh attestation verify --signer-workflow <repo>/.github/workflows/release-build.yml`
+# binds trust to THIS exact workflow path (SLSA v1 Build L3).
+#
+# L3 requires `id-token: write` + `attestations: write` on BOTH this reusable
+# job AND the caller job (Pitfall 2). The caller (release.yml) declares them too.
+name: Release Build (reusable, SLSA L3)
+
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: "The release tag (e.g. v1.2.3) extracted from GITHUB_REF_NAME"
+        value: ${{ jobs.build.outputs.version }}
+
+# Deny-all by default; the build job grants only what it needs.
+permissions: {}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: Build, SBOM & SLSA L3 provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read       # checkout only; no write access
+      id-token: write      # OIDC for keyless Sigstore provenance signing (L3)
+      attestations: write  # publish the SLSA build provenance attestation (L3)
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          # Build endpoints + Sigstore endpoints required for keyless
+          # provenance signing (fulcio cert issuance, rekor transparency log,
+          # tuf trust-root refresh).
+          allowed-endpoints: >
+            api.github.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            objects.githubusercontent.com:443
+            github.com:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
+            token.actions.githubusercontent.com:443
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0  # goreleaser needs full history for changelog
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+      - name: Run GoReleaser (build + SBOM only, no signing)
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
+        with:
+          version: "~> v2"
+          args: release --clean --skip=sign
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version tag
+        id: meta
+        # version keeps the leading `v` (e.g. v1.2.3) for release-asset / gh
+        # operations; bare strips it (e.g. 1.2.3) for goreleaser artifact names,
+        # whose checksum manifest is abysslink_<bare>_checksums.txt.
+        run: |
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "bare=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SLSA L3 provenance for every released artifact
+        # subject-checksums points at goreleaser's checksum manifest: the action
+        # parses every `<sha256>  <filename>` line and attests EACH listed
+        # artifact's digest in a single call (per goreleaser attestations docs),
+        # so all tarballs/zips/debs/rpms are covered without listing them.
+        # Running inside this reusable workflow is what makes the provenance L3.
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-checksums: dist/abysslink_${{ steps.meta.outputs.bare }}_checksums.txt
+
+      - name: Upload dist artifacts for subsequent jobs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1

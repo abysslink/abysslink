@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -98,6 +99,87 @@ func TestSignBytes_CoversAllMetadataFields(t *testing.T) {
 	}
 	for i, m := range mutators {
 		assert.False(t, bytes.Equal(b0, signBytes(m(base))), "mutator %d must change signed bytes", i)
+	}
+}
+
+// TestSignedBackupHelpers_RefuseSymlinkSource is the CR-01 regression: the
+// SIGNED backup helpers (backupNoRefresh, backupFileStreamingNoRefresh) must
+// read their source with O_NOFOLLOW, so a symlink swapped in at the backup
+// source — pointing at an out-of-path secret — is REFUSED (the open fails with
+// ELOOP) rather than read through into the .bak and the signed chain hash.
+//
+// This FAILS against the pre-fix helpers (os.ReadFile / os.Open follow the
+// symlink and copy the secret) and PASSES after they use O_NOFOLLOW. It mirrors
+// the unsigned-path TestBackupSymlink / TestBackupWithChainSymlink. The refusal
+// happens at the read, before any chain mutation, so it is safe to invoke the
+// helpers directly under the same mutex+flock discipline their callers use.
+func TestSignedBackupHelpers_RefuseSymlinkSource(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	kc := secrets.NewMockStore()
+	require.NoError(t, kc.Set(context.Background(), hmacKeyService, hmacKeyAccount,
+		hex.EncodeToString(bytes.Repeat([]byte{1}, 32))))
+
+	sa, err := NewSigned(logPath, kc)
+	require.NoError(t, err)
+
+	outside := filepath.Join(dir, "outside.secret")
+	require.NoError(t, os.WriteFile(outside, []byte("SECRET"), 0o600))
+
+	ctx := context.Background()
+
+	// withLock runs fn under the SAME mutex+flock discipline the helpers'
+	// callers (WriteFile / WriteFilePath) establish before calling them.
+	withLock := func(fn func() error) error {
+		sa.mu.Lock()
+		lockFD, lerr := acquireAuditLock(sa.logPath)
+		if lerr != nil {
+			sa.mu.Unlock()
+			return lerr
+		}
+		defer func() {
+			releaseAuditLock(lockFD)
+			sa.mu.Unlock()
+		}()
+		return fn()
+	}
+
+	t.Run("backupNoRefresh", func(t *testing.T) {
+		src := filepath.Join(dir, "src1.conf")
+		require.NoError(t, os.Symlink(outside, src))
+		bErr := withLock(func() error { return sa.backupNoRefresh(ctx, src, false) })
+		require.Error(t, bErr, "backupNoRefresh must refuse a symlinked source (no read-through)")
+		// No .bak carrying the outside secret may have been produced.
+		assertNoBakLeak(t, dir, "SECRET")
+	})
+
+	t.Run("backupFileStreamingNoRefresh", func(t *testing.T) {
+		src := filepath.Join(dir, "src2.conf")
+		require.NoError(t, os.Symlink(outside, src))
+		bErr := withLock(func() error { return sa.backupFileStreamingNoRefresh(ctx, src) })
+		require.Error(t, bErr, "backupFileStreamingNoRefresh must refuse a symlinked source (no read-through)")
+		assertNoBakLeak(t, dir, "SECRET")
+	})
+}
+
+// assertNoBakLeak fails if any .bak file under dir contains secret — proving the
+// symlinked source was never read through into a backup.
+func assertNoBakLeak(t *testing.T, dir, secret string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !bytes.Contains([]byte(name), []byte(".bak")) {
+			continue
+		}
+		data, rErr := os.ReadFile(filepath.Join(dir, name))
+		require.NoError(t, rErr)
+		assert.NotContains(t, string(data), secret,
+			"a .bak must not contain the out-of-path secret (symlink was read through)")
 	}
 }
 

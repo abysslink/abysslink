@@ -120,6 +120,46 @@ func TestVerifyCosignBundleArgs(t *testing.T) {
 	assert.NotContains(t, calls[0].Args, "--signature")
 }
 
+// TestVerifyGHAttestationOK asserts that a clean `gh attestation verify`
+// (exit 0) returns nil — the SLSA provenance leg passes.
+func TestVerifyGHAttestationOK(t *testing.T) {
+	runner := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "Verification succeeded!"}})
+	err := verifyGHAttestation(context.Background(), runner,
+		"dist/abysslink_9.9.9_linux_amd64.tar.gz", slsaSignerWorkflow)
+	require.NoError(t, err)
+
+	calls := runner.RecordedCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "gh", calls[0].Name)
+	assert.Contains(t, calls[0].Args, "attestation")
+	assert.Contains(t, calls[0].Args, "verify")
+	assert.Contains(t, calls[0].Args, "--signer-workflow")
+	assert.Contains(t, calls[0].Args, slsaSignerWorkflow)
+	assert.Contains(t, calls[0].Args, "--owner")
+}
+
+// TestVerifyFailsClosedNoProvenance covers the fail-closed contract: a non-zero
+// `gh attestation verify` exit (tampered/missing provenance) must surface an
+// error — never a warning that proceeds.
+func TestVerifyFailsClosedNoProvenance(t *testing.T) {
+	runner := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "no attestations found"}})
+	err := verifyGHAttestation(context.Background(), runner,
+		"dist/abysslink_9.9.9_linux_amd64.tar.gz", slsaSignerWorkflow)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attestation")
+}
+
+// TestVerifyFailsClosedNoGH covers the gh-absent fail-closed decision (Open
+// Question 2): when the gh binary cannot be executed, verification refuses
+// rather than silently skipping.
+func TestVerifyFailsClosedNoGH(t *testing.T) {
+	runner := shell.NewMockRunner(shell.Call{Err: errors.New(`exec: "gh": executable file not found in $PATH`)})
+	err := verifyGHAttestation(context.Background(), runner,
+		"dist/abysslink_9.9.9_linux_amd64.tar.gz", slsaSignerWorkflow)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gh not found")
+}
+
 // TestUpgradeVerifyCosignBlobV3 asserts the upgrade path delegates to the v3
 // bundle verifier with --bundle (single bundleFile parameter).
 func TestUpgradeVerifyCosignBlobV3(t *testing.T) {

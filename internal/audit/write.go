@@ -18,9 +18,30 @@ package audit
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 )
+
+// readNoFollow reads path with O_NOFOLLOW so a symlink swapped in at path is
+// refused (the open fails with ELOOP) rather than followed to an out-of-path
+// file (B5 / T-32-15). It opens the inode, operates on the returned fd, and
+// closes it — closing the check-then-act TOCTOU window that a plain os.ReadFile
+// (which re-resolves the path) leaves open. The whole file is read into memory,
+// matching the prior os.ReadFile semantics for audit backups.
+func readNoFollow(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: path is an internally-derived audited target; O_NOFOLLOW is the B5 mitigation against a symlink swap
+	if err != nil {
+		return nil, fmt.Errorf("audit: open (no-follow) %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	data, rerr := io.ReadAll(f)
+	if rerr != nil {
+		return nil, fmt.Errorf("audit: read %s: %w", path, rerr)
+	}
+	return data, nil
+}
 
 // WriteFile is the sole authorised path for modules to mutate a file on disk.
 // It backs up any existing file at path, writes content atomically (temp file +
@@ -36,12 +57,13 @@ import (
 //   - the temp file is os.CreateTemp-derived (unique name, O_EXCL), so
 //     concurrent writers cannot clobber each other's temp and an attacker
 //     cannot pre-plant a symlink at a predictable temp path;
-//   - a symlink at the target path is refused outright (os.Lstat). NOTE: this
-//     is a check-then-act sequence — a symlink swapped in AFTER the Lstat is
-//     not detected. The residual race is bounded: os.Rename replaces the
+//   - a symlink at the target path is refused outright (os.Lstat), and the
+//     residual check-then-act window is now CLOSED (B5 / T-32-15): the backup
+//     read opens the source with O_NOFOLLOW (readNoFollow), so a symlink
+//     swapped in AFTER the Lstat causes the open to fail (ELOOP) rather than
+//     redirect the read to an out-of-path file. os.Rename replaces the
 //     destination inode itself (it never follows a destination symlink), so
-//     the rename cannot be redirected; the exposure is limited to Backup
-//     reading through a freshly swapped symlink.
+//     the write/rename cannot be redirected either.
 //
 // CORE-07: the audit entry is appended BEFORE the physical write (matching
 // SignedAudit). A crash between the append and the rename leaves recorded

@@ -210,15 +210,18 @@ func applyUpgrade(ctx context.Context, p Printer, runner shell.Runner, tag strin
 		}
 	}
 
-	// Verify cosign v3 bundle signature on the checksum manifest (offline — no Rekor).
-	printerInfo(p, "  ✦  verifying cosign signature...")
-	if err := verifyCosignBlob(ctx, runner,
+	// Fail-closed verification: cosign signature THEN SLSA provenance. Both
+	// legs must pass before the binary is trusted; a failure on either aborts
+	// the upgrade before the atomic replace ever runs.
+	printerInfo(p, "  ✦  verifying cosign signature + SLSA provenance...")
+	if err := verifyUpgradeArtifact(ctx, runner,
 		filepath.Join(tmpDir, checksums),
 		filepath.Join(tmpDir, checksums+".bundle"),
+		filepath.Join(tmpDir, tarball),
 	); err != nil {
-		return fmt.Errorf("upgrade: cosign verification FAILED — refusing to install: %w", err)
+		return fmt.Errorf("upgrade: %w — refusing to install", err)
 	}
-	printerInfo(p, styleSuccess.Render("  ✓  signature verified"))
+	printerInfo(p, styleSuccess.Render("  ✓  signature + provenance verified"))
 
 	// Verify tarball SHA-256 against the signed checksum manifest.
 	printerInfo(p, "  ✦  verifying checksum...")
@@ -251,6 +254,22 @@ func checkCosignInstalled() error {
 			"  https://docs.sigstore.dev/cosign/system_config/installation/\n" +
 			"  brew install cosign   (macOS)\n" +
 			"  go install github.com/sigstore/cosign/v2/cmd/cosign@latest")
+	}
+	return nil
+}
+
+// verifyUpgradeArtifact runs the full fail-closed verification for the upgrade
+// path: (1) the cosign v3 bundle signature on the checksum manifest, then
+// (2) the SLSA build provenance on the release tarball via `gh attestation
+// verify --signer-workflow`. Both legs must pass; a failure (or an absent
+// cosign/gh) returns an error so applyUpgrade aborts before the atomic replace.
+// All exec routes through the injected shell.Runner — never os/exec.
+func verifyUpgradeArtifact(ctx context.Context, runner shell.Runner, checksums, bundle, tarball string) error {
+	if err := verifyCosignBlob(ctx, runner, checksums, bundle); err != nil {
+		return fmt.Errorf("cosign verification FAILED: %w", err)
+	}
+	if err := verifyGHAttestation(ctx, runner, tarball, slsaSignerWorkflow); err != nil {
+		return fmt.Errorf("SLSA provenance verification FAILED: %w", err)
 	}
 	return nil
 }

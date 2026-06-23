@@ -40,6 +40,7 @@ import (
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/deadman"
 	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/gate"
 	"github.com/abysslink/abysslink/internal/metrics"
@@ -314,6 +315,12 @@ func main() {
 	// the sibling CLI binary on a timer, like a watcher).
 	daemon.StartDigestScheduler(ctx, cfg, directNotifier{m: nm}, base)
 
+	// Opt-in dead-man switch (SUPL-06, default OFF). When enabled, the daemon
+	// hosts a restart-safe no-contact timer that fires the deadman lockdown
+	// (disarm armed pgids + revoke autonomy + audit) after the configured
+	// interval of operator silence. A disabled switch launches no goroutine.
+	startDeadmanTimer(ctx, cfg, kc)
+
 	// Opt-in browser dashboard (Phase 19, //go:build webui, default OFF). The
 	// base build links a no-op stub (start_webui_stub.go); the webui build wires
 	// the TLS+WhoIs server goroutine and prints the loud one-time security note
@@ -330,6 +337,94 @@ func main() {
 		slog.Error("abysslinkd: exited with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// startDeadmanTimer launches the daemon-hosted dead-man no-contact timer when
+// cfg.Deadman.Enabled is true (SUPL-06). A disabled switch returns immediately
+// (no goroutine). The daemon OWNS the registry (32-CONTEXT.md decision): it
+// constructs the armed-run registry + audit writer + resolved interval and
+// hands them to deadman.StartTimer. The RevokeAutonomy hook sets a persisted
+// lockdown flag (deadman.SetLockdownFlag) so a fresh agent cannot re-arm after
+// lockdown — a generic state flag the arm path consults, NOT a runtime
+// gate.enforcing toggle (D-40).
+//
+// Every wiring failure is logged and skips the timer (fail-soft): a missing
+// audit-log path or state path leaves the switch inactive rather than crashing
+// the daemon. kc may be nil (degraded keychain) — the audit writer then falls
+// back to chained-unsigned entries.
+func startDeadmanTimer(ctx context.Context, cfg *config.Config, kc secrets.KeychainStore) {
+	if !cfg.Deadman.Enabled {
+		return
+	}
+
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		slog.Warn("abysslinkd: deadman: audit log path unavailable; dead-man switch inactive", "err", err)
+		return
+	}
+	var aud *audit.Audit
+	if kc != nil {
+		aud = audit.NewWithKeychain(logPath, kc)
+	} else {
+		aud = audit.New(logPath)
+	}
+
+	statePath, err := deadman.StatePath()
+	if err != nil {
+		slog.Warn("abysslinkd: deadman: registry state path unavailable; dead-man switch inactive", "err", err)
+		return
+	}
+	contactPath, err := deadman.ContactStatePath()
+	if err != nil {
+		slog.Warn("abysslinkd: deadman: contact state path unavailable; dead-man switch inactive", "err", err)
+		return
+	}
+	flagPath, err := deadman.LockdownFlagPath()
+	if err != nil {
+		slog.Warn("abysslinkd: deadman: lockdown flag path unavailable; dead-man switch inactive", "err", err)
+		return
+	}
+
+	reg := deadman.New(statePath, aud)
+	interval := time.Duration(cfg.Deadman.ResolvedIntervalHours()) * time.Hour
+
+	// CR-02 backstop: seed the contact clock at daemon start when no contact file
+	// exists, so a switch that was enabled in config but whose CLI seed never ran
+	// (or whose state dir was wiped) starts counting from daemon start instead of
+	// synthesizing "now" forever and never firing. Fail-soft: a seed error is
+	// logged and the timer still starts (it seeds at the first heartbeat).
+	// Idempotent (deadman.SeedContact preserves an in-flight deadline), so a
+	// daemon restart never resets the clock (T-32-24).
+	if _, found, lcErr := deadman.LastContact(contactPath, time.Now); lcErr != nil {
+		slog.Warn("abysslinkd: deadman: could not read contact state to seed the clock; timer seeds at first heartbeat", "err", lcErr)
+	} else if !found {
+		if sErr := deadman.SeedContact(ctx, contactPath, aud, time.Now); sErr != nil {
+			slog.Warn("abysslinkd: deadman: could not seed initial contact; clock starts at first heartbeat", "err", sErr)
+		} else {
+			slog.Info("abysslinkd: deadman: seeded initial contact at daemon start (no prior contact found)")
+		}
+	}
+
+	// RevokeAutonomy: persist the lockdown flag so further arms are refused
+	// (generic state flag, D-40-safe). Fail-soft — a flag write error is logged
+	// but never panics the timer.
+	revokeAutonomy := func() error {
+		return deadman.SetLockdownFlag(ctx, flagPath, aud, "no-contact-timeout", time.Now)
+	}
+
+	// The returned done channel is ignored: the timer runs for the daemon's
+	// process lifetime and is torn down by ctx cancellation at process exit.
+	if _, startErr := deadman.StartTimer(ctx, deadman.TimerOpts{
+		Registry:       reg,
+		ContactPath:    contactPath,
+		Interval:       interval,
+		RevokeAutonomy: revokeAutonomy,
+		Audit:          aud,
+	}); startErr != nil {
+		slog.Warn("abysslinkd: deadman: failed to start timer; dead-man switch inactive", "err", startErr)
+		return
+	}
+	slog.Info("abysslinkd: dead-man switch active", "interval", interval, "contact_state", contactPath)
 }
 
 // wireContentDeps constructs the device store (device.DefaultPath + the

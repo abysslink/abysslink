@@ -48,6 +48,11 @@ type MockRunner struct {
 	streamIdx   int
 	streamCalls [][]string
 	stdinBuf    []byte
+
+	// Armed-runner state: scripted ArmedHandle responses consumed by RunArmed
+	// in order. Populated via AddArmedCall; used by cmd_arm tests.
+	armedCalls []armedCall
+	armedIdx   int
 }
 
 // NewMockRunner returns a MockRunner that will replay calls in order.
@@ -196,4 +201,39 @@ func (m *MockRunner) Done() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.idx == len(m.calls)
+}
+
+// armedCall holds the configuration for a RunArmed scripted call in MockRunner.
+type armedCall struct {
+	handle *ArmedHandle
+	err    error
+}
+
+// AddArmedCall appends a scripted RunArmed response. Callers control the PGID
+// and Done channel so tests can trigger process exit at will. Multiple calls
+// are served in FIFO order (same as MockRunner.calls).
+//
+// Example: set up a pre-closed Done so RunArmed "returns immediately":
+//
+//	done := make(chan struct{})
+//	close(done)
+//	m.AddArmedCall(&shell.ArmedHandle{PGID: 42, Done: done, Wait: func() error { return nil }}, nil)
+func (m *MockRunner) AddArmedCall(handle *ArmedHandle, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.armedCalls = append(m.armedCalls, armedCall{handle: handle, err: err})
+}
+
+// RunArmed returns the next scripted ArmedHandle (added via AddArmedCall).
+// It returns an error if more RunArmed calls are made than were scripted.
+// This allows MockRunner to satisfy shell.ArmedRunner for arm-command tests.
+func (m *MockRunner) RunArmed(_ context.Context, name string, args ...string) (*ArmedHandle, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.armedIdx >= len(m.armedCalls) {
+		return nil, fmt.Errorf("shell: unexpected RunArmed call %d: %s %v", m.armedIdx, name, args)
+	}
+	ac := m.armedCalls[m.armedIdx]
+	m.armedIdx++
+	return ac.handle, ac.err
 }

@@ -1,0 +1,23 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://abysslink.dev/vex/testdata/known-advisory",
+  "author": "Abysslink Contributors",
+  "role": "Project Maintainers",
+  "timestamp": "2026-06-20T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2020-26160"
+      },
+      "products": [
+        {
+          "@id": "pkg:golang/github.com/dgrijalva/jwt-go@v3.2.0+incompatible"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "FIXTURE ONLY (SUPL-03 suppression proof). This is not a real abysslink dependency; the statement exists solely to prove that a PURL-matching not_affected VEX flips Grype's exit status. The product @id PURL MUST match the SBOM externalRef PURL in known-advisory.spdx.json byte-for-byte."
+    }
+  ]
+}
