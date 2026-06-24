@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"time"
@@ -200,11 +201,14 @@ func writeSuccessPage(w http.ResponseWriter) {
 }
 
 // writeErrorPage writes a minimal HTML error response to the OAuth callback.
+// msg can originate from attacker-influenced callback values (the OAuth
+// error/error_description query params), so it is HTML-escaped before being
+// interpolated to prevent reflected XSS in the loopback callback page (WR-04).
 func writeErrorPage(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusBadRequest)
 	_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
 <h1>Authorization failed.</h1>
-<p>` + msg + `</p>
+<p>` + html.EscapeString(msg) + `</p>
 </body></html>`))
 }
