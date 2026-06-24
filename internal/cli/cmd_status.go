@@ -91,6 +91,11 @@ type statusDaemonExtras struct {
 	GatewayCredsStatus string `json:"gateway_creds_status,omitempty"`
 }
 
+// statusNow is a clock seam so tests can pin the timestamp to a fixed instant,
+// making the golden byte-stable (the panel writes time.Now().UTC() otherwise).
+// Restore in t.Cleanup — same pattern as fetchDaemonStatus / newRunner seams.
+var statusNow = func() time.Time { return time.Now() } //nolint:gochecknoglobals // test seam, mirrors fetchDaemonStatus
+
 // fetchDaemonStatus GETs /status from the local abysslinkd over its Unix
 // socket and decodes the BACK-07/DEVC-04 fields. A package var so tests can
 // inject canned daemon responses (same seam pattern as newRunner). Any error
@@ -260,6 +265,7 @@ func newStatusCmd() *cobra.Command {
 
 			diskEncrypt := diskEncryptionStatus(ctx, r)
 
+			now := statusNow()
 			rep := statusReport{
 				Tailscale:    tsRunning,
 				TailscaleIP:  tsIP,
@@ -270,7 +276,7 @@ func newStatusCmd() *cobra.Command {
 				DiskEncrypt:  diskEncrypt,
 				// RFC3339 UTC — the same format the fleet fan-out rows use, so
 				// JSON consumers parse exactly one timestamp format (U5).
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Timestamp: now.UTC().Format(time.RFC3339),
 			}
 
 			// BACK-07/DEVC-04: merge the daemon's wake/ack counters, content
@@ -287,7 +293,7 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			printStatusPanel(p, rep)
-			renderStatusExtras(p, rep, time.Now())
+			renderStatusExtras(p, rep, now)
 			return nil
 		},
 	}

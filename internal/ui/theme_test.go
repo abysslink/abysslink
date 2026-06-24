@@ -119,7 +119,7 @@ func TestSingleSourceOfColor(t *testing.T) {
 			return nil
 		}
 
-		data, readErr := os.ReadFile(path) //nolint:gosec
+		data, readErr := os.ReadFile(path) //nolint:gosec // G304: test iterates source tree via WalkDir, not user input
 		if readErr != nil {
 			return readErr
 		}

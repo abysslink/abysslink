@@ -1,0 +1,146 @@
++------------------------------------------------------+
+|  abysslink doctor  health check                      |
++------------------------------------------------------+
+
+╭────────────────────────────────────────────────────────────────────────────╮
+│  * INFO — doctor checks known footguns; it is not a full security audit    │
+│  abysslink doctor verifies the configuration Abysslink manages.            │
+│  It does not replace a professional security audit.                        │
+│  See docs/DESIGN.md §6.1 for the scope boundary.                           │
+╰────────────────────────────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────────────────────────────╮
+│  * SECURITY — Tailscale Funnel is permanently rejected at the schema       │
+│  level                                                                     │
+│  Abysslink never exposes services to the public internet via Funnel.       │
+│  All remote access is restricted to your tailnet only.                     │
+│  This is a hard floor — it cannot be configured away.                      │
+╰────────────────────────────────────────────────────────────────────────────╯
+
+  ──────────────────────────────────────────────────
+  tailscale
+    ✕  FATAL  installed  tailscale is not installed or not on PATH
+        fix: abysslink up --apply 
+    ⚠  WARN  funnel-probe-fail  could not determine Funnel state — tailscale funnel command unavailable or returned non-zero exit; re-run after: tailscale status
+        fix: ensure tailscaled is running: tailscale status — then re-run abysslink doctor 
+  ──────────────────────────────────────────────────
+  tmux
+    ⚠  WARN  installed  tmux is not installed or not on PATH
+        fix: abysslink up --apply 
+  ──────────────────────────────────────────────────
+  hardening
+    ✕  FATAL  filevault  disk-encryption state is UNKNOWN: fdesetup exited with a non-zero status — verify FileVault status manually in System Settings → Privacy & Security → FileVault
+        fix: System Settings → Privacy & Security → FileVault → Turn On 
+    ⚠  WARN  firewall  Application Firewall state is UNKNOWN: system_profiler exited with a non-zero status — verify it manually in System Settings → Network → Firewall
+        fix: System Settings → Network → Firewall → Turn On  (macOS) 
+  ──────────────────────────────────────────────────
+  ssh
+    ⚠  WARN  remote_login_unknown  could not determine macOS Remote Login state from systemsetup output — check System Settings → General → Sharing → Remote Login manually
+  ──────────────────────────────────────────────────
+  mosh
+    ⚠  WARN  installed  mosh-server is not installed or not on PATH
+        fix: abysslink up --apply 
+  ──────────────────────────────────────────────────
+  acl
+    ⚠  WARN  admin_credentials  no Tailscale admin OAuth client configured — ACL will be applied in manual (clipboard) mode
+  ──────────────────────────────────────────────────
+  lock
+    ⚠  WARN  lock_status  could not query Tailnet Lock status; tailscale may not be running
+        fix: ensure tailscale is running: brew services restart tailscale 
+  ──────────────────────────────────────────────────
+  ntfy
+    ⚠  WARN  installed  ntfy server not supported on macOS without Docker — install Docker Desktop or configure ntfy.sh in abysslink.yaml
+        fix: abysslink up --apply 
+  ──────────────────────────────────────────────────
+  notify
+    ⚠  WARN  ntfy_running  ntfy service is not reachable at http://localhost:2586
+  ──────────────────────────────────────────────────
+  claudecode
+    ⚠  WARN  api_key_keychain  Anthropic API key not readable from the keychain (the login keychain may be locked after reboot — unlock it at the console)
+        fix: unlock your login keychain in Keychain Access.app 
+    ⚠  WARN  stop_hook_configured  ~/.claude/settings.json missing abysslink notify Stop hook (expected command: "abysslink notify \"Claude stopped\" \"Session ended\"")
+        fix: abysslink up --apply 
+  ──────────────────────────────────────────────────
+  supply
+    ⚠  WARN  supply-cosign-bundle  dev build — no release bundle available to verify
+        fix: Install cosign and re-verify: abysslink verify   (or reinstall from a signed release) 
+    ⚠  WARN  supply-slsa-source  no SLSA provenance URL embedded (dev build or pre-v3 release)
+        fix: Upgrade to a v3+ release built with SLSA provenance: abysslink upgrade --apply 
+  ──────────────────────────────────────────────────
+  audit
+    ✕  FATAL  audit-keychain  HMAC signing key unavailable — keychain not accessible; signed entries cannot be written (AUD-02)
+    ⚠  WARN  audit-anchor-age  No audit anchor found — run `abysslink up --apply` or start the daemon to create one
+  ──────────────────────────────────────────────────
+  metrics
+    ✓  metrics-bind-tailnet
+    ✓  met-label-audit
+    ✓  met-cardinality
+    ✕  FATAL  met-disabled-listener  port :9090 is listening but metrics.enabled=false — stale listener (OBS-05)
+    ✕  FATAL  ntfy-loopback  ntfy-loopback: ntfy answered on 127.0.0.1:2586 — ntfy must not be reachable on loopback; run: abysslink up --apply  to reprovision with tailnet-IP-only binding (T-22-11, D-01)
+        fix: abysslink up --apply  (reprovisioning removes the loopback -p flag from docker run; verify with: docker inspect abysslink-ntfy) 
+  ──────────────────────────────────────────────────
+  webui
+    ✓  webui-bind
+    ✓  webui-funnel
+    ✓  webui-mutations-disabled
+    ✓  webui-tls
+    ✓  webui-auth
+    ✓  webui-whoami-local
+    ✓  webui-csrf
+    ✓  webui-csp
+  ──────────────────────────────────────────────────
+  sec
+    ✓  sec-ssh-permitroot
+    ✓  sec-ssh-x11forwarding
+    ⚠  WARN  sec-ssh-agentforwarding  sshd AllowAgentForwarding is 'yes' — disable it to prevent agent hijacking on the rig
+    ⚠  WARN  sec-ssh-maxauthtries  sshd MaxAuthTries is 6 — lower it to 4 or fewer
+    ⚠  WARN  sec-ssh-logingracetime  sshd LoginGraceTime is 120s — lower it to 60s or fewer
+    ✓  sec-ssh-ciphers
+    ✕  FATAL  sec-audit-log-exists  audit log does not exist at /tmp/abysslink-parity-test/abysslink/audit.log — run 'abysslink up --apply'
+    ✓  sec-audit-log-perms
+    ✓  sec-no-world-readable-config
+    ✓  sec-daemon-socket-perms
+    ✓  sec-listener-bind
+    ✓  sec-funnel-schema
+    ✕  FATAL  sec-disk-encryption  disk is NOT encrypted — enable FileVault (macOS) / LUKS (Linux) before remote access
+    ⚠  WARN  sec-binary-signed  dev build — no release bundle available to verify
+    ⚠  WARN  sec-upgrade-verified  no SLSA provenance URL embedded (dev build or pre-v3 release)
+    ✓  sec-metrics-bind
+    ✓  sec-webui-bind
+    ⚠  WARN  sec-audit-anchor-age  No audit anchor found — run `abysslink up --apply` or start the daemon to create one
+  ──────────────────────────────────────────────────
+  cli
+    ⚠  WARN  ntfy-version  ntfy-version: could not probe version ("ntfy" --version exited 1) — version is unknown; upgrade to >= 2.21 (CVE-2026-39087, CVSS 9.8) to be safe
+        fix: Upgrade ntfy to >= 2.21 (CVE-2026-39087 fix): see https://github.com/binwiederhier/ntfy/releases — stop container, pull new image, restart; or: brew upgrade ntfy 
+    ⚠  WARN  tmux-version  tmux-version: could not probe version ("tmux" -V exited 1) — version is unknown; the session registry needs tmux >= 3.2 (D-27)
+        fix: Upgrade tmux to >= 3.2 for session-typed notifications (D-27): brew upgrade tmux  (or your distro package manager); the daemon runs fine without it 
+    ⚠  WARN  tailscale-version  tailscale-version: could not probe version ("tailscale" version exited 1) — version is unknown; upgrade Tailscale to >= 1.98.1 to meet the floor
+        fix: Upgrade Tailscale to >= 1.98.1: brew upgrade tailscale  (or download from https://pkgs.tailscale.com) — below the floor is a fail-closed security gate 
+    ⚠  WARN  nb-client-version  nb-client-version: could not probe version ("netbird" version exited 1) — version is unknown; upgrade NetBird (client) to >= 0.57.0 to meet the floor
+        fix: Upgrade the NetBird client to >= 0.57.0: see https://github.com/netbirdio/netbird/releases  (or your package manager); below the floor is fail-closed 
+    ⚠  WARN  et-version  et-version: could not probe version ("et" --version exited 1) — version is unknown; upgrade EternalTerminal to >= 6.2.0 to meet the floor
+        fix: Upgrade EternalTerminal to >= 6.2.0 to prefer the ET transport: brew upgrade eternal-terminal  — advisory only; mosh remains a working fallback 
+    ⚠  WARN  tailscale-statedir  tailscale-statedir: could not query Tailnet Lock status (tailscale lock status --json failed) — Lock-statedir posture unknown; ensure tailscaled is running then re-run abysslink doctor
+        fix: Run tailscaled with a persistent statedir (systemd default /var/lib/tailscale, or set TS_STATE_DIR) — Tailnet Lock signing checks are not enforced without it; this is a fail-closed gate 
+    ⚠  WARN  openssh-version  openssh-version: could not probe ssh version (ssh -V failed) — version unknown; install OpenSSH >= 10.0 for post-quantum KEX (mosh remains a working fallback)
+        fix: Upgrade OpenSSH to >= 10.0 for post-quantum key exchange: brew upgrade openssh  (or your distro package manager) — advisory; mosh remains a working fallback 
+    ⚠  WARN  openssh-pqkex  openssh-pqkex: could not probe ssh key-exchange algorithms (ssh -Q kex failed) — PQ-KEX support unknown; advisory only (mosh remains a working fallback)
+        fix: Upgrade OpenSSH to >= 10.0 so ssh -Q kex lists mlkem768x25519-sha256 (post-quantum KEX) — advisory; mosh remains a working fallback 
+  ──────────────────────────────────────────────────
+  content-store
+    ⚠  WARN  content-store-daemon-down  abysslinkd not reachable — the credential pull and content fetch won't work (start it: abysslink daemon enable --apply)
+        fix: Start the daemon: abysslink daemon enable --apply 
+  ──────────────────────────────────────────────────
+  push-gateway
+    ⚠  WARN  push-creds-keychain  abysslinkd not reachable — cannot verify gateway creds from daemon context (start it: abysslink daemon enable --apply)
+    ✓  push-apns-experimental
+    ✓  push-fcm-experimental
+    ⚠  WARN  push-ios-unifiedpush-gap  UnifiedPush (sovereign path) does NOT cover iOS — iOS requires the APNs leg (or ntfy.sh relay). Enable notify.gateway.apns if you need iOS wake delivery.
+    ✓  push-stale-tokens
+    ✓  push-unifiedpush-ntfysh
+    ⚠  WARN  push-contentstore-bind  abysslinkd not reachable — cannot verify content-store bind address (start it: abysslink daemon enable --apply)
+  ──────────────────────────────────────────────────
+  ✓ 25 ok · ⚠ 32 warn · ✕ 7 fatal
+
+  ✕  FATAL  Fatal issues found — system is not safe.
+  Run: abysslink repair --apply  to auto-fix what can be fixed.
+
