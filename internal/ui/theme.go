@@ -145,6 +145,17 @@ func setFocusedStyles(t *huh.Theme) {
 
 	// Note title.
 	f.NoteTitle = f.NoteTitle.Bold(true)
+
+	// Bordered padded container around the ACTIVE group (TUI-06). A full rounded
+	// box in the brand blue with vertical breathing room — replaces huh's default
+	// left-bar so each wizard step is visibly framed. Mirrors the intent of the
+	// internal/cli styleFlowContainer (boxBorder + colorBlue + Padding(1,2)); the
+	// theme is the real source of truth since a lipgloss wrapper cannot frame a
+	// live huh form.
+	f.Base = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorInfo).
+		Padding(1, 2)
 }
 
 // setBlurredStyles applies the Abyss palette to the Blurred (inactive) FieldStyles.
@@ -176,4 +187,11 @@ func setBlurredStyles(t *huh.Theme) {
 	// Buttons.
 	b.FocusedButton = b.FocusedButton.Foreground(ColorMuted)
 	b.BlurredButton = b.BlurredButton.Foreground(ColorMuted)
+
+	// Bordered container for INACTIVE groups (TUI-06): same rounded box but in
+	// muted steel so blurred steps recede behind the focused one.
+	b.Base = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorMuted).
+		Padding(1, 2)
 }

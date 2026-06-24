@@ -96,15 +96,6 @@ var (
 			Padding(0, 2).
 			Width(boxWidth())
 
-	// styleFlowContainer is the bordered padded container for wizard flow steps
-	// (TUI-06). Matches styleHeaderBox but uses lg (1, 2) padding to give step
-	// content more vertical breathing room. Consumed by Plan 35-03 (flow cmd).
-	styleFlowContainer = lipgloss.NewStyle(). //nolint:unused // wired by plan 35-03 (TUI-06)
-				Border(boxBorder()).
-				BorderForeground(colorBlue).
-				Padding(1, 2).
-				Width(boxWidth())
-
 	// styleFooterHint renders the persistent footer hint text in muted steel:
 	// "↑/↓ navigate  •  space toggle  •  enter select  •  esc back  •  ctrl+c quit"
 	// (UI-SPEC §Copywriting Contract "Persistent footer hint"). Consumed by Plan 35-03.
