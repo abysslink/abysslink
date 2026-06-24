@@ -652,7 +652,25 @@ Plans:
   4. The OAuth/callback step runs a loopback server on `127.0.0.1` + an ephemeral random free port, validates `state`/`nonce` + PKCE before accepting, honors a `context` timeout and ctrl-c cancellation, shuts the server down after the callback, and returns the auth code into `FlowState`; the listener can never bind a non-loopback address (rejected at the config schema level — no YAML knob exposes it)
   5. Async/browser-wait steps show a cyan huh spinner inside a bordered padded container with the persistent steel footer hint; a hidden `gallery` / `--theme-preview` command renders the sample group under the Abyss theme without running the full flow
 
-**Plans**: TBD
+**Plans**: 5 plans
+Plans:
+**Wave 1**
+
+- [ ] 35-01-PLAN.md — glamour v1.0.0 dependency + Wave-0 test stubs (all packages)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 35-02-PLAN.md — ui/glamour.go (AbyssGlamourStyle + RenderMarkdown), spinner ColorAccent upgrade, styleFlowContainer/styleFooterHint, BRWS-03 config comment
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 35-03-PLAN.md — internal/flow package (FlowState, state.go, 8 step functions)
+- [ ] 35-04-PLAN.md — internal/browser package (OpenURL, ListenCallback RFC 8252, PKCE)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 35-05-PLAN.md — CLI integration: thin cmd_init.go runner, journey.go deletion, hidden gallery command
+
 **UI hint**: yes
 
 ### Phase 36: Secure Memory & Audit HMAC-Key Rotation
