@@ -81,7 +81,7 @@ Phases 22, 23, 23.1, 23.2, 24, 25, 26 (7 phases, 29 plans) — closes the 2026-0
 **Research flags (deep research at phase planning):** Phase 36 (HMAC epoch'd-chain design — the single highest-risk item: versioned epochs, in-chain marker signed by the OLD key, per-entry key selection, no false TAMPERED); Phase 37 (cgo-free per-platform hardware-key + attestation paths); Phase 38 (real-hardware FileVault mid-encryption string literals — known gap until verified); Phase 39 (duress threat model — casual-coercion, NOT forensic plausible-deniability).
 
 - [x] **Phase 34: TUI Foundation** - Abyss two-tone `*huh.Theme` + reusable lipgloss styles + go-figure banner (NO_COLOR/non-truecolor degrade) + Printer/huh IO boundary wired first + CGO_ENABLED=0 four-target cross-build CI guard (completed 2026-06-24)
-- [ ] **Phase 35: Browser Hand-off & Wizard Flow** - composable `internal/flow` steps threading one typed FlowState; `init` rebuilt on the flow layer + `journey.go` deleted; glamour-rendered results via Printer; `internal/browser` fire-and-forget + RFC 8252 loopback OAuth callback (+PKCE); cyan spinner + bordered framing + footer + hidden `gallery`
+- [ ] **Phase 35: Browser Hand-off & Wizard Flow** - composable `internal/flow` steps threading one typed FlowState; `init` rebuilt on the flow layer + `journey.go` deleted; glamour-rendered results via Printer; `internal/browser` fire-and-forget + RFC 8252 loopback OAuth callback (+PKCE); cyan spinner + bordered framing + footer + hidden `gallery` (plans complete 2026-06-24; UAT pending — TUI-06 bordered container)
 - [ ] **Phase 36: Secure Memory & Audit HMAC-Key Rotation** - `SecureBytes` mlock/zeroize in `internal/secrets` (honest WARN on RLIMIT_MEMLOCK, defense-in-depth framing); versioned audit-chain key epochs + `rotate audit-hmac --apply` (marker signed by OLD key, old keys retained) + `sec-` doctor checks — HIGHEST-RISK, research-flagged
 - [ ] **Phase 37: Hardware-Backed Keys & Local Attestation** - macOS Secure Enclave + FIDO2 opt-in `HardwareKeyProvider` (cgo-free `ssh-keygen` shell-out through `shell.Runner`, fail-closed, key-kind in `status`); `internal/attest` local boot-state reads (csrutil/SIP, SecureBoot/TPM PCR) fail-closed tri-state in `doctor`/`--profile at-risk` — research-flagged
 - [ ] **Phase 38: Backlog Closure & Doctor Coverage** - B1 Tailnet Lock WARN → hard gate w/ explicit override; B2 FileVault mid-encryption fail-closed (string-literal real-hardware gap flagged); B8 per-rig fleet HMAC domain separation; every new v4.1 footgun gets a paired `sec-` doctor check wired into `--profile at-risk` (tightened to FATAL)
@@ -652,24 +652,24 @@ Plans:
   4. The OAuth/callback step runs a loopback server on `127.0.0.1` + an ephemeral random free port, validates `state`/`nonce` + PKCE before accepting, honors a `context` timeout and ctrl-c cancellation, shuts the server down after the callback, and returns the auth code into `FlowState`; the listener can never bind a non-loopback address (rejected at the config schema level — no YAML knob exposes it)
   5. Async/browser-wait steps show a cyan huh spinner inside a bordered padded container with the persistent steel footer hint; a hidden `gallery` / `--theme-preview` command renders the sample group under the Abyss theme without running the full flow
 
-**Plans**: 5 plans
+**Plans**: 5/5 plans complete
 Plans:
 **Wave 1**
 
-- [ ] 35-01-PLAN.md — glamour v1.0.0 dependency + Wave-0 test stubs (all packages)
+- [x] 35-01-PLAN.md — glamour v1.0.0 dependency + Wave-0 test stubs (all packages)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 35-02-PLAN.md — ui/glamour.go (AbyssGlamourStyle + RenderMarkdown), spinner ColorAccent upgrade, styleFlowContainer/styleFooterHint, BRWS-03 config comment
+- [x] 35-02-PLAN.md — ui/glamour.go (AbyssGlamourStyle + RenderMarkdown), spinner ColorAccent upgrade, styleFlowContainer/styleFooterHint, BRWS-03 config comment
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 35-03-PLAN.md — internal/flow package (FlowState, state.go, 8 step functions)
-- [ ] 35-04-PLAN.md — internal/browser package (OpenURL, ListenCallback RFC 8252, PKCE)
+- [x] 35-03-PLAN.md — internal/flow package (FlowState, state.go, 8 step functions)
+- [x] 35-04-PLAN.md — internal/browser package (OpenURL, ListenCallback RFC 8252, PKCE)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 35-05-PLAN.md — CLI integration: thin cmd_init.go runner, journey.go deletion, hidden gallery command
+- [x] 35-05-PLAN.md — CLI integration: thin cmd_init.go runner, journey.go deletion, hidden gallery command
 
 **UI hint**: yes
 
@@ -784,7 +784,7 @@ Phases execute in numeric order: 1 → … → 27 → 28 → 28.1 → 29 → 30 
 | 32. Supply-Chain Depth & Trimmed Fortify | 7/7 | Complete (release-proofs at v4 tag) | 2026-06-20 |
 | 33. Distribution & Public Launch | 3/3 | Complete (human-gated: LNCH-02/04/05/06 operator) | 2026-06-21 |
 | 34. TUI Foundation | 4/4 | Complete    | 2026-06-24 |
-| 35. Browser Hand-off & Wizard Flow | 0/? | Not started | - |
+| 35. Browser Hand-off & Wizard Flow | 5/5 | Verifying (UAT) | - |
 | 36. Secure Memory & Audit HMAC-Key Rotation | 0/? | Not started | - |
 | 37. Hardware-Backed Keys & Local Attestation | 0/? | Not started | - |
 | 38. Backlog Closure & Doctor Coverage | 0/? | Not started | - |
