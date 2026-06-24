@@ -188,6 +188,11 @@ Run 'abysslink <command> --help' for details on any command.`,
 		root.AddCommand(c)
 	}
 
+	// Hidden commands — not assigned to a group (Hidden:true prevents them from
+	// appearing in help listings). Register after the grouped commands so they
+	// are still reachable by name but absent from `abysslink --help` output.
+	root.AddCommand(newGalleryCmd())
+
 	// UX review #3: unknown/missing nested subcommands must error (exit 1),
 	// not print parent help with exit 0. Applied to every parent below the
 	// root; bare `abysslink` keeps cobra's conventional help-on-no-args.

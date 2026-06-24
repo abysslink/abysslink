@@ -106,12 +106,11 @@ func newInitCmd() *cobra.Command {
 			}
 
 			// Render banner at init entry (Phase 34 D-05).
-			banner := ui.RenderBanner(ui.BannerOptions{
+			printerInfo(p, ui.RenderBanner(ui.BannerOptions{
 				Color:  colorEnabled(),
 				Width:  boxWidth(),
 				Border: boxBorder(),
-			})
-			printerInfo(p, banner)
+			}))
 
 			// Persistent footer hint (UI-SPEC §Copywriting Contract).
 			printerInfo(p, styleFooterHint.Render("↑/↓ navigate  •  space toggle  •  enter select  •  esc back  •  ctrl+c quit"))
@@ -123,178 +122,20 @@ func newInitCmd() *cobra.Command {
 				printerInfo(p, "")
 			}
 
-			// Pre-flow wizard stages: tool check, Tailscale install, security
-			// fixes, config form, config write. These are gate operations that
-			// must complete before the 8-stage flow runs.
-			var cfg *config.Config
-			if startStage == 0 {
-				toolStatus := runToolCheck(ctx, p, runner)
-				printerInfo(p, "")
-
-				if err := ensureTailscale(ctx, p, runner, plat, toolStatus, yesFlag); err != nil {
-					return err
-				}
-				if err := runSecurityFixes(ctx, p, runner, plat, yesFlag); err != nil {
-					return err
-				}
-
-				cfg, err = runInitForm(cmd, yesFlag)
-				if err != nil {
-					return err
-				}
-
-				moduleStatus := runToolCheck(ctx, p, runner)
-				if err := installModuleTools(ctx, p, runner, plat, cfg, moduleStatus, yesFlag); err != nil {
-					return err
-				}
-
-				ok, err := previewAndConfirmConfig(ctx, p, cfg, configPath, yesFlag)
-				if err != nil {
-					return fmt.Errorf("init: config preview: %w", err)
-				}
-				if !ok {
-					printerInfo(p, "  Aborted — no config written.")
-					return nil
-				}
-
-				// Validate-before-write guard (C1/C2): never write a config that
-				// config.Load would reject — that bricks every subsequent command.
-				if verr := config.Validate(cfg); verr != nil {
-					return fmt.Errorf("init: refusing to write a config that `abysslink` cannot load: %w", verr)
-				}
-
-				if err := config.Write(configPath, cfg); err != nil {
-					return fmt.Errorf("init: write config: %w", err)
-				}
-
-				printerInfo(p, "")
-				printerInfo(p, fmt.Sprintf("  %s  Config written to %s", iconDoneStr(), styleCode.Render(configPath)))
-				printerInfo(p, "")
-			} else {
-				// Resume path: config already written; load it for stage context.
-				if loaded, lerr := config.Load(configPath); lerr == nil {
-					cfg = loaded
-					printerInfo(p, fmt.Sprintf("  %s  Existing config at %s reused.",
-						iconDoneStr(), styleCode.Render(configPath)))
-					printerInfo(p, "")
-				} else {
-					printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render(
-						"Resume state found but config could not be loaded — re-running the setup wizard."))
-					printerInfo(p, "")
-					// Fall back to re-running setup wizard (set startStage=0 and recurse).
-					startStage = 0
-					toolStatus := runToolCheck(ctx, p, runner)
-					printerInfo(p, "")
-					if err := ensureTailscale(ctx, p, runner, plat, toolStatus, yesFlag); err != nil {
-						return err
-					}
-					if err := runSecurityFixes(ctx, p, runner, plat, yesFlag); err != nil {
-						return err
-					}
-					cfg, err = runInitForm(cmd, yesFlag)
-					if err != nil {
-						return err
-					}
-					moduleStatus := runToolCheck(ctx, p, runner)
-					if err := installModuleTools(ctx, p, runner, plat, cfg, moduleStatus, yesFlag); err != nil {
-						return err
-					}
-					ok, err := previewAndConfirmConfig(ctx, p, cfg, configPath, yesFlag)
-					if err != nil {
-						return fmt.Errorf("init: config preview: %w", err)
-					}
-					if !ok {
-						printerInfo(p, "  Aborted — no config written.")
-						return nil
-					}
-					if verr := config.Validate(cfg); verr != nil {
-						return fmt.Errorf("init: refusing to write a config that `abysslink` cannot load: %w", verr)
-					}
-					if err := config.Write(configPath, cfg); err != nil {
-						return fmt.Errorf("init: write config: %w", err)
-					}
-				}
+			// Pre-flow wizard: tool check, Tailscale install, security fixes,
+			// config form, config write. Delegated to a helper to keep RunE
+			// within the gocyclo ceiling.
+			startStage, err = runInitPrework(ctx, cmd, p, runner, plat, configPath, stateFile, startStage, yesFlag)
+			if err != nil {
+				return err
+			}
+			if startStage < 0 {
+				// Negative sentinel: user aborted the config write cleanly.
+				return nil
 			}
 
-			// 8-stage flow runner: iterate over flow.StepXxx functions.
-			// Each step returns a *huh.Form the caller runs here (IO boundary rule).
-			// RunWithContext lives ONLY in internal/cli — never in internal/flow.
-			state := &flow.FlowState{}
-			steps := []flow.StepFunc{
-				flow.StepAccount,
-				flow.StepPrereqs,
-				flow.StepConverge,
-				flow.StepLock,
-				flow.StepEnroll,
-				flow.StepVerify,
-				flow.StepACL,
-				flow.StepDone,
-			}
-
-			for i, stepFn := range steps {
-				// Resume support: skip stages already completed.
-				if i < startStage {
-					continue
-				}
-
-				form, stepErr := stepFn(ctx, runner, p, state)
-				if stepErr != nil {
-					// D-09: step error — emit error and continue if non-blocking.
-					printerInfo(p, ui.RenderMarkdown("**Error:** "+stepErr.Error(), !colorEnabled()))
-					continue
-				}
-
-				// StepDone returns nil form — terminal step; no form to run.
-				if form == nil {
-					// D-13: glamour summary at flow completion.
-					summaryMD := "# Setup Complete\n\n" +
-						"**Your rig is ready.** Connect from your phone:\n\n" +
-						"```\nmosh <your-rig> -- tmux new -A -s main\n```\n\n" +
-						"> Run `abysslink up --apply` to converge and `abysslink doctor` to verify."
-					printerInfo(p, ui.RenderMarkdown(summaryMD, !colorEnabled()))
-					_ = flow.WriteFlowState(stateFile, i)
-					continue
-				}
-
-				// BRWS-02 wiring: after the Account step form runs, wire
-				// ListenCallback for OAuth auth-code flow when backend needs it.
-				// This step is index 0 (StepAccount). Auth is needed when the
-				// backend is not the simple "fire-and-forget" tailscale cloud path.
-				if i == 0 && interactive(yesFlag, jsonFlag) {
-					if err := runAccountStepWithBrowserCallback(ctx, p, runner, yesFlag, jsonFlag, state, form); err != nil {
-						return err
-					}
-				} else if interactive(yesFlag, jsonFlag) {
-					// Interactive path: run the form with the Abyss theme.
-					if runErr := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); runErr != nil {
-						if runErr == huh.ErrUserAborted {
-							printerInfo(p, "  "+styleMuted.Render("Aborted."))
-							return nil
-						}
-						return fmt.Errorf("init: step %d: %w", i, runErr)
-					}
-				} else {
-					// Headless path (D-07/D-08): emit URL action JSON for the
-					// account step; other steps are silent in headless mode.
-					if i == 0 {
-						const signupURL = "https://login.tailscale.com/start"
-						if jsonFlag {
-							p.Print(`{"action_required":"open_url","url":"` + signupURL + `"}`)
-						} else {
-							printerInfo(p, "  Open this URL to continue: "+signupURL)
-						}
-					}
-				}
-
-				// Persist completed stage after each successful step.
-				_ = flow.WriteFlowState(stateFile, i+1)
-			}
-
-			if !yesFlag {
-				printerInfo(p, "  "+styleMuted.Render("Next: ")+styleCode.Render("abysslink up --apply"))
-			}
-			printerInfo(p, "")
-			return nil
+			// 8-stage flow runner. Delegated to a helper (gocyclo ceiling).
+			return runFlowSteps(ctx, p, runner, stateFile, startStage, yesFlag, jsonFlag)
 		},
 	}
 	cmd.Flags().Bool("yes", false, "Non-interactive: accept defaults and install missing tools automatically")
@@ -302,6 +143,166 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().String("email", "", "Account email written to the config (required with --yes; env ABYSSLINK_EMAIL also accepted)")
 	cmd.Flags().String("hostname", "", "Rig hostname written to the config (default: sanitized OS hostname)")
 	return cmd
+}
+
+// runInitPrework runs the pre-flow wizard stages: tool check, Tailscale install,
+// security fixes, config form, and config write. It returns the effective
+// startStage after the prework:
+//   - 0 if the full wizard ran (fresh start or resume-fallback)
+//   - the original startStage if a config was loaded from disk (resume path)
+//   - -1 if the user aborted the config-write confirmation (clean exit)
+//
+// The sentinel -1 tells the caller to return nil (no error, no further work).
+// Extracted from newInitCmd.RunE to stay within the gocyclo limit (D-08).
+func runInitPrework(ctx context.Context, cmd *cobra.Command, p Printer, runner shell.Runner, plat platform.Platform, configPath, stateFile string, startStage int, yesFlag bool) (int, error) {
+	if startStage > 0 {
+		// Resume path: config already written by a prior run.
+		if _, lerr := config.Load(configPath); lerr == nil {
+			printerInfo(p, fmt.Sprintf("  %s  Existing config at %s reused.",
+				iconDoneStr(), styleCode.Render(configPath)))
+			printerInfo(p, "")
+			return startStage, nil
+		}
+		// Config could not be loaded — fall through to re-run the full wizard.
+		printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render(
+			"Resume state found but config could not be loaded — re-running the setup wizard."))
+		printerInfo(p, "")
+	}
+
+	// Full wizard (startStage == 0): tool check, security, form, config write.
+	toolStatus := runToolCheck(ctx, p, runner)
+	printerInfo(p, "")
+
+	if err := ensureTailscale(ctx, p, runner, plat, toolStatus, yesFlag); err != nil {
+		return 0, err
+	}
+	if err := runSecurityFixes(ctx, p, runner, plat, yesFlag); err != nil {
+		return 0, err
+	}
+
+	cfg, err := runInitForm(cmd, yesFlag)
+	if err != nil {
+		return 0, err
+	}
+
+	moduleStatus := runToolCheck(ctx, p, runner)
+	if err := installModuleTools(ctx, p, runner, plat, cfg, moduleStatus, yesFlag); err != nil {
+		return 0, err
+	}
+
+	ok, err := previewAndConfirmConfig(ctx, p, cfg, configPath, yesFlag)
+	if err != nil {
+		return 0, fmt.Errorf("init: config preview: %w", err)
+	}
+	if !ok {
+		printerInfo(p, "  Aborted — no config written.")
+		return -1, nil // sentinel: caller returns nil
+	}
+
+	// Validate-before-write guard (C1/C2): never write a config that
+	// config.Load would reject — that bricks every subsequent command.
+	if verr := config.Validate(cfg); verr != nil {
+		return 0, fmt.Errorf("init: refusing to write a config that `abysslink` cannot load: %w", verr)
+	}
+
+	if err := config.Write(configPath, cfg); err != nil {
+		return 0, fmt.Errorf("init: write config: %w", err)
+	}
+
+	printerInfo(p, "")
+	printerInfo(p, fmt.Sprintf("  %s  Config written to %s", iconDoneStr(), styleCode.Render(configPath)))
+	printerInfo(p, "")
+
+	_ = flow.WriteFlowState(stateFile, 0) // reset resume state for fresh run
+	return 0, nil
+}
+
+// runFlowSteps drives the 8-stage flow.StepXxx runner. Each step returns a
+// *huh.Form that this caller runs with the Abyss theme (IO boundary rule:
+// RunWithContext lives ONLY in internal/cli — never in internal/flow).
+// Extracted from newInitCmd.RunE to stay within the gocyclo limit.
+func runFlowSteps(ctx context.Context, p Printer, runner shell.Runner, stateFile string, startStage int, yesFlag, jsonFlag bool) error {
+	state := &flow.FlowState{}
+	steps := []flow.StepFunc{
+		flow.StepAccount,
+		flow.StepPrereqs,
+		flow.StepConverge,
+		flow.StepLock,
+		flow.StepEnroll,
+		flow.StepVerify,
+		flow.StepACL,
+		flow.StepDone,
+	}
+
+	for i, stepFn := range steps {
+		if i < startStage {
+			continue // skip already-completed stages (resume support)
+		}
+
+		form, stepErr := stepFn(ctx, runner, p, state)
+		if stepErr != nil {
+			// D-09: step error — emit and continue (non-fatal by design).
+			printerInfo(p, ui.RenderMarkdown("**Error:** "+stepErr.Error(), !colorEnabled()))
+			continue
+		}
+
+		// StepDone returns nil form — terminal step; render glamour summary.
+		if form == nil {
+			const summaryMD = "# Setup Complete\n\n" +
+				"**Your rig is ready.** Connect from your phone:\n\n" +
+				"```\nmosh <your-rig> -- tmux new -A -s main\n```\n\n" +
+				"> Run `abysslink up --apply` to converge and `abysslink doctor` to verify."
+			printerInfo(p, ui.RenderMarkdown(summaryMD, !colorEnabled()))
+			_ = flow.WriteFlowState(stateFile, i)
+			continue
+		}
+
+		if err := runFlowStep(ctx, p, runner, stateFile, i, yesFlag, jsonFlag, state, form); err != nil {
+			return err
+		}
+	}
+
+	if !yesFlag {
+		printerInfo(p, "  "+styleMuted.Render("Next: ")+styleCode.Render("abysslink up --apply"))
+	}
+	printerInfo(p, "")
+	return nil
+}
+
+// runFlowStep executes a single flow step: runs the form in interactive or
+// headless mode, wires BRWS-02 for the Account step, and persists the state.
+// Extracted from runFlowSteps to keep that function within the gocyclo limit.
+func runFlowStep(ctx context.Context, p Printer, runner shell.Runner, stateFile string, i int, yesFlag, jsonFlag bool, state *flow.FlowState, form *huh.Form) error {
+	// BRWS-02 wiring: the Account step (index 0) handles OAuth callback.
+	if i == 0 && interactive(yesFlag, jsonFlag) {
+		if err := runAccountStepWithBrowserCallback(ctx, p, runner, yesFlag, jsonFlag, state, form); err != nil {
+			return err
+		}
+	} else if interactive(yesFlag, jsonFlag) {
+		// Interactive path: run the form with the Abyss theme.
+		if runErr := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); runErr != nil {
+			if runErr == huh.ErrUserAborted {
+				printerInfo(p, "  "+styleMuted.Render("Aborted."))
+				return nil //nolint:nilerr // ErrUserAborted is a user intent signal, not an error
+			}
+			return fmt.Errorf("init: step %d: %w", i, runErr)
+		}
+	} else {
+		// Headless path (D-07/D-08): emit URL for the account step only;
+		// other steps are silent.
+		if i == 0 {
+			const signupURL = "https://login.tailscale.com/start"
+			if jsonFlag {
+				p.Print(`{"action_required":"open_url","url":"` + signupURL + `"}`)
+			} else {
+				printerInfo(p, "  Open this URL to continue: "+signupURL)
+			}
+		}
+	}
+
+	// Persist completed stage after each successful step.
+	_ = flow.WriteFlowState(stateFile, i+1)
+	return nil
 }
 
 // runAccountStepWithBrowserCallback runs the Account step form and, when the
@@ -390,7 +391,6 @@ func runAccountStepWithBrowserCallback(ctx context.Context, p Printer, runner sh
 	return nil
 }
 
-
 // ensureTailscaleAccount confirms the user has a Tailscale account before proceeding.
 // Tailscale uses SSO only (Google, GitHub, Microsoft, Apple — no username/password).
 // If the user doesn't have an account yet, we show the signup URL and wait.
@@ -455,7 +455,6 @@ func ensureTailscaleAccount(ctx context.Context, p Printer, runner shell.Runner,
 	printerInfo(p, "")
 	return nil
 }
-
 
 // runToolCheck prints the prerequisites table and returns results keyed by tool name.
 // It never installs anything — that happens in later phases.
