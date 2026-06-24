@@ -227,6 +227,11 @@ func StepEnroll(_ context.Context, _ shell.Runner, _ Printer, state *FlowState) 
 					if err != nil || n < 1024 || n > 65535 {
 						return fmt.Errorf("must be a number between 1024 and 65535")
 					}
+					// huh re-runs Validate on the final accepted value, so
+					// persisting here writes the user's chosen port back into
+					// state — the local portStr would otherwise be discarded
+					// when StepEnroll returns (WR-01).
+					state.NtfyPort = n
 					return nil
 				}),
 		),
