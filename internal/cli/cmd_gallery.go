@@ -36,6 +36,8 @@ func newGalleryCmd() *cobra.Command {
 		Use:    "gallery",
 		Short:  "Abyss theme preview (hidden)",
 		Hidden: true,
+		Example: `  # Preview the Abyss theme — banner, glamour sample, and a sample form
+  abysslink gallery`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			p := newPrinter(cmd)
