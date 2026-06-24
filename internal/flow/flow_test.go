@@ -17,6 +17,8 @@
 package flow_test
 
 import (
+	"context"
+	"io"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -25,20 +27,107 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/abysslink/abysslink/internal/flow"
+	"github.com/abysslink/abysslink/internal/shell"
 )
 
-// TestStepFuncSignature verifies that a step func returns a non-nil *huh.Form
-// without calling .Run() or .RunWithContext() on it. Turned GREEN in Task 2
-// once steps.go is implemented.
+// noopRunner is a minimal shell.Runner implementation for tests: Run and
+// RunWithStdin return a non-zero exit (not called by step funcs; included for
+// completeness). RunInteractive is a no-op.
+type noopRunner struct{}
+
+func (n *noopRunner) Run(_ context.Context, _ string, _ ...string) (shell.Result, error) {
+	return shell.Result{ExitCode: 1}, nil
+}
+
+func (n *noopRunner) RunWithStdin(_ context.Context, _ io.Reader, _ string, _ ...string) (shell.Result, error) {
+	return shell.Result{ExitCode: 1}, nil
+}
+
+func (n *noopRunner) RunInteractive(_ context.Context, _ string, _ ...string) error {
+	return nil
+}
+
+func (n *noopRunner) RunWithEnv(_ context.Context, _ map[string]string, _ string, _ ...string) (shell.Result, error) {
+	return shell.Result{ExitCode: 1}, nil
+}
+
+func (n *noopRunner) RunStream(_ context.Context, _ string, _ ...string) (*shell.Stream, error) {
+	return nil, nil
+}
+
+// noopPrinter is a minimal flow.Printer that discards all output.
+type noopPrinter struct{}
+
+func (p *noopPrinter) Print(_ string) {}
+
+// TestStepFuncSignature verifies that step funcs return a non-nil *huh.Form
+// (except StepDone which returns nil by contract) and nil error, without
+// panicking and without calling .Run() or .RunWithContext() on the form.
 func TestStepFuncSignature(t *testing.T) {
-	t.Skip("TODO: steps.go not yet implemented — Task 2")
+	ctx := context.Background()
+	runner := &noopRunner{}
+	printer := &noopPrinter{}
+	state := &flow.FlowState{}
+
+	steps := []struct {
+		name     string
+		fn       flow.StepFunc
+		nilForm  bool // true for StepDone which intentionally returns nil
+	}{
+		{"StepAccount", flow.StepAccount, false},
+		{"StepPrereqs", flow.StepPrereqs, false},
+		{"StepConverge", flow.StepConverge, false},
+		{"StepLock", flow.StepLock, false},
+		{"StepEnroll", flow.StepEnroll, false},
+		{"StepVerify", flow.StepVerify, false},
+		{"StepACL", flow.StepACL, false},
+		{"StepDone", flow.StepDone, true},
+	}
+
+	for _, tc := range steps {
+		t.Run(tc.name, func(t *testing.T) {
+			form, err := tc.fn(ctx, runner, printer, state)
+			require.NoError(t, err, "%s must return nil error", tc.name)
+			if tc.nilForm {
+				require.Nil(t, form, "%s must return nil form (terminal step)", tc.name)
+			} else {
+				require.NotNil(t, form, "%s must return non-nil *huh.Form", tc.name)
+			}
+		})
+	}
 }
 
 // TestFlowStateThreading verifies that FlowState is passed by pointer through
-// multiple step funcs and that mutations made in one step are visible in
-// subsequent steps (D-11: FlowState = pure data). Turned GREEN in Task 2.
+// multiple step funcs and that mutations made in one step are visible to
+// subsequent steps (D-11: FlowState = pure data, no globals).
 func TestFlowStateThreading(t *testing.T) {
-	t.Skip("TODO: steps.go not yet implemented — Task 2")
+	ctx := context.Background()
+	runner := &noopRunner{}
+	printer := &noopPrinter{}
+
+	state := &flow.FlowState{}
+	ptr1 := state
+
+	// Call StepAccount — it binds to &state.BackendType and &state.Email.
+	form1, err := flow.StepAccount(ctx, runner, printer, state)
+	require.NoError(t, err)
+	require.NotNil(t, form1)
+
+	// Manually simulate the caller setting values on state (as if the form ran).
+	state.BackendType = "tailscale"
+	state.Email = "test@example.com"
+
+	// Call StepPrereqs with the same *FlowState pointer.
+	form2, err := flow.StepPrereqs(ctx, runner, printer, state)
+	require.NoError(t, err)
+	require.NotNil(t, form2)
+
+	// The pointer identity is preserved — same address throughout.
+	require.Same(t, ptr1, state, "FlowState pointer must be the same object throughout the flow")
+
+	// Mutations from step 1 are still visible after step 2 call.
+	require.Equal(t, "tailscale", state.BackendType, "BackendType set in step 1 must survive step 2 call")
+	require.Equal(t, "test@example.com", state.Email, "Email set in step 1 must survive step 2 call")
 }
 
 // TestFlowStateNoSecrets asserts — via reflection — that no FlowState field
