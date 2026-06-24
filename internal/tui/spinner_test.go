@@ -64,3 +64,11 @@ func TestPlainStatus_ReturnsLabel(t *testing.T) {
 	out := tui.PlainStatus("my label")
 	assert.Contains(t, out, "my label")
 }
+
+// TestSpinnerColor is a stub that will verify that newSpinnerModel uses
+// ui.ColorAccent (the Abyss cyan) rather than the legacy lipgloss.Color("8")
+// for the spinner frame colour (TUI-06). This stub is SKIP until Plan 35-02
+// upgrades the spinner implementation.
+func TestSpinnerColor(t *testing.T) {
+	t.Skip("TODO: spinner color upgrade to ui.ColorAccent — implement in Plan 35-02")
+}
