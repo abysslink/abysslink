@@ -626,7 +626,17 @@ Plans:
   3. The Printer/huh IO boundary is in place: live huh `.Run()` is gated behind `interactive()` and isolated so deterministic output still flows through `internal/cli.Printer`; existing `--json`/non-TTY output stays byte-stable (no regression)
   4. A `CGO_ENABLED=0` cross-build CI check compiles the binary for all four targets (darwin/amd64, darwin/arm64, linux/amd64, linux/arm64) and fails the build if a TUI dependency pulls in cgo
 
-**Plans**: TBD
+**Plans**: 4 plans
+**Wave 1**
+
+- [ ] 34-01-PLAN.md — internal/ui package: Abyss palette + AbyssTheme() *huh.Theme + single-source-of-color guard (Wave 1)
+- [ ] 34-02-PLAN.md — byte-stability goldens for status/doctor/header/livetable, captured BEFORE migration (Wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 34-03-PLAN.md — full color consolidation: re-source cli/tui from internal/ui, byte-identical; remove dead tui styles (Wave 2)
+- [ ] 34-04-PLAN.md — two-tone slant banner (go-figure, never-crash tiers) + four-target CGO_ENABLED=0 CI guard (Wave 2)
+
 **UI hint**: yes
 
 ### Phase 35: Browser Hand-off & Wizard Flow
