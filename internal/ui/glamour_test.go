@@ -13,19 +13,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package ui_test contains stub tests for the glamour rendering helpers.
-// All stubs except where noted are skipped until Wave 1 implements RenderMarkdown.
+// Package ui_test contains tests for the glamour rendering helpers.
 package ui_test
 
 import (
+	"bytes"
+	"strings"
 	"testing"
+
+	"github.com/abysslink/abysslink/internal/ui"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestRenderMarkdown_StyledPath asserts that RenderMarkdown returns a styled
 // (ANSI-coloured) string when the terminal supports colour (TUI-05, D-13, D-14).
 // The styled output must come from glamour→string→Printer; no raw fmt.Println.
 func TestRenderMarkdown_StyledPath(t *testing.T) {
-	t.Skip("TODO: internal/ui.RenderMarkdown not yet implemented — Wave 1")
+	result := ui.RenderMarkdown("# Hello\n\nworld", false)
+	require.NotEmpty(t, result, "RenderMarkdown must return a non-empty string")
+	assert.True(t, strings.Contains(result, "Hello"), "rendered output must contain the heading text")
 }
 
 // TestRenderMarkdown_NoColor asserts that when NO_COLOR=1 is set, RenderMarkdown
@@ -33,5 +40,8 @@ func TestRenderMarkdown_StyledPath(t *testing.T) {
 // The result must not contain the ESC byte (0x1b).
 func TestRenderMarkdown_NoColor(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	t.Skip("TODO: internal/ui.RenderMarkdown not yet implemented — Wave 1")
+	result := ui.RenderMarkdown("# Hello\n\nworld", true)
+	require.NotEmpty(t, result, "RenderMarkdown must return a non-empty string on noColor=true path")
+	assert.False(t, bytes.ContainsRune([]byte(result), 0x1b),
+		"noColor=true path must not contain ANSI escape byte (0x1b)")
 }
