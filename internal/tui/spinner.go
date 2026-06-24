@@ -24,6 +24,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
 // PlainStatus returns a non-animated status line containing the label.
@@ -47,7 +49,7 @@ type workDoneMsg struct{ err error }
 func newSpinnerModel(label string, result chan error) spinnerModel {
 	s := spinner.New()
 	s.Spinner = spinner.MiniDot
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // muted grey
+	s.Style = lipgloss.NewStyle().Foreground(ui.ColorAccent) // cyan accent (TUI-06)
 	return spinnerModel{spinner: s, label: label, result: result}
 }
 

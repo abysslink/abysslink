@@ -16,8 +16,12 @@
 package tui_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/tui"
@@ -65,10 +69,24 @@ func TestPlainStatus_ReturnsLabel(t *testing.T) {
 	assert.Contains(t, out, "my label")
 }
 
-// TestSpinnerColor is a stub that will verify that newSpinnerModel uses
-// ui.ColorAccent (the Abyss cyan) rather than the legacy lipgloss.Color("8")
-// for the spinner frame colour (TUI-06). This stub is SKIP until Plan 35-02
-// upgrades the spinner implementation.
+// TestSpinnerColor verifies that newSpinnerModel uses ui.ColorAccent (the Abyss
+// cyan) rather than the legacy lipgloss.Color("8") for the spinner frame colour
+// (TUI-06). Since newSpinnerModel is unexported, this test uses source inspection
+// to confirm the wiring — the fallback approach documented in Plan 35-02.
 func TestSpinnerColor(t *testing.T) {
-	t.Skip("TODO: spinner color upgrade to ui.ColorAccent — implement in Plan 35-02")
+	// Locate spinner.go relative to this test file via runtime.Caller.
+	_, testFile, _, ok := runtime.Caller(0)
+	require.True(t, ok, "runtime.Caller must succeed")
+
+	spinnerPath := filepath.Join(filepath.Dir(testFile), "spinner.go")
+	src, err := os.ReadFile(spinnerPath)
+	require.NoError(t, err, "must be able to read spinner.go source")
+
+	// Positive assertion: ui.ColorAccent must be the foreground (TUI-06).
+	assert.True(t, bytes.Contains(src, []byte("ui.ColorAccent")),
+		"spinner.go must use ui.ColorAccent as the spinner foreground (TUI-06)")
+
+	// Negative assertion: the old lipgloss.Color("8") grey must be gone.
+	assert.False(t, bytes.Contains(src, []byte(`Color("8")`)),
+		`spinner.go must NOT use lipgloss.Color("8") — it was replaced by ui.ColorAccent (TUI-06)`)
 }
