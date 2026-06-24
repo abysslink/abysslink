@@ -20,17 +20,22 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	cterm "github.com/charmbracelet/x/term"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
-// Palette.
-const (
-	colorGreen  = lipgloss.Color("#04B575")
-	colorYellow = lipgloss.Color("#FFD060")
-	colorRed    = lipgloss.Color("#FF5F87")
-	colorBlue   = lipgloss.Color("#5C7CFA")
-	colorMuted  = lipgloss.Color("#6B7280")
-	colorWhite  = lipgloss.Color("#F8F8F2")
-	colorDim    = lipgloss.Color("#4B5563")
+// Palette — re-sourced from internal/ui (single source of color, D-03).
+// The hex values are IDENTICAL to their former local definitions; only the
+// definition site has moved. Rendered bytes on non-TTY/--json/NO_COLOR
+// surfaces are unchanged (D-04 byte-stability gate).
+var (
+	colorGreen  = ui.ColorSuccess       // #04B575
+	colorYellow = ui.ColorWarn          // #FFD060
+	colorRed    = ui.ColorFatal         // #FF5F87
+	colorBlue   = ui.ColorInfo          // #5C7CFA
+	colorMuted  = ui.ColorMutedSemantic // #6B7280 (NOT brand steel — D-04)
+	colorWhite  = ui.ColorFg            // #F8F8F2
+	colorDim    = ui.ColorDim           // #4B5563
 )
 
 // Text styles.
