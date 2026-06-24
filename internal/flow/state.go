@@ -27,20 +27,20 @@ import (
 // Stage index constants — ordered to match journeyLabels() (ported from
 // internal/cli/journey.go:69-80).
 const (
-	StageAccount   = 0
-	StagePrereqs   = 1
-	StageConverge  = 2
-	StageLock      = 3
-	StageEnroll    = 4
-	StageVerify    = 5
-	StageACL       = 6
-	StageDone      = 7
+	StageAccount  = 0
+	StagePrereqs  = 1
+	StageConverge = 2
+	StageLock     = 3
+	StageEnroll   = 4
+	StageVerify   = 5
+	StageACL      = 6
+	StageDone     = 7
 )
 
 // flowStateFile is the filename within the state directory where the last
 // completed stage is persisted. MUST match journeyStageFile in
 // internal/cli/journey.go exactly — D-02 backward compatibility.
-const flowStateFile = "journey-state.json" //nolint:deadcode,unused // used by callers via WriteFlowState/ReadFlowState
+const flowStateFile = "journey-state.json" //nolint:unused // D-02 backward-compat filename (must match journeyStageFile in journey.go); consumed by Plan 35-05 CLI wiring
 
 // flowResumeState is the on-disk JSON schema. Intentionally minimal: only an
 // integer stage index; no credentials, tokens, or sensitive data ever written here.
@@ -55,6 +55,8 @@ type flowResumeState struct {
 // "Secret", or "Password" — captured secrets NEVER live in FlowState. Boolean
 // "Have" flags indicate that a secret was collected; the secret itself is
 // handled transiently by the caller.
+//
+//nolint:revive // revive: FlowState is the plan-35-03 contract name consumed by steps.go (StepFunc signature), flow_test.go (TestFlowStateNoSecrets reflects on this exact name), and Plan 35-05 CLI wiring; the D-11/D-12 secret-exclusion invariant is documented against this name. flow.State is reserved.
 type FlowState struct {
 	// Core identity fields.
 	Email       string
@@ -62,11 +64,11 @@ type FlowState struct {
 	BackendType string // "tailscale" | "headscale" | "netbird"
 
 	// Module toggles.
-	EnableSSH   bool
-	EnableTmux  bool
-	EnableMosh  bool
-	EnableNtfy  bool
-	NtfyPort    int
+	EnableSSH  bool
+	EnableTmux bool
+	EnableMosh bool
+	EnableNtfy bool
+	NtfyPort   int
 
 	// Per-stage completion flags. Set to true by each step after the form is
 	// accepted by the user (caller calls WriteFlowState after setting these).

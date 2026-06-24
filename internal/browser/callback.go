@@ -84,7 +84,13 @@ func ListenCallback(ctx context.Context, opts CallbackOpts) (code string, redire
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", makeCallbackHandler(opts, done))
 
-	srv := &http.Server{Handler: mux} //nolint:gosec // no TLS needed: loopback-only per RFC 8252 §8.3; no external exposure
+	// ReadHeaderTimeout bounds the header-read phase (gosec G112 / Slowloris
+	// defense-in-depth) even though the listener is loopback-only; the browser
+	// redirect delivers request headers within milliseconds.
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	go func() {
 		_ = srv.Serve(ln) //nolint:errcheck // ErrServerClosed is expected when Shutdown is called
 	}()

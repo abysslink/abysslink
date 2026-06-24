@@ -70,9 +70,9 @@ func TestStepFuncSignature(t *testing.T) {
 	state := &flow.FlowState{}
 
 	steps := []struct {
-		name     string
-		fn       flow.StepFunc
-		nilForm  bool // true for StepDone which intentionally returns nil
+		name    string
+		fn      flow.StepFunc
+		nilForm bool // true for StepDone which intentionally returns nil
 	}{
 		{"StepAccount", flow.StepAccount, false},
 		{"StepPrereqs", flow.StepPrereqs, false},
