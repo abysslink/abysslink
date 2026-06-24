@@ -27,6 +27,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
 // RowEvent mirrors modules.ModuleEvent without importing internal/modules.
@@ -191,14 +193,15 @@ func (t *LiveTable) View() string {
 	return sb.String()
 }
 
-// styleSuccess/styleWarn/styleFatal/styleBold/styleMuted are local to this
-// file to keep package tui self-contained. They mirror the cli package palette.
+// tuiSuccess/tuiWarn/tuiBold/tuiMuted/tuiInfo are re-sourced from internal/ui
+// (single source of color, D-03). Hex values are IDENTICAL to former literals;
+// rendered bytes on non-TTY/--json/NO_COLOR surfaces are unchanged (D-04).
 var (
-	tuiSuccess = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575")).Bold(true)
-	tuiWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD060")).Bold(true)
+	tuiSuccess = lipgloss.NewStyle().Foreground(ui.ColorSuccess).Bold(true) // #04B575
+	tuiWarn    = lipgloss.NewStyle().Foreground(ui.ColorWarn).Bold(true)    // #FFD060
 	tuiBold    = lipgloss.NewStyle().Bold(true)
-	tuiMuted   = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-	tuiInfo    = lipgloss.NewStyle().Foreground(lipgloss.Color("#5C7CFA"))
+	tuiMuted   = lipgloss.NewStyle().Foreground(ui.ColorMutedSemantic) // #6B7280
+	tuiInfo    = lipgloss.NewStyle().Foreground(ui.ColorInfo)          // #5C7CFA
 )
 
 // renderRow formats a settled RowEvent into a display line matching the

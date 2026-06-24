@@ -20,6 +20,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
 // JourneyHeader renders the "Abysslink Setup ─ Stage N of M" progress strip as
@@ -50,7 +52,7 @@ func JourneyHeader(stage, total int, labels []string) string {
 	// Wrap in a subtle blue box matching the project's header palette.
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#5C7CFA")).
+		BorderForeground(ui.ColorInfo).
 		Padding(0, 2)
 	w := terminalWidth() - 4
 	if w < 54 {
@@ -77,9 +79,9 @@ func buildJourneyDots(stage, total int) string {
 }
 
 func buildJourneyDotsUnicode(stage, total int) string {
-	stylesDone := lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575")) // green
-	stylesCurrent := lipgloss.NewStyle().Foreground(lipgloss.Color("#5C7CFA")).Bold(true)
-	stylesRemain := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	stylesDone := lipgloss.NewStyle().Foreground(ui.ColorSuccess) // green (#04B575)
+	stylesCurrent := lipgloss.NewStyle().Foreground(ui.ColorInfo).Bold(true)
+	stylesRemain := lipgloss.NewStyle().Foreground(ui.ColorMutedSemantic)
 
 	var parts []string
 	for i := 1; i <= total; i++ {
@@ -126,7 +128,7 @@ func buildJourneyLabels(stage, total int, labels []string) string {
 			}
 		} else {
 			if i == stage {
-				current := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#5C7CFA"))
+				current := lipgloss.NewStyle().Bold(true).Foreground(ui.ColorInfo)
 				parts = append(parts, current.Render(fmt.Sprintf("[%d] %s", i, label)))
 			} else {
 				parts = append(parts, fmt.Sprintf("[%d] %s", i, label))

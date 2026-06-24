@@ -20,6 +20,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
 // SecretBox renders a once-only red-bordered box containing the title, the
@@ -59,8 +61,8 @@ func SecretBox(title string, secrets []string) string {
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#FF5F87")). // red
-		Foreground(lipgloss.Color("#FF5F87")).
+		BorderForeground(ui.ColorFatal). // #FF5F87 — re-sourced from internal/ui (D-03)
+		Foreground(ui.ColorFatal).
 		Bold(true).
 		Padding(0, 2).
 		Width(secretBoxWidth()).

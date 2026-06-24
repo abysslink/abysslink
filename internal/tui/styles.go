@@ -18,7 +18,6 @@ package tui
 import (
 	"os"
 
-	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 )
 
@@ -36,34 +35,4 @@ func terminalWidth() int {
 		return 80
 	}
 	return w
-}
-
-// Styles groups the lipgloss styles used across TUI components.
-type Styles struct {
-	Success lipgloss.Style
-	Warning lipgloss.Style
-	Error   lipgloss.Style
-	Muted   lipgloss.Style
-	Bold    lipgloss.Style
-}
-
-// DefaultStyles returns the standard abysslink colour palette.
-// All colours are suppressed when NO_COLOR is set.
-func DefaultStyles() Styles {
-	if noColor() {
-		return Styles{
-			Success: lipgloss.NewStyle(),
-			Warning: lipgloss.NewStyle(),
-			Error:   lipgloss.NewStyle(),
-			Muted:   lipgloss.NewStyle(),
-			Bold:    lipgloss.NewStyle().Bold(true),
-		}
-	}
-	return Styles{
-		Success: lipgloss.NewStyle().Foreground(lipgloss.Color("10")), // bright green
-		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("11")), // bright yellow
-		Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("9")),  // bright red
-		Muted:   lipgloss.NewStyle().Foreground(lipgloss.Color("8")),  // dark grey
-		Bold:    lipgloss.NewStyle().Bold(true),
-	}
 }

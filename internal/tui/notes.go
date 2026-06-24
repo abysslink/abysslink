@@ -19,6 +19,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
 // NoteLevel identifies the severity / intent of a Note callout box.
@@ -43,10 +45,10 @@ type noteLevelMeta struct {
 }
 
 var noteLevelTable = map[NoteLevel]noteLevelMeta{
-	NoteInfo:     {borderColor: "#5C7CFA", unicodeLabel: "● INFO", asciiLabel: "* INFO"},
-	NoteWarn:     {borderColor: "#FFD060", unicodeLabel: "⚠ WARN", asciiLabel: "! WARN"},
-	NoteSecurity: {borderColor: "#00B4D8", unicodeLabel: "● SECURITY", asciiLabel: "* SECURITY"},
-	NoteDanger:   {borderColor: "#FF5F87", unicodeLabel: "✕ DANGER", asciiLabel: "x DANGER"},
+	NoteInfo:     {borderColor: ui.ColorInfo, unicodeLabel: "● INFO", asciiLabel: "* INFO"},      // #5C7CFA
+	NoteWarn:     {borderColor: ui.ColorWarn, unicodeLabel: "⚠ WARN", asciiLabel: "! WARN"},      // #FFD060
+	NoteSecurity: {borderColor: "#00B4D8", unicodeLabel: "● SECURITY", asciiLabel: "* SECURITY"}, // unique security blue — not in palette
+	NoteDanger:   {borderColor: ui.ColorFatal, unicodeLabel: "✕ DANGER", asciiLabel: "x DANGER"}, // #FF5F87
 }
 
 // noteLevelLabel returns the label string (icon + word) for level, choosing

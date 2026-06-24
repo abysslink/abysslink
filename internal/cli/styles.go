@@ -34,7 +34,6 @@ var (
 	colorRed    = ui.ColorFatal         // #FF5F87
 	colorBlue   = ui.ColorInfo          // #5C7CFA
 	colorMuted  = ui.ColorMutedSemantic // #6B7280 (NOT brand steel — D-04)
-	colorWhite  = ui.ColorFg            // #F8F8F2
 	colorDim    = ui.ColorDim           // #4B5563
 )
 
