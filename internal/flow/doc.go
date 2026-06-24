@@ -13,12 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package flow provides composable guided wizard steps for the abysslink
-// initialisation flow. Each step is a function that accepts a *FlowState and
-// returns a *huh.Form (or *huh.Group) that the caller in internal/cli is
-// responsible for running. No rendering logic lives here — this package holds
-// only pure data (FlowState) and form-construction functions (TUI-03, D-11).
-//
-// Implemented in Wave 2 of Phase 35. Wave 0 test stubs in flow_test.go define
-// the contract that Wave 2 must satisfy.
+// Package flow provides composable guided setup steps as pure functions
+// returning huh.Form objects. Steps thread one typed FlowState struct (no
+// globals, no rendering logic). IO boundary: internal/flow must not import
+// internal/cli. All form execution (RunWithContext) is the caller's
+// responsibility in internal/cli.
 package flow
