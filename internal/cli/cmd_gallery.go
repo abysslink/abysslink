@@ -16,6 +16,8 @@
 package cli
 
 import (
+	"errors"
+
 	"github.com/abysslink/abysslink/internal/ui"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -65,7 +67,15 @@ func newGalleryCmd() *cobra.Command {
 						).
 						Value(&choice),
 				))
-				_ = form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx)
+				// Honour ctx cancellation (ctrl+c during the preview) and
+				// propagate real form errors instead of swallowing them and
+				// reporting a clean exit 0 (WR-05). ErrUserAborted is a user
+				// intent signal, not an error — the gallery still completes
+				// normally (no mutations, exit 0) when the user aborts.
+				if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil &&
+					!errors.Is(err, huh.ErrUserAborted) {
+					return err
+				}
 			}
 
 			// 3. Glamour markdown sample (D-13: glamour via Printer, never stdout).
