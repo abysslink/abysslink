@@ -301,7 +301,12 @@ func TestListenCallbackHappyPath(t *testing.T) {
 		CodeVerifier: verifier,
 		OnReady: func(redirectURI string) {
 			// Simulate the browser being redirected back with a valid auth code.
-			resp, err := http.Get(redirectURI + "?code=testcode&state=" + state) //nolint:noctx // test-only HTTP call to loopback
+			// A configured verifier means the redirect-side PKCE check fails
+			// closed (WR-03), so the callback must carry the matching
+			// code_challenge for the happy path to be accepted.
+			challenge := browser.CodeChallenge(verifier)
+			url := redirectURI + "?code=testcode&state=" + state + "&code_challenge=" + challenge
+			resp, err := http.Get(url) //nolint:noctx // test-only HTTP call to loopback
 			if err != nil {
 				return
 			}

@@ -163,11 +163,14 @@ func validateCallback(q interface{ Get(string) string }, opts CallbackOpts) call
 	}
 
 	// Validate PKCE code_challenge if a verifier was configured (T-35-OAuth-pkce).
+	// Fail CLOSED: when a verifier is configured the parameter must be present
+	// AND correct. A constant-time compare against the expected challenge also
+	// rejects the absent/empty case, so an attacker cannot bypass the binding by
+	// simply omitting code_challenge (WR-03).
 	if opts.CodeVerifier != "" {
-		if cc := q.Get("code_challenge"); cc != "" {
-			if subtle.ConstantTimeCompare([]byte(cc), []byte(CodeChallenge(opts.CodeVerifier))) != 1 {
-				return callbackResult{err: fmt.Errorf("browser callback: PKCE code_challenge mismatch")}
-			}
+		cc := q.Get("code_challenge")
+		if subtle.ConstantTimeCompare([]byte(cc), []byte(CodeChallenge(opts.CodeVerifier))) != 1 {
+			return callbackResult{err: fmt.Errorf("browser callback: PKCE code_challenge mismatch")}
 		}
 	}
 
