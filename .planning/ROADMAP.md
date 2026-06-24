@@ -80,7 +80,7 @@ Phases 22, 23, 23.1, 23.2, 24, 25, 26 (7 phases, 29 plans) — closes the 2026-0
 
 **Research flags (deep research at phase planning):** Phase 36 (HMAC epoch'd-chain design — the single highest-risk item: versioned epochs, in-chain marker signed by the OLD key, per-entry key selection, no false TAMPERED); Phase 37 (cgo-free per-platform hardware-key + attestation paths); Phase 38 (real-hardware FileVault mid-encryption string literals — known gap until verified); Phase 39 (duress threat model — casual-coercion, NOT forensic plausible-deniability).
 
-- [ ] **Phase 34: TUI Foundation** - Abyss two-tone `*huh.Theme` + reusable lipgloss styles + go-figure banner (NO_COLOR/non-truecolor degrade) + Printer/huh IO boundary wired first + CGO_ENABLED=0 four-target cross-build CI guard
+- [x] **Phase 34: TUI Foundation** - Abyss two-tone `*huh.Theme` + reusable lipgloss styles + go-figure banner (NO_COLOR/non-truecolor degrade) + Printer/huh IO boundary wired first + CGO_ENABLED=0 four-target cross-build CI guard (completed 2026-06-24)
 - [ ] **Phase 35: Browser Hand-off & Wizard Flow** - composable `internal/flow` steps threading one typed FlowState; `init` rebuilt on the flow layer + `journey.go` deleted; glamour-rendered results via Printer; `internal/browser` fire-and-forget + RFC 8252 loopback OAuth callback (+PKCE); cyan spinner + bordered framing + footer + hidden `gallery`
 - [ ] **Phase 36: Secure Memory & Audit HMAC-Key Rotation** - `SecureBytes` mlock/zeroize in `internal/secrets` (honest WARN on RLIMIT_MEMLOCK, defense-in-depth framing); versioned audit-chain key epochs + `rotate audit-hmac --apply` (marker signed by OLD key, old keys retained) + `sec-` doctor checks — HIGHEST-RISK, research-flagged
 - [ ] **Phase 37: Hardware-Backed Keys & Local Attestation** - macOS Secure Enclave + FIDO2 opt-in `HardwareKeyProvider` (cgo-free `ssh-keygen` shell-out through `shell.Runner`, fail-closed, key-kind in `status`); `internal/attest` local boot-state reads (csrutil/SIP, SecureBoot/TPM PCR) fail-closed tri-state in `doctor`/`--profile at-risk` — research-flagged
@@ -626,16 +626,16 @@ Plans:
   3. The Printer/huh IO boundary is in place: live huh `.Run()` is gated behind `interactive()` and isolated so deterministic output still flows through `internal/cli.Printer`; existing `--json`/non-TTY output stays byte-stable (no regression)
   4. A `CGO_ENABLED=0` cross-build CI check compiles the binary for all four targets (darwin/amd64, darwin/arm64, linux/amd64, linux/arm64) and fails the build if a TUI dependency pulls in cgo
 
-**Plans**: 4 plans
+**Plans**: 4/4 plans complete
 **Wave 1**
 
-- [ ] 34-01-PLAN.md — internal/ui package: Abyss palette + AbyssTheme() *huh.Theme + single-source-of-color guard (Wave 1)
-- [ ] 34-02-PLAN.md — byte-stability goldens for status/doctor/header/livetable, captured BEFORE migration (Wave 1)
+- [x] 34-01-PLAN.md — internal/ui package: Abyss palette + AbyssTheme() *huh.Theme + single-source-of-color guard (Wave 1)
+- [x] 34-02-PLAN.md — byte-stability goldens for status/doctor/header/livetable, captured BEFORE migration (Wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 34-03-PLAN.md — full color consolidation: re-source cli/tui from internal/ui, byte-identical; remove dead tui styles (Wave 2)
-- [ ] 34-04-PLAN.md — two-tone slant banner (go-figure, never-crash tiers) + four-target CGO_ENABLED=0 CI guard (Wave 2)
+- [x] 34-03-PLAN.md — full color consolidation: re-source cli/tui from internal/ui, byte-identical; remove dead tui styles (Wave 2)
+- [x] 34-04-PLAN.md — two-tone slant banner (go-figure, never-crash tiers) + four-target CGO_ENABLED=0 CI guard (Wave 2)
 
 **UI hint**: yes
 
@@ -765,7 +765,7 @@ Phases execute in numeric order: 1 → … → 27 → 28 → 28.1 → 29 → 30 
 | 31. Agent Kill-Switch ("Apoptosis") | 5/5 | Complete | 2026-06-18 |
 | 32. Supply-Chain Depth & Trimmed Fortify | 7/7 | Complete (release-proofs at v4 tag) | 2026-06-20 |
 | 33. Distribution & Public Launch | 3/3 | Complete (human-gated: LNCH-02/04/05/06 operator) | 2026-06-21 |
-| 34. TUI Foundation | 0/? | Not started | - |
+| 34. TUI Foundation | 4/4 | Complete    | 2026-06-24 |
 | 35. Browser Hand-off & Wizard Flow | 0/? | Not started | - |
 | 36. Secure Memory & Audit HMAC-Key Rotation | 0/? | Not started | - |
 | 37. Hardware-Backed Keys & Local Attestation | 0/? | Not started | - |
@@ -785,7 +785,7 @@ Phases execute in numeric order: 1 → … → 27 → 28 → 28.1 → 29 → 30 
   4. Report-only `SeverityOK` findings appear exactly ONCE per `abysslink doctor` pass for lock/ssh/ntfy/acl/tailscale — either emitted in only one of Detect/Verify (hardening-module precedent) or deduped on `(Module, Check)` in `runner.Doctor`; the "N ok" count is no longer inflated and no duplicate ✓ rows render (DOC-08 / WR-08)
   5. `make lint test` green; new/updated tests cover each probe-failure → non-OK path and the single-emission/dedup guarantee
 
-**Plans:** 5/5 plans complete
+**Plans:** 4/4 plans complete
 
 Plans:
 **Wave 1** *(all plans independent — parallel execution)*
