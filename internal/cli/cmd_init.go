@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -258,6 +259,14 @@ func runFlowSteps(ctx context.Context, p Printer, runner shell.Runner, stateFile
 		}
 
 		if err := runFlowStep(ctx, p, runner, stateFile, i, yesFlag, jsonFlag, state, form); err != nil {
+			// User cancelled (Ctrl-C/Esc) mid-wizard: stop cleanly instead of
+			// advancing to the next step. Previously runFlowStep returned nil on
+			// abort, so the loop ran the NEXT form — Ctrl-C could not quit the
+			// wizard (T-011). Print once and exit 0 (user intent, not an error).
+			if errors.Is(err, errUserAborted) {
+				printerInfo(p, "  "+styleMuted.Render("Setup cancelled."))
+				return nil
+			}
 			return err
 		}
 	}
@@ -281,9 +290,12 @@ func runFlowStep(ctx context.Context, p Printer, runner shell.Runner, stateFile 
 	} else if interactive(yesFlag, jsonFlag) {
 		// Interactive path: run the form with the Abyss theme.
 		if runErr := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); runErr != nil {
-			if runErr == huh.ErrUserAborted {
-				printerInfo(p, "  "+styleMuted.Render("Aborted."))
-				return nil //nolint:nilerr // ErrUserAborted is a user intent signal, not an error
+			// errors.Is + ctx-cancel: huh may wrap ErrUserAborted, and a
+			// ctx-cancelled run can surface as ErrTimeout/ctx.Err rather than the
+			// bare sentinel (T-041). Signal abort to the driver so it stops the
+			// wizard rather than skipping to the next step.
+			if errors.Is(runErr, huh.ErrUserAborted) || ctx.Err() != nil {
+				return errUserAborted
 			}
 			return fmt.Errorf("init: step %d: %w", i, runErr)
 		}
@@ -316,9 +328,11 @@ func runFlowStep(ctx context.Context, p Printer, runner shell.Runner, stateFile 
 func runAccountStepWithBrowserCallback(ctx context.Context, p Printer, runner shell.Runner, yesFlag, jsonFlag bool, state *flow.FlowState, form *huh.Form) error {
 	// Run the Account step form to collect backend type + email.
 	if runErr := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); runErr != nil {
-		if runErr == huh.ErrUserAborted {
-			printerInfo(p, "  "+styleMuted.Render("Aborted."))
-			return nil //nolint:nilerr // ErrUserAborted is a user intent signal, not an error; caller continues
+		// Abort (Ctrl-C/Esc) or ctx-cancel: signal the driver to stop the wizard
+		// cleanly rather than returning nil and advancing to the next step
+		// (T-011/T-041).
+		if errors.Is(runErr, huh.ErrUserAborted) || ctx.Err() != nil {
+			return errUserAborted
 		}
 		return fmt.Errorf("init: account step: %w", runErr)
 	}
