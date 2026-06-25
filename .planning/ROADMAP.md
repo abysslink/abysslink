@@ -874,3 +874,11 @@ Plans:
 - [LOW] T-040 `internal/tui/header.go:1` (broken-flows) — tui.JourneyHeader (the "Abysslink Setup — Stage N of M" progress strip with the dot-row and bracketed stage labels) is only ever called from tests (header_test.
 - [LOW] T-016 `internal/tui/livetable.go:209` (layout) — renderRow/renderScanRow build a single line as '  ' + counter + '  ' + icon + '  ' + bold-name(%-16s) + '  ' + status with no width management. The status field
 - [LOW] T-046 `internal/tui/spinner.go:138` (state-mgmt) — RunSpinner, newSpinnerModel, spinnerModel, waitForCancel, and PlainStatus have no non-test callers anywhere in cmd/ or internal/cli (grep confirms only spinner_
+
+### TUI Audit 2026-06-25 — fix outcome (branch fix/tui-audit-2026-06-25)
+
+**Fixed (12) — commits on branch:** T-004 keymap hint, T-038 resume copy, T-044 gallery flags, T-043 status error honesty, T-023 spinner Esc, T-020 forms theming, T-022 security color centralized, T-001 note-box narrow-terminal overflow, T-017/T-032 livetable spinner palette color, T-011/T-041 init-wizard abort propagation. All pass `make build` + `make test -race` + `make lint`.
+
+**Deferred AUTO_FIXABLE (need golden re-bless / design glance):**
+- T-003 [HIGH] internal/cli/styles.go:48 + ui/theme.go — styleCode pill is ColorInfo on ColorDim (2.06:1, fails WCAG AA). Fix changes a brand color (`StyleCode`) across every surface (status/up/doctor) → confirm design intent + re-bless 3 goldens. Not auto-applied (visible brand change).
+- T-014 [MEDIUM] internal/cli/cmd_up.go:459,883 — horizontal rules hardcoded to `strings.Repeat("─",48)`, ignoring terminal width. Mechanical (add hrule() helper) but re-blesses up_dryrun + doctor goldens; deferred under budget.
