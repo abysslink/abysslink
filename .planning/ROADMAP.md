@@ -834,3 +834,43 @@ Plans:
 
 - [x] 23.2-01-PLAN.md — DOC-09 (CR-02): serveActive returns (bool, bool); probe-failure emits SeverityWarning Check='serve-probe-fail'; findingFix entry; tests for exec-error + non-zero-exit + distinct-check-ID + serve-OK regression
 - [x] 23.2-02-PLAN.md — DOC-10 (CR-01): metDisabledListenerCheck ECONNREFUSED gate; non-ECONNREFUSED errors emit SeverityWarning Check='met-listener-unknown'; findingFix entry; TestMetDisabledListener_UnroutableAddr (192.0.2.1:9) + ECONNREFUSED regression
+
+### TUI Audit 2026-06-25 — deferred backlog (multi-agent TUI+logic audit)
+
+46 findings total; 12 auto-fixed on branch `fix/tui-audit-2026-06-25`, the rest below (need design/product decision or span multiple files). Full detail: `.planning/audits/TUI_AUDIT_2026-06-25.md`.
+
+**CRITICAL (review first):**
+- T-002 `internal/ui/theme.go:47` (color-contrast) — The four semantic colors that drive virtually all status/health output are flat lipgloss.Color values, NOT lipgloss.AdaptiveColor: ColorSuccess #04B575, ColorWarn #FFD060, ColorFatal #FF5F87, ColorInf
+- T-007 `internal/flow/steps.go:154` (state-feedback) — StepConverge, StepLock, StepVerify, and StepACL each build a huh.Confirm bound to a local `runNow bool` (steps.go:155,177,245,265) that is immediately discarded (`_ = runNow` at :169,189,257,277). The
+
+**Deferred (LOG):**
+- [HIGH] T-005 `internal/cli/cmd_init.go:108` (info-arch) — The 8-stage init wizard (StepAccount through StepDone) renders each huh form with NO indication of which stage the user is on or how many remain. A purpose-buil
+- [HIGH] T-006 `internal/cli/cmd_init.go:275` (dead-handlers) — The Stage 2 Converge step (flow.StepConverge, steps.go:154-171) builds a huh.Confirm with Affirmative("Yes, run it") / Negative("No, I'll run it later") bound t
+- [HIGH] T-008 `internal/cli/cmd_init.go:224` (state-feedback) — runFlowSteps drives 8 huh form stages in a loop but never renders any stage/progress indicator. A purpose-built renderer for exactly this — tui.JourneyHeader (i
+- [HIGH] T-010 `internal/cli/cmd_init.go:333` (missing-components) — runAccountStepWithBrowserCallback presents a real-looking OAuth authorization flow for headscale/netbird backends: it generates a PKCE verifier, prints 'Browser
+- [HIGH] T-009 `internal/flow/steps.go:176` (dead-handlers) — flow.StepLock builds a huh.Confirm ("Yes, run it" / "No, I'll run it later") bound to a local `runNow` that is discarded at steps.go:189 (`_ = runNow`). The cal
+- [MEDIUM] T-029 `internal/cli/cmd_enroll.go:615` (state-feedback) — enrollWithAdminKey prints a single static line 'Waiting for the phone to join the tailnet (up to 2 minutes)...' (cmd_enroll.go:623) then enters a silent 2-minut
+- [MEDIUM] T-039 `internal/cli/cmd_init.go:250` (broken-flows) — After the 8-stage flow, StepDone renders a glamour summary that says "Your rig is ready." and shows a `mosh <your-rig> -- tmux new -A -s main` connect command, 
+- [MEDIUM] T-033 `internal/flow/steps.go:244` (dead-handlers) — flow.StepVerify builds a huh.Confirm bound to a local `runNow` discarded at steps.go:257. runFlowStep (cmd_init.go:275-306) never reads it and never runs `abyss
+- [MEDIUM] T-034 `internal/flow/steps.go:264` (dead-handlers) — flow.StepACL builds a huh.Confirm ("Yes, push ACL" / "No, I'll manage it manually") bound to a local `runNow` discarded at steps.go:277. runFlowStep never reads
+- [MEDIUM] T-042 `internal/flow/steps.go:154` (error-paths) — StepConverge (line 154), StepLock (176), StepVerify (244) and StepACL (264) each build a huh.NewConfirm bound to a function-local `var runNow bool`, then explic
+- [MEDIUM] T-037 `internal/modules/webui/handlers.go:526` (missing-components) — When cfg.webui.allow_notify is true (a real config key, config.go:444), the Notifications view renders a POST form with a 'Send notification' submit button (tem
+- [MEDIUM] T-012 `internal/tui/header.go:42` (layout) — Two layout problems. (1) The bracketed label row built by buildJourneyLabels joins all 8 stage labels ('[1] Account  [2] Prerequisites  ...  [8] Done') into a s
+- [MEDIUM] T-027 `internal/tui/header.go:116` (resize) — buildJourneyLabels joins all stage labels into one line with two-space separators ([1] Account  [2] Prerequisites  [3] Converge  ... up to 8 stages) with no wid
+- [MEDIUM] T-024 `internal/tui/spinner.go:65` (resize) — spinnerModel.Update has no tea.WindowSizeMsg case and View() (line 100) emits `fmt.Sprintf("  %s  %s\n", m.spinner.View(), m.label)` with the label rendered ver
+- [MEDIUM] T-028 `internal/tui/spinner.go:123` (state-feedback) — The entire animated spinner model (spinnerModel + RunSpinner, with its careful WR-02 ctx-cancellation wiring) has ZERO production callers — grep across the whol
+- [MEDIUM] T-018 `internal/tui/styles.go:24` (color-contrast) — tui.noColor() only checks the NO_COLOR env var, whereas the CLI's colorEnabled() (term.go:45-53) also disables color for CLICOLOR=0 and, crucially, for non-TTY 
+- [MEDIUM] T-025 `internal/ui/glamour.go:143` (resize) — RenderMarkdown creates the glamour renderer with glamour.WithWordWrap(0) (line 151), which disables word-wrapping entirely. glamour is never told the terminal w
+- [MEDIUM] T-013 `internal/ui/theme.go:155` (layout) — AbyssTheme now sets f.Base (focused) and b.Base (blurred) to a full RoundedBorder() + Padding(1,2) on EVERY group of EVERY huh form (TUI-06, commit cda91ac). Th
+- [MEDIUM] T-019 `internal/ui/theme.go:69` (color-contrast) — ColorMutedSemantic (#6B7280) is the muted tone re-sourced as cli.colorMuted (styles.go:36) and tui.tuiMuted (livetable.go:203), and is the dominant color for se
+- [MEDIUM] T-021 `internal/ui/theme.go:131` (color-contrast) — ColorSelection violet (#8B5CF6 dark side) is used for huh SelectedOption (theme.go:131), FocusedButton (theme.go:143), MultiSelectSelector, and the banner 'LINK
+- [LOW] T-045 `internal/cli/cmd_approve.go:398` (state-mgmt) — promptTTY spawns an inner goroutine that calls scanner.Scan() on /dev/tty (lines 400-406) and reports via a buffered doneCh. The outer select (lines 409-413) re
+- [LOW] T-036 `internal/cli/cmd_gallery.go:58` (dead-handlers) — The hidden gallery command renders a sample huh.Select bound to a local `choice` (cmd_gallery.go:59,68) but `choice` is never read after the form runs — the sel
+- [LOW] T-015 `internal/cli/cmd_init.go:1150` (layout) — previewAndConfirmConfig prints each YAML line as `"  " + styleCode.Render(line)`. styleCode applies a background color plus Padding(0,1) (styles.go:48). Long YA
+- [LOW] T-030 `internal/cli/cmd_up.go:431` (state-feedback) — runApply builds the ConfirmBlast summary string only from sudoLines (cmd_up.go:432-441). When the planned changes require no sudo (e.g. a plan that is purely a 
+- [LOW] T-026 `internal/cli/styles.go:80` (resize) — styleHeaderBox, styleNextStepBox and styleStatusBox are package-level vars that evaluate boxWidth() and boxBorder() exactly ONCE at package initialization (proc
+- [LOW] T-031 `internal/cli/styles.go:106` (info-arch) — The 'healthy/good' state uses two different glyphs depending on the screen. The status panel renders healthy rows with iconOK='●' (filled dot) via iconOKStr (st
+- [LOW] T-035 `internal/flow/state.go:73` (dead-handlers) — The FlowState struct declares seven per-stage completion booleans (StageAccountDone, StagePrereqsDone, StageConvergeDone, StageLockDone, StageEnrollDone, StageV
+- [LOW] T-040 `internal/tui/header.go:1` (broken-flows) — tui.JourneyHeader (the "Abysslink Setup — Stage N of M" progress strip with the dot-row and bracketed stage labels) is only ever called from tests (header_test.
+- [LOW] T-016 `internal/tui/livetable.go:209` (layout) — renderRow/renderScanRow build a single line as '  ' + counter + '  ' + icon + '  ' + bold-name(%-16s) + '  ' + status with no width management. The status field
+- [LOW] T-046 `internal/tui/spinner.go:138` (state-mgmt) — RunSpinner, newSpinnerModel, spinnerModel, waitForCancel, and PlainStatus have no non-test callers anywhere in cmd/ or internal/cli (grep confirms only spinner_
