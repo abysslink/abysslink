@@ -54,8 +54,12 @@ func newGalleryCmd() *cobra.Command {
 
 			// 2. Sample huh form — interactive path only.
 			// The form is skipped in headless / non-TTY (CI, --json, pipe) so the
-			// gallery command always exits 0 without hanging (D-15).
-			if interactive(false, false) {
+			// gallery command always exits 0 without hanging (D-15). Read the real
+			// --json / --yes flags so the documented "skipped under --json / headless"
+			// contract actually holds (T-044) instead of hard-coding false.
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			yes, _ := cmd.Flags().GetBool("yes")
+			if interactive(yes, jsonOut) {
 				var choice string
 				form := huh.NewForm(huh.NewGroup(
 					huh.NewSelect[string]().

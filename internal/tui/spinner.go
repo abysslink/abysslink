@@ -78,9 +78,12 @@ func (m spinnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	case tea.KeyMsg:
-		// Make ctrl+c intent explicit rather than relying on Bubble Tea
-		// defaults (IN-04), in tandem with the WR-02 ctx wiring.
-		if msg.Type == tea.KeyCtrlC {
+		// Make cancel intent explicit rather than relying on Bubble Tea
+		// defaults (IN-04), in tandem with the WR-02 ctx wiring. Esc/Ctrl-D
+		// are quit synonyms for Ctrl-C, matching LiveTable (livetable.go) so
+		// the cancel keys are consistent across every interactive surface (T-023).
+		switch msg.Type {
+		case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyEsc:
 			return m, tea.Quit
 		}
 		return m, nil

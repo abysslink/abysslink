@@ -1,7 +1,7 @@
 +------------------------------------------------------+
 |  Abysslink Status                                    |
 |                                                      |
-|    ✕  Tailscale           not running                |
+|    ✕  Tailscale           unknown                    |
 |    ●  Tailscale SSH       enabled                    |
 |    ●  Tailnet Lock        enabled                    |
 |    ●  ntfy                enabled                    |

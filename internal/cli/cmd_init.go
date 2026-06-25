@@ -113,11 +113,11 @@ func newInitCmd() *cobra.Command {
 			}))
 
 			// Persistent footer hint (UI-SPEC §Copywriting Contract).
-			printerInfo(p, styleFooterHint.Render("↑/↓ navigate  •  space toggle  •  enter select  •  esc back  •  ctrl+c quit"))
+			printerInfo(p, styleFooterHint.Render("↑/↓ navigate  •  ←/→ or y/n toggle  •  enter confirm  •  shift+tab back  •  ctrl+c quit"))
 
 			// Resume hint.
 			if resume && startStage > 0 {
-				printerInfo(p, fmt.Sprintf("  %s  Resuming from stage %d. Run with --no-resume to start over.",
+				printerInfo(p, fmt.Sprintf("  %s  Resuming from stage %d. Run `abysslink init` (without --resume) to start over.",
 					iconDoneStr(), startStage))
 				printerInfo(p, "")
 			}

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"runtime"
@@ -229,7 +230,7 @@ func newStatusCmd() *cobra.Command {
 				return fmt.Errorf("status: %w", bErr)
 			}
 
-			tsRunning := "not running"
+			var tsRunning string // set below: running/stopped on success, "unknown" on query error
 			tsIP := ""
 			hostname := ""
 
@@ -246,6 +247,12 @@ func newStatusCmd() *cobra.Command {
 						tsIP = st.Self.TailscaleIPs[0].String()
 					}
 				}
+			} else {
+				// Distinguish a failed query (tailscaled unreachable / RPC error)
+				// from a confirmed-stopped backend: "not running" must mean we
+				// actually asked and it was down, not that we never got an answer (T-043).
+				tsRunning = "unknown"
+				slog.Debug("status: tailscale backend query failed", "err", tsErr)
 			}
 
 			tsSSH := "disabled"
