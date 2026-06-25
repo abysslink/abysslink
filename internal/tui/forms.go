@@ -23,6 +23,8 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"golang.org/x/term"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
 // stdinIsTTY reports whether os.Stdin is an interactive terminal.
@@ -45,7 +47,7 @@ func Confirm(ctx context.Context, prompt string, yes bool) (bool, error) {
 				Value(&result),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return false, err
 	}
 	return result, nil
@@ -72,7 +74,7 @@ func Select(ctx context.Context, title string, options []string, yes bool) (stri
 				Value(&result),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return "", err
 	}
 	return result, nil
@@ -96,7 +98,7 @@ func Pause(ctx context.Context, msg string, yes bool) error {
 				Value(&dummy),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -122,7 +124,7 @@ func PauseWithAction(ctx context.Context, msg, actionLabel string, yes bool) (bo
 				Value(&action),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return false, err
 	}
 	return action, nil
@@ -148,7 +150,7 @@ func ConfirmTyped(ctx context.Context, prompt, phrase string, yes bool) (bool, e
 				Value(&typed),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return false, err
 	}
 	return strings.TrimSpace(typed) == phrase, nil
@@ -179,7 +181,7 @@ func ConfirmBlast(ctx context.Context, summary string, count int, yes bool) (boo
 				Value(&result),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return false, err
 	}
 	return result, nil
@@ -196,7 +198,7 @@ func Input(ctx context.Context, title, defaultValue string) (string, error) {
 				Value(&result),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return "", err
 	}
 	return result, nil

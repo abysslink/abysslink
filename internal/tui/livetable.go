@@ -80,7 +80,7 @@ func NewLiveTableWithLabel(label string) *LiveTable {
 	}
 	s := spinner.New()
 	s.Spinner = spinner.MiniDot
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	s.Style = lipgloss.NewStyle().Foreground(ui.ColorAccent)
 	return &LiveTable{
 		spinner: s,
 		events:  make(chan RowEvent, 64),

@@ -56,6 +56,12 @@ const ColorFatal = lipgloss.Color("#FF5F87")
 // ColorInfo is the semantic blue for arrows and info markers.
 const ColorInfo = lipgloss.Color("#5C7CFA")
 
+// ColorSecurity is the semantic blue for SECURITY note borders. Centralized
+// here (T-022) so the single-source-of-color contract holds; was a hardcoded
+// literal in internal/tui/notes.go. Flat to match the rest of the semantic
+// palette (the AdaptiveColor upgrade rides with the deferred T-002 sweep).
+const ColorSecurity = lipgloss.Color("#00B4D8")
+
 // ColorFg is the primary foreground text color.
 const ColorFg = lipgloss.Color("#F8F8F2")
 

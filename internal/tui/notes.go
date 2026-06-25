@@ -45,10 +45,10 @@ type noteLevelMeta struct {
 }
 
 var noteLevelTable = map[NoteLevel]noteLevelMeta{
-	NoteInfo:     {borderColor: ui.ColorInfo, unicodeLabel: "● INFO", asciiLabel: "* INFO"},      // #5C7CFA
-	NoteWarn:     {borderColor: ui.ColorWarn, unicodeLabel: "⚠ WARN", asciiLabel: "! WARN"},      // #FFD060
-	NoteSecurity: {borderColor: "#00B4D8", unicodeLabel: "● SECURITY", asciiLabel: "* SECURITY"}, // unique security blue — not in palette
-	NoteDanger:   {borderColor: ui.ColorFatal, unicodeLabel: "✕ DANGER", asciiLabel: "x DANGER"}, // #FF5F87
+	NoteInfo:     {borderColor: ui.ColorInfo, unicodeLabel: "● INFO", asciiLabel: "* INFO"},             // #5C7CFA
+	NoteWarn:     {borderColor: ui.ColorWarn, unicodeLabel: "⚠ WARN", asciiLabel: "! WARN"},             // #FFD060
+	NoteSecurity: {borderColor: ui.ColorSecurity, unicodeLabel: "● SECURITY", asciiLabel: "* SECURITY"}, // #00B4D8 (ui.ColorSecurity)
+	NoteDanger:   {borderColor: ui.ColorFatal, unicodeLabel: "✕ DANGER", asciiLabel: "x DANGER"},        // #FF5F87
 }
 
 // noteLevelLabel returns the label string (icon + word) for level, choosing
@@ -71,11 +71,12 @@ func noteBoxStyle(level NoteLevel) lipgloss.Style {
 		Border(lipgloss.RoundedBorder()).
 		Padding(0, 2)
 
-	// Responsive width: floor at 54, grow to terminal width - 4 if larger.
-	w := terminalWidth() - 4
-	if w < 54 {
-		w = 54
-	}
+	// Responsive width: track the terminal (terminalWidth()-4), shrinking on
+	// narrow (phone) terminals. The previous `if w < 54 { w = 54 }` floor
+	// forced a 54-col box even on a 40-col terminal, overflowing the viewport
+	// with wrapped/clipped borders (T-001). Removing the floor keeps the
+	// wide-terminal width unchanged and lets it shrink below 54 when needed.
+	w := max(1, terminalWidth()-4)
 	base = base.Width(w)
 
 	if noColor() {
