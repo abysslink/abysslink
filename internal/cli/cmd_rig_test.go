@@ -191,7 +191,7 @@ func TestRigImport_Merge(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err := runRigImport(cfgPath, importPath, true, nil, io.Discard)
+	err := runRigImport(cfgPath, importPath, true, false, nil, io.Discard)
 	require.NoError(t, err)
 
 	// Read back and verify.
@@ -221,7 +221,7 @@ func TestRigImport_DryRun(t *testing.T) {
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
 	var dryOut bytes.Buffer
-	err := runRigImport(cfgPath, importPath, false, nil, &dryOut) // dry-run
+	err := runRigImport(cfgPath, importPath, false, false, nil, &dryOut) // dry-run
 	require.NoError(t, err)
 	assert.Contains(t, dryOut.String(), "[dry-run]", "dry-run output must go through io.Writer (WR-01)")
 
@@ -229,6 +229,34 @@ func TestRigImport_DryRun(t *testing.T) {
 	cfg, err := config.Load(cfgPath)
 	require.NoError(t, err)
 	assert.Len(t, cfg.Rigs, 2, "dry-run must not modify config")
+}
+
+// TestRigImport_JSON asserts that `rig import --json` emits one typed,
+// ANSI-free JSON record instead of prose lines dribbled into the stream.
+func TestRigImport_JSON(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeCfgWithRigs(t, dir)
+
+	importPath := filepath.Join(dir, "import.yaml")
+	importDoc := `rigs:
+  - name: delta
+    hostname: delta.ts.net
+    ntfy_topic: abysslink-delta-00000000
+    backend: tailscale
+`
+	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
+
+	var out bytes.Buffer
+	require.NoError(t, runRigImport(cfgPath, importPath, true /*apply*/, true /*jsonOut*/, nil, &out))
+
+	assert.NotContains(t, out.String(), "\x1b[", "JSON output must be ANSI-free")
+	var rec rigImportResult
+	require.NoError(t, json.Unmarshal(out.Bytes(), &rec), "import --json must emit one valid JSON object")
+	assert.Equal(t, "imported", rec.Action)
+	assert.Equal(t, 1, rec.Count)
+	require.Len(t, rec.Rigs, 1)
+	assert.Equal(t, "delta", rec.Rigs[0].Name)
+	assert.NotEmpty(t, rec.Note, "imported record must carry the signing-key note")
 }
 
 // TestRigImport_CollisionError asserts that `rig import` returns an error on a name collision.
@@ -246,7 +274,7 @@ func TestRigImport_CollisionError(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err := runRigImport(cfgPath, importPath, true, nil, io.Discard)
+	err := runRigImport(cfgPath, importPath, true, false, nil, io.Discard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "alpha", "error must identify the colliding rig name")
 }
@@ -275,7 +303,7 @@ func TestRigImport_NoOSWriteFile(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err = runRigImport(cfgPath, importPath, true, nil, io.Discard)
+	err = runRigImport(cfgPath, importPath, true, false, nil, io.Discard)
 	require.NoError(t, err)
 }
 
@@ -311,7 +339,7 @@ func TestRigImport_Stdin(t *testing.T) {
     ntfy_topic: abysslink-stdin-cafebabe
     backend: tailscale
 `
-	err := runRigImport(cfgPath, "-", true, strings.NewReader(importDoc), io.Discard)
+	err := runRigImport(cfgPath, "-", true, false, strings.NewReader(importDoc), io.Discard)
 	require.NoError(t, err)
 
 	cfg, err := config.Load(cfgPath)
@@ -340,7 +368,7 @@ func TestRigImport_InvalidName(t *testing.T) {
 		importPath := filepath.Join(dir, "bad-import.yaml")
 		require.NoError(t, os.WriteFile(importPath, []byte(doc), 0o600))
 
-		err := runRigImport(cfgPath, importPath, true, nil, io.Discard)
+		err := runRigImport(cfgPath, importPath, true, false, nil, io.Discard)
 		require.Error(t, err, "doc %d must be rejected", i)
 		assert.Contains(t, err.Error(), "invalid rig name", "doc %d", i)
 	}
@@ -426,7 +454,7 @@ func TestRigImport_InFileDuplicateRejected(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
-	err := runRigImport(cfgPath, importPath, true, nil, io.Discard)
+	err := runRigImport(cfgPath, importPath, true, false, nil, io.Discard)
 	require.Error(t, err, "in-file duplicate rig names must be rejected")
 	assert.Contains(t, err.Error(), "twin", "error must identify the duplicated name")
 
@@ -453,7 +481,7 @@ func TestRigImport_ApplyPrintsConfirmation(t *testing.T) {
 	require.NoError(t, os.WriteFile(importPath, []byte(importDoc), 0o600))
 
 	var out bytes.Buffer
-	require.NoError(t, runRigImport(cfgPath, importPath, true, nil, &out))
+	require.NoError(t, runRigImport(cfgPath, importPath, true, false, nil, &out))
 
 	assert.Contains(t, out.String(), `Imported rig "gamma"`, "apply must confirm each imported rig")
 	assert.Contains(t, out.String(), "1 rig(s)", "apply must summarise the import")
