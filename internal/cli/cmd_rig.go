@@ -186,7 +186,7 @@ func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
 			lastSeen = styleMuted.Render("never")
 		}
 		row := fmt.Sprintf("  %-20s %-30s %-12s %-25s",
-			r.Name, r.Hostname, r.Backend, lastSeen)
+			truncCell(r.Name, 20), truncCell(r.Hostname, 30), truncCell(r.Backend, 12), lastSeen)
 		_, _ = fmt.Fprintln(out, row)
 	}
 	return nil

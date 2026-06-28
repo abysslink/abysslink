@@ -595,7 +595,7 @@ func renderEntryTable(p Printer, entries []audit.Entry) {
 	printerInfo(p, fmt.Sprintf("%-20s  %-8s  %-40s  %s", "TIME", "OP", "TARGET", "DRY_RUN"))
 	for _, e := range entries {
 		printerInfo(p, fmt.Sprintf("%-20s  %-8s  %-40s  %v",
-			e.Time.Format("2006-01-02 15:04:05"), e.Op, e.Target, e.DryRun))
+			e.Time.Format("2006-01-02 15:04:05"), truncCell(e.Op, 8), truncCell(e.Target, 40), e.DryRun))
 	}
 }
 

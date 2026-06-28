@@ -394,7 +394,7 @@ func printStatusAllRigsTable(p Printer, rows []statusReport) {
 		if ntfy == "" {
 			ntfy = "-"
 		}
-		printerInfo(p, fmt.Sprintf("  %-20s %-14s %-12s %-10s", r.RigName, r.Tailscale, disk, ntfy))
+		printerInfo(p, fmt.Sprintf("  %-20s %-14s %-12s %-10s", truncCell(r.RigName, 20), r.Tailscale, disk, ntfy))
 	}
 	printerInfo(p, "")
 }

@@ -78,6 +78,21 @@ func hrule() string {
 	return strings.Repeat("─", max(1, boxWidth()-2))
 }
 
+// truncCell truncates s to at most maxCols display columns, appending an
+// ellipsis when it overflows, so a long value (e.g. a backup path or hostname)
+// never shears the next column of a fixed-width %-Ns table. maxCols <= 1 returns
+// s unchanged.
+func truncCell(s string, maxCols int) string {
+	if maxCols <= 1 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= maxCols {
+		return s
+	}
+	return string(r[:maxCols-1]) + "…"
+}
+
 // boxBorder returns the border set for boxes: rounded glyphs on a TTY, an
 // ASCII +/-/| fallback when output is piped or redirected so logs and CI
 // captures stay readable (UX review #10).
