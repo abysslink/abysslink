@@ -55,7 +55,7 @@ func runStepInteraction(ctx context.Context, msg string, recopy func(context.Con
 		if rerr := recopy(ctx); rerr != nil {
 			p.Error(fmt.Sprintf("  ! copy failed: %v", rerr))
 		} else {
-			p.Print("  ✓ copied to clipboard")
+			p.Print("  " + iconDoneStr() + " copied to clipboard")
 		}
 	}
 }

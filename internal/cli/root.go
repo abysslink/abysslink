@@ -70,7 +70,12 @@ func printCLIError(rootCmd *cobra.Command, err error) {
 
 	p := NewHumanPrinterTo(rootCmd.OutOrStdout(), rootCmd.ErrOrStderr())
 	lines := strings.Split(strings.TrimRight(err.Error(), "\n"), "\n")
-	p.Error("Error: " + lines[0])
+	// Brand the human-TTY error: the "Error:" label in semantic red. The literal
+	// "Error: <firstline>" text and the continuation lines are preserved verbatim
+	// (lipgloss strips the ANSI on a non-TTY/NO_COLOR surface, so piped/captured
+	// error text — and the Contains assertions in the tests — are unchanged). The
+	// --json {"error":…} path above is untouched.
+	p.Error(styleFatal.Render("Error:") + " " + lines[0])
 	for _, l := range lines[1:] {
 		p.Error(l)
 	}

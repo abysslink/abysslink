@@ -37,9 +37,20 @@ import (
 // work MUST honour ctx so cancellation actually stops the side effect; the
 // spinner only stops the visual.
 func spinWork(ctx context.Context, p Printer, label string, work func(context.Context) error) error {
-	if _, isJSON := p.(*jsonPrinter); !isJSON && colorEnabled() {
+	// JSON (or any machine printer): run the work silently. Printing a status
+	// line here would emit a {"msg":"  ◌  …"} record into the newline-delimited
+	// JSON stream and corrupt it — the spinner is a human affordance only. This
+	// makes spinWork safe to call from a collector that runs BEFORE a command's
+	// cc.jsonOut branch, so call sites do not each have to re-gate it.
+	if _, isJSON := p.(*jsonPrinter); isJSON {
+		return work(ctx)
+	}
+	// Human colour TTY: the animated, ctx-cancellable cyan spinner.
+	if colorEnabled() {
 		return tui.RunSpinner(ctx, label, work, true)
 	}
+	// Human non-colour surface (NO_COLOR / CLICOLOR=0 / dumb terminal): a single
+	// static status line, then run the work.
 	printerInfo(p, "  "+iconSpinStr()+"  "+label)
 	return work(ctx)
 }
