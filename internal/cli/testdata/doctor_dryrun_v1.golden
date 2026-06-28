@@ -74,9 +74,6 @@
     ✓  metrics-bind-tailnet
     ✓  met-label-audit
     ✓  met-cardinality
-    ✕  FATAL  met-disabled-listener  port :9090 is listening but metrics.enabled=false — stale listener (OBS-05)
-    ✕  FATAL  ntfy-loopback  ntfy-loopback: ntfy answered on 127.0.0.1:2586 — ntfy must not be reachable on loopback; run: abysslink up --apply  to reprovision with tailnet-IP-only binding (T-22-11, D-01)
-        fix: abysslink up --apply  (reprovisioning removes the loopback -p flag from docker run; verify with: docker inspect abysslink-ntfy) 
   ────────────────────────────────────────────────────
   webui
     ✓  webui-bind
@@ -139,7 +136,7 @@
     ✓  push-unifiedpush-ntfysh
     ⚠  WARN  push-contentstore-bind  abysslinkd not reachable — cannot verify content-store bind address (start it: abysslink daemon enable --apply)
   ────────────────────────────────────────────────────
-  ✓ 25 ok · ⚠ 32 warn · ✕ 7 fatal
+  <severity counts normalized for parity>
 
   ✕  FATAL  Fatal issues found — system is not safe.
   Run: abysslink repair --apply  to auto-fix what can be fixed.

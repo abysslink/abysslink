@@ -38,6 +38,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,6 +196,50 @@ func TestStatusParity(t *testing.T) {
 // doctor is a non-mutating, read-only invocation (no --apply flag exists for
 // doctor — every check is read-only). The noopRunner makes all shell-calling
 // checks produce deterministic "not installed / unavailable" findings.
+// volatileDoctorChecks are doctor checks whose presence/severity depends on what
+// is bound to a local port during the run (real localhost network probes), so
+// they cannot be byte-stable in a styling golden.
+//
+//nolint:gochecknoglobals // read-only test fixture list.
+var volatileDoctorChecks = []string{"ntfy_health", "ntfy-loopback", "met-disabled-listener"}
+
+// normalizeDoctorParity removes the network-coupled finding lines (and any fix:
+// continuation that follows them) and replaces the severity-counts summary —
+// which shifts when those findings appear/disappear — with a fixed token. Every
+// other line (section headers, separator rules, box borders, finding icons and
+// their colour bytes) is left intact so the styling parity coverage is preserved.
+func normalizeDoctorParity(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	dropFollowingFix := false
+	for _, ln := range lines {
+		volatile := false
+		for _, v := range volatileDoctorChecks {
+			if strings.Contains(ln, v) {
+				volatile = true
+				break
+			}
+		}
+		if volatile {
+			dropFollowingFix = true
+			continue
+		}
+		if dropFollowingFix {
+			if strings.HasPrefix(strings.TrimSpace(ln), "fix:") {
+				continue
+			}
+			dropFollowingFix = false
+		}
+		// Severity-counts summary, e.g. "  ✓ 25 ok · ⚠ 32 warn · ✕ 7 fatal".
+		if strings.Contains(ln, "ok ·") && strings.Contains(ln, "warn ·") && strings.Contains(ln, "fatal") {
+			out = append(out, "  <severity counts normalized for parity>")
+			continue
+		}
+		out = append(out, ln)
+	}
+	return strings.Join(out, "\n")
+}
+
 func TestDoctorParity(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("parity golden is darwin-scoped; doctor output differs per-OS")
@@ -211,7 +256,15 @@ func TestDoctorParity(t *testing.T) {
 	cmd.SetErr(&buf)
 	_ = cmd.Execute()
 
-	got := buf.String()
+	// This is a STYLING parity golden (box borders, separator rules, finding-icon
+	// glyphs, colour bytes) — not a live-network assertion. A few doctor findings
+	// dial localhost (ntfy_health → :2586, ntfy-loopback → :2586,
+	// met-disabled-listener → :9090) and so flip with whatever else on the machine
+	// happens to bind those ports during the run, which made the byte-for-byte
+	// golden flaky between an isolated `-run` and a full-suite run. Normalise those
+	// network-coupled lines (and the severity-counts summary they shift) out before
+	// the compare; every styled/structural line is still byte-checked.
+	got := normalizeDoctorParity(buf.String())
 
 	goldenPath := filepath.Join("testdata", "doctor_dryrun_v1.golden")
 	captureOrAssertGolden(t, goldenPath, got)
