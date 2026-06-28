@@ -29,6 +29,7 @@ import (
 	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/secrets"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -139,12 +140,15 @@ for confirmation; if you need that, use abysslink uninstall instead.`,
 			printerError(p, styleMuted.Render(fmt.Sprintf("done in %.1fs", elapsed.Seconds())))
 			printerError(p, "")
 
-			// Required manual follow-up.
-			printerError(p, styleBold.Render("Required manual follow-up:"))
-			printerError(p, "  1. Revoke the Anthropic API key in the console:")
-			printerError(p, "       https://console.anthropic.com/settings/keys")
-			printerError(p, "  2. If devices could not be revoked above, remove them at:")
-			printerError(p, "       https://login.tailscale.com/admin/machines")
+			// Required manual follow-up — the single highest-stakes "what to do
+			// now" advisory in the product. Render it as a DANGER callout so it
+			// cannot be skimmed past.
+			printerError(p, tui.Note(tui.NoteDanger, "Required manual follow-up", []string{
+				"1. Revoke the Anthropic API key in the console:",
+				"     https://console.anthropic.com/settings/keys",
+				"2. If devices could not be revoked above, remove them at:",
+				"     https://login.tailscale.com/admin/machines",
+			}))
 
 			// §7 note 12: panic is reversible via repair.
 			emitSecurityNote(p, cc.jsonOut, "panic-reversible")

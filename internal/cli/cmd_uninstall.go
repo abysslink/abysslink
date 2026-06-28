@@ -60,6 +60,13 @@ func newUninstallCmd() *cobra.Command {
 			printerInfo(p, styleTitle.Render("abysslink uninstall")+"  "+styleMuted.Render("reverse all changes"))
 			printerInfo(p, "")
 			printReversePlan(p, plan)
+			if !cc.jsonOut {
+				printerInfo(p, "")
+				printerInfo(p, tui.Note(tui.NoteDanger, "Uninstall reverses every change abysslink made", []string{
+					"SSH, firewall, sleep, ntfy and module config are restored from their backups.",
+					"With --purge the audit log and backups are also deleted — that is irreversible.",
+				}))
+			}
 
 			if cc.dryRun {
 				printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))

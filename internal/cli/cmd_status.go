@@ -33,6 +33,7 @@ import (
 	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -318,8 +319,9 @@ func printStatusNotInitialised(p Printer, jsonOut bool) {
 		return
 	}
 	printerInfo(p, "")
-	printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("Abysslink is not initialised on this machine."))
-	printerInfo(p, "  "+styleMuted.Render("Run ")+styleCode.Render("abysslink init")+styleMuted.Render(" to set it up."))
+	printerInfo(p, tui.Note(tui.NoteWarn, "Abysslink is not initialised on this machine", []string{
+		"Run `abysslink init` to set it up.",
+	}))
 	printerInfo(p, "")
 }
 

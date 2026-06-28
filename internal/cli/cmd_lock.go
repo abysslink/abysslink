@@ -134,6 +134,9 @@ func newLockInitCmd() *cobra.Command {
 			// It is NEVER passed to slog, deps.Audit, or any os.WriteFile call.
 			// Violating this invariant would constitute a secret leak (T-10-14).
 			printerInfo(p, "")
+			// §7 note 6: the disablement secrets are shown ONCE and never stored —
+			// surface the registry callout just before the box (self-guards --json).
+			emitSecurityNote(p, cc.jsonOut, "tailnet-lock-secrets")
 			renderSecretsToBox(p, res.DisablementSecrets)
 			printerInfo(p, "")
 
