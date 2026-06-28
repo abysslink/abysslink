@@ -136,7 +136,7 @@ func newInitCmd() *cobra.Command {
 			}
 
 			// 8-stage flow runner. Delegated to a helper (gocyclo ceiling).
-			return runFlowSteps(ctx, p, runner, stateFile, startStage, yesFlag, jsonFlag)
+			return runFlowSteps(ctx, p, runner, configPath, stateFile, startStage, yesFlag, jsonFlag)
 		},
 	}
 	cmd.Flags().Bool("yes", false, "Non-interactive: accept defaults and install missing tools automatically")
@@ -222,8 +222,23 @@ func runInitPrework(ctx context.Context, cmd *cobra.Command, p Printer, runner s
 // *huh.Form that this caller runs with the Abyss theme (IO boundary rule:
 // RunWithContext lives ONLY in internal/cli — never in internal/flow).
 // Extracted from newInitCmd.RunE to stay within the gocyclo limit.
-func runFlowSteps(ctx context.Context, p Printer, runner shell.Runner, stateFile string, startStage int, yesFlag, jsonFlag bool) error {
+func runFlowSteps(ctx context.Context, p Printer, runner shell.Runner, configPath, stateFile string, startStage int, yesFlag, jsonFlag bool) error {
 	state := &flow.FlowState{}
+	// Populate the journey state from the config the pre-flow wizard just wrote
+	// (or the existing config on the resume path). The flow stages are an
+	// informational recap + next-steps journey; they read these values so the
+	// summary shows the user's real hostname/backend/modules instead of a
+	// placeholder. Best-effort: a load failure leaves generic copy in place.
+	if cfg, err := config.Load(configPath); err == nil {
+		state.Email = cfg.Identity.Email
+		state.Hostname = cfg.Tailnet.Hostname
+		state.BackendType = cfg.Backend.Type
+		state.EnableSSH = cfg.Modules.SSH.Enabled
+		state.EnableTmux = cfg.Modules.Tmux.Enabled
+		state.EnableMosh = cfg.Modules.Mosh.Enabled
+		state.EnableNtfy = cfg.Modules.Ntfy.Enabled
+		state.NtfyPort = cfg.Modules.Ntfy.Port
+	}
 	steps := []flow.StepFunc{
 		flow.StepAccount,
 		flow.StepPrereqs,
@@ -249,16 +264,12 @@ func runFlowSteps(ctx context.Context, p Printer, runner shell.Runner, stateFile
 
 		// StepDone returns nil form — terminal step; render glamour summary.
 		if form == nil {
-			const summaryMD = "# Setup Complete\n\n" +
-				"**Your rig is ready.** Connect from your phone:\n\n" +
-				"```\nmosh <your-rig> -- tmux new -A -s main\n```\n\n" +
-				"> Run `abysslink up --apply` to converge and `abysslink doctor` to verify."
-			printerInfo(p, ui.RenderMarkdown(summaryMD, !colorEnabled()))
+			printerInfo(p, ui.RenderMarkdown(doneSummaryMD(state), !colorEnabled()))
 			_ = flow.WriteFlowState(stateFile, i)
 			continue
 		}
 
-		if err := runFlowStep(ctx, p, runner, stateFile, i, yesFlag, jsonFlag, state, form); err != nil {
+		if err := runFlowStep(ctx, stateFile, i, yesFlag, jsonFlag, form); err != nil {
 			// User cancelled (Ctrl-C/Esc) mid-wizard: stop cleanly instead of
 			// advancing to the next step. Previously runFlowStep returned nil on
 			// abort, so the loop ran the NEXT form — Ctrl-C could not quit the
@@ -278,37 +289,21 @@ func runFlowSteps(ctx context.Context, p Printer, runner shell.Runner, stateFile
 	return nil
 }
 
-// runFlowStep executes a single flow step: runs the form in interactive or
-// headless mode, wires BRWS-02 for the Account step, and persists the state.
-// Extracted from runFlowSteps to keep that function within the gocyclo limit.
-func runFlowStep(ctx context.Context, p Printer, runner shell.Runner, stateFile string, i int, yesFlag, jsonFlag bool, state *flow.FlowState, form *huh.Form) error {
-	// BRWS-02 wiring: the Account step (index 0) handles OAuth callback.
-	if i == 0 && interactive(yesFlag, jsonFlag) {
-		if err := runAccountStepWithBrowserCallback(ctx, p, runner, yesFlag, jsonFlag, state, form); err != nil {
-			return err
-		}
-	} else if interactive(yesFlag, jsonFlag) {
-		// Interactive path: run the form with the Abyss theme.
+// runFlowStep runs a single informational journey stage's huh.Note form (with
+// the Abyss theme) and persists the completed-stage marker. The stages are a
+// recap + next-steps journey — they collect nothing and run no command — so the
+// step index no longer needs special-casing. A Ctrl-C/Esc abort (or a
+// ctx-cancel that huh surfaces as ErrTimeout) returns errUserAborted so the
+// driver stops the wizard cleanly instead of marching through the rest (T-011/
+// T-041). Headless/non-interactive runs skip the form silently; the terminal
+// StepDone summary is still printed by runFlowSteps.
+func runFlowStep(ctx context.Context, stateFile string, i int, yesFlag, jsonFlag bool, form *huh.Form) error {
+	if interactive(yesFlag, jsonFlag) {
 		if runErr := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); runErr != nil {
-			// errors.Is + ctx-cancel: huh may wrap ErrUserAborted, and a
-			// ctx-cancelled run can surface as ErrTimeout/ctx.Err rather than the
-			// bare sentinel (T-041). Signal abort to the driver so it stops the
-			// wizard rather than skipping to the next step.
 			if errors.Is(runErr, huh.ErrUserAborted) || ctx.Err() != nil {
 				return errUserAborted
 			}
 			return fmt.Errorf("init: step %d: %w", i, runErr)
-		}
-	} else {
-		// Headless path (D-07/D-08): emit URL for the account step only;
-		// other steps are silent.
-		if i == 0 {
-			const signupURL = "https://login.tailscale.com/start"
-			if jsonFlag {
-				p.Print(`{"action_required":"open_url","url":"` + signupURL + `"}`)
-			} else {
-				printerInfo(p, "  Open this URL to continue: "+signupURL)
-			}
 		}
 	}
 
@@ -317,92 +312,30 @@ func runFlowStep(ctx context.Context, p Printer, runner shell.Runner, stateFile 
 	return nil
 }
 
-// runAccountStepWithBrowserCallback runs the Account step form and, when the
-// selected backend uses OAuth, wires browser.ListenCallback (BRWS-02). The auth
-// code is handed directly to the keychain consumer; it is never stored in
-// FlowState (D-12). state.HaveAuthCode is set to true after successful retrieval.
-//
-// The function runs the form first (to learn the backend type), then determines
-// whether the OAuth callback loop is needed. The browser.OpenURL call is gated
-// on interactive(yesFlag, jsonFlag) (D-08).
-func runAccountStepWithBrowserCallback(ctx context.Context, p Printer, runner shell.Runner, yesFlag, jsonFlag bool, state *flow.FlowState, form *huh.Form) error {
-	// Run the Account step form to collect backend type + email.
-	if runErr := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); runErr != nil {
-		// Abort (Ctrl-C/Esc) or ctx-cancel: signal the driver to stop the wizard
-		// cleanly rather than returning nil and advancing to the next step
-		// (T-011/T-041).
-		if errors.Is(runErr, huh.ErrUserAborted) || ctx.Err() != nil {
-			return errUserAborted
-		}
-		return fmt.Errorf("init: account step: %w", runErr)
+// doneSummaryMD builds the terminal StepDone summary. It interpolates the user's
+// real hostname (collected in the pre-flow wizard and threaded via FlowState) so
+// the connect command is copy-pasteable, and it states honestly that the rig is
+// configured (not yet converged) with the exact commands to finish — the
+// pre-flow wizard installs prerequisites and writes config, but converge / lock
+// / verify are separate commands the user still runs (previously the summary
+// claimed "Your rig is ready" and printed a literal `<your-rig>`).
+func doneSummaryMD(state *flow.FlowState) string {
+	host := strings.TrimSpace(state.Hostname)
+	if host == "" {
+		host = "<your-rig>"
 	}
-
-	// Tailscale cloud always uses SSO (no OAuth callback loop in abysslink).
-	// Headscale and NetBird may use OAuth authorization-code flow (D-04).
-	// For this integration the callback is wired when backend != tailscale.
-	if state.BackendType == "" || state.BackendType == "tailscale" {
-		return nil
-	}
-
-	// BRWS-02: OAuth auth-code flow for self-hosted backends.
-	// Generate PKCE verifier.
-	codeVerifier, err := browser.GenerateCodeVerifier()
-	if err != nil {
-		return fmt.Errorf("init: PKCE verifier: %w", err)
-	}
-
-	// Build the authorization URL placeholder — in a real integration this
-	// would be constructed from the headscale/netbird server URL. For now,
-	// emit the server URL as the action.
-	var authURL string
-	switch state.BackendType {
-	case "headscale":
-		authURL = "https://headscale.example.com/oauth/authorize"
-	case "netbird":
-		authURL = "https://nb.example.com/oauth/authorize"
-	default:
-		return nil
-	}
-
-	opts := browser.CallbackOpts{
-		State:        fmt.Sprintf("abysslink-%d", time.Now().UnixNano()),
-		CodeVerifier: codeVerifier,
-		Timeout:      5 * time.Minute,
-		OnReady: func(redirectURI string) {
-			// Open browser only in interactive mode (D-08).
-			if interactive(yesFlag, jsonFlag) {
-				fullURL := authURL + "?redirect_uri=" + redirectURI +
-					"&code_challenge=" + browser.CodeChallenge(codeVerifier) +
-					"&code_challenge_method=S256"
-				if openErr := browser.OpenURL(ctx, runner, fullURL); openErr != nil {
-					printerInfo(p, "  "+iconWarnStr()+"  Could not open browser — visit manually:")
-					printerInfo(p, "  "+styleCode.Render(fullURL))
-				} else {
-					printerInfo(p, "  "+iconDoneStr()+"  Browser opened → "+styleCode.Render(redirectURI))
-				}
-			} else {
-				// Headless path (D-07): emit URL to Printer.
-				printerInfo(p, "  Open this URL to authorize: "+authURL)
-				printerInfo(p, "  Redirect URI: "+redirectURI)
-			}
-		},
-	}
-
-	printerInfo(p, "  "+styleMuted.Render("Waiting for OAuth callback (5 min timeout)..."))
-	code, _, err := browser.ListenCallback(ctx, opts)
-	if err != nil {
-		return fmt.Errorf("init: OAuth callback: %w", err)
-	}
-
-	// D-12: The auth code is NEVER stored in FlowState. Hand it directly to the
-	// keychain consumer. For now we log at debug level (keychain integration is
-	// a v2 concern; the seam is wired here per the BRWS-02 contract).
-	slog.Debug("init: OAuth auth code received", "backend", state.BackendType)
-	_ = code // would be: keychain.Store("abysslink/oauth-code", code)
-
-	// Set the boolean flag only — the code itself never touches FlowState (D-12).
-	state.HaveAuthCode = true
-	return nil
+	return "# Setup configured\n\n" +
+		"Your `abysslink.yaml` is written and prerequisites are installed. " +
+		"Finish bringing your rig online:\n\n" +
+		"```\n" +
+		"abysslink up --apply         # converge the system to your config\n" +
+		"abysslink lock init --apply  # enable Tailnet Lock (secrets shown once)\n" +
+		"abysslink doctor             # verify every module\n" +
+		"```\n\n" +
+		"Then connect from your phone:\n\n" +
+		"```\n" +
+		"mosh " + host + " -- tmux new -A -s main\n" +
+		"```"
 }
 
 // ensureTailscaleAccount confirms the user has a Tailscale account before proceeding.

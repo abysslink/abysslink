@@ -18,12 +18,10 @@ package flow
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/huh"
 
-	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -42,6 +40,18 @@ type Printer interface {
 // form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx). Step funcs MUST NOT
 // call .Run() or .RunWithContext() themselves — all IO execution belongs in
 // the caller (IO boundary rule).
+//
+// CONTRACT (post-audit 2026-06-25): the configuration is collected and written
+// to abysslink.yaml by the pre-flow wizard in internal/cli (runInitPrework),
+// which is the SINGLE source of configuration data. These step funcs are the
+// post-config journey: they recap what was set up and tell the user the exact
+// command to run for each remaining stage. They are INFORMATIONAL — none of
+// them collects data and none of them silently runs a command. The previous
+// design re-asked the same questions into a discarded FlowState and presented
+// four "Run it now?" confirms whose answers were thrown away (a no-op that made
+// users believe Tailnet Lock was enabled when it was not). Both defects are
+// removed here: the stages read the already-collected FlowState and render a
+// huh.Note with the next command to run.
 type StepFunc func(ctx context.Context, runner shell.Runner, printer Printer, state *FlowState) (*huh.Form, error)
 
 // Compile-time assertions: verify each exported step function satisfies
@@ -58,224 +68,109 @@ var (
 	_ StepFunc = StepDone
 )
 
-// sanitizeHostname converts a raw hostname string to a lowercase DNS-safe
-// value by lowercasing, replacing underscores/spaces with hyphens, and
-// stripping any leading or trailing hyphens/dots.
-// Ported from internal/cli/cmd_init.go:sanitizeHostname.
-func sanitizeHostname(h string) string {
-	h = strings.ToLower(strings.TrimSpace(h))
-	var b strings.Builder
-	for _, r := range h {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
-			b.WriteRune(r)
-		case r == '_' || r == ' ':
-			b.WriteByte('-')
-		}
-	}
-	return strings.Trim(b.String(), "-.")
+// noteForm wraps a single informational huh.Note in a one-group form with a
+// "Continue" affordance. The caller runs it with the Abyss theme; on Enter the
+// journey advances to the next stage. Keeping every stage a non-nil *huh.Form
+// (except StepDone) preserves the StepFunc contract the signature test asserts.
+func noteForm(title, description string) *huh.Form {
+	return huh.NewForm(
+		huh.NewGroup(
+			huh.NewNote().
+				Title(title).
+				Description(description).
+				Next(true).
+				NextLabel("Continue →"),
+		),
+	)
 }
 
-// validateInitHostname is the inline form validator for the hostname input.
-// It mirrors the config.Load rules so the wizard can never collect a value
-// the config loader would later reject (C1).
-// Ported from internal/cli/cmd_init.go:validateInitHostname.
-func validateInitHostname(s string) error {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return fmt.Errorf("hostname is required")
+// orDefault returns v when non-empty, else fallback — used so the recap never
+// renders a blank value when a field was not collected (e.g. resume with a
+// partially-populated config).
+func orDefault(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
 	}
-	if s != strings.ToLower(s) {
-		return fmt.Errorf("hostname must be lowercase (try %q)", sanitizeHostname(s))
-	}
-	if err := config.ValidateHostname(s); err != nil {
-		return fmt.Errorf("only a-z, 0-9, hyphens and dots are allowed (try %q)", sanitizeHostname(s))
-	}
-	return nil
+	return v
 }
 
-// StepAccount builds the account setup form (Stage 0). The form collects:
-//   - BackendType (tailscale / headscale / netbird) via a select
-//   - Email (account identity) via a text input
-//
-// The returned *huh.Form MUST be run by the caller; this function never calls
-// .Run() or .RunWithContext().
+// enabledModules returns the space-joined list of enabled module names for the
+// Enroll recap, or "none" when no modules were enabled.
+func enabledModules(state *FlowState) string {
+	var mods []string
+	if state.EnableSSH {
+		mods = append(mods, "ssh")
+	}
+	if state.EnableTmux {
+		mods = append(mods, "tmux")
+	}
+	if state.EnableMosh {
+		mods = append(mods, "mosh")
+	}
+	if state.EnableNtfy {
+		mods = append(mods, "ntfy")
+	}
+	if len(mods) == 0 {
+		return "none"
+	}
+	return strings.Join(mods, ", ")
+}
+
+// StepAccount (Stage 0) recaps the backend and account identity that were
+// collected and written during the pre-flow wizard.
 func StepAccount(_ context.Context, _ shell.Runner, _ Printer, state *FlowState) (*huh.Form, error) {
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Backend type").
-				Description("Which Tailscale-compatible control server to use").
-				Options(
-					huh.NewOption("Tailscale (cloud, requires account)", "tailscale"),
-					huh.NewOption("Headscale (self-hosted)", "headscale"),
-					huh.NewOption("NetBird (self-hosted, REST-only — SSHCheck degradation, see docs)", "netbird"),
-				).
-				Value(&state.BackendType),
-		),
-		huh.NewGroup(
-			// Backend-neutral wording (U8): headscale/netbird users have no
-			// "Tailscale account"; the email is the config identity.
-			huh.NewInput().
-				Title("Account email").
-				Description("The email you sign in to your control plane with (Tailscale, Headscale, or NetBird)").
-				Value(&state.Email).
-				Validate(func(s string) error {
-					if !strings.Contains(s, "@") {
-						return fmt.Errorf("must be a valid email address")
-					}
-					return nil
-				}),
-		),
+	desc := fmt.Sprintf(
+		"Backend:  %s\nAccount:  %s\n\nYour configuration has been written to abysslink.yaml. The next stages recap what was set up and the exact command to run for each remaining step.",
+		orDefault(state.BackendType, "tailscale"),
+		orDefault(state.Email, "(set in abysslink.yaml)"),
 	)
-	return form, nil
+	return noteForm("Account", desc), nil
 }
 
-// StepPrereqs builds the prerequisites form (Stage 1). The form collects the
-// rig hostname with DNS-safe validation. Prereq tool checks are handled by
-// the caller before running the form.
+// StepPrereqs (Stage 1) recaps the rig hostname.
 func StepPrereqs(_ context.Context, _ shell.Runner, _ Printer, state *FlowState) (*huh.Form, error) {
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Rig hostname").
-				Description("This machine's tailnet hostname (pre-filled from OS, lowercase a-z0-9-.)").
-				Value(&state.Hostname).
-				Validate(validateInitHostname),
-		),
+	desc := fmt.Sprintf(
+		"Rig hostname:  %s\n\nThis is the tailnet name you will connect to from your phone.",
+		orDefault(state.Hostname, "(set in abysslink.yaml)"),
 	)
-	return form, nil
+	return noteForm("Prerequisites", desc), nil
 }
 
-// StepConverge builds the converge confirmation form (Stage 2). The form
-// asks the user whether to run `abysslink up --apply` now. The actual shell
-// command is NOT invoked here — the caller reads the form result and invokes
-// the command if the user confirmed.
-func StepConverge(_ context.Context, _ shell.Runner, _ Printer, state *FlowState) (*huh.Form, error) {
-	var runNow bool
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Run `abysslink up --apply` now?").
-				Description("Converges your system to match abysslink.yaml.").
-				Affirmative("Yes, run it").
-				Negative("No, I'll run it later").
-				Value(&runNow),
-		),
-	)
-	// Store the user's choice on the state when the caller runs the form.
-	// The caller is responsible for actually executing the command.
-	_ = state // state.StageConvergeDone will be set by the caller after form execution
-	_ = runNow
-	return form, nil
+// StepConverge (Stage 2) directs the user to converge the system. It does NOT
+// run the command itself — running `abysslink up --apply` is a separate,
+// fully-tested command with its own --dry-run/--apply gating and live progress.
+func StepConverge(_ context.Context, _ shell.Runner, _ Printer, _ *FlowState) (*huh.Form, error) {
+	desc := "Next, converge your system to match abysslink.yaml:\n\n    abysslink up --apply\n\nThis applies every enabled module. It is dry-run by default — `--apply` executes the plan after showing it."
+	return noteForm("Converge", desc), nil
 }
 
-// StepLock builds the Tailnet Lock confirmation form (Stage 3). The form asks
-// the user whether to enable Tailnet Lock now via `abysslink lock init --apply`.
-// The actual command is NOT invoked here.
-func StepLock(_ context.Context, _ shell.Runner, _ Printer, state *FlowState) (*huh.Form, error) {
-	var runNow bool
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Run `abysslink lock init --apply` now?").
-				Description("Enables Tailnet Lock — disablement secrets printed ONCE. Have a password manager ready.").
-				Affirmative("Yes, run it").
-				Negative("No, I'll run it later").
-				Value(&runNow),
-		),
-	)
-	_ = state
-	_ = runNow
-	return form, nil
+// StepLock (Stage 3) directs the user to enable Tailnet Lock. The disablement
+// secrets are shown ONCE by `lock init --apply` and never stored — the security
+// framing is preserved here so the user knows to have a password manager ready.
+func StepLock(_ context.Context, _ shell.Runner, _ Printer, _ *FlowState) (*huh.Form, error) {
+	desc := "Next, enable Tailnet Lock:\n\n    abysslink lock init --apply\n\nSECURITY: the disablement secrets are printed ONCE and never stored on disk. Have a password manager ready before you run it — losing them can permanently lock you out of your tailnet."
+	return noteForm("Tailnet Lock", desc), nil
 }
 
-// StepEnroll builds the module-enrollment form (Stage 4). The form collects
-// boolean toggles for SSH, tmux, mosh, and ntfy, plus the ntfy listen port
-// (validated as an integer in [1024, 65535]).
+// StepEnroll (Stage 4) recaps the enabled modules and points at phone pairing.
 func StepEnroll(_ context.Context, _ shell.Runner, _ Printer, state *FlowState) (*huh.Form, error) {
-	portStr := strconv.Itoa(state.NtfyPort)
-	if state.NtfyPort == 0 {
-		portStr = "2586"
-	}
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Enable Tailscale SSH?").
-				Description("Replaces macOS Remote Login with Tailscale's cryptographically-verified SSH — no open ports, no password auth").
-				Value(&state.EnableSSH),
-			huh.NewConfirm().
-				Title("Enable tmux?").
-				Description("Keeps your terminal session alive on the rig — reconnect from your phone and pick up exactly where you left off").
-				Value(&state.EnableTmux),
-			huh.NewConfirm().
-				Title("Enable mosh?").
-				Description("Roaming shell that survives network switches on your phone (WiFi↔LTE), timeouts, and sleep — reconnects automatically").
-				Value(&state.EnableMosh),
-			huh.NewConfirm().
-				Title("Enable ntfy push notifications?").
-				Description("Sends a buzz to your phone when Claude stops, a build finishes, or any terminal task completes — no polling needed").
-				Value(&state.EnableNtfy),
-		),
-		huh.NewGroup(
-			huh.NewInput().
-				Title("ntfy listen port").
-				Description("Port for the notification server on your tailnet.\nDefault 2586 avoids conflicts with local dev servers (8080, 3000, etc.).").
-				Value(&portStr).
-				Validate(func(s string) error {
-					n, err := strconv.Atoi(strings.TrimSpace(s))
-					if err != nil || n < 1024 || n > 65535 {
-						return fmt.Errorf("must be a number between 1024 and 65535")
-					}
-					// huh re-runs Validate on the final accepted value, so
-					// persisting here writes the user's chosen port back into
-					// state — the local portStr would otherwise be discarded
-					// when StepEnroll returns (WR-01).
-					state.NtfyPort = n
-					return nil
-				}),
-		),
+	desc := fmt.Sprintf(
+		"Enabled modules:  %s\n\nPair your phone to this rig:\n\n    abysslink enroll phone",
+		enabledModules(state),
 	)
-	return form, nil
+	return noteForm("Enroll", desc), nil
 }
 
-// StepVerify builds the doctor-run confirmation form (Stage 5). The form asks
-// whether to run `abysslink doctor` now. The actual command is NOT invoked here.
-func StepVerify(_ context.Context, _ shell.Runner, _ Printer, state *FlowState) (*huh.Form, error) {
-	var runNow bool
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Run `abysslink doctor` now?").
-				Description("Checks all modules for misconfigurations.").
-				Affirmative("Yes, run it").
-				Negative("No, I'll run it later").
-				Value(&runNow),
-		),
-	)
-	_ = state
-	_ = runNow
-	return form, nil
+// StepVerify (Stage 5) directs the user to run the health check.
+func StepVerify(_ context.Context, _ shell.Runner, _ Printer, _ *FlowState) (*huh.Form, error) {
+	desc := "Next, verify every module is healthy:\n\n    abysslink doctor\n\nIt checks the configuration Abysslink manages and prints fix guidance for anything misconfigured."
+	return noteForm("Verify", desc), nil
 }
 
-// StepACL builds the ACL-push confirmation form (Stage 6). The form asks
-// whether to run `abysslink acl push --apply` now. The actual command is NOT
-// invoked here.
-func StepACL(_ context.Context, _ shell.Runner, _ Printer, state *FlowState) (*huh.Form, error) {
-	var runNow bool
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Run `abysslink acl push --apply` now?").
-				Description("Pushes the abysslink ACL to your tailnet. Requires OAuth config.").
-				Affirmative("Yes, push ACL").
-				Negative("No, I'll manage it manually").
-				Value(&runNow),
-		),
-	)
-	_ = state
-	_ = runNow
-	return form, nil
+// StepACL (Stage 6) directs the user to push the access-control policy.
+func StepACL(_ context.Context, _ shell.Runner, _ Printer, _ *FlowState) (*huh.Form, error) {
+	desc := "Finally, apply the abysslink access policy to your tailnet:\n\n    abysslink acl push --apply\n\nRequires OAuth config for self-hosted backends. Dry-run by default."
+	return noteForm("ACL", desc), nil
 }
 
 // StepDone signals the end of the setup wizard (Stage 7). It returns nil
