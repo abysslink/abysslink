@@ -147,8 +147,15 @@ func runReport(cmd *cobra.Command, _ []string) error {
 		return rigErr
 	}
 
-	findings, err := collectReportFindings(ctx, cc)
-	if err != nil {
+	// Animated liveness while the full finding set is collected (dozens of
+	// shell-outs + network dials) and while the rig fan-out runs (30s/rig).
+	// spinWork is json-safe, so the --json record + exit code are unaffected.
+	var findings []modules.Finding
+	if err := spinWork(ctx, p, "Collecting posture…", func(ctx context.Context) error {
+		var e error
+		findings, e = collectReportFindings(ctx, cc)
+		return e
+	}); err != nil {
 		return fmt.Errorf("report: %w", err)
 	}
 
@@ -157,7 +164,10 @@ func runReport(cmd *cobra.Command, _ []string) error {
 	var rigResults []rigReachability
 	var fanErr error
 	if rt.fanOut && len(rt.rigs) > 0 {
-		rigResults, fanErr = collectRigReachability(ctx, cc, strict, rt.rigs)
+		_ = spinWork(ctx, p, "Querying rigs…", func(ctx context.Context) error {
+			rigResults, fanErr = collectRigReachability(ctx, cc, strict, rt.rigs)
+			return nil
+		})
 	}
 
 	exitCode := reportExitCode(findings)

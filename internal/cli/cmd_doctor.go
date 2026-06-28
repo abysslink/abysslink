@@ -681,9 +681,16 @@ Exit codes:
 			// web-UI dashboard uses (CollectDoctorFindings, B3). Keeping the
 			// ordering in one place stops the CLI and the dashboard from drifting.
 			// Skipped under --rig: the user asked for that rig's posture only.
+			// Show animated liveness while the (many shell-outs + network dials)
+			// local checks run — on a phone SSH session this is the difference
+			// between "working" and "hung". spinWork is json-safe (runs silently
+			// with a jsonPrinter), so the --json exit-code contract is unaffected.
 			var findings []modules.Finding
 			if !rt.rigOnly {
-				findings = collectDoctorFindings(ctx, cc, deps)
+				_ = spinWork(ctx, p, "Running checks…", func(ctx context.Context) error {
+					findings = collectDoctorFindings(ctx, cc, deps)
+					return nil
+				})
 			}
 
 			// --rig / --all-rigs: fan-out doctor --json to the targeted rigs and

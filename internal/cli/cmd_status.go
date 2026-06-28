@@ -338,7 +338,14 @@ func printStatusNoRigs(p Printer, jsonOut bool) {
 func statusRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool, rigs []config.RigConfig) error {
 	const perRigTimeout = 10 * time.Second
 
-	results, fanErr := fleet.FanOut(ctx, cc.runner, rigs, perRigTimeout, strict, []string{"status", "--json"})
+	// Animated liveness during the fan-out (10s/rig); spinWork is json-safe so
+	// the --json aggregate + exit code are unaffected.
+	var results []fleet.RigResult
+	var fanErr error
+	_ = spinWork(ctx, p, "Querying rigs…", func(ctx context.Context) error {
+		results, fanErr = fleet.FanOut(ctx, cc.runner, rigs, perRigTimeout, strict, []string{"status", "--json"})
+		return nil
+	})
 
 	var aggregate []statusReport
 	for _, r := range results {

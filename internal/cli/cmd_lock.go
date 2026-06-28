@@ -112,8 +112,15 @@ func newLockInitCmd() *cobra.Command {
 				return nil
 			}
 
-			res, err := lc.LockInit(ctx, n, cc.cfg.Tailnet.Lock.ShareWithSupport)
-			if err != nil {
+			// Animated liveness during key generation (network round-trip to the
+			// control plane). spinWork is json-safe; the fail-closed empty-secret
+			// check and SecretBox below are unchanged.
+			var res *backend.LockInitResult
+			if err := spinWork(ctx, p, "Initialising Tailnet Lock…", func(ctx context.Context) error {
+				var e error
+				res, e = lc.LockInit(ctx, n, cc.cfg.Tailnet.Lock.ShareWithSupport)
+				return e
+			}); err != nil {
 				return fmt.Errorf("lock init: %w", err)
 			}
 			// Fail closed: never render an empty "shown ONCE" box or demand the

@@ -16,6 +16,7 @@
 |  This is a hard floor — it cannot be configured away.                      |
 +----------------------------------------------------------------------------+
 
+  ◌  Running checks…
   ────────────────────────────────────────────────────
   tailscale
     ✕  FATAL  installed  tailscale is not installed or not on PATH
