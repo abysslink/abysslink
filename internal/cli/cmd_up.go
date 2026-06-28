@@ -337,11 +337,12 @@ func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modu
 	go func() {
 		actions, findings, err := r.PlanAll(workerCtx, func(evt modules.ModuleEvent) {
 			table.SendRow(tui.RowEvent{
-				Module:  evt.Module,
-				Index:   evt.Index,
-				Total:   evt.Total,
-				HasWarn: hasFindingSeverity(evt.Findings, modules.SeverityWarning),
-				WarnMsg: firstFindingMessage(evt.Findings, nil),
+				Module:     evt.Module,
+				Index:      evt.Index,
+				Total:      evt.Total,
+				HasActions: len(evt.Actions) > 0,
+				HasWarn:    hasFindingSeverity(evt.Findings, modules.SeverityWarning),
+				WarnMsg:    firstFindingMessage(evt.Findings, nil),
 			})
 		})
 		table.Done(err)
@@ -352,7 +353,7 @@ func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modu
 		}{actions, findings, err}
 	}()
 
-	final, err := runTableProgram(table)
+	final, err := runTableProgram(ctx, table)
 	if err != nil || !final.Completed() {
 		// UI exited before the worker finished (program error or user abort):
 		// cancel the worker and drain its remaining events so it cannot block.
@@ -527,7 +528,7 @@ func runApplyAnimated(ctx context.Context, r *modules.Runner) ([]modules.Finding
 		}{findings, err}
 	}()
 
-	final, err := runTableProgram(table)
+	final, err := runTableProgram(ctx, table)
 	if err != nil || !final.Completed() {
 		cancel()
 		table.Drain()
@@ -544,10 +545,12 @@ func runApplyAnimated(ctx context.Context, r *modules.Runner) ([]modules.Finding
 
 // runTableProgram runs the LiveTable as a Bubble Tea program and returns
 // the final model. Factored out to keep animated helpers small.
-func runTableProgram(table *tui.LiveTable) (*tui.LiveTable, error) {
+func runTableProgram(ctx context.Context, table *tui.LiveTable) (*tui.LiveTable, error) {
 	// Import bubbletea to run the program.
-	// We run via tui.RunLiveTable to avoid direct bubbletea import here.
-	return tui.RunLiveTable(table)
+	// We run via tui.RunLiveTable to avoid direct bubbletea import here. ctx is
+	// threaded so a parent/SIGTERM cancel tears the program down and restores the
+	// terminal instead of leaving it in raw mode.
+	return tui.RunLiveTable(ctx, table)
 }
 
 // sudoActionsFromActions returns the display strings for actions that require

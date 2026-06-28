@@ -21,12 +21,14 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abysslink/abysslink/internal/ui"
 )
@@ -41,6 +43,10 @@ type RowEvent struct {
 	ErrMsg   string // first error message (if HasError)
 	HasWarn  bool   // true if any warning finding was present
 	WarnMsg  string // first warning message (if HasWarn)
+	// HasActions is set during the scan/plan phase: true when the module has
+	// planned changes. It drives the scan-row glyph (→ changes planned vs ✓ up
+	// to date) so the animated scan table stops claiming every module is "done".
+	HasActions bool
 }
 
 // tableRowMsg is sent to the live table model when a new module event arrives.
@@ -58,6 +64,8 @@ type LiveTable struct {
 	events  chan RowEvent
 	stop    chan error
 	label   string // in-flight row label, e.g. "scanning..." or "applying..."
+	scan    bool   // true during the scan/plan phase → renders scan-style rows
+	width   int    // terminal width from tea.WindowSizeMsg; 0 = unknown (no clamp)
 }
 
 // defaultInFlightLabel is the label shown next to the spinner for the
@@ -67,7 +75,9 @@ const defaultInFlightLabel = "scanning..."
 // NewLiveTable returns a new LiveTable model with the default in-flight label
 // ("scanning..."). Call SendRow() to send events and Done() to signal completion.
 func NewLiveTable() *LiveTable {
-	return NewLiveTableWithLabel(defaultInFlightLabel)
+	t := NewLiveTableWithLabel(defaultInFlightLabel)
+	t.scan = true // scan/plan phase: settled rows render →/✓ via renderScanRow
+	return t
 }
 
 // NewLiveTableWithLabel returns a new LiveTable model whose in-flight row shows
@@ -160,6 +170,12 @@ func (t *LiveTable) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			return t, nil
 		}
+	case tea.WindowSizeMsg:
+		// Track the terminal width so View can clamp each row to a single line;
+		// without this a long error message wraps and the in-place redraw smears
+		// the table across lines (T-016/T-024).
+		t.width = msg.Width
+		return t, nil
 	case tableRowMsg:
 		t.rows = append(t.rows, msg.evt)
 		return t, tea.Batch(t.spinner.Tick, t.listenForRow())
@@ -180,17 +196,35 @@ func (t *LiveTable) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (t *LiveTable) View() string {
 	var sb strings.Builder
 	for _, row := range t.rows {
-		sb.WriteString(renderRow(row))
+		sb.WriteString(t.clampLine(t.renderSettledRow(row)))
 		sb.WriteByte('\n')
 	}
 	if !t.done {
-		sb.WriteString("  ")
-		sb.WriteString(t.spinner.View())
-		sb.WriteString("  ")
-		sb.WriteString(t.label)
+		sb.WriteString(t.clampLine("  " + t.spinner.View() + "  " + t.label))
 		sb.WriteByte('\n')
 	}
 	return sb.String()
+}
+
+// renderSettledRow renders a completed row in the style for the current phase:
+// scan rows show →/✓ (changes-planned vs up-to-date) so the animated scan table
+// no longer renders every module as a settled "✓ done" and hides the plan; the
+// apply phase uses the ✓/⚠ outcome row.
+func (t *LiveTable) renderSettledRow(row RowEvent) string {
+	if t.scan {
+		return renderScanRow(row, row.HasActions)
+	}
+	return renderRow(row)
+}
+
+// clampLine truncates a rendered (possibly ANSI-styled) line to the known
+// terminal width so it always occupies exactly one row. A zero width (no
+// WindowSizeMsg yet, or a non-TTY) returns the line unchanged.
+func (t *LiveTable) clampLine(line string) string {
+	if t.width <= 0 {
+		return line
+	}
+	return ansi.Truncate(line, t.width, "…")
 }
 
 // tuiSuccess/tuiWarn/tuiBold/tuiMuted/tuiInfo are re-sourced from internal/ui
@@ -251,27 +285,19 @@ func RenderRows(rows []RowEvent) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// RenderScanRows renders a slice of settled scan-phase RowEvents.
-// hasActionsMap maps module name → bool indicating changes were planned.
-func RenderScanRows(rows []RowEvent, hasActionsMap map[string]bool) string {
-	if len(rows) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	for _, row := range rows {
-		sb.WriteString(renderScanRow(row, hasActionsMap[row.Module]))
-		sb.WriteByte('\n')
-	}
-	return strings.TrimRight(sb.String(), "\n")
-}
-
 // RunLiveTable runs the given LiveTable as a Bubble Tea program and returns the
-// final LiveTable model. Events must be sent via SendRow and Done must be called
-// from a separate goroutine before this function returns.
-func RunLiveTable(table *LiveTable) (*LiveTable, error) {
-	prog := tea.NewProgram(table)
+// final LiveTable model. The program is wired with tea.WithContext(ctx) so a
+// parent/SIGTERM cancellation tears the program down promptly and restores the
+// terminal — previously RunLiveTable ignored ctx, so a cancelled run could leave
+// the terminal in raw mode. Events must be sent via SendRow and Done must be
+// called from a separate goroutine before this function returns.
+func RunLiveTable(ctx context.Context, table *LiveTable) (*LiveTable, error) {
+	prog := tea.NewProgram(table, tea.WithContext(ctx))
 	final, err := prog.Run()
 	if err != nil {
+		if ctx.Err() != nil {
+			return table, ctx.Err()
+		}
 		return table, fmt.Errorf("live table program: %w", err)
 	}
 	if lt, ok := final.(*LiveTable); ok {
