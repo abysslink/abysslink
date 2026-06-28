@@ -456,7 +456,7 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	// Note: printSudoNotice is driven by sudoLines only — interactiveLines (tailscale login)
 	// must NOT trigger the sudo notice, as login is an auth step, not privilege escalation.
 	printSudoNotice(p, unique)
-	printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
+	printerInfo(p, "  "+styleMuted.Render(hrule()))
 	printerInfo(p, "  "+styleBold.Render(fmt.Sprintf("Applying %d changes...", len(unique))))
 	printerInfo(p, "")
 
@@ -880,7 +880,7 @@ func printNextSteps(p Printer, findings []modules.Finding, cfg *config.Config) {
 		}
 		if i < len(steps)-1 {
 			sb.WriteString("\n")
-			sb.WriteString(styleMuted.Render(strings.Repeat("─", 48)))
+			sb.WriteString(styleMuted.Render(hrule()))
 			sb.WriteString("\n\n")
 		}
 	}

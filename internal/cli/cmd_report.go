@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -280,7 +279,7 @@ func printReportHuman(p Printer, findings []modules.Finding, entries []audit.Ent
 	printerInfo(p, "")
 
 	doctorHumanOutput(p, findings)
-	printerInfo(p, styleMuted.Render("  "+strings.Repeat("─", 50)))
+	printerInfo(p, styleMuted.Render("  "+hrule()))
 	printerInfo(p, doctorSeverityCounts(findings))
 	printerInfo(p, "")
 

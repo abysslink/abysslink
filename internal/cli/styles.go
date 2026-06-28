@@ -17,6 +17,7 @@ package cli
 
 import (
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	cterm "github.com/charmbracelet/x/term"
@@ -61,6 +62,17 @@ func boxWidth() int {
 		return w - 2
 	}
 	return defaultBoxWidth
+}
+
+// hrule returns a horizontal-rule separator sized to the current box width
+// (boxWidth()-2 for the box interior) instead of a hardcoded 48/50-column
+// literal. The fixed widths soft-wrapped onto a second line on narrow phone
+// terminals (leaving a short dangling fragment) and looked stubby on wide ones;
+// hrule tracks the terminal so separators line up with the boxes they sit
+// between. The glyph stays "─" on every surface for byte-stability with the
+// existing parity goldens (only the width became responsive).
+func hrule() string {
+	return strings.Repeat("─", max(1, boxWidth()-2))
 }
 
 // boxBorder returns the border set for boxes: rounded glyphs on a TTY, an

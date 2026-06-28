@@ -40,9 +40,11 @@ import (
 //
 // When noColor() is true, plain ASCII glyphs and no ANSI codes are used.
 func JourneyHeader(stage, total int, labels []string) string {
+	w := journeyBoxWidth()
+	inner := max(8, w-6) // border (2) + horizontal padding (4)
 	title := buildJourneyTitle(stage, total)
 	dots := buildJourneyDots(stage, total)
-	labelRow := buildJourneyLabels(stage, total, labels)
+	labelRow := buildJourneyLabels(stage, total, labels, inner)
 
 	body := strings.Join([]string{title, dots, labelRow}, "\n")
 
@@ -53,13 +55,16 @@ func JourneyHeader(stage, total int, labels []string) string {
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ui.ColorInfo).
-		Padding(0, 2)
-	w := terminalWidth() - 4
-	if w < 54 {
-		w = 54
-	}
-	boxStyle = boxStyle.Width(w)
+		Padding(0, 2).
+		Width(w)
 	return boxStyle.Render(body)
+}
+
+// journeyBoxWidth caps the header strip at 54 columns (matching cli.boxWidth)
+// and shrinks it on narrow phone terminals — it never FLOORS at 54, which
+// overflowed sub-54-col terminals (T-001).
+func journeyBoxWidth() int {
+	return max(1, min(54, terminalWidth()-4))
 }
 
 // buildJourneyTitle returns the heading line "Abysslink Setup — Stage N of M".
@@ -112,8 +117,29 @@ func buildJourneyDotsASCII(stage, total int) string {
 	return strings.Join(parts, " ")
 }
 
-// buildJourneyLabels returns the bracketed numbered label list.
-func buildJourneyLabels(stage, total int, labels []string) string {
+// buildJourneyLabels returns the bracketed numbered label list, falling back to
+// a compact "Stage N/M: <current label>" form when the full row would overflow
+// the box inner width. The 8-stage row is ~97 columns and previously
+// soft-wrapped inside the box, breaking the rectangle and pushing the bottom
+// border down with a ragged right edge (T-012/T-027).
+func buildJourneyLabels(stage, total int, labels []string, maxWidth int) string {
+	full := buildJourneyLabelsFull(stage, total, labels)
+	if lipgloss.Width(full) <= maxWidth {
+		return full
+	}
+	label := fmt.Sprintf("%d", stage)
+	if stage >= 1 && stage <= len(labels) {
+		label = labels[stage-1]
+	}
+	compact := fmt.Sprintf("Stage %d/%d: %s", stage, total, label)
+	if noColor() {
+		return compact
+	}
+	return lipgloss.NewStyle().Bold(true).Foreground(ui.ColorInfo).Render(compact)
+}
+
+// buildJourneyLabelsFull renders the complete bracketed numbered label row.
+func buildJourneyLabelsFull(stage, total int, labels []string) string {
 	var parts []string
 	for i := 1; i <= total; i++ {
 		label := fmt.Sprintf("%d", i)

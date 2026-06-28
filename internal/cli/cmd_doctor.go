@@ -601,7 +601,7 @@ func doctorHumanOutput(p Printer, findings []modules.Finding) (hasFatal, hasWarn
 	for _, f := range findings {
 		if !seenMod[f.Module] {
 			seenMod[f.Module] = true
-			printerInfo(p, styleMuted.Render("  "+strings.Repeat("─", 50)))
+			printerInfo(p, styleMuted.Render("  "+hrule()))
 			printerInfo(p, "  "+styleBold.Render(f.Module))
 		}
 
@@ -728,7 +728,7 @@ Exit codes:
 
 			doctorHumanOutput(p, findings)
 
-			printerInfo(p, styleMuted.Render("  "+strings.Repeat("─", 50)))
+			printerInfo(p, styleMuted.Render("  "+hrule()))
 			printerInfo(p, doctorSeverityCounts(findings))
 			printerInfo(p, "")
 

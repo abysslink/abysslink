@@ -69,11 +69,11 @@ func SecretBox(title string, secrets []string) string {
 		Render(body)
 }
 
-// secretBoxWidth returns the responsive width for the secret box.
+// secretBoxWidth returns the responsive width for the secret box. It caps at 54
+// columns and shrinks on narrow (phone) terminals — it never FLOORS at 54. The
+// previous `if w < 54 { return 54 }` floor forced a 54-col box on a sub-54-col
+// terminal, overflowing the viewport and garbling the once-only Tailnet Lock
+// disablement secret on the very device the product targets (T-001).
 func secretBoxWidth() int {
-	w := terminalWidth() - 4
-	if w < 54 {
-		return 54
-	}
-	return w
+	return max(1, min(54, terminalWidth()-4))
 }
