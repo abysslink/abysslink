@@ -197,15 +197,26 @@ func enrollRigGenerateKey(ctx context.Context, opts enrollRigOpts, rigSvc string
 	if err := opts.keychain.Set(ctx, rigSvc, "hmac-signing-key", hexKey); err != nil {
 		return fmt.Errorf("enroll rig: store signing key: %w", err)
 	}
-	// Print the key ONCE with a one-time-warning box (mirror Tailnet Lock UX).
-	// Under --json the Printer emits each line as a {"msg": ...} record — the
-	// one-time secret still reaches the operator without corrupting the stream.
+	// Print the key ONCE. Under --json emit a single structured record so the
+	// one-time secret arrives as one machine-readable object instead of being
+	// dribbled across several box-art {"msg"} lines. On a human terminal render
+	// it through tui.SecretBox, whose width tracks the terminal (responsive on
+	// phones) and uses the shared once-only idiom — replacing the hand-built
+	// fixed 67-col box that overflowed narrow terminals.
+	if _, isJSON := p.(*jsonPrinter); isJSON {
+		p.PrintJSON(map[string]string{
+			"secret":  "hmac-signing-key",
+			"rig":     opts.name,
+			"key":     hexKey,
+			"warning": "store now in your password manager — shown once and never stored by abysslink",
+		})
+		return nil
+	}
 	printerInfo(p, "")
-	printerInfo(p, "┌─────────────────────────────────────────────────────────────────┐")
-	printerInfo(p, fmt.Sprintf("│  ONE-TIME SECRET: HMAC signing key for rig %q", opts.name))
-	printerInfo(p, "│  Store this in your password manager — it will not be shown again.")
-	printerInfo(p, "│  "+hexKey)
-	printerInfo(p, "└─────────────────────────────────────────────────────────────────┘")
+	printerInfo(p, tui.SecretBox(
+		fmt.Sprintf("HMAC signing key for rig %q", opts.name),
+		[]string{hexKey},
+	))
 	printerInfo(p, "")
 	return nil
 }

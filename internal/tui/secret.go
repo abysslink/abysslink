@@ -53,14 +53,14 @@ func SecretBox(title string, secrets []string) string {
 	if noColor() {
 		// Still render the box structure without colour.
 		return lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
+			Border(boxBorder()).
 			Padding(0, 2).
 			Width(secretBoxWidth()).
 			Render(body)
 	}
 
 	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(boxBorder()).
 		BorderForeground(ui.ColorFatal). // #FF5F87 — re-sourced from internal/ui (D-03)
 		Foreground(ui.ColorFatal).
 		Bold(true).

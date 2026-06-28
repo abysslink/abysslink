@@ -2,19 +2,19 @@
 |  abysslink doctor  health check                      |
 +------------------------------------------------------+
 
-╭────────────────────────────────────────────────────────────────────────────╮
-│  * INFO — doctor checks known footguns; it is not a full security audit    │
-│  abysslink doctor verifies the configuration Abysslink manages.            │
-│  It does not replace a professional security audit.                        │
-│  See docs/DESIGN.md §6.1 for the scope boundary.                           │
-╰────────────────────────────────────────────────────────────────────────────╯
-╭────────────────────────────────────────────────────────────────────────────╮
-│  * SECURITY — Tailscale Funnel is permanently rejected at the schema       │
-│  level                                                                     │
-│  Abysslink never exposes services to the public internet via Funnel.       │
-│  All remote access is restricted to your tailnet only.                     │
-│  This is a hard floor — it cannot be configured away.                      │
-╰────────────────────────────────────────────────────────────────────────────╯
++----------------------------------------------------------------------------+
+|  * INFO — doctor checks known footguns; it is not a full security audit    |
+|  abysslink doctor verifies the configuration Abysslink manages.            |
+|  It does not replace a professional security audit.                        |
+|  See docs/DESIGN.md §6.1 for the scope boundary.                           |
++----------------------------------------------------------------------------+
++----------------------------------------------------------------------------+
+|  * SECURITY — Tailscale Funnel is permanently rejected at the schema       |
+|  level                                                                     |
+|  Abysslink never exposes services to the public internet via Funnel.       |
+|  All remote access is restricted to your tailnet only.                     |
+|  This is a hard floor — it cannot be configured away.                      |
++----------------------------------------------------------------------------+
 
   ────────────────────────────────────────────────────
   tailscale

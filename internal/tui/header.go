@@ -53,7 +53,7 @@ func JourneyHeader(stage, total int, labels []string) string {
 	}
 	// Wrap in a subtle blue box matching the project's header palette.
 	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(boxBorder()).
 		BorderForeground(ui.ColorInfo).
 		Padding(0, 2).
 		Width(w)

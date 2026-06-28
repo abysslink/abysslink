@@ -68,7 +68,7 @@ func noteLevelLabel(level NoteLevel) string {
 // When noColor() is true, no colour is applied to the border.
 func noteBoxStyle(level NoteLevel) lipgloss.Style {
 	base := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(boxBorder()).
 		Padding(0, 2)
 
 	// Responsive width: track the terminal (terminalWidth()-4), shrinking on
