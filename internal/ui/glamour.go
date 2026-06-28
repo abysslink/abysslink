@@ -16,9 +16,26 @@
 package ui
 
 import (
+	"os"
+
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/ansi"
+	"golang.org/x/term"
 )
+
+// markdownWrapWidth returns the column width to reflow markdown prose at:
+// the terminal width, capped at 100 and defaulting to 80 when it cannot be
+// determined (non-TTY / tests). glamour was previously created with
+// WithWordWrap(0), which disabled wrapping entirely, so a long summary sentence
+// ran off the right edge and was hard-wrapped by the terminal at an arbitrary
+// column, breaking words mid-character (T-025).
+func markdownWrapWidth() int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		return 80
+	}
+	return min(100, w)
+}
 
 // ptr returns a pointer to the given string. Required because glamour's
 // StyleConfig uses *string for all color and style fields (RESEARCH.md Pitfall 7).
@@ -114,7 +131,7 @@ func AbyssGlamourStyle() ansi.StyleConfig {
 
 		Code: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Color:           ptr("#5C7CFA"),
+				Color:           ptr("#F8F8F2"),
 				BackgroundColor: ptr("#4B5563"),
 			},
 		},
@@ -148,7 +165,7 @@ func RenderMarkdown(md string, noColor bool) string {
 
 	r, err := glamour.NewTermRenderer(
 		glamour.WithStyles(AbyssGlamourStyle()),
-		glamour.WithWordWrap(0),
+		glamour.WithWordWrap(markdownWrapWidth()),
 	)
 	if err != nil {
 		// Never-crash: fall back to plain markdown on renderer creation error.

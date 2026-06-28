@@ -36,8 +36,10 @@ const (
 
 // noteLevelMeta holds the display attributes for a single NoteLevel.
 type noteLevelMeta struct {
-	// borderColor is the lipgloss border colour; empty string → default (used under NO_COLOR).
-	borderColor lipgloss.Color
+	// borderColor is the lipgloss border colour. Typed as the TerminalColor
+	// interface so it accepts both flat lipgloss.Color and the semantic
+	// AdaptiveColor tones from internal/ui (T-002). nil → default (NO_COLOR path).
+	borderColor lipgloss.TerminalColor
 	// unicodeLabel is the icon+word label shown when colour is available.
 	unicodeLabel string
 	// asciiLabel is the plain-text fallback used when noColor() is true.

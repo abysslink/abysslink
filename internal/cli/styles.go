@@ -46,7 +46,10 @@ var (
 	styleInfo    = lipgloss.NewStyle().Foreground(colorBlue)
 	styleMuted   = lipgloss.NewStyle().Foreground(colorMuted)
 	styleBold    = lipgloss.NewStyle().Bold(true)
-	styleCode    = lipgloss.NewStyle().Foreground(colorBlue).Background(colorDim).Padding(0, 1)
+	// styleCode renders copy/run command snippets. Foreground is ColorFg
+	// (near-white) not colorBlue — blue-on-grey measured ~2:1, failing WCAG AA on
+	// the exact text the user most needs to read (T-003).
+	styleCode = lipgloss.NewStyle().Foreground(ui.ColorFg).Background(colorDim).Padding(0, 1)
 )
 
 // defaultBoxWidth is the box width used on wide terminals and when the

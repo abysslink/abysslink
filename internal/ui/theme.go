@@ -30,37 +30,42 @@ import (
 var ColorAccent = lipgloss.AdaptiveColor{Dark: "#22D3EE", Light: "#0E7490"}
 
 // ColorSelection is the Abyss violet used for huh SelectedOption, FocusedButton,
-// MultiSelectSelector, and banner "LINK".
-var ColorSelection = lipgloss.AdaptiveColor{Dark: "#8B5CF6", Light: "#6D28D9"}
+// MultiSelectSelector, and banner "LINK". The dark side was brightened from
+// #8B5CF6 (3.94:1 on #1e1e1e — below AA) to #A78BFA (~6:1) so the currently-
+// selected option is the HIGHEST-contrast row, not the lowest (T-021).
+var ColorSelection = lipgloss.AdaptiveColor{Dark: "#A78BFA", Light: "#6D28D9"}
 
 // ColorMuted is the Abyss steel tone used for secondary/muted text,
 // huh Description, and non-truecolor banner monochrome.
 var ColorMuted = lipgloss.AdaptiveColor{Dark: "#64748B", Light: "#475569"}
 
 // ---------------------------------------------------------------------------
-// Semantic palette (D-04): definition site moves here; rendered bytes are
-// UNCHANGED. These stay flat lipgloss.Color to guarantee byte-stable output
-// on --json / non-TTY / NO_COLOR surfaces. Their EXACT current hexes are
-// preserved — internal/cli/styles.go re-sources from these in Plan 03.
+// Semantic palette (D-04 / T-002): AdaptiveColor so status/health output stays
+// legible on a LIGHT terminal (default macOS Terminal/iTerm, many phone SSH
+// clients). The DARK side is byte-identical to the former flat hexes, so output
+// on a dark terminal — and on every --json / non-TTY / NO_COLOR surface, where
+// lipgloss strips ANSI regardless — is unchanged; only the light-terminal path
+// gains AA-legible counterparts (the flat hexes measured 1.45:1–3.67:1 on white,
+// all failing WCAG AA). internal/cli/styles.go re-sources these.
 // ---------------------------------------------------------------------------
 
 // ColorSuccess is the semantic green for OK icons and positive status output.
-const ColorSuccess = lipgloss.Color("#04B575")
+var ColorSuccess = lipgloss.AdaptiveColor{Dark: "#04B575", Light: "#02764C"}
 
 // ColorWarn is the semantic yellow for WARN icons and advisory output.
-const ColorWarn = lipgloss.Color("#FFD060")
+var ColorWarn = lipgloss.AdaptiveColor{Dark: "#FFD060", Light: "#946200"}
 
 // ColorFatal is the semantic red for FATAL icons and error output.
-const ColorFatal = lipgloss.Color("#FF5F87")
+var ColorFatal = lipgloss.AdaptiveColor{Dark: "#FF5F87", Light: "#B3003A"}
 
 // ColorInfo is the semantic blue for arrows and info markers.
-const ColorInfo = lipgloss.Color("#5C7CFA")
+var ColorInfo = lipgloss.AdaptiveColor{Dark: "#5C7CFA", Light: "#2540C0"}
 
 // ColorSecurity is the semantic blue for SECURITY note borders. Centralized
 // here (T-022) so the single-source-of-color contract holds; was a hardcoded
-// literal in internal/tui/notes.go. Flat to match the rest of the semantic
-// palette (the AdaptiveColor upgrade rides with the deferred T-002 sweep).
-const ColorSecurity = lipgloss.Color("#00B4D8")
+// literal in internal/tui/notes.go. AdaptiveColor so the security frame stays
+// legible on a light terminal (the flat #00B4D8 measured 2.46:1 on white).
+var ColorSecurity = lipgloss.AdaptiveColor{Dark: "#00B4D8", Light: "#006883"}
 
 // ColorFg is the primary foreground text color.
 const ColorFg = lipgloss.Color("#F8F8F2")
@@ -68,11 +73,16 @@ const ColorFg = lipgloss.Color("#F8F8F2")
 // ColorDim is used for code block backgrounds and secondary surfaces.
 const ColorDim = lipgloss.Color("#4B5563")
 
-// ColorMutedSemantic is the EXISTING cli/tui muted hex (#6B7280) used on
-// byte-asserted surfaces. It is exported under its own name so Plan 03 can
-// re-source the old muted value byte-stably, distinct from the new brand
-// steel AdaptiveColor (ColorMuted). Do NOT conflate the two.
-const ColorMutedSemantic = lipgloss.Color("#6B7280")
+// ColorMutedSemantic is the muted tone for secondary text (status labels,
+// doctor check names, footer hints, remaining journey dots). The dark side was
+// brightened from #6B7280 (3.45:1 on #1e1e1e — below AA for body text) to
+// #8B95A5 (~5:1) so the large share of UI chrome rendered in this tone is no
+// longer washed out (T-019); the light side (#475569) already clears AA on
+// white. Exported distinct from the brand-steel ColorMuted — do NOT conflate.
+// Dark-terminal callers that re-source the old flat value see a brighter grey;
+// every NO_COLOR / non-TTY / --json surface (where ANSI is stripped) is
+// byte-unchanged.
+var ColorMutedSemantic = lipgloss.AdaptiveColor{Dark: "#8B95A5", Light: "#475569"}
 
 // ---------------------------------------------------------------------------
 // Reusable styles (exported for consumers in internal/cli and internal/tui).
@@ -97,8 +107,12 @@ var StyleFatal = lipgloss.NewStyle().Bold(true).Foreground(ColorFatal)
 // StyleInfo renders info markers in semantic blue.
 var StyleInfo = lipgloss.NewStyle().Foreground(ColorInfo)
 
-// StyleCode renders inline code in semantic blue on a dim background.
-var StyleCode = lipgloss.NewStyle().Foreground(ColorInfo).Background(ColorDim).Padding(0, 1)
+// StyleCode renders inline code as near-white foreground on a dim background.
+// The previous ColorInfo blue (#5C7CFA) on ColorDim grey (#4B5563) measured
+// ~2.06:1 — failing WCAG AA regardless of terminal theme, on the exact command
+// snippets the user is meant to copy/run. ColorFg (#F8F8F2) on #4B5563 is
+// ~7.5:1 (T-003).
+var StyleCode = lipgloss.NewStyle().Foreground(ColorFg).Background(ColorDim).Padding(0, 1)
 
 // StyleBold renders text in bold with no color modification.
 var StyleBold = lipgloss.NewStyle().Bold(true)
