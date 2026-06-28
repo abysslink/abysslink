@@ -333,14 +333,6 @@ func printStatusNoRigs(p Printer, jsonOut bool) {
 	printerInfo(p, "  No rigs enrolled — enroll one with "+styleCode.Render("abysslink rig add")+".")
 }
 
-// statusAllRigs fans out `abysslink status --json` to every enrolled rig and
-// aggregates the results into a per-rig slice. Offline rigs appear as UNREACHABLE
-// rows (SC-2); --strict maps to exit 2 when any rig is offline (T-14-21,
-// matches root --help and the exitCodeFatal return below).
-func statusAllRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool) error {
-	return statusRigs(ctx, cc, p, strict, cc.cfg.Rigs)
-}
-
 // statusRigs fans out `abysslink status --json` to the targeted rigs only
 // (every enrolled rig under --all-rigs, a single rig under --rig, CLI-05).
 func statusRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool, rigs []config.RigConfig) error {

@@ -181,7 +181,7 @@ func runInitPrework(ctx context.Context, cmd *cobra.Command, p Printer, runner s
 		return 0, err
 	}
 
-	cfg, err := runInitForm(cmd, yesFlag)
+	cfg, err := runInitForm(ctx, cmd, yesFlag)
 	if err != nil {
 		return 0, err
 	}
@@ -253,6 +253,15 @@ func runFlowSteps(ctx context.Context, p Printer, runner shell.Runner, configPat
 	for i, stepFn := range steps {
 		if i < startStage {
 			continue // skip already-completed stages (resume support)
+		}
+
+		// Show the journey progress strip ("Abysslink Setup — Stage N of 8" with
+		// a ✓/●/· dot row) above each stage so the user always knows where they
+		// are in the 8-stage flow. Interactive only: headless/--json runs skip the
+		// forms entirely, so the breadcrumb would be noise there. Wires the
+		// previously-dead tui.JourneyHeader (T-005/T-008/T-040).
+		if interactive(yesFlag, jsonFlag) {
+			printerInfo(p, tui.JourneyHeader(i+1, len(steps), flow.StageLabels()))
 		}
 
 		form, stepErr := stepFn(ctx, runner, p, state)
@@ -515,10 +524,12 @@ func startTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner, p
 	start := autoYes
 	if !autoYes {
 		printerInfo(p, "")
-		if err := huh.NewConfirm().
-			Title("Start the Tailscale daemon?").
-			Description("tailscaled is not running — it is required for all remote access.").
-			Value(&start).Run(); err != nil {
+		if err := huh.NewForm(huh.NewGroup(
+			huh.NewConfirm().
+				Title("Start the Tailscale daemon?").
+				Description("tailscaled is not running — it is required for all remote access.").
+				Value(&start),
+		)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 			return err
 		}
 	}
@@ -601,10 +612,12 @@ func installTool(ctx context.Context, p Printer, runner shell.Runner, plat platf
 		if !t.optional {
 			desc = "Required for abysslink. " + desc
 		}
-		if err := huh.NewConfirm().
-			Title(fmt.Sprintf("Install %s?", t.name)).
-			Description(desc).
-			Value(&doInstall).Run(); err != nil {
+		if err := huh.NewForm(huh.NewGroup(
+			huh.NewConfirm().
+				Title(fmt.Sprintf("Install %s?", t.name)).
+				Description(desc).
+				Value(&doInstall),
+		)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 			return err
 		}
 	}
@@ -705,10 +718,12 @@ func maybeFixFirewall(ctx context.Context, p Printer, runner shell.Runner, autoY
 	printerInfo(p, fmt.Sprintf("  %s  %s  disabled", iconWarnStr(), nameCol))
 	fix := autoYes
 	if !autoYes {
-		if err := huh.NewConfirm().
-			Title("Enable macOS Application Firewall?").
-			Description("Blocks unexpected inbound connections. Requires sudo password.").
-			Value(&fix).Run(); err != nil {
+		if err := huh.NewForm(huh.NewGroup(
+			huh.NewConfirm().
+				Title("Enable macOS Application Firewall?").
+				Description("Blocks unexpected inbound connections. Requires sudo password.").
+				Value(&fix),
+		)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 			return err
 		}
 	}
@@ -738,10 +753,12 @@ func maybeFixSleep(ctx context.Context, p Printer, runner shell.Runner, autoYes 
 	printerInfo(p, fmt.Sprintf("  %s  %s  enabled — rig may sleep and become unreachable", iconWarnStr(), nameCol))
 	fix := autoYes
 	if !autoYes {
-		if err := huh.NewConfirm().
-			Title("Prevent sleep while on AC power?").
-			Description("Keeps the rig reachable overnight. Requires sudo password.").
-			Value(&fix).Run(); err != nil {
+		if err := huh.NewForm(huh.NewGroup(
+			huh.NewConfirm().
+				Title("Prevent sleep while on AC power?").
+				Description("Keeps the rig reachable overnight. Requires sudo password.").
+				Value(&fix),
+		)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 			return err
 		}
 	}
@@ -844,40 +861,44 @@ func applyInitFormResult(r initFormResult) (*config.Config, error) {
 // promptBackendServerURL runs the conditional server URL prompts for self-hosted
 // backends (headscale and netbird) after the main form completes. Extracted to
 // keep runInitForm's cyclomatic complexity below the gocyclo limit.
-func promptBackendServerURL(cmd *cobra.Command, r *initFormResult) error {
+func promptBackendServerURL(ctx context.Context, cmd *cobra.Command, r *initFormResult) error {
 	switch r.backendType {
 	case "headscale":
-		return huh.NewInput().
-			Title("Headscale server URL").
-			Description("Public HTTPS URL of your Headscale instance (e.g. https://headscale.example.com)").
-			Value(&r.headscaleServerURL).
-			Validate(func(s string) error {
-				if s == "" {
-					return fmt.Errorf("server URL is required for headscale backend")
-				}
-				if !strings.HasPrefix(s, "https://") {
-					return fmt.Errorf("server URL must start with https://")
-				}
-				return nil
-			}).Run()
+		return huh.NewForm(huh.NewGroup(
+			huh.NewInput().
+				Title("Headscale server URL").
+				Description("Public HTTPS URL of your Headscale instance (e.g. https://headscale.example.com)").
+				Value(&r.headscaleServerURL).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("server URL is required for headscale backend")
+					}
+					if !strings.HasPrefix(s, "https://") {
+						return fmt.Errorf("server URL must start with https://")
+					}
+					return nil
+				}),
+		)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx)
 	case "netbird":
 		// Emit degradation warning before prompting — wizard-time D-04 disclosure.
 		printerInfo(newPrinter(cmd), styleWarn.Render(
 			"WARN: NetBird does not support SSH checkPeriod enforcement. "+
 				"You will need to run `abysslink up --accept-no-sshcheck` on first use."))
-		return huh.NewInput().
-			Title("NetBird server URL").
-			Description("Management server base URL (e.g. https://nb.example.com)").
-			Value(&r.netbirdServerURL).
-			Validate(func(s string) error {
-				if s == "" {
-					return fmt.Errorf("server URL is required for netbird backend")
-				}
-				if !strings.HasPrefix(s, "https://") {
-					return fmt.Errorf("server URL must start with https://")
-				}
-				return nil
-			}).Run()
+		return huh.NewForm(huh.NewGroup(
+			huh.NewInput().
+				Title("NetBird server URL").
+				Description("Management server base URL (e.g. https://nb.example.com)").
+				Value(&r.netbirdServerURL).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("server URL is required for netbird backend")
+					}
+					if !strings.HasPrefix(s, "https://") {
+						return fmt.Errorf("server URL must start with https://")
+					}
+					return nil
+				}),
+		)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx)
 	}
 	return nil
 }
@@ -977,7 +998,7 @@ func initFormPrefill(cmd *cobra.Command, autoYes bool) (initFormResult, error) {
 }
 
 // runInitForm runs the interactive questionnaire and returns the resulting Config.
-func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
+func runInitForm(ctx context.Context, cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 	r, err := initFormPrefill(cmd, autoYes)
 	if err != nil {
 		return nil, err
@@ -1034,26 +1055,28 @@ func runInitForm(cmd *cobra.Command, autoYes bool) (*config.Config, error) {
 					Value(&r.enableNtfy),
 			),
 		)
-		if err := form.Run(); err != nil {
+		if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 			return nil, fmt.Errorf("init: %w", err)
 		}
 		// Conditional server URL prompts for self-hosted backends.
-		if err := promptBackendServerURL(cmd, &r); err != nil {
+		if err := promptBackendServerURL(ctx, cmd, &r); err != nil {
 			return nil, err
 		}
 		if r.enableNtfy {
 			portStr := fmt.Sprintf("%d", r.ntfyPort)
-			if err := huh.NewInput().
-				Title("ntfy listen port").
-				Description("Port for the notification server on your tailnet.\nDefault 2586 avoids conflicts with local dev servers (8080, 3000, etc.).").
-				Value(&portStr).
-				Validate(func(s string) error {
-					n, err := strconv.Atoi(strings.TrimSpace(s))
-					if err != nil || n < 1024 || n > 65535 {
-						return fmt.Errorf("must be a number between 1024 and 65535")
-					}
-					return nil
-				}).Run(); err != nil {
+			if err := huh.NewForm(huh.NewGroup(
+				huh.NewInput().
+					Title("ntfy listen port").
+					Description("Port for the notification server on your tailnet.\nDefault 2586 avoids conflicts with local dev servers (8080, 3000, etc.).").
+					Value(&portStr).
+					Validate(func(s string) error {
+						n, err := strconv.Atoi(strings.TrimSpace(s))
+						if err != nil || n < 1024 || n > 65535 {
+							return fmt.Errorf("must be a number between 1024 and 65535")
+						}
+						return nil
+					}),
+			)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 				return nil, fmt.Errorf("init: ntfy port: %w", err)
 			}
 			if n, err := strconv.Atoi(strings.TrimSpace(portStr)); err == nil {

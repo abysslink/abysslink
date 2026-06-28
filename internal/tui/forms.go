@@ -173,14 +173,15 @@ func ConfirmBlast(ctx context.Context, summary string, count int, yes bool) (boo
 	}
 	var result bool
 	title := fmt.Sprintf("Apply %d change(s)? This will modify your system.", count)
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().Title(summary),
-			huh.NewConfirm().
-				Title(title).
-				Value(&result),
-		),
-	)
+	// Only include the summary note when there is a summary — rendering
+	// huh.NewNote().Title("") produces an empty titled note box above the confirm
+	// (e.g. when a plan has no sudo actions to summarise).
+	fields := make([]huh.Field, 0, 2)
+	if strings.TrimSpace(summary) != "" {
+		fields = append(fields, huh.NewNote().Title(summary))
+	}
+	fields = append(fields, huh.NewConfirm().Title(title).Value(&result))
+	form := huh.NewForm(huh.NewGroup(fields...))
 	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return false, err
 	}
