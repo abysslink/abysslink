@@ -57,7 +57,7 @@ func newUninstallCmd() *cobra.Command {
 				return fmt.Errorf("uninstall: %w", err)
 			}
 
-			printerInfo(p, styleBold.Render("abysslink uninstall")+"  "+styleMuted.Render("reverse all changes"))
+			printerInfo(p, styleTitle.Render("abysslink uninstall")+"  "+styleMuted.Render("reverse all changes"))
 			printerInfo(p, "")
 			printReversePlan(p, plan)
 

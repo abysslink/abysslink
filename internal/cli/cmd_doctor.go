@@ -759,7 +759,7 @@ func printDoctorHeader(p Printer, cc *cmdContext) {
 	if cc.jsonOut {
 		return
 	}
-	header := styleBold.Render("abysslink doctor") + "  " + styleMuted.Render("health check")
+	header := styleTitle.Render("abysslink doctor") + "  " + styleMuted.Render("health check")
 	printerInfo(p, styleHeaderBox.Render(header))
 	printerInfo(p, "")
 	// Fresh machine: tell the user to init before anything else — the checks

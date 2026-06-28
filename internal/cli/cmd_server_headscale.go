@@ -874,7 +874,7 @@ func headscaleStatusRunE(ctx context.Context, cc *cmdContext, p Printer) error {
 		return nil
 	}
 
-	printerInfo(p, styleBold.Render("Headscale status"))
+	printerInfo(p, styleTitle.Render("Headscale status"))
 	printerInfo(p, "")
 	printerInfo(p, "  Version:       "+report.Version)
 	printerInfo(p, "  Service:       "+report.ServiceState)

@@ -72,7 +72,7 @@ func newClaudeCodeDisableCmd() *cobra.Command {
 				return fmt.Errorf("claudecode disable: %w", err)
 			}
 
-			printerInfo(p, styleBold.Render("abysslink claudecode disable")+"  "+styleMuted.Render("remove notify hooks"))
+			printerInfo(p, styleTitle.Render("abysslink claudecode disable")+"  "+styleMuted.Render("remove notify hooks"))
 			printerInfo(p, "")
 
 			if len(removed) == 0 {

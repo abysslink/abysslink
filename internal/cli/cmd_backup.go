@@ -85,7 +85,7 @@ func newBackupLsCmd() *cobra.Command {
 				return nil
 			}
 
-			printerInfo(p, styleBold.Render("Files modified by abysslink"))
+			printerInfo(p, styleTitle.Render("Files modified by abysslink"))
 			printerInfo(p, "")
 			for _, t := range targets {
 				baks, _ := audit.Backups(t)

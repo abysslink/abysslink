@@ -195,10 +195,10 @@ func runUpApplyPhase(ctx context.Context, cmd *cobra.Command, p Printer, r *modu
 // keep its cyclomatic complexity below the gocyclo ceiling.
 func printUpHeader(p Printer, dryRun bool) {
 	if dryRun {
-		header := styleBold.Render("abysslink up") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
+		header := styleTitle.Render("abysslink up") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
 		printerInfo(p, styleHeaderBox.Render(header))
 	} else {
-		header := styleBold.Render("abysslink up") + "  " + styleSuccess.Render("✦  applying")
+		header := styleTitle.Render("abysslink up") + "  " + styleSuccess.Render("✦  applying")
 		printerInfo(p, styleHeaderBox.Render(header))
 	}
 	printerInfo(p, "")

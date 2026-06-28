@@ -119,7 +119,7 @@ func newThreatModelCmd() *cobra.Command {
 				}
 			}
 
-			printerInfo(p, styleBold.Render("Abysslink threat model")+"  "+styleMuted.Render("(live status)"))
+			printerInfo(p, styleTitle.Render("Abysslink threat model")+"  "+styleMuted.Render("(live status)"))
 
 			printerInfo(p, "")
 			printerInfo(p, styleBold.Render("  Base threat model"))

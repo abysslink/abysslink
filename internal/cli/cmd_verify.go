@@ -333,7 +333,7 @@ func resolveVerifyArtifacts(ctx context.Context, tmpDir, ver, bundleOverride str
 
 // emitVerifyHuman prints a human-readable verification summary.
 func emitVerifyHuman(p Printer, res verifyResult, verr, binErr, slsaErr error) {
-	printerInfo(p, styleBold.Render("abysslink verify")+"  "+styleMuted.Render("v"+res.Version))
+	printerInfo(p, styleTitle.Render("abysslink verify")+"  "+styleMuted.Render("v"+res.Version))
 	if res.BundleOK {
 		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("cosign bundle verified (offline)"))
 	} else {

@@ -46,6 +46,11 @@ var (
 	styleInfo    = lipgloss.NewStyle().Foreground(colorBlue)
 	styleMuted   = lipgloss.NewStyle().Foreground(colorMuted)
 	styleBold    = lipgloss.NewStyle().Bold(true)
+	// styleTitle is the brand-cyan bold for every command/section header (the
+	// TUI-migration single accent). Mirrors ui.StyleTitle but lives here so
+	// command files brand a title without each importing internal/ui. ANSI is
+	// stripped on non-TTY/NO_COLOR, so it is byte-identical to styleBold there.
+	styleTitle = lipgloss.NewStyle().Bold(true).Foreground(ui.ColorAccent)
 	// styleCode renders copy/run command snippets. Foreground is ColorFg
 	// (near-white) not colorBlue — blue-on-grey measured ~2:1, failing WCAG AA on
 	// the exact text the user most needs to read (T-003).

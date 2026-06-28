@@ -41,8 +41,12 @@ func newRepairCmd() *cobra.Command {
 
 			p := newPrinter(cmd)
 
-			if cc.dryRun {
-				printerInfo(p, "Dry-run mode (use --apply to apply changes)")
+			if !cc.jsonOut {
+				mode := styleMuted.Render("repair drift")
+				if cc.dryRun {
+					mode = styleWarn.Render("preview only — run with --apply to make changes")
+				}
+				commandHeader(p, "repair", mode)
 			}
 
 			deps, err := buildDeps(ctx, cc)

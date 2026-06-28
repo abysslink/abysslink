@@ -756,7 +756,7 @@ func netbirdStatusRunE(ctx context.Context, cc *cmdContext, p Printer) error {
 		return nil
 	}
 
-	printerInfo(p, styleBold.Render("NetBird server status"))
+	printerInfo(p, styleTitle.Render("NetBird server status"))
 	printerInfo(p, "")
 	printerInfo(p, "  Version:       "+report.Version)
 	printerInfo(p, "  Service:       "+report.ServiceState)
