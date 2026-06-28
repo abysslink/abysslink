@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -36,11 +37,29 @@ import (
 type rigReachability struct {
 	RigID     string `json:"rig_id"`
 	Reachable bool   `json:"reachable"`
+	// unknown is the WR-05 honest-unknown flag: the probe could not run (a
+	// non-timeout transport error), so reachability is genuinely undetermined
+	// rather than a fabricated definite offline. It is rendered as "unknown" in
+	// the human output and is intentionally NOT serialised (the JSON contract
+	// keeps reachable as a binary flag).
+	unknown bool `json:"-"`
 }
 
 // newRigReachability builds a rigReachability with an opaque rig id.
 func newRigReachability(rigName string, reachable bool) rigReachability {
 	return rigReachability{RigID: metrics.OpaqueRigLabel(rigName), Reachable: reachable}
+}
+
+// rigReachabilityFromResult maps a fleet result to an opaque reachability row,
+// honouring the WR-05 tri-state: a transport error that is NOT a clean timeout
+// means the probe never ran — render that as honest "unknown", never a
+// fabricated definite "UNREACHABLE" (mirrors fleet_status.go remoteRigStatuses).
+func rigReachabilityFromResult(res fleet.RigResult) rigReachability {
+	row := newRigReachability(res.Rig.Name, res.Reachable)
+	if !res.Reachable && res.Err != nil && !errors.Is(res.Err, context.DeadlineExceeded) {
+		row.unknown = true
+	}
+	return row
 }
 
 // reportOutput is the JSON-serialisable posture snapshot emitted by
@@ -137,11 +156,19 @@ func runReport(cmd *cobra.Command, _ []string) error {
 	entries := collectAuditTail(tailN)
 
 	var rigResults []rigReachability
+	var fanErr error
 	if rt.fanOut && len(rt.rigs) > 0 {
-		rigResults = collectRigReachability(ctx, cc, strict, rt.rigs)
+		rigResults, fanErr = collectRigReachability(ctx, cc, strict, rt.rigs)
 	}
 
 	exitCode := reportExitCode(findings)
+	// Fleet honesty: under --strict an unreachable rig must fail the run (exit 2),
+	// matching `status`/`doctor`. Previously the fan-out error was discarded
+	// (`results, _ := fleet.FanOut(...)`), so `report --all-rigs --strict` could
+	// exit 0 with an offline rig — a fabricated all-clear in CI.
+	if strict && fanErr != nil && exitCode < exitCodeFatal {
+		exitCode = exitCodeFatal
+	}
 
 	if cc.jsonOut {
 		p.PrintJSON(reportOutput{
@@ -231,14 +258,19 @@ func collectAuditTail(tailN int) []audit.Entry {
 // collectRigReachability fans out `status --json` to the targeted rigs (all
 // enrolled rigs under --all-rigs, a single rig under --rig, CLI-05) and
 // returns opaque per-rig reachability rows.
-func collectRigReachability(ctx context.Context, cc *cmdContext, strict bool, rigs []config.RigConfig) []rigReachability {
+// collectRigReachability fans out and returns the opaque reachability rows plus
+// the fan-out error. Under --strict the error is non-nil when any rig was
+// unreachable; the caller escalates the exit code on it (the error was
+// previously discarded). Non-strict fan-out only errors on a pre-flight
+// validation failure.
+func collectRigReachability(ctx context.Context, cc *cmdContext, strict bool, rigs []config.RigConfig) ([]rigReachability, error) {
 	const perRigTimeout = 30 * time.Second
-	results, _ := fleet.FanOut(ctx, cc.runner, rigs, perRigTimeout, strict, []string{"status", "--json"})
+	results, fanErr := fleet.FanOut(ctx, cc.runner, rigs, perRigTimeout, strict, []string{"status", "--json"})
 	rows := make([]rigReachability, 0, len(results))
 	for _, res := range results {
-		rows = append(rows, newRigReachability(res.Rig.Name, res.Reachable))
+		rows = append(rows, rigReachabilityFromResult(res))
 	}
-	return rows
+	return rows, fanErr
 }
 
 // printReportHuman renders the human-readable posture snapshot via the Printer.
@@ -264,8 +296,13 @@ func printReportHuman(p Printer, findings []modules.Finding, entries []audit.Ent
 	if len(rigResults) > 0 {
 		printerInfo(p, "  "+styleBold.Render("rigs"))
 		for _, rr := range rigResults {
+			// WR-05 tri-state: never collapse an honest-unknown probe into a
+			// definitive UNREACHABLE.
 			status := "reachable"
-			if !rr.Reachable {
+			switch {
+			case rr.unknown:
+				status = "unknown"
+			case !rr.Reachable:
 				status = "UNREACHABLE"
 			}
 			printerInfo(p, fmt.Sprintf("    %s  %s", styleMuted.Render(rr.RigID), styleBold.Render(status)))

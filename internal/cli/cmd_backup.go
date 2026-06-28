@@ -158,7 +158,7 @@ func newBackupRestoreCmd() *cobra.Command {
 				return nil
 			}
 
-			ok, err := confirmRestore(ctx, p, target, latest, backupLabel, cc.yes)
+			ok, err := confirmRestore(ctx, p, target, latest, backupLabel, cc.yes, cc.jsonOut)
 			if err != nil {
 				return err
 			}
@@ -311,7 +311,7 @@ func printLineDiffSummary(p Printer, current, backup []byte) {
 // context (no TTY, no --yes) it returns errMissingInput so the command exits
 // non-zero — a piped/CI invocation must be able to tell the restore did not
 // happen (never a silent "Aborted." + exit 0).
-func confirmRestore(ctx context.Context, p Printer, target, backupPath, backupLabel string, yes bool) (bool, error) {
+func confirmRestore(ctx context.Context, p Printer, target, backupPath, backupLabel string, yes, jsonOut bool) (bool, error) {
 	if err := restoreDiffPreview(p, target, backupPath, backupLabel); err != nil {
 		printerInfo(p, styleMuted.Render(fmt.Sprintf("  (diff preview unavailable: %v)", err)))
 	}
@@ -320,7 +320,12 @@ func confirmRestore(ctx context.Context, p Printer, target, backupPath, backupLa
 		return true, nil
 	}
 
-	if !interactive(false, false) {
+	// Fail closed under --json (or any non-interactive context): a destructive
+	// restore must never render a huh confirm into the machine-readable JSON
+	// stream or hang waiting for a TTY that is not there. Previously this passed
+	// interactive(false, false), which ignored --json and would prompt on a TTY
+	// even with --json set.
+	if !interactive(yes, jsonOut) {
 		return false, errMissingInput("yes")
 	}
 

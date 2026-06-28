@@ -123,7 +123,7 @@ func TestBackupRestoreDeclined_FileUnchanged(t *testing.T) {
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
 
-	ok, err := confirmRestore(context.Background(), p, target, backup, "20260101T000000.000000000Z", false /*yes*/)
+	ok, err := confirmRestore(context.Background(), p, target, backup, "20260101T000000.000000000Z", false /*yes*/, false /*jsonOut*/)
 	require.Error(t, err, "non-interactive without --yes must return errMissingInput")
 	assert.Contains(t, err.Error(), "--yes", "the error must name the flag that supplies the missing input")
 	assert.False(t, ok, "non-interactive without --yes must decline and return false")
@@ -150,9 +150,29 @@ func TestBackupRestoreAutoYes_RestoresFile(t *testing.T) {
 	var buf bytes.Buffer
 	p := &testPrinter{out: &buf}
 
-	ok, err := confirmRestore(context.Background(), p, target, backup, "20260101T000000.000000000Z", true /*yes*/)
+	ok, err := confirmRestore(context.Background(), p, target, backup, "20260101T000000.000000000Z", true /*yes*/, false /*jsonOut*/)
 	require.NoError(t, err)
 	assert.True(t, ok, "--yes must auto-confirm restore")
+}
+
+// TestBackupRestoreJSON_FailsClosed asserts that confirmRestore with --json set
+// never prompts and fails closed with errMissingInput — a destructive restore
+// must not render a huh confirm into the machine-readable JSON stream. Without
+// --yes, --json must decline regardless of TTY state.
+func TestBackupRestoreJSON_FailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "cfg.conf")
+	backup := filepath.Join(dir, "cfg.conf.bak.20260101T000000.000000000Z")
+	require.NoError(t, os.WriteFile(target, []byte("live content\n"), 0o600))
+	require.NoError(t, os.WriteFile(backup, []byte("backup content\n"), 0o600))
+
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	ok, err := confirmRestore(context.Background(), p, target, backup, "20260101T000000.000000000Z", false /*yes*/, true /*jsonOut*/)
+	require.Error(t, err, "--json without --yes must fail closed with errMissingInput, not prompt")
+	assert.Contains(t, err.Error(), "--yes")
+	assert.False(t, ok, "--json must decline the restore")
 }
 
 // TestRestoreDiff_ContainsSha256 asserts that the diff preview includes SHA-256
