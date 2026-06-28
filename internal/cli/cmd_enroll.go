@@ -981,7 +981,7 @@ func printDeviceBundle(p Printer, out io.Writer, jsonOut bool, b *device.Bundle,
 		title += "  (rotated — the previous credentials are now INVALID)"
 	}
 	printerInfo(p, "")
-	printerInfo(p, "┌─────────────────────────────────────────────────────────────────┐")
+	printerInfo(p, "┌"+ruleN(65)+"┐")
 	printerInfo(p, title)
 	printerInfo(p, "│  Shown ONCE — store these in your phone's SSH client / shortcut NOW.")
 	printerInfo(p, "│  Abysslink never writes them to disk; they cannot be shown again.")
@@ -1014,7 +1014,7 @@ func printDeviceBundle(p Printer, out io.Writer, jsonOut bool, b *device.Bundle,
 	printerInfo(p, "│")
 	printerInfo(p, "│  CA public key (for sshd TrustedUserCAKeys — also via `abysslink device ca`):")
 	printerInfo(p, "│    "+b.CAPublicKeyAuthorizedKey)
-	printerInfo(p, "└─────────────────────────────────────────────────────────────────┘")
+	printerInfo(p, "└"+ruleN(65)+"┘")
 	printerInfo(p, "")
 
 	if showQR {

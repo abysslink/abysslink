@@ -78,6 +78,19 @@ func hrule() string {
 	return strings.Repeat("─", max(1, boxWidth()-2))
 }
 
+// ruleN returns a horizontal rule of n "─" columns, shrunk to the terminal
+// width (minus 2) when the terminal is narrower than n. Used for fixed boxes
+// that are intentionally wider than boxWidth() — e.g. the device-credential
+// bundle, which must hold full SSH keys — so their top/bottom frame does not
+// overflow a narrow phone terminal. On a non-TTY (pipe/CI/tests) the size probe
+// fails and the full n is kept, so captures stay byte-stable.
+func ruleN(n int) string {
+	if w, _, err := cterm.GetSize(os.Stdout.Fd()); err == nil && w > 2 && w-2 < n {
+		n = w - 2
+	}
+	return strings.Repeat("─", max(1, n))
+}
+
 // truncCell truncates s to at most maxCols display columns, appending an
 // ellipsis when it overflows, so a long value (e.g. a backup path or hostname)
 // never shears the next column of a fixed-width %-Ns table. maxCols <= 1 returns
