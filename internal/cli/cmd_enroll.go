@@ -620,32 +620,56 @@ func enrollWithAdminKey(ctx context.Context, p Printer, out io.Writer, jsonOut b
 	printerInfo(p, "2. In the Tailscale app choose \"Sign in with auth key\" and scan:")
 	printQR(p, out, jsonOut, "tailscale-auth-key", key)
 	printerInfo(p, "")
-	printerInfo(p, "Waiting for the phone to join the tailnet (up to 2 minutes)...")
 
-	deadline := time.Now().Add(2 * time.Minute)
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(3 * time.Second):
-		}
-		devices, derr := admin.Devices(ctx)
-		if derr != nil {
-			continue
-		}
-		for _, d := range devices {
-			for _, t := range d.Tags {
-				if t == tag {
-					printerInfo(p, styleSuccess.Render(fmt.Sprintf("Phone joined: %s (%s)", d.Name, t)))
-					return nil
+	// Poll for the phone to appear, showing animated liveness on a TTY instead of
+	// a frozen "Waiting..." line that looked hung for two minutes (T-029). The
+	// poll runs as the spinner's work func; it must not print the join result
+	// itself (that would corrupt the spinner render), so it stores the result and
+	// the caller prints after the spinner stops. Per-poll admin.Devices errors are
+	// no longer silently swallowed — the last one is surfaced in the timeout
+	// message so a wholly-unreachable admin API is distinguishable from a phone
+	// that simply has not joined yet.
+	var joined string
+	var lastPollErr error
+	pollErr := spinWork(ctx, p, "Waiting for the phone to join the tailnet (up to 2 minutes)...", func(ctx context.Context) error {
+		deadline := time.Now().Add(2 * time.Minute)
+		for time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+			devices, derr := admin.Devices(ctx)
+			if derr != nil {
+				lastPollErr = derr
+				continue
+			}
+			lastPollErr = nil
+			for _, d := range devices {
+				for _, t := range d.Tags {
+					if t == tag {
+						joined = fmt.Sprintf("%s (%s)", d.Name, t)
+						return nil
+					}
 				}
 			}
 		}
+		if lastPollErr != nil {
+			return fmt.Errorf("timed out after 2 minutes — the admin API was not responding (last error: %w)", lastPollErr)
+		}
+		return errors.New("timed out after 2 minutes")
+	})
+	if pollErr != nil {
+		if errors.Is(pollErr, context.Canceled) || errors.Is(pollErr, context.DeadlineExceeded) {
+			return pollErr
+		}
+		// CLI: a join-poll timeout must exit non-zero — automation believing the
+		// enrollment succeeded would skip the manual follow-up entirely.
+		printerInfo(p, styleWarn.Render("Timed out waiting for the phone. Re-run `abysslink doctor` once it has joined."))
+		return fmt.Errorf("enroll: %w — scan the auth-key QR and re-run `abysslink doctor` once it has joined", pollErr)
 	}
-	// CLI: a join-poll timeout must exit non-zero — automation believing the
-	// enrollment succeeded would skip the manual follow-up entirely.
-	printerInfo(p, styleWarn.Render("Timed out waiting for the phone. Re-run `abysslink doctor` once it has joined."))
-	return fmt.Errorf("timed out waiting for the phone to join the tailnet after 2 minutes — scan the auth-key QR and re-run `abysslink doctor` once it has joined")
+	printerInfo(p, styleSuccess.Render("Phone joined: "+joined))
+	return nil
 }
 
 // printNtfyQR shows a QR for the ntfy subscription URL when the tailnet IP is

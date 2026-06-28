@@ -526,9 +526,9 @@ func startTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner, p
 		return fmt.Errorf("init: tailscaled is required; start it then re-run `abysslink init`")
 	}
 
-	printerInfo(p, fmt.Sprintf("  %s  Starting tailscaled...", iconSpinStr()))
-
-	if err := doStartTailscaleDaemon(ctx, runner, plat); err != nil {
+	if err := spinWork(ctx, p, "Starting tailscaled...", func(ctx context.Context) error {
+		return doStartTailscaleDaemon(ctx, runner, plat)
+	}); err != nil {
 		// Non-fatal: print the actual error + guidance and continue.
 		printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render("Could not start daemon automatically: "+err.Error()))
 		printerInfo(p, "  "+styleMuted.Render("  macOS:  brew services restart tailscale"))
@@ -537,8 +537,12 @@ func startTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner, p
 		return nil
 	}
 
-	printerInfo(p, fmt.Sprintf("  %s  Waiting for tailscaled...", iconSpinStr()))
-	if !waitForDaemon(ctx, runner) {
+	var daemonReady bool
+	_ = spinWork(ctx, p, "Waiting for tailscaled...", func(ctx context.Context) error {
+		daemonReady = waitForDaemon(ctx, runner)
+		return nil
+	})
+	if !daemonReady {
 		printerInfo(p, "  "+iconWarnStr()+"  "+styleMuted.Render("Daemon did not respond within 15s — check with: tailscale status"))
 		return nil
 	}
@@ -611,8 +615,9 @@ func installTool(ctx context.Context, p Printer, runner shell.Runner, plat platf
 		return fmt.Errorf("init: %s is required — aborting", t.name)
 	}
 
-	printerInfo(p, fmt.Sprintf("  %s  Installing %s...", iconSpinStr(), t.name))
-	if err := plat.InstallPackage(ctx, t.pkg); err != nil {
+	if err := spinWork(ctx, p, fmt.Sprintf("Installing %s...", t.name), func(ctx context.Context) error {
+		return plat.InstallPackage(ctx, t.pkg)
+	}); err != nil {
 		return fmt.Errorf("init: install %s: %w", t.name, err)
 	}
 

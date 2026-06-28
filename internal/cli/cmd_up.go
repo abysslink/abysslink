@@ -654,8 +654,12 @@ func requireTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner)
 		printerInfo(p, "  "+iconWarnStr()+"  start command failed: "+styleMuted.Render(startErr.Error()))
 	}
 
-	printerInfo(p, "  "+iconSpinStr()+"  Waiting for tailscaled...")
-	if !waitForDaemon(ctx, runner) {
+	var daemonReady bool
+	_ = spinWork(ctx, p, "Waiting for tailscaled...", func(ctx context.Context) error {
+		daemonReady = waitForDaemon(ctx, runner)
+		return nil
+	})
+	if !daemonReady {
 		// Show the actual tailscale status output so the user can see why.
 		if diag, diagErr := runner.Run(ctx, "tailscale", "status"); diagErr == nil && diag.Stderr != "" {
 			printerInfo(p, "  "+styleMuted.Render("tailscale status: "+strings.TrimSpace(diag.Stderr)))
