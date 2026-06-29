@@ -31,13 +31,12 @@ import (
 )
 
 // tailscaleStatus is the subset of `tailscale status --json` we care about.
+// NOTE: SSH-enabled state is deliberately NOT read from here — `tailscale status`
+// exposes no RunSSH field, and Self.Capabilities always lists the tailnet-granted
+// ".../cap/ssh" capability whether or not the SSH server is running. Tailscale
+// SSH state is read from the RunSSH pref instead (see tailscaleRunSSH).
 type tailscaleStatus struct {
 	BackendState string `json:"BackendState"`
-	Self         struct {
-		Capabilities []string `json:"Capabilities"`
-	} `json:"Self"`
-	// SSH is reported under the "ssh" capability or TailscaleSSH field.
-	TailscaleSSH bool `json:"TailscaleSSH"`
 }
 
 // Module implements the tailscale module.
@@ -114,14 +113,37 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		})
 	}
 
-	findings = append(findings, m.sshFindings(&status, sandboxed)...)
+	findings = append(findings, m.sshFindings(ctx, sandboxed)...)
 
 	return findings, nil
 }
 
+// tailscaleRunSSH reports whether Tailscale SSH is ACTUALLY enabled on this node,
+// read from the RunSSH preference (`tailscale debug prefs`). This is the only
+// reliable signal: `tailscale status --json` exposes no SSH-running field, and
+// the node's Capabilities list ALWAYS carries the tailnet-granted ".../cap/ssh"
+// whether or not the SSH server runs. Detecting from status therefore false-
+// greened ("SSH enabled" for every node), so `up --apply` never ran
+// `tailscale set --ssh` and the rig was left with NO SSH listener — every
+// phone connect got "connection refused". A probe failure returns false so
+// Apply idempotently (re-)runs `tailscale set --ssh`.
+func (m *Module) tailscaleRunSSH(ctx context.Context) bool {
+	res, err := m.runner.Run(ctx, "tailscale", "debug", "prefs")
+	if err != nil || res.ExitCode != 0 {
+		return false
+	}
+	var prefs struct {
+		RunSSH bool `json:"RunSSH"`
+	}
+	if json.Unmarshal([]byte(res.Stdout), &prefs) != nil {
+		return false
+	}
+	return prefs.RunSSH
+}
+
 // sshFindings reports whether Tailscale SSH is enabled for the current config,
 // accounting for sandboxed GUI builds that cannot run the SSH server.
-func (m *Module) sshFindings(status *tailscaleStatus, sandboxed bool) []modules.Finding {
+func (m *Module) sshFindings(ctx context.Context, sandboxed bool) []modules.Finding {
 	if !m.cfg.Tailnet.SSH {
 		return nil
 	}
@@ -133,13 +155,10 @@ func (m *Module) sshFindings(status *tailscaleStatus, sandboxed bool) []modules.
 			Message:  "Tailscale SSH is not available in the sandboxed GUI build; install the CLI: brew install tailscale",
 		}}
 	}
-	if status.TailscaleSSH {
+	// Enabled iff the RunSSH pref is actually set (status/capabilities are not a
+	// valid signal — see tailscaleRunSSH).
+	if m.tailscaleRunSSH(ctx) {
 		return nil
-	}
-	for _, capability := range status.Self.Capabilities {
-		if strings.Contains(capability, "ssh") {
-			return nil
-		}
 	}
 	return []modules.Finding{{
 		Module:   m.Name(),

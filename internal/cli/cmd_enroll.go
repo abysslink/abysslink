@@ -887,6 +887,7 @@ type deviceBundleRecord struct {
 	SSHCommand       string `json:"ssh_command,omitempty"`
 	MoshCommand      string `json:"mosh_command,omitempty"`
 	SSHPrivateKeyPEM string `json:"ssh_private_key_pem"`
+	SSHPublicKey     string `json:"ssh_public_key,omitempty"`
 	SSHCertificate   string `json:"ssh_certificate"`
 	SSHHost          string `json:"ssh_host,omitempty"`
 	SSHUser          string `json:"ssh_user,omitempty"`
@@ -1060,6 +1061,7 @@ func newDeviceBundleRecord(b *device.Bundle, rotated bool, conn sshConnInfo) dev
 		SSHHost:          conn.Host,
 		SSHUser:          conn.User,
 		SSHPrivateKeyPEM: b.SSHPrivateKeyPEM,
+		SSHPublicKey:     b.SSHPublicKeyAuthorizedKey,
 		SSHCertificate:   b.SSHCertAuthorizedKey,
 		Bearer:           b.Bearer,
 		PushToken:        b.PushToken,

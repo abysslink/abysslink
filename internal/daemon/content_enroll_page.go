@@ -51,6 +51,7 @@ var enrollFieldLabel = map[string]string{ //nolint:gochecknoglobals // static la
 	"bearer":              "Bearer token",
 	"push_token":          "Push token",
 	"ssh_private_key_pem": "SSH private key",
+	"ssh_public_key":      "Public Key",
 	"ssh_certificate":     "SSH certificate",
 	"ca_public_key":       "CA public key",
 	"cert_not_after":      "Cert expires",
@@ -70,6 +71,7 @@ var enrollFieldFile = map[string]string{ //nolint:gochecknoglobals // static fil
 // page reads as a fill-in guide rather than an undifferentiated value dump.
 var enrollFieldNote = map[string]string{ //nolint:gochecknoglobals // static hint lookup
 	"ssh_private_key_pem": `Paste into the "Private Key" field (required). Or tap Download and import the file.`,
+	"ssh_public_key":      `Leave the "Public Key" field empty — the certificate already carries this. Shown here only for reference.`,
 	"ssh_certificate":     `Paste into the "Certificate" field. Required — it authorises the key for login.`,
 	"ssh_host":            `Host / Address of the rig.`,
 	"ssh_user":            `Username to log in as.`,
@@ -90,9 +92,10 @@ type enrollPageField struct {
 	ID    string // DOM id (f0, f1, …) — server-controlled, never user data
 	Label string
 	Value string
-	File  string // download filename; empty = no Download button
-	Note  string // hint shown under the value (what it is / where it goes)
-	Guide bool   // true = label + note only (no value, no Copy/Download)
+	File   string // download filename; empty = no Download button
+	Note   string // hint shown under the value (what it is / where it goes)
+	Guide  bool   // true = label + note only (no value, no Copy/Download)
+	NoCopy bool   // true = show the value (read-only) but no Copy/Download buttons
 }
 
 // enrollSection groups rows under a titled heading so the SSH-key import fields
@@ -240,10 +243,20 @@ func buildEnrollSections(fields []enrollPageField) []enrollSection {
 		Note:  "A name for this key in your SSH app. Copy this suggestion or type your own.",
 	}}
 	keyFields = append(keyFields, take("ssh_private_key_pem")...)
-	keyFields = append(keyFields, enrollPageField{
-		Guide: true, Label: `"Public Key"`,
-		Note: "Leave empty — the certificate already carries the public key.",
-	})
+	// Public Key: show the value (read-only, no Copy) so it's visible for
+	// reference, with the note that Termius's field stays empty. Falls back to a
+	// guidance row when an older daemon's bundle carries no public key.
+	if pk, ok := byKey["ssh_public_key"]; ok {
+		pk.Note = enrollFieldNote["ssh_public_key"]
+		pk.NoCopy = true
+		keyFields = append(keyFields, pk)
+		used["ssh_public_key"] = true
+	} else {
+		keyFields = append(keyFields, enrollPageField{
+			Guide: true, Label: `"Public Key"`,
+			Note: "Leave empty — the certificate already carries the public key.",
+		})
+	}
 	keyFields = append(keyFields, enrollPageField{
 		Guide: true, Label: `"Passphrase"`,
 		Note: "Leave empty — this key has no passphrase.",
@@ -433,7 +446,7 @@ section.guide h2{color:#7d8794}
 <div class="sectitle">{{.Title}}</div>{{if .Lead}}
 <div class="lead">{{.Lead}}</div>{{end}}
 {{range .Fields}}<section{{if .Guide}} class="guide"{{end}}>
-<div class="row"><h2>{{.Label}}</h2>{{if not .Guide}}<span class="btns">
+<div class="row"><h2>{{.Label}}</h2>{{if and (not .Guide) (not .NoCopy)}}<span class="btns">
 <button onclick="cp('{{.ID}}',this)">Copy</button>{{if .File}}
 <button class="sec" onclick="dl('{{.ID}}','{{.File}}')">Download</button>{{end}}
 </span>{{end}}</div>{{if not .Guide}}

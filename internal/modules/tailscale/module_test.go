@@ -134,33 +134,37 @@ func TestFunnelOK(t *testing.T) {
 }
 
 func TestSSHFindings(t *testing.T) {
-	m := newTestModule()
+	ctx := context.Background()
 
-	// SSH disabled in config → no finding.
+	// SSH disabled in config → no finding (and no prefs probe).
 	mDisabled := New(modules.Deps{Cfg: config.Defaults()})
 	mDisabled.cfg.Tailnet.SSH = false
-	assert.Empty(t, mDisabled.sshFindings(&tailscaleStatus{}, false))
+	assert.Empty(t, mDisabled.sshFindings(ctx, false))
 
-	// Sandboxed GUI build → ssh_sandboxed.
-	got := m.sshFindings(&tailscaleStatus{}, true)
+	// Sandboxed GUI build → ssh_sandboxed (returns before the prefs probe).
+	got := newTestModule().sshFindings(ctx, true)
 	if assert.Len(t, got, 1) {
 		assert.Equal(t, "ssh_sandboxed", got[0].Check)
 	}
 
-	// SSH already enabled (TailscaleSSH true) → no finding.
-	assert.Empty(t, m.sshFindings(&tailscaleStatus{TailscaleSSH: true}, false))
+	// RunSSH pref TRUE → Tailscale SSH actually enabled → no finding.
+	mOn := newTestModule(shell.Call{Result: shell.Result{Stdout: `{"RunSSH": true}`, ExitCode: 0}})
+	assert.Empty(t, mOn.sshFindings(ctx, false))
 
-	// SSH capability present → no finding.
-	st := &tailscaleStatus{}
-	st.Self.Capabilities = []string{"https://tailscale.com/cap/ssh"}
-	assert.Empty(t, m.sshFindings(st, false))
-
-	// SSH wanted but absent → ssh finding.
-	got = m.sshFindings(&tailscaleStatus{}, false)
+	// RunSSH pref FALSE → SSH wanted but not enabled → ssh finding. This is the
+	// regression guard: a node ALWAYS carries the ".../cap/ssh" capability, so
+	// the old capability-based detection false-greened here (rig left with no
+	// SSH listener → "connection refused" on every phone connect).
+	mOff := newTestModule(shell.Call{Result: shell.Result{Stdout: `{"RunSSH": false}`, ExitCode: 0}})
+	got = mOff.sshFindings(ctx, false)
 	if assert.Len(t, got, 1) {
 		assert.Equal(t, "ssh", got[0].Check)
 		assert.Equal(t, modules.SeverityWarning, got[0].Severity)
 	}
+
+	// prefs probe fails → treated as not-enabled so Apply (idempotently) re-enables.
+	mErr := newTestModule(shell.Call{Err: errors.New("prefs unavailable")})
+	assert.Len(t, mErr.sshFindings(ctx, false), 1)
 }
 
 // TestFunnelProbeFailure verifies WR-02: exec error on "tailscale funnel status"
