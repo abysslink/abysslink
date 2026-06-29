@@ -65,17 +65,48 @@ var enrollFieldFile = map[string]string{ //nolint:gochecknoglobals // static fil
 	"ssh_certificate":     "abysslink_phone-cert.pub",
 }
 
-// enrollPageField is one rendered credential row.
+// enrollFieldNote maps bundle keys to a short hint telling the user EXACTLY where
+// each value goes in a phone SSH client (Termius "Paste Key" / Blink), so the
+// page reads as a fill-in guide rather than an undifferentiated value dump.
+var enrollFieldNote = map[string]string{ //nolint:gochecknoglobals // static hint lookup
+	"ssh_private_key_pem": `Paste into the "Private Key" field (required). Or tap Download and import the file.`,
+	"ssh_certificate":     `Paste into the "Certificate" field. Required — it authorises the key for login.`,
+	"ssh_host":            `Host / Address of the rig.`,
+	"ssh_user":            `Username to log in as.`,
+	"ssh_port":            `Port (default 22).`,
+	"ssh_command":         `Ready-to-run: paste into any terminal SSH app to connect.`,
+	"mosh_command":        `Roaming connection (survives Wi-Fi/cellular changes) that reattaches your tmux session.`,
+	"bearer":              `For the abysslink notify app only — NOT your SSH client.`,
+	"push_token":          `For the abysslink notify app only — NOT your SSH client.`,
+	"ca_public_key":       `Server-side only: goes in sshd TrustedUserCAKeys on the rig. You don't need this on the phone.`,
+	"cert_not_after":      `Your access stops working on this date — re-enroll before then.`,
+	"device":              `The device name these credentials were minted for.`,
+}
+
+// enrollPageField is one rendered credential row. Guide rows (Guide=true) carry
+// only a Label + Note (e.g. "leave empty") with no value/buttons.
 type enrollPageField struct {
+	Key   string // bundle key — used for ordering/notes; never rendered
 	ID    string // DOM id (f0, f1, …) — server-controlled, never user data
 	Label string
 	Value string
 	File  string // download filename; empty = no Download button
+	Note  string // hint shown under the value (what it is / where it goes)
+	Guide bool   // true = label + note only (no value, no Copy/Download)
+}
+
+// enrollSection groups rows under a titled heading so the SSH-key import fields
+// (Termius "Paste Key" order) are visually separated from connection details,
+// the notify-app tokens, and advanced server-side material.
+type enrollSection struct {
+	Title  string
+	Lead   string // optional one-line description under the title
+	Fields []enrollPageField
 }
 
 // enrollPageData is the template payload.
 type enrollPageData struct {
-	Fields []enrollPageField
+	Sections []enrollSection
 }
 
 var enrollPageTmpl = template.Must(template.New("enroll").Parse(enrollPageHTML)) //nolint:gochecknoglobals // compiled-once template
@@ -167,7 +198,108 @@ func writeEnrollHTML(w http.ResponseWriter, bundleJSON string) error {
 		return err
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	return enrollPageTmpl.Execute(w, enrollPageData{Fields: fields})
+	return enrollPageTmpl.Execute(w, enrollPageData{Sections: buildEnrollSections(fields)})
+}
+
+// buildEnrollSections arranges the parsed bundle rows into the SSH-client import
+// flow: the key-import fields first in the exact Termius "Paste Key" order
+// (Label → Private Key → Public Key → Passphrase → Certificate), then the
+// connection details, then the notify-app tokens, then advanced server-side
+// material. It attaches per-field notes and synthesises the guidance rows for
+// the fields the user must leave empty. Any bundle key not placed by the spec is
+// appended under "Advanced" so the page stays decoupled from the bundle shape
+// (a newly-added bundle field still renders).
+func buildEnrollSections(fields []enrollPageField) []enrollSection {
+	byKey := make(map[string]enrollPageField, len(fields))
+	for _, f := range fields {
+		byKey[f.Key] = f
+	}
+	used := make(map[string]bool)
+	take := func(keys ...string) []enrollPageField {
+		var out []enrollPageField
+		for _, k := range keys {
+			if f, ok := byKey[k]; ok {
+				f.Note = enrollFieldNote[k]
+				out = append(out, f)
+				used[k] = true
+			}
+		}
+		return out
+	}
+
+	var sections []enrollSection
+
+	// 1 — SSH key import, in the phone client's own field order so the user can
+	// go straight down the screen. Real values (private key, certificate) are
+	// Copy/Download rows; the Label is a copyable suggestion; Public Key and
+	// Passphrase are guidance rows that say to leave them empty.
+	keyFields := []enrollPageField{{
+		ID:    "lbl",
+		Label: `"Label" — any name`,
+		Value: enrollSuggestedLabel(byKey),
+		Note:  "A name for this key in your SSH app. Copy this suggestion or type your own.",
+	}}
+	keyFields = append(keyFields, take("ssh_private_key_pem")...)
+	keyFields = append(keyFields, enrollPageField{
+		Guide: true, Label: `"Public Key"`,
+		Note: "Leave empty — the certificate already carries the public key.",
+	})
+	keyFields = append(keyFields, enrollPageField{
+		Guide: true, Label: `"Passphrase"`,
+		Note: "Leave empty — this key has no passphrase.",
+	})
+	keyFields = append(keyFields, take("ssh_certificate")...)
+	sections = append(sections, enrollSection{
+		Title:  "1 · Import the key into your SSH app",
+		Lead:   `Termius / Blink → add a key ("Paste Key"), then fill its fields top to bottom:`,
+		Fields: keyFields,
+	})
+
+	// 2 — Connection details / ready-to-run commands.
+	if conn := take("ssh_host", "ssh_user", "ssh_port", "ssh_command", "mosh_command"); len(conn) > 0 {
+		sections = append(sections, enrollSection{
+			Title:  "2 · Connect to the rig",
+			Lead:   "Add a host with these fields, or just run one of the commands.",
+			Fields: conn,
+		})
+	}
+
+	// 3 — Notify-app tokens (explicitly NOT the SSH client).
+	if notify := take("bearer", "push_token"); len(notify) > 0 {
+		sections = append(sections, enrollSection{
+			Title:  "3 · Notify app (optional)",
+			Lead:   "Only for the abysslink phone-notification app — your SSH client does not need these.",
+			Fields: notify,
+		})
+	}
+
+	// 4 — Advanced + any unrecognised bundle keys (decoupling).
+	adv := take("ca_public_key", "cert_not_after", "device", "rotated", "warning")
+	for _, f := range fields {
+		if !used[f.Key] {
+			f.Note = enrollFieldNote[f.Key]
+			adv = append(adv, f)
+			used[f.Key] = true
+		}
+	}
+	if len(adv) > 0 {
+		sections = append(sections, enrollSection{Title: "Advanced", Fields: adv})
+	}
+
+	return sections
+}
+
+// enrollSuggestedLabel builds a friendly default name for the imported key from
+// the device name and rig host, e.g. "abysslink phone (rig.tailnet.ts.net)".
+func enrollSuggestedLabel(byKey map[string]enrollPageField) string {
+	dev := byKey["device"].Value
+	if dev == "" {
+		dev = "phone"
+	}
+	if host := byKey["ssh_host"].Value; host != "" {
+		return "abysslink " + dev + " (" + host + ")"
+	}
+	return "abysslink " + dev
 }
 
 // parseOrderedEnrollFields decodes a flat JSON object into label/value rows in
@@ -199,6 +331,7 @@ func parseOrderedEnrollFields(raw string) ([]enrollPageField, error) {
 			label = key
 		}
 		fields = append(fields, enrollPageField{
+			Key:   key,
 			ID:    "f" + strconv.Itoa(i),
 			Label: label,
 			Value: stringifyEnrollValue(val),
@@ -288,17 +421,26 @@ button{background:#1f6feb;color:#fff;border:0;border-radius:7px;padding:7px 12px
 button.sec{background:#21262d;color:#c9d1d9;border:1px solid #30363d}
 button:active{opacity:.7}
 pre.val{margin:0;background:#11161f;border:1px solid #222b38;border-radius:8px;padding:10px 12px;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-all;-webkit-user-select:all;user-select:all}
+.sectitle{font-size:12px;font-weight:700;color:#cfd6df;margin:22px 0 2px;letter-spacing:.03em}
+.lead{font-size:12px;color:#7d8794;margin:0 0 12px}
+.note{font-size:12px;color:#8b95a3;margin:5px 0 0}
+section.guide{background:#0e1320;border:1px dashed #2a3342;border-radius:8px;padding:8px 12px}
+section.guide h2{color:#7d8794}
 </style></head><body>
 <h1>Device credentials</h1>
 <div class="warn">Shown once — copy what you need now. This page cannot be reloaded (the link is single-use and already consumed).</div>
-{{range .Fields}}<section>
-<div class="row"><h2>{{.Label}}</h2><span class="btns">
+{{range .Sections}}
+<div class="sectitle">{{.Title}}</div>{{if .Lead}}
+<div class="lead">{{.Lead}}</div>{{end}}
+{{range .Fields}}<section{{if .Guide}} class="guide"{{end}}>
+<div class="row"><h2>{{.Label}}</h2>{{if not .Guide}}<span class="btns">
 <button onclick="cp('{{.ID}}',this)">Copy</button>{{if .File}}
 <button class="sec" onclick="dl('{{.ID}}','{{.File}}')">Download</button>{{end}}
-</span></div>
-<pre class="val" id="{{.ID}}">{{.Value}}</pre>
+</span>{{end}}</div>{{if not .Guide}}
+<pre class="val" id="{{.ID}}">{{.Value}}</pre>{{end}}{{if .Note}}
+<div class="note">{{.Note}}</div>{{end}}
 </section>
-{{end}}
+{{end}}{{end}}
 <script>
 function cp(id,b){var t=document.getElementById(id).textContent;
 function ok(){var o=b.textContent;b.textContent='Copied';setTimeout(function(){b.textContent=o},1200)}
