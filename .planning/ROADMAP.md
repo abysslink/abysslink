@@ -913,6 +913,8 @@ merged/pushed. Detail: `.planning/phases/35.1-tui-migration-and-hardening/`.
 - [x] B6 fleet-cell colour, repair outcome icons, sub-heading accents (`a2a1d7b`, `f7c08a7`).
 - [x] Verify (workflow): `.planning/audits/TUI_MIGRATION_VERIFY.md` — SHIP-SAFE; 1 MED + 11 LOW fixed (`c184548`, `63f44b5`).
 
-**Deferred (documented, not regressions):** server\* provisioning step-spinners (complex audited flow, infrequent admin cmd); lock-rotate runbook glamour; audit-command branding.
+**Server health-check spinners done** (`45145de`): the long up-to-30s provisioning health poll in `server headscale/netbird init` now animates via spinWork.
+
+**Deferred (documented, not regressions):** server provisioning *per-step* spinners (audited install/systemd/config steps stay static — touch the audited write path/sudo; the long wait is now animated); lock-rotate runbook glamour; audit-command branding.
 
 **Crash note (2026-06-29):** mid-B5 laptop crash — 0 work lost (staged/committed intact; only ssh-agent cleared). Resumed cleanly.
