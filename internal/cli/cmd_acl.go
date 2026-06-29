@@ -101,6 +101,11 @@ func newACLPushCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			mode := styleMuted.Render("converge tailnet ACL")
+			if !cc.apply {
+				mode = styleWarn.Render("preview only — run with --apply to make changes")
+			}
+			commandHeader(p, "acl push", mode)
 
 			// CLI-01: acl push mutates the tailnet ACL (or writes the generated
 			// policy file + clipboard + browser in manual mode). Dry-run is the
@@ -159,6 +164,7 @@ func newACLValidateCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			commandHeader(p, "acl validate", styleMuted.Render("check tailnet ACL"))
 			// NetBird's ACL editor primitives are no-ops, so convergeACL would never
 			// modify the policy and validate would falsely certify "contains
 			// abysslink's required rules". Be honest: the Tailscale ACL contract does

@@ -56,6 +56,7 @@ func newRotateAnthropicCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			commandHeader(p, "rotate anthropic-key", styleMuted.Render("rotate the Anthropic API key"))
 
 			if cc.dryRun {
 				printerInfo(p, "[plan] open the Anthropic console, read the new key from "+newAnthropicKeyEnv+
@@ -127,6 +128,7 @@ func newRotateNtfyCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			commandHeader(p, "rotate ntfy-creds", styleMuted.Render("rotate the ntfy admin password"))
 
 			if cc.dryRun {
 				printerInfo(p, "[plan] generate a new ntfy admin password, update ntfy + the keychain, and reload the service. Re-run with --apply.")

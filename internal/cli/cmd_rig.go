@@ -175,9 +175,11 @@ func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
 		return nil
 	}
 
-	// Header.
+	// Branded title + muted column header, matching `device ls` (TUI-migration L6).
+	_, _ = fmt.Fprintln(out, styleTitle.Render("Enrolled rigs"))
+	_, _ = fmt.Fprintln(out, "")
 	hdr := fmt.Sprintf("  %-20s %-30s %-12s %-25s", "NAME", "HOSTNAME", "BACKEND", "LAST SEEN")
-	_, _ = fmt.Fprintln(out, styleBold.Render(hdr))
+	_, _ = fmt.Fprintln(out, styleMuted.Render(hdr))
 	_, _ = fmt.Fprintln(out, styleMuted.Render("  "+repeatStr("─", 87)))
 
 	for _, r := range records {

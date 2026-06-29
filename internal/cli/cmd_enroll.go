@@ -448,7 +448,7 @@ func newEnrollCmd() *cobra.Command {
 
 			hostname, _ := b.Hostname(ctx)
 
-			printerInfo(p, styleBold.Render("Enroll rig: "+args[0]))
+			printerInfo(p, styleTitle.Render("Enroll rig: "+args[0]))
 			if cc.dryRun {
 				printerInfo(p, styleMuted.Render("Dry-run mode — no changes will be made. Use --apply to execute."))
 			}
@@ -500,7 +500,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 			p := newPrinter(cmd)
 			tag := "tag:" + cc.cfg.Mobile.Tag
 
-			printerInfo(p, styleBold.Render("Enroll phone"))
+			printerInfo(p, styleTitle.Render("Enroll phone"))
 
 			// CLI-30: `enroll phone` mints a pre-authorized tailnet auth key and
 			// writes a runbook file — both are mutations, so the standard

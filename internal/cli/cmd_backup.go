@@ -227,7 +227,7 @@ func restoreDiffPreview(p Printer, target, backupPath, backupLabel string) error
 	}
 
 	printerInfo(p, "")
-	printerInfo(p, styleBold.Render("Restore preview"))
+	printerInfo(p, styleTitle.Render("Restore preview"))
 	printerInfo(p, "")
 
 	if currentMissing {

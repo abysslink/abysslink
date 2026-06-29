@@ -47,6 +47,7 @@ func newLockStatusCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			commandHeader(p, "lock status", styleMuted.Render("tailnet lock"))
 			b, err := cc.backend()
 			if err != nil {
 				return fmt.Errorf("lock status: %w", err)
@@ -85,6 +86,11 @@ func newLockInitCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			mode := styleMuted.Render("initialise tailnet lock")
+			if cc.dryRun {
+				mode = styleWarn.Render("preview only — run with --apply to make changes")
+			}
+			commandHeader(p, "lock init", mode)
 			b, err := cc.backend()
 			if err != nil {
 				return fmt.Errorf("lock init: %w", err)
@@ -198,6 +204,7 @@ func newLockSignCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			commandHeader(p, "lock sign", styleMuted.Render("sign a node key into tailnet lock"))
 			b, err := cc.backend()
 			if err != nil {
 				return fmt.Errorf("lock sign: %w", err)
@@ -227,6 +234,7 @@ func newLockRotateCmd() *cobra.Command {
   abysslink lock rotate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			p := newPrinter(cmd)
+			commandHeader(p, "lock rotate", styleMuted.Render("rotate disablement secrets"))
 			printerInfo(p, "Rotating disablement secrets requires disabling and re-initialising Tailnet Lock:")
 			printerInfo(p, "  1. Disable: tailscale lock disable <one-of-your-disablement-secrets>")
 			printerInfo(p, "  2. Re-init: abysslink lock init --apply   (prints fresh secrets)")
