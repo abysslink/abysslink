@@ -513,82 +513,124 @@ func newEnrollPhoneCmd() *cobra.Command {
 				return nil
 			}
 
-			b, err := cc.backend()
-			if err != nil {
-				return fmt.Errorf("enroll phone: backend init: %w", err)
-			}
-			adminAPI, hasAdmin := b.(backend.AdminAPI)
-			hasCreds := hasAdmin &&
-				cc.cfg.Tailnet.Admin.Tailnet != "" &&
-				cc.cfg.Tailnet.Admin.OAuthClientID != "" &&
-				os.Getenv(oauthSecretEnv) != ""
-
-			printerInfo(p, "")
-			printerInfo(p, stepHeader(1, "Install Tailscale on your phone (scan to open the download page):"))
-			printQR(p, cmd.OutOrStdout(), cc.jsonOut, "tailscale-download", "https://tailscale.com/download")
-			printerInfo(p, "")
-
-			// §6-sanctioned stop point: external action (phone install).
-			// Pause after the install-app QR (step 1) and BEFORE minting/showing
-			// the auth-key QR (step 2). The key-scan and device-join poll are
-			// automated — no stop there (per §6: never for pollable things).
-			autoYes, _ := cmd.Flags().GetBool("yes")
-			if err := enrollPhoneInstallPause(ctx, p, autoYes); err != nil {
-				return err
-			}
-
-			if !hasCreds {
-				// Keep the step number (2) even on the manual path so the
-				// walkthrough reads 1 → 2 → 3, not 1 → 3 (the auth-key step still
-				// happens, just by hand instead of via the admin API).
-				printerInfo(p, stepHeader(2, "Create a single-use, pre-authorized auth key by hand:"))
-				emitNote(p, tui.NoteWarn, "No admin OAuth client configured", []string{
-					"Abysslink can't mint the key automatically.",
-				})
-				printerInfo(p, "   Create a key tagged "+styleCode.Render(tag)+" at:")
-				printerInfo(p, "   "+styleCode.Render("https://login.tailscale.com/admin/settings/keys"))
-				printerInfo(p, "   Then sign in on the phone with that key.")
-			} else if err := enrollWithAdminKey(ctx, p, cmd.OutOrStdout(), cc.jsonOut, adminAPI, tag); err != nil {
-				return fmt.Errorf("enroll phone: %w", err)
-			}
-
-			// ntfy subscription QR (best-effort — needs the tailnet IP).
-			printNtfyQR(ctx, p, cmd.OutOrStdout(), cc, b)
-
-			// DEVC-01/DEVC-02: mint the device credential bundle (bearer, push
-			// token, 90-day SSH cert). A re-enroll of an active "phone" rotates
-			// the existing record instead of failing. The Bundle is printed
-			// ONCE and never persisted anywhere by abysslink.
-			bundle, rotated, mintErr := enrollPhoneDeviceBundle(ctx, cc)
-			if mintErr != nil {
-				return fmt.Errorf("enroll phone: device credentials: %w", mintErr)
-			}
-			showQR, _ := cmd.Flags().GetBool("qr")
-			// Resolve the rig's connection coordinates so the bundle carries
-			// ready-to-paste ssh/mosh commands (no host/user typing on the phone).
-			conn := sshConnInfo{Host: resolveSSHHost(ctx, b), User: currentSSHUser(), Port: 22}
-			// DEVC-07: pull is the DEFAULT. Stage the bundle into the running
-			// daemon and print ONE capability-URL QR; the box always prints, and
-			// any staging failure degrades gracefully (never errors enrollment).
-			offerCredentialPull(ctx, p, cmd.OutOrStdout(), cc.jsonOut, bundle, rotated, showQR, conn)
-
-			// Printable runbook for the remaining manual steps.
-			// §7 note 10 (lock-screen hygiene) fires here alongside the runbook.
-			emitSecurityNote(p, cc.jsonOut, "lock-screen-hygiene") // §7 note 10
-			if path, err := writeRunbook(ctx, cc, bundle.CertNotAfter); err == nil {
-				printerInfo(p, "")
-				printerInfo(p, "Manual steps (SSO passkey, disable SMS 2FA, hide lock-screen previews) are in:")
-				printerInfo(p, "  "+styleCode.Render(path))
-			} else {
-				// CLI-27: never swallow the runbook write failure silently.
-				emitNote(p, tui.NoteWarn, "Could not write the pairing runbook", []string{err.Error()})
-			}
-			return nil
+			return runEnrollPhoneApply(ctx, cmd, cc, p, tag)
 		},
 	}
 	cmd.Flags().Bool("qr", false,
 		"render the device credentials (SSH key, cert, bearer, push token) as scannable QR codes for the phone's camera")
 	return cmd
+}
+
+// runEnrollPhoneApply drives the interactive `enroll phone --apply` walkthrough:
+// a §6 step-by-step wizard that STOPS between each phone-side action (install →
+// create key → subscribe → save credentials) instead of flooding the whole flow
+// out after the first Enter. Extracted from newEnrollPhoneCmd's RunE (and split
+// into per-step helpers) to keep every function under the gocyclo ceiling.
+func runEnrollPhoneApply(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer, tag string) error {
+	b, err := cc.backend()
+	if err != nil {
+		return fmt.Errorf("enroll phone: backend init: %w", err)
+	}
+	adminAPI, _ := b.(backend.AdminAPI)
+	hasCreds := enrollHasAdminCreds(b, cc.cfg)
+	autoYes, _ := cmd.Flags().GetBool("yes")
+
+	// Step 1 — install Tailscale on the phone (external action → §6 stop).
+	printerInfo(p, "")
+	printerInfo(p, stepHeader(1, "Install Tailscale on your phone (scan to open the download page):"))
+	printQR(p, cmd.OutOrStdout(), cc.jsonOut, "tailscale-download", "https://tailscale.com/download")
+	printerInfo(p, "")
+	if err := enrollPhoneInstallPause(ctx, p, autoYes); err != nil {
+		return err
+	}
+
+	// Step 2 — auth key (manual create + sign-in, or admin-API mint + poll).
+	if err := enrollPhoneAuthKeyStep(ctx, cmd, cc, p, adminAPI, hasCreds, tag, autoYes); err != nil {
+		return err
+	}
+
+	// Step 3 — ntfy subscription (external action → §6 stop when the QR shows).
+	if printNtfyQR(ctx, p, cmd.OutOrStdout(), cc, b) {
+		if err := tui.Pause(ctx, "Press Enter once you've subscribed in the ntfy app", autoYes); err != nil {
+			return err
+		}
+	}
+
+	// One-time device credentials + printable runbook (final step).
+	return enrollPhoneCredentialsStep(ctx, cmd, cc, p, b, autoYes)
+}
+
+// enrollHasAdminCreds reports whether an admin OAuth client is fully configured,
+// so the auth key can be minted automatically rather than created by hand.
+func enrollHasAdminCreds(b backend.Client, cfg *config.Config) bool {
+	_, hasAdmin := b.(backend.AdminAPI)
+	return hasAdmin &&
+		cfg.Tailnet.Admin.Tailnet != "" &&
+		cfg.Tailnet.Admin.OAuthClientID != "" &&
+		os.Getenv(oauthSecretEnv) != ""
+}
+
+// enrollPhoneAuthKeyStep renders step 2. With an admin OAuth client it mints a
+// tagged key, shows the QR, and polls for the join (pollable → no manual stop,
+// per §6). Without one it prints the manual key-create instructions and stops on
+// the external create+sign-in action (§6). Body prose is styleMuted to match
+// step 3; only the copy-paste values (tag, URL) keep the styleCode chip.
+func enrollPhoneAuthKeyStep(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer, adminAPI backend.AdminAPI, hasCreds bool, tag string, autoYes bool) error {
+	if hasCreds {
+		if err := enrollWithAdminKey(ctx, p, cmd.OutOrStdout(), cc.jsonOut, adminAPI, tag); err != nil {
+			return fmt.Errorf("enroll phone: %w", err)
+		}
+		return nil
+	}
+	// Keep the step number (2) on the manual path so the walkthrough reads
+	// 1 → 2 → 3, not 1 → 3 (the auth-key step still happens, just by hand).
+	printerInfo(p, "")
+	printerInfo(p, stepHeader(2, "Create a single-use, pre-authorized auth key by hand:"))
+	emitNote(p, tui.NoteWarn, "No admin OAuth client configured", []string{
+		"Abysslink can't mint the key automatically.",
+	})
+	printerInfo(p, styleMuted.Render("   Create a key tagged ")+styleCode.Render(tag)+styleMuted.Render(" at:"))
+	printerInfo(p, "   "+styleCode.Render("https://login.tailscale.com/admin/settings/keys"))
+	printerInfo(p, styleMuted.Render("   Then sign in on the phone with that key."))
+	return tui.Pause(ctx, "Press Enter once you've created the key and signed in on your phone", autoYes)
+}
+
+// enrollPhoneCredentialsStep mints (or rotates) the one-time device credential
+// bundle, prints it ONCE, stops so the user can save it (§6), then writes the
+// printable runbook.
+func enrollPhoneCredentialsStep(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer, b backend.Client, autoYes bool) error {
+	// DEVC-01/DEVC-02: a re-enroll of an active "phone" rotates the existing
+	// record instead of failing. The bundle is printed ONCE, never persisted.
+	bundle, rotated, mintErr := enrollPhoneDeviceBundle(ctx, cc)
+	if mintErr != nil {
+		return fmt.Errorf("enroll phone: device credentials: %w", mintErr)
+	}
+	showQR, _ := cmd.Flags().GetBool("qr")
+	// Resolve the rig's connection coordinates so the bundle carries
+	// ready-to-paste ssh/mosh commands (no host/user typing on the phone).
+	conn := sshConnInfo{Host: resolveSSHHost(ctx, b), User: currentSSHUser(), Port: 22}
+	// DEVC-07: pull is the DEFAULT. Stage the bundle into the running daemon and
+	// print ONE capability-URL QR; the box always prints and any staging failure
+	// degrades gracefully (never errors enrollment).
+	offerCredentialPull(ctx, p, cmd.OutOrStdout(), cc.jsonOut, bundle, rotated, showQR, conn)
+
+	// §6 stop: the credentials above are shown ONCE — hold so the lock-screen
+	// note and runbook path below do not scroll the secrets off-screen first.
+	if err := tui.Pause(ctx, "Press Enter once you've saved these credentials", autoYes); err != nil {
+		return err
+	}
+
+	emitSecurityNote(p, cc.jsonOut, "lock-screen-hygiene") // §7 note 10
+	path, err := writeRunbook(ctx, cc, bundle.CertNotAfter)
+	if err != nil {
+		// CLI-27: never swallow the runbook write failure silently.
+		emitNote(p, tui.NoteWarn, "Could not write the pairing runbook", []string{err.Error()})
+		return nil
+	}
+	printerInfo(p, "")
+	printerInfo(p, "Manual steps (SSO passkey, disable SMS 2FA, hide lock-screen previews) are in:")
+	printerInfo(p, "  "+styleCode.Render(path))
+	return nil
 }
 
 // printEnrollPhonePlan prints the `enroll phone` dry-run plan (no mutations).
@@ -734,9 +776,12 @@ func enrollWithAdminKey(ctx context.Context, p Printer, out io.Writer, jsonOut b
 // re-shelling `tailscale ip`/`tailscale status --json`, so it stays
 // backend-neutral and avoids the fragile hand-rolled JSON line parser (WR-01).
 // The QR is rendered to out (never os.Stdout directly — CLI-17).
-func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, b backend.Client) {
+// printNtfyQR returns true when it actually rendered the subscription step (so
+// the caller can offer a §6 "press Enter once subscribed" stop) and false when
+// the step was skipped (ntfy disabled, no tailnet status, no hostname).
+func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, b backend.Client) bool {
 	if !cc.cfg.Modules.Ntfy.Enabled {
-		return
+		return false
 	}
 	st, err := b.Status(ctx)
 	if err != nil || st.Self == nil {
@@ -744,7 +789,7 @@ func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, 
 			"Could not get tailnet status.",
 		})
 		printerInfo(p, styleMuted.Render("  Run `tailscale up` then re-run `abysslink enroll phone` to get the QR."))
-		return
+		return false
 	}
 
 	// Prefer MagicDNS hostname — survives IP changes. Fall back to the first
@@ -757,7 +802,7 @@ func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, 
 		emitNote(p, tui.NoteWarn, "ntfy subscription QR skipped", []string{
 			"No tailnet hostname or IP available.",
 		})
-		return
+		return false
 	}
 
 	topic := cc.cfg.Modules.Notify.DefaultTopic
@@ -774,6 +819,7 @@ func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, 
 	printerInfo(p, styleMuted.Render("   iPhone:  tap + → enter manually:"))
 	printerInfo(p, fmt.Sprintf("     Server:  http://%s:%d", hostname, port))
 	printerInfo(p, fmt.Sprintf("     Topic:   %s", topic))
+	return true
 }
 
 // enrollPhoneDeviceBundle opens the audited device store and mints (or
