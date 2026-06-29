@@ -18,6 +18,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -222,4 +223,75 @@ func TestRemoveAbysslinkDirs_PurgeRemovesBothDirs(t *testing.T) {
 
 	assert.NoDirExists(t, cfgDir, "config dir must be removed with --purge")
 	assert.NoDirExists(t, stateDir, "state dir must be removed with --purge")
+}
+
+// TestFoldSkipDirs_CollapsesTempFlood asserts that a flood of unique temp-dir
+// paths (the real-world cause of thousands of "skip" lines: each t.TempDir()
+// fixture is its own folder) collapses to a single subtree line, while skips in
+// distinct top-level trees stay separate and counts are exact.
+func TestFoldSkipDirs_CollapsesTempFlood(t *testing.T) {
+	var skips []string
+	for i := range 500 {
+		skips = append(skips, fmt.Sprintf("/var/folders/dh/R/T/TestX%d/001/abysslink.yaml", i))
+	}
+	skips = append(skips,
+		"/tmp/claude-501/a/abysslink.yaml",
+		"/tmp/claude-501/b/abysslink.yaml",
+		"/tmp/loose.yaml",
+	)
+
+	groups := foldSkipDirs(skips, skipFanout)
+
+	total := 0
+	byDir := map[string]int{}
+	for _, g := range groups {
+		total += g.count
+		byDir[g.dir] = g.count
+	}
+	assert.Equal(t, len(skips), total, "folding must preserve the total skip count")
+
+	// The 500-wide temp fan-out collapses to one line at the branching folder.
+	assert.Equal(t, 500, byDir["/var/folders/dh/R/T"], "wide temp fan-out must fold to its subtree root")
+	// A narrow tree (claude-501 has 2 children <= fanout) is NOT collapsed: each
+	// distinct leaf folder is kept so the few real leftovers stay visible.
+	assert.Equal(t, 1, byDir["/tmp/claude-501/a"], "narrow tree leaf folder must be kept")
+	assert.Equal(t, 1, byDir["/tmp/claude-501/b"], "narrow tree leaf folder must be kept")
+	// A loose file directly under /tmp is reported on its own folder line.
+	assert.Equal(t, 1, byDir["/tmp"], "loose file's folder must be reported")
+
+	// First group is the largest (sorted by count desc).
+	require.NotEmpty(t, groups)
+	assert.Equal(t, "/var/folders/dh/R/T", groups[0].dir)
+}
+
+// TestFoldSkipDirs_Empty returns no groups for no skips.
+func TestFoldSkipDirs_Empty(t *testing.T) {
+	assert.Empty(t, foldSkipDirs(nil, skipFanout))
+}
+
+// TestPrintReversePlan_FoldsSkipsKeepsActionable asserts the printed plan lists
+// restore/delete individually but folds skips into a grouped summary.
+func TestPrintReversePlan_FoldsSkipsKeepsActionable(t *testing.T) {
+	plan := []audit.ReverseAction{
+		{Target: "/Users/x/.config/abysslink/abysslink.yaml", Action: "restore"},
+		{Target: "/Users/x/.zshenv", Action: "delete"},
+	}
+	for i := range 50 {
+		plan = append(plan, audit.ReverseAction{
+			Target: fmt.Sprintf("/var/folders/dh/R/T/TestX%d/001/abysslink.yaml", i),
+			Action: "skip",
+		})
+	}
+
+	var out bytes.Buffer
+	p := NewHumanPrinterTo(&out, &out)
+	printReversePlan(p, plan)
+	got := out.String()
+
+	assert.Contains(t, got, "restore  /Users/x/.config/abysslink/abysslink.yaml")
+	assert.Contains(t, got, "delete   /Users/x/.zshenv")
+	assert.Contains(t, got, "50 already-absent target(s)")
+	assert.Contains(t, got, "/var/folders/dh/R/T")
+	// No per-file skip line should leak through.
+	assert.NotContains(t, got, "TestX0/001/abysslink.yaml")
 }

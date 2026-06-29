@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/tui"
@@ -114,24 +116,40 @@ func newUninstallCmd() *cobra.Command {
 	return cmd
 }
 
-// printReversePlan lists the planned reverse actions (restore/delete/skip).
+// printReversePlan lists the planned reverse actions. Actionable actions
+// (restore/delete) are printed one per line; skips (targets already absent —
+// nothing to reverse) are folded by folder so a flood of transient paths reads
+// as a few summary lines instead of one line per file.
 func printReversePlan(p Printer, plan []audit.ReverseAction) {
 	if len(plan) == 0 {
 		printerInfo(p, "  No file mutations recorded in the audit log.")
 		printerInfo(p, "")
 		return
 	}
+	var skips []string
 	for _, a := range plan {
+		if a.Action == "skip" {
+			skips = append(skips, a.Target)
+			continue
+		}
 		printerInfo(p, fmt.Sprintf("  %-8s %s", a.Action, a.Target))
 	}
+	printSkipGroups(p, skips)
 	printerInfo(p, "")
 }
 
 // printReverseManifest prints the result of each reverse action, including the
-// SHA-256 of restored content, and returns the number of failures.
+// SHA-256 of restored content, and returns the number of failures. Skips are
+// folded by folder (see printSkipGroups) so already-absent targets do not flood
+// the output.
 func printReverseManifest(p Printer, manifest []audit.ReverseAction) int {
 	failures := 0
+	var skips []string
 	for _, a := range manifest {
+		if a.Err == nil && a.Action == "skip" {
+			skips = append(skips, a.Target)
+			continue
+		}
 		if a.Err != nil {
 			failures++
 			printerError(p, fmt.Sprintf("  %-8s %s — %v", a.Action, a.Target, a.Err))
@@ -143,8 +161,125 @@ func printReverseManifest(p Printer, manifest []audit.ReverseAction) int {
 		}
 		printerInfo(p, fmt.Sprintf("  %-8s %s  %s", a.Action, a.Target, detail))
 	}
+	printSkipGroups(p, skips)
 	printerInfo(p, "")
 	return failures
+}
+
+// skipFanout is the maximum number of distinct child folders a directory may
+// have before foldSkipDirs collapses its whole subtree into a single summary
+// line. A directory that fans out wider than this (e.g. the OS temp root full
+// of per-test t.TempDir() fixtures) is almost always machine-generated noise.
+const skipFanout = 8
+
+// skipFoldersShown caps how many folded skip folders are listed before the rest
+// are summarised as "… and N more folder(s)".
+const skipFoldersShown = 12
+
+// printSkipGroups renders skipped (already-absent) targets folded by folder so
+// a flood of transient paths reads as a few "<count>  <folder>" lines instead
+// of one line per file. Nothing is printed when there are no skips.
+func printSkipGroups(p Printer, skips []string) {
+	if len(skips) == 0 {
+		return
+	}
+	groups := foldSkipDirs(skips, skipFanout)
+	printerInfo(p, fmt.Sprintf("  %-8s %d already-absent target(s) — nothing to reverse, grouped by folder:",
+		"skip", len(skips)))
+	for i, g := range groups {
+		if i == skipFoldersShown {
+			printerInfo(p, styleMuted.Render(fmt.Sprintf("           … and %d more folder(s)", len(groups)-skipFoldersShown)))
+			break
+		}
+		printerInfo(p, fmt.Sprintf("           %6d  %s", g.count, g.dir))
+	}
+}
+
+// dirGroup is a folder and the number of skipped targets folded under it.
+type dirGroup struct {
+	dir   string
+	count int
+}
+
+// foldSkipDirs groups skip targets into the fewest folders that still keep
+// independent directory subtrees distinct. Single-child directory chains are
+// collapsed, and any folder that fans out into more than maxFanout distinct
+// child folders is summarised as a single subtree line. This turns a flood of
+// unique temp-dir paths (e.g. thousands of t.TempDir() fixtures under the OS
+// temp root) into one "<count>  <folder>" line instead of N lines. Results are
+// sorted by count (desc) then path.
+func foldSkipDirs(targets []string, maxFanout int) []dirGroup {
+	type node struct {
+		children map[string]*node
+		count    int // total files in this subtree
+		direct   int // files whose immediate dir is this node
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	newNode := func() *node { return &node{children: map[string]*node{}} }
+
+	root := newNode()
+	for _, t := range targets {
+		dir := filepath.ToSlash(filepath.Dir(t))
+		n := root
+		n.count++
+		for s := range strings.SplitSeq(dir, "/") {
+			c := n.children[s]
+			if c == nil {
+				c = newNode()
+				n.children[s] = c
+			}
+			n = c
+			n.count++
+		}
+		n.direct++
+	}
+
+	joinDir := func(segs []string) string {
+		if d := strings.Join(segs, "/"); d != "" {
+			return d
+		}
+		return "/"
+	}
+
+	var groups []dirGroup
+	var walk func(n *node, segs []string)
+	walk = func(n *node, segs []string) {
+		// Collapse single-child chains that hold no files of their own.
+		for len(n.children) == 1 && n.direct == 0 {
+			for s, c := range n.children {
+				segs = append(segs, s)
+				n = c
+			}
+		}
+		// Emit one line for a leaf or a wide, machine-generated fan-out.
+		if len(n.children) == 0 || len(n.children) > maxFanout {
+			groups = append(groups, dirGroup{dir: joinDir(segs), count: n.count})
+			return
+		}
+		// Files sitting directly in a branching folder get their own line.
+		if n.direct > 0 {
+			groups = append(groups, dirGroup{dir: joinDir(segs), count: n.direct})
+		}
+		keys := make([]string, 0, len(n.children))
+		for s := range n.children {
+			keys = append(keys, s)
+		}
+		sort.Strings(keys)
+		for _, s := range keys {
+			walk(n.children[s], append(append([]string{}, segs...), s))
+		}
+	}
+	walk(root, nil)
+
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].count != groups[j].count {
+			return groups[i].count > groups[j].count
+		}
+		return groups[i].dir < groups[j].dir
+	})
+	return groups
 }
 
 // removeAbysslinkDirs removes the config dir and the state dir (audit log +
