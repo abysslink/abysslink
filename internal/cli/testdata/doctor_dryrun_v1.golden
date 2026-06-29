@@ -139,6 +139,8 @@
   ────────────────────────────────────────────────────
   <severity counts normalized for parity>
 
-  ✕  FATAL  Fatal issues found — system is not safe.
-  Run: abysslink repair --apply  to auto-fix what can be fixed.
++----------------------------------------------------------------------------+
+|  x DANGER — Fatal issues found — system is not safe.                       |
+|  Run: abysslink repair --apply  to auto-fix what can be fixed.             |
++----------------------------------------------------------------------------+
 

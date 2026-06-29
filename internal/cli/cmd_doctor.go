@@ -35,6 +35,7 @@ import (
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -739,14 +740,19 @@ Exit codes:
 			printerInfo(p, doctorSeverityCounts(findings))
 			printerInfo(p, "")
 
+			// Verdict as a level-coloured callout box. The exact verdict sentence
+			// stays a single literal Note title (never split title+body), so any
+			// substring match on it survives the reflow.
 			switch {
 			case hasFatal:
-				printerInfo(p, "  "+iconFatalStr()+"  "+styleFatal.Render("FATAL  Fatal issues found — system is not safe."))
-				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair --apply  to auto-fix what can be fixed."))
+				printerInfo(p, tui.Note(tui.NoteDanger, "Fatal issues found — system is not safe.", []string{
+					"Run: abysslink repair --apply  to auto-fix what can be fixed.",
+				}))
 				printerInfo(p, "")
 			case hasWarn:
-				printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("WARN  Warnings found — review the issues above."))
-				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair --apply  to auto-fix what can be fixed."))
+				printerInfo(p, tui.Note(tui.NoteWarn, "Warnings found — review the issues above.", []string{
+					"Run: abysslink repair --apply  to auto-fix what can be fixed.",
+				}))
 				printerInfo(p, "")
 			}
 			return doctorExitErr(hasFatal, hasWarn)

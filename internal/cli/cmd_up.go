@@ -876,7 +876,7 @@ func printNextSteps(p Printer, findings []modules.Finding, cfg *config.Config) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleBold.Render("Next steps"))
+	sb.WriteString(styleTitle.Render("Next steps"))
 	sb.WriteString("\n\n")
 	for i, s := range steps {
 		sb.WriteString(s.title)
