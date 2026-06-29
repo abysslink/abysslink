@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -71,6 +72,7 @@ func newUninstallCmd() *cobra.Command {
 			}
 
 			if cc.dryRun {
+				runModuleTeardowns(ctx, p, cc, true)
 				printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))
 				if purge {
 					printerInfo(p, styleMuted.Render("--purge would also remove ~/.config/abysslink and the state dir (audit log + backups)."))
@@ -103,7 +105,9 @@ func newUninstallCmd() *cobra.Command {
 				purge = false
 			}
 
-			failures := printReverseManifest(p, manifest) + removeAbysslinkDirs(p, purge)
+			failures := printReverseManifest(p, manifest)
+			failures += runModuleTeardowns(ctx, p, cc, false)
+			failures += removeAbysslinkDirs(p, purge)
 			if failures > 0 {
 				return fmt.Errorf("uninstall: %d action(s) failed", failures)
 			}
@@ -309,6 +313,42 @@ func removeAbysslinkDirs(p Printer, purge bool) int {
 		}
 	}
 	printerInfo(p, styleMuted.Render("  Third-party packages (tailscale, ntfy, mosh, tmux) are left installed; remove them manually if desired."))
+	return failures
+}
+
+// runModuleTeardowns invokes Teardown on every module that implements
+// modules.Teardowner — non-file resources (e.g. the ntfy Docker container) that
+// audit-log reversal cannot undo. With dryRun it only previews what would be
+// removed. Best-effort: if module deps cannot be built (e.g. config already
+// gone) the step is skipped with a warning rather than failing the uninstall,
+// and per-module teardown errors are counted and reported, never fatal to the
+// rest. Returns the number of teardown failures.
+func runModuleTeardowns(ctx context.Context, p Printer, cc *cmdContext, dryRun bool) int {
+	deps, err := buildDeps(ctx, cc)
+	if err != nil {
+		slog.Warn("uninstall: cannot build module deps; skipping non-file resource teardown", "err", err)
+		return 0
+	}
+	failures := 0
+	for _, mod := range allModules(deps) {
+		td, ok := mod.(modules.Teardowner)
+		if !ok {
+			continue
+		}
+		items, terr := td.Teardown(ctx, dryRun)
+		if terr != nil {
+			failures++
+			printerError(p, fmt.Sprintf("  teardown %s: %v", mod.Name(), terr))
+			continue
+		}
+		for _, it := range items {
+			if dryRun {
+				printerInfo(p, "  would remove "+it)
+			} else {
+				printerInfo(p, "  "+it)
+			}
+		}
+	}
 	return failures
 }
 

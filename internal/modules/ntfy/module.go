@@ -123,6 +123,40 @@ func (m *Module) ntfyDockerRunning(ctx context.Context) bool {
 	return err == nil && res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "true"
 }
 
+// ntfyDockerExists returns true when the abysslink-ntfy container exists in any
+// state (running or stopped) — used by Teardown, which must remove a stopped
+// container too, not only a running one.
+func (m *Module) ntfyDockerExists(ctx context.Context) bool {
+	res, err := m.runner.Run(ctx, "docker", "inspect",
+		"--format={{.Id}}", dockerContainerName)
+	return err == nil && res.ExitCode == 0
+}
+
+// Teardown removes the abysslink-ntfy Docker container — a non-file resource
+// that uninstall's file-backup reversal cannot undo (the original guide's docker
+// mode on macOS). It is best-effort and idempotent: when Docker is unavailable
+// or the container is already gone it returns no items and no error. Native
+// (non-Docker) ntfy is service- and file-backed, so it is reversed by the audit
+// log and needs no teardown here. Third-party packages are intentionally left
+// installed (see uninstall's removeAbysslinkDirs note).
+func (m *Module) Teardown(ctx context.Context, dryRun bool) ([]string, error) {
+	if !m.dockerAvailable(ctx) || !m.ntfyDockerExists(ctx) {
+		return nil, nil
+	}
+	desc := "docker container " + dockerContainerName
+	if dryRun {
+		return []string{desc}, nil
+	}
+	res, err := m.runner.Run(ctx, "docker", "rm", "-f", dockerContainerName)
+	if err != nil {
+		return nil, fmt.Errorf("ntfy teardown: docker rm: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("ntfy teardown: docker rm exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return []string{"removed " + desc}, nil
+}
+
 // ntfyDockerIPDrift returns true when the running container's port binding
 // does not include the current tailnet IP — meaning the IP changed since the
 // container was created and it must be recreated.
