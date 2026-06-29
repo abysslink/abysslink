@@ -605,6 +605,18 @@ func printEnrollPhonePlan(p Printer, cc *cmdContext, tag string, showQR bool) {
 		printerInfo(p, "[plan] --qr set: would also render each credential as a scannable QR code")
 	}
 	printerInfo(p, "[plan] would write a pairing runbook with the remaining manual steps")
+
+	// Closing call-to-action. The top-of-plan "Use --apply" line is styleMuted
+	// (dimmed) and easy to miss after a wall of [plan] lines, so restate the
+	// next step prominently. Branch on OAuth so the no-credentials path (the
+	// common fresh-install case) tells the user exactly what --apply will do.
+	printerInfo(p, "")
+	if hasCfgCreds {
+		printerInfo(p, "Next: run "+styleCode.Render("abysslink enroll phone --apply")+" to mint the key and start pairing.")
+	} else {
+		printerInfo(p, "Next: run "+styleCode.Render("abysslink enroll phone --apply")+" to start pairing — you'll create the auth key by hand.")
+		printerInfo(p, styleMuted.Render("Optional: configure an admin OAuth client (tailnet.admin) to mint the key automatically."))
+	}
 }
 
 // printQR renders an ANSI QR code for payload to out. Under --json the raw

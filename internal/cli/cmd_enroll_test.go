@@ -482,6 +482,9 @@ func TestEnrollPhone_DryRunDefault(t *testing.T) {
 	assert.Contains(t, output, "tag:", "preview must name the tag the key would carry")
 	assert.Contains(t, output, "--apply", "preview must point at --apply")
 	assert.Contains(t, output, "runbook", "preview must mention the runbook that would be written")
+	assert.Contains(t, output, "Next: run", "preview must end with a prominent --apply call-to-action")
+	assert.Contains(t, output, "create the auth key by hand",
+		"no-OAuth preview must tell the user --apply uses the manual key path")
 
 	// No runbook may have been written anywhere under the sandboxed HOME.
 	matches, _ := filepath.Glob(filepath.Join(home, "Documents", "abysslink-runbook-*.md"))
