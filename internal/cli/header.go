@@ -32,6 +32,13 @@ package cli
 // invoke this on the --json path — the header is a human affordance only and
 // would corrupt a machine-readable or redirected (`> file`) stream.
 func commandHeader(p Printer, cmd, mode string) {
+	// Self-guard: the header is a human affordance only. Emitting it into a
+	// jsonPrinter would push a {"msg":"<box>"} record into the newline-delimited
+	// JSON stream (or a redirected `> file`). Mirrors spinWork/emitSecurityNote,
+	// so a forgetful caller cannot corrupt --json (TUI-migration verify L3/L11).
+	if _, isJSON := p.(*jsonPrinter); isJSON {
+		return
+	}
 	line := styleTitle.Render("abysslink " + cmd)
 	if mode != "" {
 		line += "  " + mode

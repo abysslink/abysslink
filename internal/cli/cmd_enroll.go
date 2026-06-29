@@ -537,9 +537,9 @@ func newEnrollPhoneCmd() *cobra.Command {
 			}
 
 			if !hasCreds {
-				printerInfo(p, tui.Note(tui.NoteWarn, "No admin OAuth client configured", []string{
+				emitNote(p, tui.NoteWarn, "No admin OAuth client configured", []string{
 					"Cannot mint an auth key automatically.",
-				}))
+				})
 				printerInfo(p, "Create a single-use, pre-authorized key tagged "+styleCode.Render(tag)+" at:")
 				printerInfo(p, "  "+styleCode.Render("https://login.tailscale.com/admin/settings/keys"))
 				printerInfo(p, "Then sign in on the phone with that key.")
@@ -685,9 +685,9 @@ func enrollWithAdminKey(ctx context.Context, p Printer, out io.Writer, jsonOut b
 		}
 		// CLI: a join-poll timeout must exit non-zero — automation believing the
 		// enrollment succeeded would skip the manual follow-up entirely.
-		printerInfo(p, tui.Note(tui.NoteWarn, "Timed out waiting for the phone", []string{
+		emitNote(p, tui.NoteWarn, "Timed out waiting for the phone", []string{
 			"Re-run `abysslink doctor` once it has joined.",
-		}))
+		})
 		return fmt.Errorf("enroll: %w — scan the auth-key QR and re-run `abysslink doctor` once it has joined", pollErr)
 	}
 	printerInfo(p, styleSuccess.Render("Phone joined: "+joined))
@@ -705,9 +705,9 @@ func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, 
 	}
 	st, err := b.Status(ctx)
 	if err != nil || st.Self == nil {
-		printerInfo(p, tui.Note(tui.NoteWarn, "ntfy subscription QR skipped", []string{
+		emitNote(p, tui.NoteWarn, "ntfy subscription QR skipped", []string{
 			"Could not get tailnet status.",
-		}))
+		})
 		printerInfo(p, styleMuted.Render("  Run `tailscale up` then re-run `abysslink enroll phone` to get the QR."))
 		return
 	}
@@ -719,9 +719,9 @@ func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, 
 		hostname = st.Self.TailscaleIPs[0].String()
 	}
 	if hostname == "" {
-		printerInfo(p, tui.Note(tui.NoteWarn, "ntfy subscription QR skipped", []string{
+		emitNote(p, tui.NoteWarn, "ntfy subscription QR skipped", []string{
 			"No tailnet hostname or IP available.",
-		}))
+		})
 		return
 	}
 
@@ -942,10 +942,10 @@ func printOneScanQR(p Printer, out io.Writer, jsonOut bool, res *daemon.EnrollSt
 // daemon is what serves it). Output goes through the Printer only (never
 // fmt.Println — CLAUDE.md).
 func printStageDegradedNotice(p Printer) {
-	printerInfo(p, tui.Note(tui.NoteWarn, "Daemon not reachable — showing credentials inline", []string{
+	emitNote(p, tui.NoteWarn, "Daemon not reachable — showing credentials inline", []string{
 		"For the one-scan pull QR, start the daemon:",
 		"abysslink daemon enable --apply",
-	}))
+	})
 }
 
 // newDeviceBundleRecord builds the JSON-encodable record for a device bundle.
