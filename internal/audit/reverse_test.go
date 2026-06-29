@@ -74,6 +74,47 @@ func TestReverse_RestoresAndDeletes(t *testing.T) {
 	}
 }
 
+// TestReverse_IdempotentRerun asserts a second uninstall after a successful one
+// is a clean no-op: restored files (whose .bak sidecars were consumed) are
+// SKIPPED — never re-restored (which would fail "no such file or directory")
+// and never deleted (which would destroy the user's restored original content).
+func TestReverse_IdempotentRerun(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	a := audit.New(logPath)
+
+	// Pre-existing file abysslink modifies (gets a backup chain).
+	pre := filepath.Join(dir, "existing.conf")
+	require.NoError(t, os.WriteFile(pre, []byte("ORIGINAL"), 0o600))
+	require.NoError(t, a.WriteFile(pre, []byte("MODIFIED"), 0o600, false))
+
+	// File abysslink creates from scratch (no backup chain).
+	created := filepath.Join(dir, "created.conf")
+	require.NoError(t, a.WriteFile(created, []byte("brand new"), 0o600, false))
+
+	// First uninstall: restores pre, deletes created, consumes sidecars.
+	_, err := audit.Reverse(logPath, false)
+	require.NoError(t, err)
+	got, err := os.ReadFile(pre) //nolint:gosec // G304: fixture under test temp dir
+	require.NoError(t, err)
+	require.Equal(t, "ORIGINAL", string(got))
+	baks, _ := audit.Backups(pre)
+	require.Empty(t, baks, "first uninstall must consume the sidecars")
+
+	// Second uninstall: must be a clean no-op.
+	manifest, err := audit.Reverse(logPath, false)
+	require.NoError(t, err)
+	for _, act := range manifest {
+		assert.NoError(t, act.Err, "re-run must not error on %s", act.Target)
+		assert.Equal(t, "skip", act.Action, "re-run must skip %s, not %s", act.Target, act.Action)
+	}
+
+	// The restored original file must survive the second run untouched.
+	got, err = os.ReadFile(pre) //nolint:gosec // G304: fixture under test temp dir
+	require.NoError(t, err)
+	assert.Equal(t, "ORIGINAL", string(got), "re-run must not delete the restored original")
+}
+
 func TestReverse_DryRunDoesNotMutate(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")

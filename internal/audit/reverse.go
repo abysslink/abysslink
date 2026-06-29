@@ -274,6 +274,13 @@ func PlanReverse(logPath string) ([]ReverseAction, error) {
 	// sidecar — equivalent to the old anchored HasPrefix(e.Target, t+".bak.")
 	// match, but built once instead of re-scanned per target.
 	attested := map[string][]Entry{}
+	// restored records targets already reverted by a prior uninstall. Reverse
+	// appends an Op="restore" entry (signed or unsigned) whenever it restores a
+	// file, so this is the durable proof a target pre-existed abysslink even
+	// after its .bak sidecars have been consumed — what stops an idempotent
+	// re-run from mistaking a restored original for an abysslink-created file and
+	// deleting it.
+	restored := map[string]bool{}
 	for i := range entries {
 		e := entries[i]
 		if e.DryRun {
@@ -290,43 +297,78 @@ func PlanReverse(logPath string) ([]ReverseAction, error) {
 				orig := e.Target[:idx]
 				attested[orig] = append(attested[orig], e)
 			}
+		case "restore":
+			restored[e.Target] = true
 		}
 	}
 
 	plan := make([]ReverseAction, 0, len(targets))
 	for _, t := range targets {
-		attested := attested[t]
-
-		switch {
-		case len(attested) > 0:
-			// Earliest chain-recorded backup = pre-abysslink content. The
-			// chain hash travels with the action so Reverse can refuse a
-			// tampered .bak (verifyBackupHash) before restoring.
-			plan = append(plan, ReverseAction{
-				Target:    t,
-				Action:    "restore",
-				Backup:    attested[0].Target,
-				ChainHash: attested[0].Hash,
-			})
-		default:
-			baks, _ := Backups(t)
-			if len(baks) > 0 {
-				// CORE-06 fallback: no chain entry exists for this target —
-				// glob selection is the only option, flagged as unverified.
-				plan = append(plan, ReverseAction{
-					Target:  t,
-					Action:  "restore",
-					Backup:  baks[0],
-					Warning: globFallbackWarning,
-				})
-			} else if _, statErr := os.Stat(t); statErr == nil {
-				plan = append(plan, ReverseAction{Target: t, Action: "delete"})
-			} else {
-				plan = append(plan, ReverseAction{Target: t, Action: "skip"})
-			}
-		}
+		plan = append(plan, planReverseTarget(t, attested[t], restored[t]))
 	}
 	return plan, nil
+}
+
+// planReverseTarget decides the reverse action for a single mutated target.
+// chain is the target's chain-recorded backup entries (oldest first); alreadyRestored
+// is true when a prior uninstall already recorded a restore for it.
+func planReverseTarget(t string, chain []Entry, alreadyRestored bool) ReverseAction {
+	// Keep only chain-attested backups whose sidecar still exists on disk. A
+	// successful uninstall deletes the .bak sidecars after restoring
+	// (reverseRestore), yet the log keeps the write+backup entries forever — so a
+	// re-run would otherwise re-plan a restore against a backup it already removed
+	// and fail with "no such file or directory".
+	var existing []Entry
+	for _, e := range chain {
+		if _, statErr := os.Stat(e.Target); statErr == nil {
+			existing = append(existing, e)
+		}
+	}
+
+	switch {
+	case len(existing) > 0:
+		// Earliest chain-recorded backup = pre-abysslink content. The chain hash
+		// travels with the action so Reverse can refuse a tampered .bak
+		// (verifyBackupHash) before restoring.
+		return ReverseAction{
+			Target:    t,
+			Action:    "restore",
+			Backup:    existing[0].Target,
+			ChainHash: existing[0].Hash,
+		}
+	case len(chain) > 0 || alreadyRestored:
+		// Either the log recorded backups for this target whose sidecars are now
+		// gone, or a prior uninstall already restored it — both prove the file
+		// pre-existed abysslink and its original content is back in place. It must
+		// be SKIPPED, never deleted: deleting a restored original would be data
+		// loss (idempotent re-run).
+		return ReverseAction{Target: t, Action: "skip"}
+	}
+
+	baks, _ := Backups(t)
+	switch {
+	case len(baks) > 0:
+		// CORE-06 fallback: no chain entry exists for this target — glob
+		// selection is the only option, flagged as unverified.
+		return ReverseAction{
+			Target:  t,
+			Action:  "restore",
+			Backup:  baks[0],
+			Warning: globFallbackWarning,
+		}
+	case fileExists(t):
+		// No backup was ever recorded and the file was never restored ⇒ abysslink
+		// created it from scratch ⇒ delete it.
+		return ReverseAction{Target: t, Action: "delete"}
+	default:
+		return ReverseAction{Target: t, Action: "skip"}
+	}
+}
+
+// fileExists reports whether path is present on disk.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // Reverse undoes every mutation recorded in the audit log. When dryRun is true
