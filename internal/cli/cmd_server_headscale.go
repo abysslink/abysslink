@@ -258,7 +258,11 @@ func completeInit(ctx context.Context, cfg *config.Config, cc *cmdContext, runne
 
 	// ── Step 8: Health-check (30s timeout, before any REST admin calls) ───────
 	baseURL := cfg.Server.Headscale.ServerURL
-	if err := doHeadscaleHealthCheck(ctx, baseURL+"/api/v1/node"); err != nil {
+	// Animated liveness during the health poll; spinWork is json-safe and the
+	// success line prints after it stops.
+	if err := spinWork(ctx, p, "Waiting for Headscale to respond…", func(ctx context.Context) error {
+		return doHeadscaleHealthCheck(ctx, baseURL+"/api/v1/node")
+	}); err != nil {
 		return fmt.Errorf("headscale init: health-check: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  Headscale is responding"))

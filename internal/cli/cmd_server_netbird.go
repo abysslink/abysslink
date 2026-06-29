@@ -209,7 +209,11 @@ func netbirdInitLinux(ctx context.Context, cfg *config.Config, cc *cmdContext, r
 	if serverURL == "" {
 		serverURL = "https://localhost:443"
 	}
-	if err := doNetBirdHealthCheck(ctx, serverURL+"/api/groups"); err != nil {
+	// Animated liveness during the health poll (up to 30s GET /api/groups);
+	// spinWork is json-safe and the success line prints after it stops.
+	if err := spinWork(ctx, p, "Waiting for netbird-server to respond…", func(ctx context.Context) error {
+		return doNetBirdHealthCheck(ctx, serverURL+"/api/groups")
+	}); err != nil {
 		return fmt.Errorf("netbird init: health-check: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  netbird-server is responding"))
