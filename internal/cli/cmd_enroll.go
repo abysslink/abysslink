@@ -331,18 +331,25 @@ func enforceRigToRigACLDeny(ctx context.Context, mgr aclManagerFace, apply bool,
 	}
 
 	if apply {
-		// SetACL (persist; idempotent write forces the read-back round-trip).
-		if err := mgr.SetACL(ctx, raw, etag); err != nil {
-			return fmt.Errorf("enroll rig: SetACL: %w", err)
-		}
-
-		// Validate-after-push: re-read and assert again (Phase 13 SC-3).
-		raw2, _, err := mgr.GetACL(ctx)
-		if err != nil {
-			return fmt.Errorf("enroll rig: ACL validate-after-push GetACL: %w", err)
-		}
-		if err := assertNoRigRigGrant(raw2); err != nil {
-			return fmt.Errorf("enroll rig: ACL validate-after-push failed: %w", err)
+		// SetACL → re-read → re-assert is a multi-round-trip validate-after-push;
+		// show animated liveness during it. spinWork preserves the error semantics
+		// (the verified line only prints on success, after the spinner stops).
+		if err := spinWork(ctx, p, "Verifying rig-to-rig ACL isolation…", func(ctx context.Context) error {
+			// SetACL (persist; idempotent write forces the read-back round-trip).
+			if e := mgr.SetACL(ctx, raw, etag); e != nil {
+				return fmt.Errorf("enroll rig: SetACL: %w", e)
+			}
+			// Validate-after-push: re-read and assert again (Phase 13 SC-3).
+			raw2, _, e := mgr.GetACL(ctx)
+			if e != nil {
+				return fmt.Errorf("enroll rig: ACL validate-after-push GetACL: %w", e)
+			}
+			if e := assertNoRigRigGrant(raw2); e != nil {
+				return fmt.Errorf("enroll rig: ACL validate-after-push failed: %w", e)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		printerInfo(p, "ACL isolation verified: no tag:laptop↔tag:laptop grant found (absence-of-grant, SC-3)")
 	} else {
@@ -530,7 +537,9 @@ func newEnrollPhoneCmd() *cobra.Command {
 			}
 
 			if !hasCreds {
-				printerInfo(p, styleWarn.Render("No admin OAuth client configured — cannot mint an auth key automatically."))
+				printerInfo(p, tui.Note(tui.NoteWarn, "No admin OAuth client configured", []string{
+					"Cannot mint an auth key automatically.",
+				}))
 				printerInfo(p, "Create a single-use, pre-authorized key tagged "+styleCode.Render(tag)+" at:")
 				printerInfo(p, "  "+styleCode.Render("https://login.tailscale.com/admin/settings/keys"))
 				printerInfo(p, "Then sign in on the phone with that key.")
@@ -676,7 +685,9 @@ func enrollWithAdminKey(ctx context.Context, p Printer, out io.Writer, jsonOut b
 		}
 		// CLI: a join-poll timeout must exit non-zero — automation believing the
 		// enrollment succeeded would skip the manual follow-up entirely.
-		printerInfo(p, styleWarn.Render("Timed out waiting for the phone. Re-run `abysslink doctor` once it has joined."))
+		printerInfo(p, tui.Note(tui.NoteWarn, "Timed out waiting for the phone", []string{
+			"Re-run `abysslink doctor` once it has joined.",
+		}))
 		return fmt.Errorf("enroll: %w — scan the auth-key QR and re-run `abysslink doctor` once it has joined", pollErr)
 	}
 	printerInfo(p, styleSuccess.Render("Phone joined: "+joined))
@@ -694,7 +705,9 @@ func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, 
 	}
 	st, err := b.Status(ctx)
 	if err != nil || st.Self == nil {
-		printerInfo(p, styleWarn.Render("⚠  Could not get tailnet status — ntfy subscription QR skipped."))
+		printerInfo(p, tui.Note(tui.NoteWarn, "ntfy subscription QR skipped", []string{
+			"Could not get tailnet status.",
+		}))
 		printerInfo(p, styleMuted.Render("  Run `tailscale up` then re-run `abysslink enroll phone` to get the QR."))
 		return
 	}
@@ -706,7 +719,9 @@ func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, 
 		hostname = st.Self.TailscaleIPs[0].String()
 	}
 	if hostname == "" {
-		printerInfo(p, styleWarn.Render("⚠  No tailnet hostname or IP available — ntfy subscription QR skipped."))
+		printerInfo(p, tui.Note(tui.NoteWarn, "ntfy subscription QR skipped", []string{
+			"No tailnet hostname or IP available.",
+		}))
 		return
 	}
 
@@ -927,8 +942,10 @@ func printOneScanQR(p Printer, out io.Writer, jsonOut bool, res *daemon.EnrollSt
 // daemon is what serves it). Output goes through the Printer only (never
 // fmt.Println — CLAUDE.md).
 func printStageDegradedNotice(p Printer) {
-	printerInfo(p, styleWarn.Render("daemon not reachable — showing credentials inline"))
-	printerInfo(p, styleMuted.Render("  for the one-scan pull QR, start the daemon: abysslink daemon enable --apply"))
+	printerInfo(p, tui.Note(tui.NoteWarn, "Daemon not reachable — showing credentials inline", []string{
+		"For the one-scan pull QR, start the daemon:",
+		"abysslink daemon enable --apply",
+	}))
 }
 
 // newDeviceBundleRecord builds the JSON-encodable record for a device bundle.

@@ -224,8 +224,10 @@ func netbirdSSHCheckGate(ctx context.Context, cmd *cobra.Command, cc *cmdContext
 	// Dry-run (scan only) does not mutate the system; the gate is informational only.
 	// We still emit the WARN so the user is aware, but do not block (CLI-21).
 	if cc.dryRun {
-		printerInfo(p, styleWarn.Render(warnSSHCheckText))
-		printerInfo(p, styleMuted.Render(warnSetupKeyText))
+		printerInfo(p, tui.Note(tui.NoteWarn, "SSHCheck not available on NetBird", []string{
+			"checkPeriod enforcement is disabled on this backend.",
+			warnSetupKeyText,
+		}))
 		return nil
 	}
 
@@ -584,12 +586,9 @@ func printSudoNotice(p Printer, actions []modules.Action) {
 		return
 	}
 
+	lines := append([]string{"Your macOS/Linux password will be requested for:"}, sudoActions...)
 	printerInfo(p, "")
-	printerInfo(p, "  "+styleWarn.Render("⚠")+"  "+styleBold.Render("sudo required")+"  "+styleMuted.Render("your macOS/Linux password will be requested for:"))
-	printerInfo(p, "")
-	for _, line := range sudoActions {
-		printerInfo(p, "    "+line)
-	}
+	printerInfo(p, tui.Note(tui.NoteWarn, "sudo required", lines))
 	printerInfo(p, "")
 }
 
