@@ -80,22 +80,26 @@ func Select(ctx context.Context, title string, options []string, yes bool) (stri
 	return result, nil
 }
 
-// Pause displays a "Press Enter to continue…" message and waits for the user
-// to press Enter. If yes is true OR stdin is not a TTY (headless/CI), Pause
-// returns nil immediately without any interaction so automated runs never hang.
+// Pause displays msg and waits for the user to acknowledge with a single
+// "Continue" affordance. If yes is true OR stdin is not a TTY (headless/CI),
+// Pause returns nil immediately without any interaction so automated runs never
+// hang.
+//
+// A pause is an ACKNOWLEDGMENT, not a decision: the previous implementation
+// rendered a yes/no huh.Confirm whose result was discarded, so picking Yes or No
+// did the exact same thing — a fake choice that read as broken. It is now a huh
+// Note with a single "Continue" next-button: press Enter to proceed, Ctrl-C to
+// abort (huh returns an error the caller surfaces).
 func Pause(ctx context.Context, msg string, yes bool) error {
 	if yes || !stdinIsTTY() {
 		return nil
 	}
-	// Use a huh Note (non-interactive informational display) then a minimal
-	// Confirm prompt with no actual choice — the user presses Enter to proceed.
-	var dummy bool
 	form := huh.NewForm(
 		huh.NewGroup(
-			huh.NewNote().Title(msg),
-			huh.NewConfirm().
-				Title("Press Enter to continue…").
-				Value(&dummy),
+			huh.NewNote().
+				Title(msg).
+				Next(true).
+				NextLabel("Continue"),
 		),
 	)
 	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {

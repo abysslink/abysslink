@@ -1028,45 +1028,53 @@ func printDeviceBundle(p Printer, out io.Writer, jsonOut bool, b *device.Bundle,
 		return
 	}
 
-	title := fmt.Sprintf("│  ONE-TIME DEVICE CREDENTIALS: %q", b.Name)
+	// Colour ONLY the box structure (left rail + top/bottom rules) in the brand
+	// secret-red used by tui.SecretBox, so the one-time-credential box reads as an
+	// intentional "handle-with-care" callout instead of plain monochrome ASCII.
+	// The left-rail (no right border) is deliberate: the ~370-char SSH cert line
+	// must not wrap, which a fixed-width bordered box would force. Content stays
+	// uncolored for clean copy/paste, and styleFatal/styleBold collapse to plain
+	// text on a non-TTY / NO_COLOR surface, so captures stay byte-stable.
+	rail := styleFatal.Render("│")
+	titleText := fmt.Sprintf("ONE-TIME DEVICE CREDENTIALS: %q", b.Name)
 	if rotated {
-		title += "  (rotated — the previous credentials are now INVALID)"
+		titleText += "  (rotated — the previous credentials are now INVALID)"
 	}
 	printerInfo(p, "")
-	printerInfo(p, "╭"+ruleN(65)+"╮")
-	printerInfo(p, title)
-	printerInfo(p, "│  Shown ONCE — store these in your phone's SSH client / shortcut NOW.")
-	printerInfo(p, "│  Abysslink never writes them to disk; they cannot be shown again.")
+	printerInfo(p, styleFatal.Render("╭"+ruleN(65)+"╮"))
+	printerInfo(p, rail+"  "+styleBold.Render(titleText))
+	printerInfo(p, rail+"  Shown ONCE — store these in your phone's SSH client / shortcut NOW.")
+	printerInfo(p, rail+"  Abysslink never writes them to disk; they cannot be shown again.")
 	if rec.SSHHost != "" {
-		printerInfo(p, "│")
-		printerInfo(p, "│  Host:          "+rec.SSHHost)
-		printerInfo(p, "│  User:          "+rec.SSHUser)
+		printerInfo(p, rail)
+		printerInfo(p, rail+"  Host:          "+rec.SSHHost)
+		printerInfo(p, rail+"  User:          "+rec.SSHUser)
 		if rec.SSHPort != 0 {
-			printerInfo(p, "│  SSH port:      "+strconv.Itoa(rec.SSHPort))
+			printerInfo(p, rail+"  SSH port:      "+strconv.Itoa(rec.SSHPort))
 		}
 	}
 	if rec.SSHCommand != "" {
-		printerInfo(p, "│")
-		printerInfo(p, "│  Connect (after saving the key below as ~/.ssh/abysslink_phone):")
-		printerInfo(p, "│    "+rec.SSHCommand)
-		printerInfo(p, "│    "+rec.MoshCommand)
+		printerInfo(p, rail)
+		printerInfo(p, rail+"  Connect (after saving the key below as ~/.ssh/abysslink_phone):")
+		printerInfo(p, rail+"    "+rec.SSHCommand)
+		printerInfo(p, rail+"    "+rec.MoshCommand)
 	}
-	printerInfo(p, "│")
-	printerInfo(p, "│  Bearer token:  "+b.Bearer)
-	printerInfo(p, "│  Push token:    "+b.PushToken)
-	printerInfo(p, "│  Cert expires:  "+b.CertNotAfter.UTC().Format("2006-01-02"))
-	printerInfo(p, "│")
-	printerInfo(p, "│  SSH private key (save as e.g. ~/.ssh/abysslink_phone):")
+	printerInfo(p, rail)
+	printerInfo(p, rail+"  Bearer token:  "+b.Bearer)
+	printerInfo(p, rail+"  Push token:    "+b.PushToken)
+	printerInfo(p, rail+"  Cert expires:  "+b.CertNotAfter.UTC().Format("2006-01-02"))
+	printerInfo(p, rail)
+	printerInfo(p, rail+"  SSH private key (save as e.g. ~/.ssh/abysslink_phone):")
 	for _, line := range strings.Split(strings.TrimRight(b.SSHPrivateKeyPEM, "\n"), "\n") {
-		printerInfo(p, "│    "+line)
+		printerInfo(p, rail+"    "+line)
 	}
-	printerInfo(p, "│")
-	printerInfo(p, "│  SSH certificate (save next to the key as abysslink_phone-cert.pub):")
-	printerInfo(p, "│    "+b.SSHCertAuthorizedKey)
-	printerInfo(p, "│")
-	printerInfo(p, "│  CA public key (for sshd TrustedUserCAKeys — also via `abysslink device ca`):")
-	printerInfo(p, "│    "+b.CAPublicKeyAuthorizedKey)
-	printerInfo(p, "╰"+ruleN(65)+"╯")
+	printerInfo(p, rail)
+	printerInfo(p, rail+"  SSH certificate (save next to the key as abysslink_phone-cert.pub):")
+	printerInfo(p, rail+"    "+b.SSHCertAuthorizedKey)
+	printerInfo(p, rail)
+	printerInfo(p, rail+"  CA public key (for sshd TrustedUserCAKeys — also via `abysslink device ca`):")
+	printerInfo(p, rail+"    "+b.CAPublicKeyAuthorizedKey)
+	printerInfo(p, styleFatal.Render("╰"+ruleN(65)+"╯"))
 	printerInfo(p, "")
 
 	if showQR {
