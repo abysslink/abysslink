@@ -18,12 +18,15 @@
 package darwin
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/abysslink/abysslink/internal/audit"
@@ -40,6 +43,21 @@ func (p *Platform) ServiceInstall(ctx context.Context, spec platform.ServiceSpec
 	if err != nil {
 		return err
 	}
+
+	uid := fmt.Sprintf("%d", os.Getuid())
+	domain := "gui/" + uid
+	target := domain + "/" + spec.Label
+
+	// Idempotent fast path: if the service is already RUNNING with an on-disk
+	// plist that matches what we'd write, it is correctly installed — return
+	// without bouncing it. A bootout+bootstrap would drop the notify socket and
+	// content listener for ~1s, so re-running `enable` on a healthy daemon must
+	// not leave that gap. A stopped service (pid 0) or a changed plist falls
+	// through to the full (re)install below.
+	if existing, rerr := os.ReadFile(plistPath); rerr == nil && bytes.Equal(existing, data) && p.servicePID(ctx, target) > 0 {
+		return nil
+	}
+
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0o750); err != nil {
 		return fmt.Errorf("mkdir LaunchAgents: %w", err)
 	}
@@ -50,33 +68,28 @@ func (p *Platform) ServiceInstall(ctx context.Context, spec platform.ServiceSpec
 	if err := audit.New(logPath).WriteFile(plistPath, data, 0o600, false); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
-	uid := fmt.Sprintf("%d", os.Getuid())
-	domain := "gui/" + uid
-	target := domain + "/" + spec.Label
 
-	// Boot out any previously-loaded instance first so the rewritten plist is
-	// re-read; bootout fails when nothing is loaded, which is fine (best-effort).
+	// Capture the running pid (0 if none) BEFORE bootout. launchctl reports the
+	// job "unloaded" the instant bootout runs, but the process lingers ~200ms
+	// while it drains; launching the replacement in that window races the old
+	// instance's socket-file cleanup (it would unlink the new listener's socket).
+	// So: boot out any previous instance (best-effort; fails when none loaded),
+	// then wait for the OLD process to actually exit before bootstrapping.
+	oldPID := p.servicePID(ctx, target)
 	_, _ = p.runner.Run(ctx, "launchctl", "bootout", target)
+	p.waitProcessExit(ctx, oldPID)
 
-	// bootout is ASYNCHRONOUS: bootstrapping immediately can race the teardown and
-	// fail with "Bootstrap failed: 5: Input/output error". The old code tolerated
-	// that exit-5 as "already loaded" and then ran `kickstart -k` against the
-	// (now unloaded) service, surfacing the opaque "Could not find service … 113".
-	// Wait for the prior instance to actually unload first (no-op when nothing was
-	// loaded, so the common fresh-install path pays no latency).
-	p.waitServiceUnloaded(ctx, target)
-
-	// Bootstrap the (re)written plist. shell.Runner reports a non-zero exit in
-	// Result.ExitCode with err == nil — both must be checked (C3/C4 bug class).
+	// Bootstrap re-reads the (rewritten) plist and, with RunAtLoad, LAUNCHES the
+	// fresh instance. shell.Runner reports a non-zero exit in Result.ExitCode with
+	// err == nil — both must be checked (C3/C4 bug class).
 	res, err := p.runner.Run(ctx, "launchctl", "bootstrap", domain, plistPath)
 	if err != nil {
 		return fmt.Errorf("launchctl bootstrap %s: %w", spec.Label, err)
 	}
-	// Trust the LOADED state, not the exit code. macOS returns a non-zero
+	// Trust the LOADED state, not the exit code: macOS returns a non-zero
 	// bootstrap both for real failures and for the benign "already loaded" case
-	// (exit 5), so the old string-match heuristic masked real failures. If the
-	// service did not load, surface the real bootstrap output + remediation rather
-	// than letting the kickstart below fail with the opaque 113.
+	// (exit 5). If the service did not load, surface the real bootstrap output +
+	// remediation rather than a later opaque failure.
 	if !res.Ok() && !p.serviceLoaded(ctx, target) {
 		return fmt.Errorf(
 			"launchctl bootstrap %s did not load the service (exited %d: %s)\n"+
@@ -86,11 +99,13 @@ func (p *Platform) ServiceInstall(ctx context.Context, spec platform.ServiceSpec
 			spec.Label, res.ExitCode, strings.TrimSpace(res.Stderr+res.Stdout), target)
 	}
 
-	// Kickstart -k kills any running instance and restarts it so a changed
-	// service spec takes effect immediately instead of after logout/login
-	// (parity with the systemd daemon-reload + enable --now path).
-	if spec.RunAtLoad {
-		kres, kerr := p.runner.Run(ctx, "launchctl", "kickstart", "-k", target)
+	// Do NOT kickstart a RunAtLoad service: bootstrap already launched it, and a
+	// `kickstart -k` immediately after a launch hits launchd's ~10s respawn
+	// throttle (a job that (re)starts <10s after its last launch is held off) —
+	// the opaque 10s "hang". Only a service that does NOT auto-load needs an
+	// explicit start, and a plain kickstart (no -k) suffices since nothing runs yet.
+	if !spec.RunAtLoad {
+		kres, kerr := p.runner.Run(ctx, "launchctl", "kickstart", target)
 		if kerr != nil {
 			return fmt.Errorf("launchctl kickstart %s: %w", spec.Label, kerr)
 		}
@@ -110,13 +125,34 @@ func (p *Platform) serviceLoaded(ctx context.Context, target string) bool {
 	return err == nil && res.Ok()
 }
 
-// waitServiceUnloaded polls until the launchd label is no longer loaded (or a
-// short timeout elapses), so a bootstrap after bootout does not race the
-// asynchronous teardown. It returns immediately when nothing is loaded.
-func (p *Platform) waitServiceUnloaded(ctx context.Context, target string) {
-	for range 20 {
-		if !p.serviceLoaded(ctx, target) {
-			return
+// servicePID returns the running pid of the launchd label, or 0 when it is not
+// loaded / not running. Parsed from `launchctl print`'s "pid = N" line.
+func (p *Platform) servicePID(ctx context.Context, target string) int {
+	res, err := p.runner.Run(ctx, "launchctl", "print", target)
+	if err != nil || !res.Ok() {
+		return 0
+	}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "pid = "); ok {
+			if n, perr := strconv.Atoi(strings.TrimSpace(rest)); perr == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// waitProcessExit polls until pid is gone (or a short timeout elapses) so a
+// replacement is not launched while the old process is still draining and could
+// unlink the new listener's socket on its way out. No-op for pid <= 0. Uses
+// signal 0 (existence probe — no signal delivered), not an external command.
+func (p *Platform) waitProcessExit(ctx context.Context, pid int) {
+	if pid <= 0 {
+		return
+	}
+	for range 50 {
+		if syscall.Kill(pid, 0) != nil {
+			return // ESRCH (gone) or EPERM — either way, not our live process
 		}
 		select {
 		case <-ctx.Done():
