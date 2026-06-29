@@ -47,7 +47,7 @@ type noteLevelMeta struct {
 }
 
 var noteLevelTable = map[NoteLevel]noteLevelMeta{
-	NoteInfo:     {borderColor: ui.ColorInfo, unicodeLabel: "● INFO", asciiLabel: "* INFO"},             // #5C7CFA
+	NoteInfo:     {borderColor: ui.ColorInfo, unicodeLabel: "● INFO", asciiLabel: "* INFO"},             // #6E80F7
 	NoteWarn:     {borderColor: ui.ColorWarn, unicodeLabel: "⚠ WARN", asciiLabel: "! WARN"},             // #FFD060
 	NoteSecurity: {borderColor: ui.ColorSecurity, unicodeLabel: "● SECURITY", asciiLabel: "* SECURITY"}, // #00B4D8 (ui.ColorSecurity)
 	NoteDanger:   {borderColor: ui.ColorFatal, unicodeLabel: "✕ DANGER", asciiLabel: "x DANGER"},        // #FF5F87

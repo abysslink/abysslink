@@ -235,7 +235,7 @@ var (
 	tuiWarn    = lipgloss.NewStyle().Foreground(ui.ColorWarn).Bold(true)    // #FFD060
 	tuiBold    = lipgloss.NewStyle().Bold(true)
 	tuiMuted   = lipgloss.NewStyle().Foreground(ui.ColorMutedSemantic) // #6B7280
-	tuiInfo    = lipgloss.NewStyle().Foreground(ui.ColorInfo)          // #5C7CFA
+	tuiInfo    = lipgloss.NewStyle().Foreground(ui.ColorInfo)          // #6E80F7
 )
 
 // renderRow formats a settled RowEvent into a display line matching the

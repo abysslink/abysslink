@@ -21,19 +21,25 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Brand palette (D-01): three AdaptiveColor tones — dark hexes are LOCKED;
-// light-mode counterparts are chosen for WCAG-AA legibility on light surfaces.
+// Brand palette (D-01): three AdaptiveColor tones sampled from the abyss-vortex
+// logo (electric-cyan rain, violet vortex, indigo mid-tone). Dark hexes are
+// LOCKED to the logo; light-mode counterparts are chosen for WCAG-AA legibility
+// on light surfaces.
 // ---------------------------------------------------------------------------
 
 // ColorAccent is the Abyss cyan accent used for nav, titles, banner "ABYSS",
-// huh SelectSelector, TextInput cursor/prompt, and SelectedPrefix.
-var ColorAccent = lipgloss.AdaptiveColor{Dark: "#22D3EE", Light: "#0E7490"}
+// huh SelectSelector, TextInput cursor/prompt, and SelectedPrefix. Sampled from
+// the electric-cyan matrix rain / "ABYSS" wordmark of the abyss-vortex logo;
+// #2CE0F5 measures 10.39:1 on #1e1e1e. Light side #0E7490 = 5.36:1 on white.
+var ColorAccent = lipgloss.AdaptiveColor{Dark: "#2CE0F5", Light: "#0E7490"}
 
 // ColorSelection is the Abyss violet used for huh SelectedOption, FocusedButton,
-// MultiSelectSelector, and banner "LINK". The dark side was brightened from
-// #8B5CF6 (3.94:1 on #1e1e1e — below AA) to #A78BFA (~6:1) so the currently-
-// selected option is the HIGHEST-contrast row, not the lowest (T-021).
-var ColorSelection = lipgloss.AdaptiveColor{Dark: "#A78BFA", Light: "#6D28D9"}
+// MultiSelectSelector, and banner "LINK". Sampled from the logo's violet vortex
+// / "LINK" gradient (the punchy #A06CF0–#E060F8 swirl), replacing the washed-out
+// pastel #A78BFA. #B57BFF measures 5.75:1 on #1e1e1e and the light side #7C3AED
+// 5.70:1 on white — both clear WCAG AA, so the selected option stays the
+// HIGHEST-contrast row, not the lowest (T-021).
+var ColorSelection = lipgloss.AdaptiveColor{Dark: "#B57BFF", Light: "#7C3AED"}
 
 // ColorMuted is the Abyss steel tone used for secondary/muted text,
 // huh Description, and non-truecolor banner monochrome.
@@ -58,8 +64,10 @@ var ColorWarn = lipgloss.AdaptiveColor{Dark: "#FFD060", Light: "#946200"}
 // ColorFatal is the semantic red for FATAL icons and error output.
 var ColorFatal = lipgloss.AdaptiveColor{Dark: "#FF5F87", Light: "#B3003A"}
 
-// ColorInfo is the semantic blue for arrows and info markers.
-var ColorInfo = lipgloss.AdaptiveColor{Dark: "#5C7CFA", Light: "#2540C0"}
+// ColorInfo is the semantic blue for arrows and info markers. Aligned to the
+// logo's indigo blue-violet mid-tone (the #5060F8 band between the cyan rain and
+// the violet vortex); #6E80F7 = 4.84:1 on #1e1e1e, light side #2540C0 8.16:1.
+var ColorInfo = lipgloss.AdaptiveColor{Dark: "#6E80F7", Light: "#2540C0"}
 
 // ColorSecurity is the semantic blue for SECURITY note borders. Centralized
 // here (T-022) so the single-source-of-color contract holds; was a hardcoded
@@ -108,7 +116,7 @@ var StyleFatal = lipgloss.NewStyle().Bold(true).Foreground(ColorFatal)
 var StyleInfo = lipgloss.NewStyle().Foreground(ColorInfo)
 
 // StyleCode renders inline code as near-white foreground on a dim background.
-// The previous ColorInfo blue (#5C7CFA) on ColorDim grey (#4B5563) measured
+// The previous ColorInfo blue (#6E80F7) on ColorDim grey (#4B5563) measured
 // ~2.06:1 — failing WCAG AA regardless of terminal theme, on the exact command
 // snippets the user is meant to copy/run. ColorFg (#F8F8F2) on #4B5563 is
 // ~7.5:1 (T-003).

@@ -33,7 +33,7 @@ var (
 	colorGreen  = ui.ColorSuccess       // #04B575
 	colorYellow = ui.ColorWarn          // #FFD060
 	colorRed    = ui.ColorFatal         // #FF5F87
-	colorBlue   = ui.ColorInfo          // #5C7CFA
+	colorBlue   = ui.ColorInfo          // #6E80F7
 	colorMuted  = ui.ColorMutedSemantic // #6B7280 (NOT brand steel — D-04)
 	colorDim    = ui.ColorDim           // #4B5563
 )

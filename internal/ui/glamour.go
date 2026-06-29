@@ -50,13 +50,13 @@ func boolPtr(b bool) *bool { return &b }
 //
 // Hex strings are sourced directly from this package's palette constants
 // (single source of color, D-01):
-//   - H1/H2 headings: "#22D3EE" (ColorAccent dark — cyan)
-//   - Emphasis/strong: "#8B5CF6" (ColorSelection dark — violet)
-//   - Code foreground: "#5C7CFA" (ColorInfo — blue)
+//   - H1/H2 headings: "#2CE0F5" (ColorAccent dark — logo cyan)
+//   - Emphasis/strong: "#B57BFF" (ColorSelection dark — logo violet)
+//   - Code foreground: "#6E80F7" (ColorInfo — logo indigo)
 //   - Code background: "#4B5563" (ColorDim)
 //   - Body text:       "#F8F8F2" (ColorFg)
 //   - Blockquote/muted:"#64748B" (ColorMuted dark — steel)
-//   - Link:            "#22D3EE" (ColorAccent dark — underlined)
+//   - Link:            "#2CE0F5" (ColorAccent dark — underlined)
 //
 // glamour.StyleConfig uses *string/*bool fields — all values are passed
 // through ptr()/boolPtr() helpers (RESEARCH.md Pitfall 7).
@@ -70,24 +70,24 @@ func AbyssGlamourStyle() ansi.StyleConfig {
 
 		H1: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Color: ptr("#22D3EE"),
+				Color: ptr("#2CE0F5"),
 				Bold:  boolPtr(true),
 			},
 		},
 		H2: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Color: ptr("#22D3EE"),
+				Color: ptr("#2CE0F5"),
 				Bold:  boolPtr(true),
 			},
 		},
 		H3: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Color: ptr("#22D3EE"),
+				Color: ptr("#2CE0F5"),
 			},
 		},
 		H4: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Color: ptr("#22D3EE"),
+				Color: ptr("#2CE0F5"),
 			},
 		},
 		H5: ansi.StyleBlock{
@@ -102,11 +102,11 @@ func AbyssGlamourStyle() ansi.StyleConfig {
 		},
 
 		Emph: ansi.StylePrimitive{
-			Color:  ptr("#8B5CF6"),
+			Color:  ptr("#B57BFF"),
 			Italic: boolPtr(true),
 		},
 		Strong: ansi.StylePrimitive{
-			Color: ptr("#8B5CF6"),
+			Color: ptr("#B57BFF"),
 			Bold:  boolPtr(true),
 		},
 
@@ -115,11 +115,11 @@ func AbyssGlamourStyle() ansi.StyleConfig {
 		},
 
 		Link: ansi.StylePrimitive{
-			Color:     ptr("#22D3EE"),
+			Color:     ptr("#2CE0F5"),
 			Underline: boolPtr(true),
 		},
 		LinkText: ansi.StylePrimitive{
-			Color: ptr("#22D3EE"),
+			Color: ptr("#2CE0F5"),
 		},
 
 		BlockQuote: ansi.StyleBlock{
@@ -138,7 +138,7 @@ func AbyssGlamourStyle() ansi.StyleConfig {
 		CodeBlock: ansi.StyleCodeBlock{
 			StyleBlock: ansi.StyleBlock{
 				StylePrimitive: ansi.StylePrimitive{
-					Color:           ptr("#5C7CFA"),
+					Color:           ptr("#6E80F7"),
 					BackgroundColor: ptr("#4B5563"),
 				},
 			},

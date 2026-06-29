@@ -90,13 +90,13 @@ func TestSingleSourceOfColor(t *testing.T) {
 	// Brand literals that must live ONLY in internal/ui.
 	// (planner-discipline-allow tags below permit these strings to appear in this
 	// _test.go file, which is excluded from its own walk.)
-	// planner-discipline-allow: #22D3EE
-	// planner-discipline-allow: #8B5CF6
+	// planner-discipline-allow: #2CE0F5
+	// planner-discipline-allow: #B57BFF
 	// planner-discipline-allow: #64748B
 	// planner-discipline-allow: AdaptiveColor{
 	needles := []string{
-		"#22D3EE",
-		"#8B5CF6",
+		"#2CE0F5",
+		"#B57BFF",
 		"#64748B",
 		"AdaptiveColor{",
 	}
