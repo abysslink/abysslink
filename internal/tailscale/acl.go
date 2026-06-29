@@ -61,7 +61,7 @@ type aclSSHRule struct {
 	Src         []string `json:"src"`
 	Dst         []string `json:"dst"`
 	Users       []string `json:"users"`
-	CheckPeriod string   `json:"checkPeriod"`
+	CheckPeriod string   `json:"checkPeriod,omitempty"`
 }
 
 // ACLEditor edits a Tailscale HuJSON ACL document idempotently.
@@ -169,11 +169,10 @@ func DefaultACL(owner, sshUser string) []byte {
 		},
 		SSH: []aclSSHRule{
 			{
-				Action:      "check",
-				Src:         []string{owner},
-				Dst:         []string{"tag:laptop"},
-				Users:       []string{sshUser},
-				CheckPeriod: "12h",
+				Action: "accept",
+				Src:    []string{"tag:mobile"},
+				Dst:    []string{"tag:laptop"},
+				Users:  []string{sshUser, "autogroup:nonroot"},
 			},
 		},
 	}
@@ -244,28 +243,48 @@ func (e *ACLEditor) EnsureGrant() error {
 	return e.flush()
 }
 
-// EnsureSSHRule ensures the SSH *check* rule for owner→tag:laptop with sshUser
-// exists. Idempotent: updates checkPeriod if the rule exists but the period
-// differs, and rewrites a weaker action (e.g. "accept", which skips re-auth
-// entirely) to "check" — the 12h re-auth interval is an immutable security
-// default and an accept rule must never satisfy the check requirement.
-func (e *ACLEditor) EnsureSSHRule(owner, sshUser, checkPeriod string) error {
+// EnsureSSHRule ensures the Tailscale SSH rule that lets the enrolled phone
+// (tag:mobile) reach the rig (tag:laptop) as sshUser.
+//
+// It is an `accept` rule with src=tag:mobile — NOT a `check` rule keyed to the
+// owner. The phone is enrolled as a TAGGED device (tag:mobile), which has no
+// user identity, so a `check` rule (src=owner, 12h browser re-auth) can never
+// match it — Tailscale SSH `check` requires a user src. The previous owner+check
+// rule therefore generated an SSH policy that denied the very phone it targeted
+// ("access controls don't allow anyone to access this device"). The time-bound
+// control for a tagged phone is the device certificate's expiry + revocation,
+// not periodic re-auth, so checkPeriod does not apply here (it is ignored;
+// retained in the signature for the backend.ACLEditor interface).
+//
+// Idempotent: it also REWRITES the legacy owner/check rule it replaces, so an
+// existing tailnet ACL converges to the working form on the next `acl push`.
+func (e *ACLEditor) EnsureSSHRule(owner, sshUser, _ string) error {
 	for i := range e.doc.SSH {
 		r := &e.doc.SSH[i]
-		if !containsString(r.Src, owner) ||
-			!containsString(r.Dst, "tag:laptop") ||
-			!containsString(r.Users, sshUser) {
+		// Match the abysslink-managed mobile→laptop rule: either the new
+		// tag:mobile form or the legacy owner-src form it supersedes.
+		if !containsString(r.Dst, "tag:laptop") ||
+			(!containsString(r.Src, "tag:mobile") && !containsString(r.Src, owner)) {
 			continue
 		}
-		// Rule exists; converge action and checkPeriod if needed.
 		changed := false
-		if r.Action != "check" {
-			r.Action = "check"
+		if r.Action != "accept" {
+			r.Action = "accept"
 			changed = true
 		}
-		if r.CheckPeriod != checkPeriod {
-			r.CheckPeriod = checkPeriod
+		if len(r.Src) != 1 || r.Src[0] != "tag:mobile" {
+			r.Src = []string{"tag:mobile"}
 			changed = true
+		}
+		if r.CheckPeriod != "" {
+			r.CheckPeriod = "" // accept rules carry no checkPeriod
+			changed = true
+		}
+		for _, u := range []string{sshUser, "autogroup:nonroot"} {
+			if !containsString(r.Users, u) {
+				r.Users = append(r.Users, u)
+				changed = true
+			}
 		}
 		if !changed {
 			return nil // fully idempotent
@@ -274,11 +293,10 @@ func (e *ACLEditor) EnsureSSHRule(owner, sshUser, checkPeriod string) error {
 	}
 	// Rule not found; add it.
 	e.doc.SSH = append(e.doc.SSH, aclSSHRule{
-		Action:      "check",
-		Src:         []string{owner},
-		Dst:         []string{"tag:laptop"},
-		Users:       []string{sshUser},
-		CheckPeriod: checkPeriod,
+		Action: "accept",
+		Src:    []string{"tag:mobile"},
+		Dst:    []string{"tag:laptop"},
+		Users:  []string{sshUser, "autogroup:nonroot"},
 	})
 	return e.flush()
 }
