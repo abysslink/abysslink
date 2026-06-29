@@ -608,6 +608,24 @@ func (m *Module) RemoveHooks(ctx context.Context, dryRun bool) ([]string, error)
 	return removed, nil
 }
 
+// OwnedPaths reports the shared, user-owned files claudecode merges into and so
+// must reverse SURGICALLY (never whole-file) on uninstall — currently just
+// ~/.claude/settings.json. Implements modules.ConfigReverter.
+func (m *Module) OwnedPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{filepath.Join(home, ".claude", "settings.json")}
+}
+
+// ReverseConfig surgically removes abysslink's notify/approve hooks from
+// ~/.claude/settings.json, preserving every other setting the user has — the
+// uninstall counterpart to Apply's merge. Implements modules.ConfigReverter.
+func (m *Module) ReverseConfig(ctx context.Context, dryRun bool) ([]string, error) {
+	return m.RemoveHooks(ctx, dryRun)
+}
+
 // readSettingsForRemoval reads ~/.claude/settings.json for the removal path.
 // Returns (nil, nil) when the directory or file does not exist (graceful no-op).
 func readSettingsForRemoval(home, settingsPath string) ([]byte, error) {

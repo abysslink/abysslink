@@ -193,13 +193,36 @@ func TestRemoveAbysslinkDirs_NoPurgeKeepsConfigDir(t *testing.T) {
 	var out bytes.Buffer
 	p := NewHumanPrinterTo(&out, &out)
 
-	failures := removeAbysslinkDirs(p, false /* purge */)
+	failures := removeAbysslinkDirs(p, false /* removeConfig */, false /* removeState */)
 	assert.Zero(t, failures)
 
 	assert.DirExists(t, cfgDir, "config dir must be KEPT without --purge (CLI-18)")
 	assert.DirExists(t, stateDir, "state dir must be KEPT without --purge")
 	assert.Contains(t, out.String(), "Kept", "output must tell the user the dirs were kept")
 	assert.Contains(t, out.String(), "--purge", "output must point at --purge for full removal")
+}
+
+// TestRemoveAbysslinkDirs_RemoveConfigKeepsState verifies --remove-config drops
+// the config dir but keeps the state dir (audit log + backups) for forensics.
+func TestRemoveAbysslinkDirs_RemoveConfigKeepsState(t *testing.T) {
+	cfgBase := t.TempDir()
+	stateBase := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgBase)
+	t.Setenv("XDG_STATE_HOME", stateBase)
+
+	cfgDir := abysslinkConfigDir()
+	stateDir := abysslinkStateDir()
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	require.NoError(t, os.MkdirAll(stateDir, 0o700))
+
+	var out bytes.Buffer
+	p := NewHumanPrinterTo(&out, &out)
+
+	failures := removeAbysslinkDirs(p, true /* removeConfig */, false /* removeState */)
+	assert.Zero(t, failures)
+
+	assert.NoDirExists(t, cfgDir, "config dir must be removed with --remove-config")
+	assert.DirExists(t, stateDir, "state dir must be KEPT with --remove-config")
 }
 
 // TestRemoveAbysslinkDirs_PurgeRemovesBothDirs verifies that --purge removes
@@ -218,7 +241,7 @@ func TestRemoveAbysslinkDirs_PurgeRemovesBothDirs(t *testing.T) {
 	var out bytes.Buffer
 	p := NewHumanPrinterTo(&out, &out)
 
-	failures := removeAbysslinkDirs(p, true /* purge */)
+	failures := removeAbysslinkDirs(p, true /* removeConfig */, true /* removeState */)
 	assert.Zero(t, failures)
 
 	assert.NoDirExists(t, cfgDir, "config dir must be removed with --purge")

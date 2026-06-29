@@ -50,12 +50,25 @@ func newUninstallCmd() *cobra.Command {
 			}
 			p := newPrinter(cmd)
 			purge, _ := cmd.Flags().GetBool("purge")
+			removeConfigFlag, _ := cmd.Flags().GetBool("remove-config")
+			// --purge implies removing the config dir; --remove-config removes the
+			// config dir but keeps the state dir (audit log + backups).
+			removeConfig := purge || removeConfigFlag
+			removeState := purge
 
 			logPath, err := audit.DefaultLogPath()
 			if err != nil {
 				return fmt.Errorf("uninstall: %w", err)
 			}
-			plan, err := audit.PlanReverse(logPath)
+
+			// Modules drive surgical reverts (shared files like ~/.claude/settings.json)
+			// and resource teardown (the ntfy Docker container). Build them once;
+			// their OwnedPaths are excluded from the whole-file reversal so the user's
+			// own edits to those shared files are never clobbered.
+			mods := uninstallModules(ctx, cc)
+			excluded := configRevertPaths(mods)
+
+			plan, err := audit.PlanReverseExcluding(logPath, excluded)
 			if err != nil {
 				return fmt.Errorf("uninstall: %w", err)
 			}
@@ -67,17 +80,22 @@ func newUninstallCmd() *cobra.Command {
 				printerInfo(p, "")
 				printerInfo(p, tui.Note(tui.NoteDanger, "Uninstall reverses every change abysslink made", []string{
 					"SSH, firewall, sleep, ntfy and module config are restored from their backups.",
+					"Shared files you also edited (e.g. ~/.claude/settings.json) keep your changes — only abysslink's additions are removed.",
 					"With --purge the audit log and backups are also deleted — that is irreversible.",
 				}))
 			}
 
 			if cc.dryRun {
-				runModuleTeardowns(ctx, p, cc, true)
+				runConfigReverts(ctx, p, mods, true)
+				runModuleTeardowns(ctx, p, mods, true)
 				printerInfo(p, styleMuted.Render("Dry-run. Re-run with --apply to execute."))
-				if purge {
+				switch {
+				case purge:
 					printerInfo(p, styleMuted.Render("--purge would also remove ~/.config/abysslink and the state dir (audit log + backups)."))
-				} else {
-					printerInfo(p, styleMuted.Render("~/.config/abysslink and the state dir (audit log + backups) would be kept. Use --purge to remove them."))
+				case removeConfig:
+					printerInfo(p, styleMuted.Render("--remove-config would also remove ~/.config/abysslink (the state dir with audit log + backups is kept)."))
+				default:
+					printerInfo(p, styleMuted.Render("~/.config/abysslink and the state dir (audit log + backups) would be kept. Use --remove-config or --purge to remove them."))
 				}
 				return nil
 			}
@@ -91,23 +109,24 @@ func newUninstallCmd() *cobra.Command {
 				return nil
 			}
 
-			manifest, err := audit.Reverse(logPath, false)
+			manifest, err := audit.ReverseExcluding(logPath, false, excluded)
 			if err != nil {
 				return fmt.Errorf("uninstall: %w", err)
 			}
 
-			// When purge was confirmed, honour it; when --yes bypassed, use the
-			// purge flag from the command line (already set).
+			// When the user declined the second (--purge irreversibility) confirm we
+			// still run Reverse but must NOT delete the state dir. Keep the config
+			// dir too unless --remove-config was passed explicitly, mirroring the
+			// pre-split behaviour where a declined purge kept both dirs.
 			if purge && !purgeOK {
-				// This branch should not happen in practice: purgeOK is always true
-				// when purge=true + yes=true, and false when user declined the
-				// second confirm — in which case we still run Reverse but skip purge.
-				purge = false
+				removeState = false
+				removeConfig = removeConfigFlag
 			}
 
 			failures := printReverseManifest(p, manifest)
-			failures += runModuleTeardowns(ctx, p, cc, false)
-			failures += removeAbysslinkDirs(p, purge)
+			failures += runConfigReverts(ctx, p, mods, false)
+			failures += runModuleTeardowns(ctx, p, mods, false)
+			failures += removeAbysslinkDirs(p, removeConfig, removeState)
 			if failures > 0 {
 				return fmt.Errorf("uninstall: %d action(s) failed", failures)
 			}
@@ -117,6 +136,7 @@ func newUninstallCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Bool("purge", false, "Also remove ~/.config/abysslink and the state dir (audit log + backups)")
+	cmd.Flags().Bool("remove-config", false, "Also remove ~/.config/abysslink (keeps the state dir: audit log + backups)")
 	return cmd
 }
 
@@ -137,6 +157,9 @@ func printReversePlan(p Printer, plan []audit.ReverseAction) {
 			continue
 		}
 		printerInfo(p, fmt.Sprintf("  %-8s %s", a.Action, a.Target))
+		if a.Warning != "" {
+			printerInfo(p, styleWarn.Render("           ⚠ "+a.Warning))
+		}
 	}
 	printSkipGroups(p, skips)
 	printerInfo(p, "")
@@ -164,6 +187,9 @@ func printReverseManifest(p Printer, manifest []audit.ReverseAction) int {
 			detail = styleMuted.Render("sha256:" + a.Hash[:12])
 		}
 		printerInfo(p, fmt.Sprintf("  %-8s %s  %s", a.Action, a.Target, detail))
+		if a.Warning != "" {
+			printerInfo(p, styleWarn.Render("           ⚠ "+a.Warning))
+		}
 	}
 	printSkipGroups(p, skips)
 	printerInfo(p, "")
@@ -286,51 +312,105 @@ func foldSkipDirs(targets []string, maxFanout int) []dirGroup {
 	return groups
 }
 
-// removeAbysslinkDirs removes the config dir and the state dir (audit log +
-// backups) — but ONLY when purge is set (CLI-18): the --purge help and dry-run
-// text promise that purge controls directory removal, so a plain --apply keeps
-// both ~/.config/abysslink and the state dir. Returns the number of failures.
-func removeAbysslinkDirs(p Printer, purge bool) int {
+// removeAbysslinkDirs removes the abysslink config dir (~/.config/abysslink) and
+// the state dir (audit log + backups). removeConfig and removeState gate each
+// independently: a plain --apply keeps both (forensics); --remove-config drops
+// the config dir only; --purge drops both. Returns the number of failures.
+func removeAbysslinkDirs(p Printer, removeConfig, removeState bool) int {
 	failures := 0
-	if !purge {
-		printerInfo(p, styleMuted.Render("  Kept ~/.config/abysslink and the state dir (audit log + backups) for forensics. Use --purge to remove them."))
+	if !removeConfig && !removeState {
+		printerInfo(p, styleMuted.Render("  Kept ~/.config/abysslink and the state dir (audit log + backups) for forensics. Use --remove-config or --purge to remove them."))
 		return failures
 	}
-	if cfgDir := abysslinkConfigDir(); cfgDir != "" {
-		if err := os.RemoveAll(cfgDir); err != nil {
-			printerError(p, fmt.Sprintf("  could not remove %s: %v", cfgDir, err))
-			failures++
-		} else {
-			printerInfo(p, "  removed "+cfgDir)
+	if removeConfig {
+		if cfgDir := abysslinkConfigDir(); cfgDir != "" {
+			if err := os.RemoveAll(cfgDir); err != nil {
+				printerError(p, fmt.Sprintf("  could not remove %s: %v", cfgDir, err))
+				failures++
+			} else {
+				printerInfo(p, "  removed "+cfgDir+" (config)")
+			}
 		}
 	}
-	if stateDir := abysslinkStateDir(); stateDir != "" {
-		if err := os.RemoveAll(stateDir); err != nil {
-			printerError(p, fmt.Sprintf("  could not remove %s: %v", stateDir, err))
-			failures++
-		} else {
-			printerInfo(p, "  removed "+stateDir+" (audit log + backups)")
+	if removeState {
+		if stateDir := abysslinkStateDir(); stateDir != "" {
+			if err := os.RemoveAll(stateDir); err != nil {
+				printerError(p, fmt.Sprintf("  could not remove %s: %v", stateDir, err))
+				failures++
+			} else {
+				printerInfo(p, "  removed "+stateDir+" (audit log + backups)")
+			}
 		}
+	} else if removeConfig {
+		printerInfo(p, styleMuted.Render("  Kept the state dir (audit log + backups) for forensics. Use --purge to remove it too."))
 	}
 	printerInfo(p, styleMuted.Render("  Third-party packages (tailscale, ntfy, mosh, tmux) are left installed; remove them manually if desired."))
 	return failures
 }
 
-// runModuleTeardowns invokes Teardown on every module that implements
-// modules.Teardowner — non-file resources (e.g. the ntfy Docker container) that
-// audit-log reversal cannot undo. With dryRun it only previews what would be
-// removed. Best-effort: if module deps cannot be built (e.g. config already
-// gone) the step is skipped with a warning rather than failing the uninstall,
-// and per-module teardown errors are counted and reported, never fatal to the
-// rest. Returns the number of teardown failures.
-func runModuleTeardowns(ctx context.Context, p Printer, cc *cmdContext, dryRun bool) int {
+// uninstallModules builds the module set used for surgical config-reverts and
+// resource teardown. Best-effort: returns nil when deps cannot be built (e.g.
+// config already removed) so file reversal still proceeds.
+func uninstallModules(ctx context.Context, cc *cmdContext) []modules.Module {
 	deps, err := buildDeps(ctx, cc)
 	if err != nil {
-		slog.Warn("uninstall: cannot build module deps; skipping non-file resource teardown", "err", err)
-		return 0
+		slog.Warn("uninstall: cannot build module deps; skipping surgical config-revert and resource teardown", "err", err)
+		return nil
 	}
+	return allModules(deps)
+}
+
+// configRevertPaths is the set of paths reversed surgically by modules
+// (modules.ConfigReverter.OwnedPaths) — e.g. ~/.claude/settings.json. uninstall
+// EXCLUDES these from whole-file restore/delete so the user's own edits to those
+// shared files are preserved; the module strips only abysslink's additions.
+func configRevertPaths(mods []modules.Module) map[string]bool {
+	excluded := map[string]bool{}
+	for _, mod := range mods {
+		if cr, ok := mod.(modules.ConfigReverter); ok {
+			for _, path := range cr.OwnedPaths() {
+				excluded[path] = true
+			}
+		}
+	}
+	return excluded
+}
+
+// runConfigReverts runs each module's surgical ReverseConfig — removing only
+// abysslink's own additions from shared user files (preserving the rest). With
+// dryRun it previews. Best-effort; per-module errors are counted, never fatal.
+func runConfigReverts(ctx context.Context, p Printer, mods []modules.Module, dryRun bool) int {
 	failures := 0
-	for _, mod := range allModules(deps) {
+	for _, mod := range mods {
+		cr, ok := mod.(modules.ConfigReverter)
+		if !ok {
+			continue
+		}
+		items, err := cr.ReverseConfig(ctx, dryRun)
+		if err != nil {
+			failures++
+			printerError(p, fmt.Sprintf("  config %s: %v", mod.Name(), err))
+			continue
+		}
+		for _, it := range items {
+			if dryRun {
+				printerInfo(p, "  would remove "+it)
+			} else {
+				printerInfo(p, "  removed "+it)
+			}
+		}
+	}
+	return failures
+}
+
+// runModuleTeardowns invokes Teardown on every module that implements
+// modules.Teardowner — non-file resources (e.g. the ntfy Docker container) that
+// audit-log reversal cannot undo. With dryRun it only previews. Best-effort:
+// per-module errors are counted and reported, never fatal to the rest. Returns
+// the number of teardown failures.
+func runModuleTeardowns(ctx context.Context, p Printer, mods []modules.Module, dryRun bool) int {
+	failures := 0
+	for _, mod := range mods {
 		td, ok := mod.(modules.Teardowner)
 		if !ok {
 			continue
