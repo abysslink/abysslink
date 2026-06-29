@@ -879,6 +879,40 @@ Plans:
 
 **Fixed (12) — commits on branch:** T-004 keymap hint, T-038 resume copy, T-044 gallery flags, T-043 status error honesty, T-023 spinner Esc, T-020 forms theming, T-022 security color centralized, T-001 note-box narrow-terminal overflow, T-017/T-032 livetable spinner palette color, T-011/T-041 init-wizard abort propagation. All pass `make build` + `make test -race` + `make lint`.
 
-**Deferred AUTO_FIXABLE (need golden re-bless / design glance):**
-- T-003 [HIGH] internal/cli/styles.go:48 + ui/theme.go — styleCode pill is ColorInfo on ColorDim (2.06:1, fails WCAG AA). Fix changes a brand color (`StyleCode`) across every surface (status/up/doctor) → confirm design intent + re-bless 3 goldens. Not auto-applied (visible brand change).
-- T-014 [MEDIUM] internal/cli/cmd_up.go:459,883 — horizontal rules hardcoded to `strings.Repeat("─",48)`, ignoring terminal width. Mechanical (add hrule() helper) but re-blesses up_dryrun + doctor goldens; deferred under budget.
+**Deferred AUTO_FIXABLE (round 1) — NOW FIXED in Phase 35.1:**
+- T-003 [HIGH] styleCode/glamour contrast → ColorFg (Phase 35.1 commit `0a1dd72`); goldens re-blessed.
+- T-014 [MEDIUM] hardcoded `─` rules → shared `hrule()` (Phase 35.1 commit `a05524c`); goldens re-blessed.
+
+**→ Every remaining audit finding (and a fresh 101-finding re-review) was closed in Phase 35.1. See below.**
+
+---
+
+## Phase 35.1: TUI Migration & Hardening (INSERTED) (branch fix/tui-audit-2026-06-25) ✅ COMPLETE
+
+Completes the 2026-06-25 audit backlog AND migrates the entire human CLI onto the
+new-TUI stack (was init-only). 25 commits (`efad489`..`63f44b5`), all gates green
+(`go test ./...` 0 failures · `make lint` 0 issues + gosec + semgrep). Not yet
+merged/pushed. Detail: `.planning/phases/35.1-tui-migration-and-hardening/`.
+
+**Plan 35.1-01 — backlog completion + adversarial re-review**
+- [x] Re-review (workflow): `.planning/audits/TUI_REREVIEW.md` — 101 confirmed findings (10 HIGH / 43 MED / 48 LOW).
+- [x] P0 init honest recap journey — killed 4 discarded confirms (Lock "enabled" lie) + OAuth example.com hang + `<your-rig>` (`efad489`).
+- [x] P0 fail-closed: backup restore `--json`, report `--strict` exit-2, WR-05 tri-state rigs (`dcf605d`).
+- [x] P1 width floors/rules (`a05524c`), animated spinner wiring (`c2a32de`), single color-enable + HMAC SecretBox (`6e87102`).
+- [x] P2 AdaptiveColor palette (`0a1dd72`), LiveTable ctx+clamp+scan-rows (`82e8dd5`), JourneyHeader wired + dead-code/opener cleanup (`2e6c7e1`).
+- [x] LOW sweep: rig import `--json` (`8d58cd2`), acl NetBird gating (`62784bc`), `truncCell` tables (`8806779`), device-bundle `ruleN` (`a7637cf`).
+- [x] `TestDoctorParity` made deterministic (`68c1dce`).
+
+**Plan 35.1-02 — full human-TUI migration (225-item plan, batches B1–B6)**
+- [x] Plan: `.planning/audits/TUI_MIGRATION_PLAN.md` (standard + shared infra + batches).
+- [x] B1 infra: `commandHeader`/`styleTitle`, spinWork json-safe, branded errors (`c59cf8c`).
+- [x] B2 every command title brand-cyan (`09d525b`).
+- [x] B3 spinners on blocking collectors (`20a8766`, `f7c08a7`); B3-cont enroll ACL (`919d23f`).
+- [x] B4 danger/security callouts → `tui.Note` (`c40cc0e`, `a3a6d49`, `919d23f`).
+- [x] B5 up next-steps/success brand (`992c147`).
+- [x] B6 fleet-cell colour, repair outcome icons, sub-heading accents (`a2a1d7b`, `f7c08a7`).
+- [x] Verify (workflow): `.planning/audits/TUI_MIGRATION_VERIFY.md` — SHIP-SAFE; 1 MED + 11 LOW fixed (`c184548`, `63f44b5`).
+
+**Deferred (documented, not regressions):** server\* provisioning step-spinners (complex audited flow, infrequent admin cmd); lock-rotate runbook glamour; audit-command branding.
+
+**Crash note (2026-06-29):** mid-B5 laptop crash — 0 work lost (staged/committed intact; only ssh-agent cleared). Resumed cleanly.
