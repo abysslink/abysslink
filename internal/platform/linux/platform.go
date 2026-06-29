@@ -238,6 +238,37 @@ func (f *linuxFirewall) AllowPort(ctx context.Context, port int, proto string) e
 		"-p", proto, "--dport", fmt.Sprintf("%d", port), "-j", "ACCEPT")
 }
 
+// AllowPortRange opens the inclusive [lo,hi] range for proto. Implements the
+// optional platform.RangeFirewall capability — used by the mosh module to open
+// the mosh UDP range (60000-61000). Prefers ufw (persistent), falls back to
+// iptables (ephemeral). Both use ufw/iptables range syntax "lo:hi".
+func (f *linuxFirewall) AllowPortRange(ctx context.Context, lo, hi int, proto string) error {
+	rule := fmt.Sprintf("%d:%d/%s", lo, hi, proto)
+	if err := f.p.runPrivileged(ctx, "ufw", "allow", rule); err == nil {
+		return nil
+	}
+	return f.p.runPrivileged(ctx, "iptables", "-A", "INPUT",
+		"-p", proto, "--dport", fmt.Sprintf("%d:%d", lo, hi), "-j", "ACCEPT")
+}
+
+// IsPortRangeAllowed reports whether [lo,hi]/proto appears as an ALLOW rule in
+// `ufw status`. A genuine exec/IO failure (err != nil — e.g. context cancelled)
+// is propagated so the doctor probe skips rather than emit a false "not open"
+// warning; a non-zero exit (ufw absent/errored — the codebase's C4 class, where
+// failures surface in ExitCode with err == nil) is treated as "not confirmed
+// open". Implements platform.RangeFirewall.
+func (f *linuxFirewall) IsPortRangeAllowed(ctx context.Context, lo, hi int, proto string) (bool, error) {
+	res, err := f.p.runner.Run(ctx, "ufw", "status")
+	if err != nil {
+		return false, fmt.Errorf("ufw status: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return false, nil // ufw absent or errored — cannot confirm
+	}
+	needle := fmt.Sprintf("%d:%d/%s", lo, hi, proto)
+	return strings.Contains(res.Stdout, needle), nil
+}
+
 func (f *linuxFirewall) DenyPort(ctx context.Context, port int, proto string) error {
 	rule := fmt.Sprintf("%d/%s", port, proto)
 	// Prefer ufw (privilege-elevated).

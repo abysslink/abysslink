@@ -925,6 +925,9 @@ func findingFix(check string) string {
 		// Firewall.
 		"firewall":             "System Settings → Network → Firewall → Turn On  (macOS)",
 		"application_firewall": "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on",
+		// mosh reachability (host-level gaps that surface as "No response from Mosh server").
+		"mosh_path":     "abysslink up --apply  (symlinks mosh-server into /usr/local/bin so non-login SSH shells resolve it)",
+		"mosh_firewall": "abysslink up --apply  (allows mosh-server through the firewall / opens udp 60000-61000)",
 		// SSH.
 		"sshd_running": "sudo systemctl disable --now sshd  (Linux)  |  System Settings → General → Sharing → Remote Login → turn off  (macOS)",
 		"checkperiod":  "Lower ssh_check_period in abysslink.yaml (max 12h)",

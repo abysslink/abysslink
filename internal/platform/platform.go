@@ -94,6 +94,45 @@ type FirewallController interface {
 	Status(ctx context.Context) (string, error)
 }
 
+// AppFirewall is an optional capability for per-application firewalls (the macOS
+// Application Firewall). A FirewallController MAY implement it; callers must
+// type-assert. It exists because macOS gates incoming connections per signed
+// binary, not per port — so an unsigned Homebrew binary (e.g. mosh-server) is
+// blocked on first incoming connection until explicitly allowed. Linux's
+// per-port firewall does not implement this capability.
+type AppFirewall interface {
+	// AllowApp permits incoming connections to the binary at binaryPath.
+	AllowApp(ctx context.Context, binaryPath string) error
+	// IsAppAllowed reports whether incoming connections to binaryPath are permitted.
+	IsAppAllowed(ctx context.Context, binaryPath string) (bool, error)
+}
+
+// RangeFirewall is an optional capability for per-port-range firewalls (Linux
+// ufw/iptables). A FirewallController MAY implement it; callers must type-assert.
+// macOS's per-application firewall does not implement this capability.
+type RangeFirewall interface {
+	// AllowPortRange opens the inclusive [lo,hi] port range for proto ("udp"/"tcp").
+	AllowPortRange(ctx context.Context, lo, hi int, proto string) error
+	// IsPortRangeAllowed reports whether [lo,hi]/proto is already permitted.
+	IsPortRangeAllowed(ctx context.Context, lo, hi int, proto string) (bool, error)
+}
+
+// PathLinker is an optional Platform capability that makes an installed binary
+// resolvable on the system base PATH used by non-login shells — notably the
+// shell Tailscale SSH execs remote commands in. On macOS, Homebrew's bin dir
+// (/opt/homebrew/bin or /usr/local/bin on Intel) is absent from that PATH, so
+// binaries are symlinked into /usr/local/bin (which is on the base PATH for
+// sh/bash/zsh/fish). Linux package managers install onto the base PATH already,
+// so the Linux Platform does not implement this capability.
+type PathLinker interface {
+	// SymlinkIntoSystemPath symlinks binaryPath into a base-PATH directory,
+	// keyed by its base name. Idempotent.
+	SymlinkIntoSystemPath(ctx context.Context, binaryPath string) error
+	// IsOnSystemPath reports whether a binary named name is resolvable on the
+	// system base PATH (i.e. the abysslink-managed symlink resolves).
+	IsOnSystemPath(ctx context.Context, name string) (bool, error)
+}
+
 // Platform abstracts macOS and Linux system operations.
 type Platform interface {
 	OS() string
