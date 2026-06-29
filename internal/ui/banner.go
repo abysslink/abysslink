@@ -14,7 +14,7 @@
 // limitations under the License.
 
 // Package ui provides the Abyss brand palette, huh theme, reusable lipgloss
-// styles, and the two-tone slant FIGlet banner.
+// styles, and the two-tone stacked FIGlet banner.
 //
 // IO boundary (D-07): internal/ui is a leaf package — it MUST NOT import
 // internal/cli. TTY/color decisions flow IN as parameters; internal/ui never
@@ -22,6 +22,8 @@
 package ui
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/lipgloss"
 	figure "github.com/common-nighthawk/go-figure"
 )
@@ -53,14 +55,14 @@ type BannerOptions struct {
 // It matches the defaultBoxWidth constant in internal/cli/styles.go (54 cols).
 const defaultBannerWidth = 54
 
-// RenderBanner returns the two-tone slant FIGlet brand banner as a string.
+// RenderBanner returns the two-tone stacked FIGlet brand banner as a string.
 // The return value is always safe to print via the caller's Printer — it is
 // never written to stdout by this function.
 //
 // Degradation tiers (D-06):
 //   - opts.Color == false   → plain "ABYSSLINK" word; no FIGlet; NO \x1b[ bytes.
-//   - opts.Color == true    → slant FIGlet; ABYSS styled ColorAccent (cyan) and
-//     LINK styled ColorSelection (violet), joined horizontally inside a border.
+//   - opts.Color == true    → stacked FIGlet; ABYSS styled ColorAccent (cyan)
+//     over LINK styled ColorSelection (violet), centered inside a border.
 //     On a non-truecolor terminal lipgloss/termenv auto-downsample the colors
 //     to 256/16-color; no extra branch is required (Pitfall 14 avoided).
 //
@@ -79,29 +81,21 @@ func renderPlain() string {
 	return "ABYSSLINK"
 }
 
-// renderFIGlet renders the two-tone slant banner using go-figure's pure path.
+// renderFIGlet renders the two-tone STACKED banner using go-figure's pure path:
+// "ABYSS" (ColorAccent cyan) on top of "LINK" (ColorSelection violet), centered.
+//
+// Why stacked, not the old side-by-side slant: a single-line "ABYSSLINK" FIGlet
+// is ~64+ columns wide and the brand box is capped at 54 (phone-friendly), so the
+// art wrapped into unreadable fragments. Stacking the two halves keeps each word
+// well under the cap (standard "ABYSS" ≈ 42 cols, small ≈ 34) while staying large
+// and legible. The font is chosen to FIT the available width so it never wraps;
+// below the smallest FIGlet that fits, a plain two-tone wordmark is used.
 //
 // Safety contract: ONLY figure.NewFigure(...).String() and .Slicify() are safe.
 // The "color" variants (NewColor*, Color*) call log.Fatalf on unsupported colors
 // and write to stdout, bypassing Printer and crashing on brand hex values
 // (RESEARCH Pitfall 2 / T-34-12). They are banned from this file by forbidigo.
 func renderFIGlet(opts BannerOptions) string {
-	// Build each half using the safe, pure go-figure path.
-	// NewFigure returns a figure value (unexported type); .String() converts it
-	// to a multi-line ASCII-art string with no ANSI codes and no terminal writes.
-	abyssText := figure.NewFigure("ABYSS", "slant", true).String()
-	linkText := figure.NewFigure("LINK", "slant", true).String()
-
-	// Apply brand colors.  lipgloss/termenv auto-downsamples truecolor →
-	// 256 → 16-color depending on the terminal profile; no explicit branch
-	// is needed for the non-truecolor monochrome tier (D-06 tier 2).
-	abyssStyled := lipgloss.NewStyle().Foreground(ColorAccent).Render(abyssText)
-	linkStyled := lipgloss.NewStyle().Foreground(ColorSelection).Render(linkText)
-
-	// Join the two halves side-by-side, aligning their tops.
-	body := lipgloss.JoinHorizontal(lipgloss.Top, abyssStyled, linkStyled)
-
-	// Apply the border.
 	border := opts.Border
 	if border == (lipgloss.Border{}) {
 		border = lipgloss.RoundedBorder()
@@ -112,11 +106,46 @@ func renderFIGlet(opts BannerOptions) string {
 		width = defaultBannerWidth
 	}
 
+	// Available content columns after the box's horizontal padding (0,1).
+	// Size the FIGlet to the WIDER half ("ABYSS") so neither word wraps.
+	inner := width - 2
+	font := ""
+	switch {
+	case inner >= 42:
+		font = "standard" // ABYSS ≈ 42 cols — crisp and large
+	case inner >= 34:
+		font = "small" // ABYSS ≈ 34 cols — compact fallback
+	}
+
+	body := bannerBody(font)
+
 	boxStyle := lipgloss.NewStyle().
 		Border(border).
 		BorderForeground(ColorAccent).
 		Padding(0, 1).
-		Width(width)
+		Width(width).
+		Align(lipgloss.Center)
 
 	return boxStyle.Render(body)
+}
+
+// bannerBody builds the centered two-tone stacked wordmark. An empty font means
+// the box is too narrow for any readable FIGlet, so a plain bold two-tone
+// wordmark is stacked instead — still no wrapping, still on-brand.
+func bannerBody(font string) string {
+	if font == "" {
+		abyss := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("ABYSS")
+		link := lipgloss.NewStyle().Foreground(ColorSelection).Bold(true).Render("LINK")
+		return lipgloss.JoinVertical(lipgloss.Center, abyss, link)
+	}
+	// NewFigure(...).String() yields multi-line ASCII art with no ANSI codes and
+	// no terminal writes; TrimRight drops the trailing blank line go-figure emits
+	// so JoinVertical does not insert a gap between the two words.
+	abyssArt := strings.TrimRight(figure.NewFigure("ABYSS", font, true).String(), "\n")
+	linkArt := strings.TrimRight(figure.NewFigure("LINK", font, true).String(), "\n")
+	// lipgloss/termenv auto-downsamples truecolor → 256 → 16-color by terminal
+	// profile; no explicit branch is needed for the monochrome tier (D-06 tier 2).
+	abyssStyled := lipgloss.NewStyle().Foreground(ColorAccent).Render(abyssArt)
+	linkStyled := lipgloss.NewStyle().Foreground(ColorSelection).Render(linkArt)
+	return lipgloss.JoinVertical(lipgloss.Center, abyssStyled, linkStyled)
 }
