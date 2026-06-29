@@ -915,6 +915,17 @@ merged/pushed. Detail: `.planning/phases/35.1-tui-migration-and-hardening/`.
 
 **Server health-check spinners done** (`45145de`): the long up-to-30s provisioning health poll in `server headscale/netbird init` now animates via spinWork.
 
-**Deferred (documented, not regressions):** server provisioning *per-step* spinners (audited install/systemd/config steps stay static — touch the audited write path/sudo; the long wait is now animated); lock-rotate runbook glamour; audit-command branding.
+**Deferred (documented, not regressions):** server provisioning *per-step* spinners; lock-rotate runbook glamour; audit-command branding.
+
+### Phase 35.1 — remaining polish TODO (marginal, no functional gap; pick up cold)
+
+Branch `fix/tui-audit-2026-06-25` is complete + green; these are optional polish.
+Rules for all three: human path only (never `--json`; `commandHeader`/`emitNote`/
+`spinWork` already self-guard `*jsonPrinter`); re-bless any golden you touch; keep
+`internal/tui` a leaf; `make build && make test && make lint` per change.
+
+- [ ] **lock-rotate runbook → glamour** — `internal/cli/cmd_lock.go` `newLockRotateCmd` (~L236): the 5 plain `printerInfo` numbered steps → one `ui.RenderMarkdown(md, !colorEnabled())` (numbered list + fenced commands), mirroring init's `doneSummaryMD`. cmd_lock must add the `internal/ui` import. No golden (lock has none).
+- [ ] **audit-command branding** — `internal/cli/cmd_audit.go`: add `commandHeader(p,"audit","audit log")` to the `audit ls`/`tail` human path; the `Chain OK` / `CHAIN BROKEN` verdict → `tui.Note(NoteInfo/NoteDanger)` or `styleSuccess`/`styleFatal`. Check for an audit parity golden / `Contains` test first; keep the exact `CHAIN BROKEN at entry N` substring + exit codes.
+- [ ] **server per-step provisioning spinners** — `internal/cli/cmd_server_headscale.go` / `cmd_server_netbird.go`: wrap only the per-step network/exec waits that do NOT use `RunInteractive` (sudo TTY passthrough) and are NOT audited `WriteFilePath` calls, in `spinWork`. The long health poll is already animated (`45145de`). HIGH CARE — audited provisioning flow; leave any step whose wrap risks the audit path static.
 
 **Crash note (2026-06-29):** mid-B5 laptop crash — 0 work lost (staged/committed intact; only ssh-agent cleared). Resumed cleanly.
