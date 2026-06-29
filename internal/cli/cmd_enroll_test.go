@@ -477,7 +477,7 @@ func TestEnrollPhone_DryRunDefault(t *testing.T) {
 	require.NoError(t, execErr)
 
 	output := out.String()
-	assert.Contains(t, output, "Dry-run mode", "dry-run banner must be printed")
+	assert.Contains(t, output, "preview only", "dry-run header must mark the run as preview-only")
 	assert.Contains(t, output, "[plan]", "dry-run must print a plan preview")
 	assert.Contains(t, output, "tag:", "preview must name the tag the key would carry")
 	assert.Contains(t, output, "--apply", "preview must point at --apply")

@@ -500,7 +500,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 			p := newPrinter(cmd)
 			tag := "tag:" + cc.cfg.Mobile.Tag
 
-			printerInfo(p, styleTitle.Render("Enroll phone"))
+			printEnrollPhoneHeader(p, !cc.apply)
 
 			// CLI-30: `enroll phone` mints a pre-authorized tailnet auth key and
 			// writes a runbook file — both are mutations, so the standard
@@ -537,12 +537,16 @@ func newEnrollPhoneCmd() *cobra.Command {
 			}
 
 			if !hasCreds {
+				// Keep the step number (2) even on the manual path so the
+				// walkthrough reads 1 → 2 → 3, not 1 → 3 (the auth-key step still
+				// happens, just by hand instead of via the admin API).
+				printerInfo(p, "2. Create a single-use, pre-authorized auth key by hand:")
 				emitNote(p, tui.NoteWarn, "No admin OAuth client configured", []string{
-					"Cannot mint an auth key automatically.",
+					"Abysslink can't mint the key automatically.",
 				})
-				printerInfo(p, "Create a single-use, pre-authorized key tagged "+styleCode.Render(tag)+" at:")
-				printerInfo(p, "  "+styleCode.Render("https://login.tailscale.com/admin/settings/keys"))
-				printerInfo(p, "Then sign in on the phone with that key.")
+				printerInfo(p, "   Create a key tagged "+styleCode.Render(tag)+" at:")
+				printerInfo(p, "   "+styleCode.Render("https://login.tailscale.com/admin/settings/keys"))
+				printerInfo(p, "   Then sign in on the phone with that key.")
 			} else if err := enrollWithAdminKey(ctx, p, cmd.OutOrStdout(), cc.jsonOut, adminAPI, tag); err != nil {
 				return fmt.Errorf("enroll phone: %w", err)
 			}
@@ -589,11 +593,24 @@ func newEnrollPhoneCmd() *cobra.Command {
 // printEnrollPhonePlan prints the `enroll phone` dry-run plan (no mutations).
 // Extracted from newEnrollPhoneCmd to keep that command's cyclomatic complexity
 // in check.
+// printEnrollPhoneHeader renders the boxed command header, matching `up`'s
+// styleHeaderBox treatment so the enroll screen reads as the same polished TUI
+// rather than a bare bold title. dryRun selects the preview vs applying banner.
+func printEnrollPhoneHeader(p Printer, dryRun bool) {
+	var header string
+	if dryRun {
+		header = styleTitle.Render("abysslink enroll phone") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
+	} else {
+		header = styleTitle.Render("abysslink enroll phone") + "  " + styleSuccess.Render("✦  applying")
+	}
+	printerInfo(p, styleHeaderBox.Render(header))
+	printerInfo(p, "")
+}
+
 func printEnrollPhonePlan(p Printer, cc *cmdContext, tag string, showQR bool) {
 	hasCfgCreds := cc.cfg.Tailnet.Admin.Tailnet != "" &&
 		cc.cfg.Tailnet.Admin.OAuthClientID != "" &&
 		os.Getenv(oauthSecretEnv) != ""
-	printerInfo(p, styleMuted.Render("Dry-run mode — no changes will be made. Use --apply to execute."))
 	if hasCfgCreds {
 		printerInfo(p, "[plan] would mint a single-use, pre-authorized tailnet auth key tagged "+tag+" (backend-default expiry) via the admin API and show it as a QR code")
 	} else {
@@ -1010,7 +1027,7 @@ func printDeviceBundle(p Printer, out io.Writer, jsonOut bool, b *device.Bundle,
 		title += "  (rotated — the previous credentials are now INVALID)"
 	}
 	printerInfo(p, "")
-	printerInfo(p, "┌"+ruleN(65)+"┐")
+	printerInfo(p, "╭"+ruleN(65)+"╮")
 	printerInfo(p, title)
 	printerInfo(p, "│  Shown ONCE — store these in your phone's SSH client / shortcut NOW.")
 	printerInfo(p, "│  Abysslink never writes them to disk; they cannot be shown again.")
@@ -1043,7 +1060,7 @@ func printDeviceBundle(p Printer, out io.Writer, jsonOut bool, b *device.Bundle,
 	printerInfo(p, "│")
 	printerInfo(p, "│  CA public key (for sshd TrustedUserCAKeys — also via `abysslink device ca`):")
 	printerInfo(p, "│    "+b.CAPublicKeyAuthorizedKey)
-	printerInfo(p, "└"+ruleN(65)+"┘")
+	printerInfo(p, "╰"+ruleN(65)+"╯")
 	printerInfo(p, "")
 
 	if showQR {
