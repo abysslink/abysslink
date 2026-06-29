@@ -254,25 +254,48 @@ const globFallbackWarning = "backup selected by filesystem glob (no signed chain
 // target (e.g. legacy unsigned logs); such actions carry a Warning and an
 // empty ChainHash so callers (and Reverse) know the content is unverified.
 func PlanReverse(logPath string) ([]ReverseAction, error) {
-	targets, err := MutatedTargets(logPath)
+	// Read the log exactly once and build both the mutated-target list and a
+	// per-target index of chain-attested backups in a single pass. The previous
+	// implementation called MutatedTargets (one full-log read) and then
+	// BackupsFromChain (another full-log read) for *every* target, making
+	// PlanReverse O(targets × log-lines): on a real log (~15k lines, ~10k
+	// targets) that is ~150M json.Unmarshal calls, so uninstall — even its
+	// dry-run preview — appeared to hang for minutes. This pass is O(log-lines).
+	entries, err := ReadLog(logPath)
 	if err != nil {
 		return nil, err
 	}
 
-	plan := make([]ReverseAction, 0, len(targets))
-	for _, t := range targets {
-		// Chain-attested backups for this exact target. The ".bak." suffix in
-		// the prefix match prevents a sibling target like t+"2" from matching.
-		chainBaks, cerr := BackupsFromChain(logPath, t)
-		if cerr != nil {
-			return nil, cerr
+	seen := map[string]bool{}
+	var targets []string
+	// attested maps an original target to its chain-recorded backup sidecars in
+	// log (chronological) order. Backup targets are "<orig>.bak.<stamp>" and the
+	// stamp never contains ".bak.", so the LAST ".bak." splits orig from the
+	// sidecar — equivalent to the old anchored HasPrefix(e.Target, t+".bak.")
+	// match, but built once instead of re-scanned per target.
+	attested := map[string][]Entry{}
+	for i := range entries {
+		e := entries[i]
+		if e.DryRun {
+			continue
 		}
-		var attested []Entry
-		for _, e := range chainBaks {
-			if !e.DryRun && strings.HasPrefix(e.Target, t+".bak.") {
-				attested = append(attested, e)
+		switch e.Op {
+		case "write":
+			if !seen[e.Target] {
+				seen[e.Target] = true
+				targets = append(targets, e.Target)
+			}
+		case "backup":
+			if idx := strings.LastIndex(e.Target, ".bak."); idx > 0 {
+				orig := e.Target[:idx]
+				attested[orig] = append(attested[orig], e)
 			}
 		}
+	}
+
+	plan := make([]ReverseAction, 0, len(targets))
+	for _, t := range targets {
+		attested := attested[t]
 
 		switch {
 		case len(attested) > 0:
