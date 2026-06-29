@@ -204,9 +204,12 @@ func applyUpgrade(ctx context.Context, p Printer, runner shell.Runner, tag strin
 	// Download all artifacts. The cosign v3 bundle embeds both the signature and
 	// the signing certificate, so a single .bundle file replaces the v2 .sig/.pem pair.
 	for _, name := range []string{tarball, checksums, checksums + ".bundle"} {
-		printerInfo(p, "  ↓  "+name)
-		if err := downloadFile(ctx, baseURL+"/"+name, filepath.Join(tmpDir, name)); err != nil {
-			return fmt.Errorf("upgrade: download %s: %w", name, err)
+		dl := name
+		// Animated liveness during each network download; spinWork is json-safe.
+		if err := spinWork(ctx, p, "Downloading "+dl+"…", func(ctx context.Context) error {
+			return downloadFile(ctx, baseURL+"/"+dl, filepath.Join(tmpDir, dl))
+		}); err != nil {
+			return fmt.Errorf("upgrade: download %s: %w", dl, err)
 		}
 	}
 

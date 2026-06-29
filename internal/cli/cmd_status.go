@@ -403,7 +403,8 @@ func printStatusAllRigsTable(p Printer, rows []statusReport) {
 		if ntfy == "" {
 			ntfy = "-"
 		}
-		printerInfo(p, fmt.Sprintf("  %-20s %-14s %-12s %-10s", truncCell(r.RigName, 20), r.Tailscale, disk, ntfy))
+		ts := statusCellStyle(r.Tailscale).Render(fmt.Sprintf("%-14s", r.Tailscale))
+		printerInfo(p, fmt.Sprintf("  %-20s %s %-12s %-10s", truncCell(r.RigName, 20), ts, disk, ntfy))
 	}
 	printerInfo(p, "")
 }

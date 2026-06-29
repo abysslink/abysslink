@@ -314,7 +314,7 @@ func printReportHuman(p Printer, findings []modules.Finding, entries []audit.Ent
 			case !rr.Reachable:
 				status = "UNREACHABLE"
 			}
-			printerInfo(p, fmt.Sprintf("    %s  %s", styleMuted.Render(rr.RigID), styleBold.Render(status)))
+			printerInfo(p, fmt.Sprintf("    %s  %s", styleMuted.Render(rr.RigID), statusCellStyle(status).Render(status)))
 		}
 		printerInfo(p, "")
 	}

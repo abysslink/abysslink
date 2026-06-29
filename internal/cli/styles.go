@@ -96,6 +96,25 @@ func ruleN(n int) string {
 	return strings.Repeat("─", max(1, n))
 }
 
+// statusCellStyle returns the palette style for a fleet status-cell word: red
+// for UNREACHABLE/offline, yellow for DEGRADED/unknown, green for
+// reachable/running/online/ok, muted otherwise. The literal word is preserved by
+// the caller — only its colour comes from here, the single source for fleet
+// tables (status --all-rigs, report rigs, panic fan-out). ANSI is stripped on
+// non-TTY/NO_COLOR, so byte-stable surfaces are unaffected.
+func statusCellStyle(state string) lipgloss.Style {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "unreachable", "offline":
+		return styleFatal
+	case "degraded", "unknown":
+		return styleWarn
+	case "reachable", "running", "online", "ok":
+		return styleSuccess
+	default:
+		return styleMuted
+	}
+}
+
 // truncCell truncates s to at most maxCols display columns, appending an
 // ellipsis when it overflows, so a long value (e.g. a backup path or hostname)
 // never shears the next column of a fixed-width %-Ns table. maxCols <= 1 returns
