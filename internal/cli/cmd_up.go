@@ -65,10 +65,7 @@ func newUpCmd() *cobra.Command {
 
 			p := newPrinter(cmd)
 
-			// D-04 gate: NetBird backend requires explicit --accept-no-sshcheck
-			// acknowledgment before apply proceeds. Prevents silent degradation of
-			// the immutable 12h checkPeriod enforcement floor (SC-1 / PR-C).
-			if err := netbirdSSHCheckGate(ctx, cmd, cc, p); err != nil {
+			if err := upPreflightGates(ctx, cmd, cc, p); err != nil {
 				return err
 			}
 
@@ -193,6 +190,47 @@ func runUpApplyPhase(ctx context.Context, cmd *cobra.Command, p Printer, r *modu
 // printUpHeader renders the `abysslink up` header box: a preview-only warning
 // in dry-run mode, the "applying" banner otherwise. Extracted from newUpCmd to
 // keep its cyclomatic complexity below the gocyclo ceiling.
+// upPreflightGates runs the fail-closed checks that must pass before `up` does
+// any work. Bundled into one helper so newUpCmd's RunE stays under the gocyclo
+// ceiling. Order matters: the not-initialised refusal comes first because the
+// NetBird gate dereferences cc.cfg.Backend, which on a missing config is only
+// the synthesized default.
+func upPreflightGates(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer) error {
+	// Fresh machine: no abysslink.yaml exists. `up` converges an *existing*
+	// config; without one, loadCmdContext falls back to config.Defaults()
+	// (empty Identity.Email / Tailnet.Hostname), so `up --apply` would
+	// converge a zero-identity config and print a `<your-rig>` success banner.
+	// Refuse fail-closed and route to `init` — the sole owner of config
+	// bootstrap (U10 / D-01), mirroring the doctor/status not-initialised guards.
+	if cc.cfgMissing {
+		printUpNotInitialised(p, cc.jsonOut)
+		return &exitError{code: exitCodeFatal}
+	}
+	// D-04 gate: NetBird backend requires explicit --accept-no-sshcheck
+	// acknowledgment before apply proceeds. Prevents silent degradation of the
+	// immutable 12h checkPeriod enforcement floor (SC-1 / PR-C).
+	return netbirdSSHCheckGate(ctx, cmd, cc, p)
+}
+
+// printUpNotInitialised renders the fail-closed refusal when `up` runs on a
+// machine that has no abysslink.yaml. `up` converges an *existing* config, so
+// routing the user to `init` (the sole owner of config bootstrap) is the only
+// safe action — mirrors the doctor/status not-initialised guards (U10 / D-01).
+func printUpNotInitialised(p Printer, jsonOut bool) {
+	if jsonOut {
+		p.PrintJSON(map[string]string{
+			"status": "not-initialised",
+			"hint":   "run `abysslink init` to create abysslink.yaml",
+		})
+		return
+	}
+	printerInfo(p, "")
+	printerInfo(p, tui.Note(tui.NoteWarn, "No abysslink.yaml found — this machine is not initialised", []string{
+		"Run `abysslink init` first to create your config, then `abysslink up --apply`.",
+	}))
+	printerInfo(p, "")
+}
+
 func printUpHeader(p Printer, dryRun bool) {
 	if dryRun {
 		header := styleTitle.Render("abysslink up") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
