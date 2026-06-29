@@ -69,3 +69,17 @@ func terminalWidth() int {
 	}
 	return w
 }
+
+// brandBoxWidth caps the inner width of every tui callout box (Note, SecretBox)
+// at 54 columns, matching cli.defaultBoxWidth and the `up`/`enroll` header box.
+// One width for every framed box means they line up on a wide terminal instead
+// of some hugging 54 cols (header, secret) while notes sprawl the full viewport
+// — the "mix of old and new" the notes used to create.
+const brandBoxWidth = 54
+
+// boxWidth returns the responsive inner width for tui callout boxes: capped at
+// brandBoxWidth on wide terminals and shrinking on narrow (phone) terminals so
+// the box never overflows the viewport (T-001 — no hard floor).
+func boxWidth() int {
+	return max(1, min(brandBoxWidth, terminalWidth()-4))
+}

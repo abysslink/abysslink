@@ -73,13 +73,10 @@ func noteBoxStyle(level NoteLevel) lipgloss.Style {
 		Border(boxBorder()).
 		Padding(0, 2)
 
-	// Responsive width: track the terminal (terminalWidth()-4), shrinking on
-	// narrow (phone) terminals. The previous `if w < 54 { w = 54 }` floor
-	// forced a 54-col box even on a 40-col terminal, overflowing the viewport
-	// with wrapped/clipped borders (T-001). Removing the floor keeps the
-	// wide-terminal width unchanged and lets it shrink below 54 when needed.
-	w := max(1, terminalWidth()-4)
-	base = base.Width(w)
+	// Brand box width (cap 54, shrink on narrow terminals) — the SAME width as
+	// the header and SecretBox so every framed box lines up instead of notes
+	// stretching the full viewport (T-001 floor stays removed via the min()).
+	base = base.Width(boxWidth())
 
 	if noColor() {
 		return base

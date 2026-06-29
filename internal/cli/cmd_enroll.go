@@ -523,7 +523,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 				os.Getenv(oauthSecretEnv) != ""
 
 			printerInfo(p, "")
-			printerInfo(p, "1. Install Tailscale on your phone (scan to open the download page):")
+			printerInfo(p, stepHeader(1, "Install Tailscale on your phone (scan to open the download page):"))
 			printQR(p, cmd.OutOrStdout(), cc.jsonOut, "tailscale-download", "https://tailscale.com/download")
 			printerInfo(p, "")
 
@@ -540,7 +540,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 				// Keep the step number (2) even on the manual path so the
 				// walkthrough reads 1 → 2 → 3, not 1 → 3 (the auth-key step still
 				// happens, just by hand instead of via the admin API).
-				printerInfo(p, "2. Create a single-use, pre-authorized auth key by hand:")
+				printerInfo(p, stepHeader(2, "Create a single-use, pre-authorized auth key by hand:"))
 				emitNote(p, tui.NoteWarn, "No admin OAuth client configured", []string{
 					"Abysslink can't mint the key automatically.",
 				})
@@ -607,6 +607,14 @@ func printEnrollPhoneHeader(p Printer, dryRun bool) {
 	printerInfo(p, "")
 }
 
+// stepHeader renders a numbered walkthrough step header in the brand style: an
+// accent-cyan number and a bold title, so the steps read as styled section
+// headers consistent with the boxed command header and the callout notes —
+// not the flat plain text that made the screen look half-old, half-new.
+func stepHeader(n int, text string) string {
+	return styleTitle.Render(fmt.Sprintf("%d.", n)) + " " + styleBold.Render(text)
+}
+
 func printEnrollPhonePlan(p Printer, cc *cmdContext, tag string, showQR bool) {
 	hasCfgCreds := cc.cfg.Tailnet.Admin.Tailnet != "" &&
 		cc.cfg.Tailnet.Admin.OAuthClientID != "" &&
@@ -666,7 +674,7 @@ func enrollWithAdminKey(ctx context.Context, p Printer, out io.Writer, jsonOut b
 	if err != nil {
 		return fmt.Errorf("mint auth key: %w", err)
 	}
-	printerInfo(p, "2. In the Tailscale app choose \"Sign in with auth key\" and scan:")
+	printerInfo(p, stepHeader(2, "In the Tailscale app choose \"Sign in with auth key\" and scan:"))
 	printQR(p, out, jsonOut, "tailscale-auth-key", key)
 	printerInfo(p, "")
 
@@ -762,7 +770,7 @@ func printNtfyQR(ctx context.Context, p Printer, out io.Writer, cc *cmdContext, 
 
 	deepLink := fmt.Sprintf("ntfy://%s:%d/%s", hostname, port, topic)
 	printerInfo(p, "")
-	printerInfo(p, "3. Subscribe to notifications in the ntfy app:")
+	printerInfo(p, stepHeader(3, "Subscribe to notifications in the ntfy app:"))
 	printerInfo(p, styleMuted.Render("   Android: tap + → Scan QR code"))
 	printQR(p, out, cc.jsonOut, "ntfy-subscription", deepLink)
 	printerInfo(p, styleMuted.Render("   iPhone:  tap + → enter manually:"))
