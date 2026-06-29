@@ -43,11 +43,12 @@ func TestUninstallConfirmSeq_NonInteractiveErrors(t *testing.T) {
 	}
 
 	// Tests run without a TTY, so this exercises the non-interactive branch.
-	ok, purgeOK, err := uninstallConfirmSeq(ctx, p, plan, false, false)
+	ok, removeConfig, removeState, err := uninstallConfirmSeq(ctx, p, plan, false, false, false)
 	require.Error(t, err, "non-interactive without --yes must return an error (exit non-zero)")
 	assert.Contains(t, err.Error(), "--yes", "the error must name the flag that supplies the missing input")
 	assert.False(t, ok, "ok must be false when aborting")
-	assert.False(t, purgeOK, "purgeOK must be false when ok=false")
+	assert.False(t, removeConfig, "removeConfig must be false when ok=false")
+	assert.False(t, removeState, "removeState must be false when ok=false")
 }
 
 // TestUninstallConfirmSeq_AutoYes asserts that with --yes the confirm sequence
@@ -62,10 +63,11 @@ func TestUninstallConfirmSeq_AutoYesBase(t *testing.T) {
 		{Action: "restore", Target: "/tmp/test-file"},
 	}
 
-	ok, purgeOK, err := uninstallConfirmSeq(ctx, p, plan, false, true /*yes*/)
+	ok, removeConfig, removeState, err := uninstallConfirmSeq(ctx, p, plan, false, false, true /*yes*/)
 	require.NoError(t, err)
 	assert.True(t, ok, "--yes must auto-confirm UNINSTALL")
-	assert.False(t, purgeOK, "purge=false must not trigger second confirm")
+	assert.False(t, removeConfig, "no flag + --yes must keep the config dir")
+	assert.False(t, removeState, "no flag + --yes must keep the state dir")
 }
 
 // TestUninstallConfirmSeq_AutoYesPurge asserts that with --yes and --purge both
@@ -79,10 +81,28 @@ func TestUninstallConfirmSeq_AutoYesPurge(t *testing.T) {
 		{Action: "restore", Target: "/tmp/test-file"},
 	}
 
-	ok, purgeOK, err := uninstallConfirmSeq(ctx, p, plan, true /*purge*/, true /*yes*/)
+	ok, removeConfig, removeState, err := uninstallConfirmSeq(ctx, p, plan, true /*purge*/, false, true /*yes*/)
 	require.NoError(t, err)
 	assert.True(t, ok, "--yes must auto-confirm UNINSTALL")
-	assert.True(t, purgeOK, "--yes + --purge must auto-confirm second gate")
+	assert.True(t, removeConfig, "--purge must remove the config dir")
+	assert.True(t, removeState, "--yes + --purge must auto-confirm removing the state dir")
+}
+
+// TestUninstallConfirmSeq_RemoveConfigFlag asserts --remove-config (without
+// --purge) resolves to removing the config dir but keeping the state dir, and
+// does not trigger the irreversibility gate.
+func TestUninstallConfirmSeq_RemoveConfigFlag(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	plan := []audit.ReverseAction{{Action: "restore", Target: "/tmp/test-file"}}
+
+	ok, removeConfig, removeState, err := uninstallConfirmSeq(ctx, p, plan, false /*purge*/, true /*removeConfig*/, true /*yes*/)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.True(t, removeConfig, "--remove-config must remove the config dir")
+	assert.False(t, removeState, "--remove-config must keep the state dir (audit log + backups)")
 }
 
 // TestUninstallConfirmSeq_PurgeMessagePrinted asserts that with --purge a warning
@@ -96,7 +116,7 @@ func TestUninstallConfirmSeq_PurgeMessagePrinted(t *testing.T) {
 		{Action: "restore", Target: "/tmp/test-file"},
 	}
 
-	_, _, err := uninstallConfirmSeq(ctx, p, plan, true /*purge*/, true /*yes*/)
+	_, _, _, err := uninstallConfirmSeq(ctx, p, plan, true /*purge*/, false, true /*yes*/)
 	require.NoError(t, err)
 
 	out := buf.String()
@@ -121,7 +141,7 @@ func TestUninstallConfirmSeq_BlastRadiusPrinted(t *testing.T) {
 		{Action: "restore", Target: "/tmp/file-c"},
 	}
 
-	_, _, err := uninstallConfirmSeq(ctx, p, plan, false, true /*yes*/)
+	_, _, _, err := uninstallConfirmSeq(ctx, p, plan, false, false, true /*yes*/)
 	require.NoError(t, err)
 
 	out := buf.String()
@@ -167,7 +187,7 @@ func TestUninstallCmd_ContainsTypedConfirmCall(t *testing.T) {
 
 	// Non-TTY + no --yes → errMissingInput → Reverse must not be called and the
 	// command exits non-zero (U8).
-	ok, _, err := uninstallConfirmSeq(ctx, p, nil, false, false)
+	ok, _, _, err := uninstallConfirmSeq(ctx, p, nil, false, false, false)
 	require.Error(t, err, "non-interactive uninstall without --yes must error")
 	assert.False(t, ok, "non-interactive uninstall without --yes must not proceed")
 }

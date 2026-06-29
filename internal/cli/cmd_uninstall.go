@@ -52,9 +52,10 @@ func newUninstallCmd() *cobra.Command {
 			purge, _ := cmd.Flags().GetBool("purge")
 			removeConfigFlag, _ := cmd.Flags().GetBool("remove-config")
 			// --purge implies removing the config dir; --remove-config removes the
-			// config dir but keeps the state dir (audit log + backups).
+			// config dir but keeps the state dir. This flag-derived value drives the
+			// dry-run preview text; the apply path re-resolves the final scope (config
+			// AND state) via the interactive confirm sequence.
 			removeConfig := purge || removeConfigFlag
-			removeState := purge
 
 			logPath, err := audit.DefaultLogPath()
 			if err != nil {
@@ -100,7 +101,7 @@ func newUninstallCmd() *cobra.Command {
 				return nil
 			}
 
-			ok, purgeOK, err := uninstallConfirmSeq(ctx, p, plan, purge, cc.yes)
+			ok, resolvedConfig, resolvedState, err := uninstallConfirmSeq(ctx, p, plan, purge, removeConfigFlag, cc.yes)
 			if err != nil {
 				return err
 			}
@@ -108,19 +109,14 @@ func newUninstallCmd() *cobra.Command {
 				printerInfo(p, "Aborted.")
 				return nil
 			}
+			// The confirm sequence resolves the final scope (flags or interactive
+			// menu, then the irreversibility gate); use it over the flag-only guess.
+			removeConfig = resolvedConfig
+			removeState := resolvedState
 
 			manifest, err := audit.ReverseExcluding(logPath, false, excluded)
 			if err != nil {
 				return fmt.Errorf("uninstall: %w", err)
-			}
-
-			// When the user declined the second (--purge irreversibility) confirm we
-			// still run Reverse but must NOT delete the state dir. Keep the config
-			// dir too unless --remove-config was passed explicitly, mirroring the
-			// pre-split behaviour where a declined purge kept both dirs.
-			if purge && !purgeOK {
-				removeState = false
-				removeConfig = removeConfigFlag
 			}
 
 			failures := printReverseManifest(p, manifest)
@@ -432,20 +428,37 @@ func runModuleTeardowns(ctx context.Context, p Printer, mods []modules.Module, d
 	return failures
 }
 
-// uninstallConfirmSeq runs the two-stage confirmation sequence for uninstall --apply.
+// Cleanup-scope select labels (shown after the UNINSTALL typed confirm when no
+// --purge / --remove-config flag was passed). Discoverability: an interactive
+// user never has to know the flag names — they pick from this menu.
+const (
+	cleanupKeepBoth      = "Keep ~/.config/abysslink and the audit log + backups (recommended)"
+	cleanupRemoveConfig  = "Remove ~/.config/abysslink, keep the audit log + backups"
+	cleanupRemoveEverything = "Remove everything: config, audit log and backups (IRREVERSIBLE)"
+)
+
+// uninstallConfirmSeq runs the confirmation sequence for uninstall --apply and
+// resolves what to do with abysslink's own directories.
 //
-// Stage 1 (always): requires the user to type "UNINSTALL" (ConfirmTyped). Before the
-// prompt, a blast-radius summary (count of planned actions) is printed inside a danger
-// Note. With --yes the typed gate is bypassed and a slog.Warn records the skip.
+// Stage 1 (always): requires the user to type "UNINSTALL" (ConfirmTyped). Before
+// the prompt a blast-radius summary is printed. With --yes the typed gate is
+// bypassed (slog.Warn records the skip); a non-interactive run without --yes
+// aborts with errMissingInput so scripts exit non-zero.
 //
-// Stage 2 (only when purge=true): a second confirm warns that --purge will permanently
-// delete the audit log + backups (irreversible). With --yes this second gate is also
-// bypassed with a slog.Warn.
+// Stage 2 (cleanup scope): if neither --purge nor --remove-config was passed and
+// the session is interactive, the user picks from a menu (keep / remove config /
+// remove everything) — so the flags are discoverable without docs. With a flag
+// set, or --yes, or a non-interactive run, the scope comes from the flags
+// (default: keep both).
 //
-// Returns (ok, purgeOK, err): ok is false when the UNINSTALL gate is declined (caller
-// must abort and not call audit.Reverse). purgeOK is true only when purge=true AND the
-// user confirmed the second gate (or --yes was set).
-func uninstallConfirmSeq(ctx context.Context, p Printer, plan []audit.ReverseAction, purge, yes bool) (bool, bool, error) {
+// Stage 3 (irreversibility gate): when the chosen scope removes the state dir
+// (audit log + backups), a final confirm warns it is irreversible; declining
+// downgrades to "keep the state dir" rather than aborting. With --yes this gate
+// is skipped (slog.Warn).
+//
+// Returns (ok, removeConfig, removeState, err): ok is false when the UNINSTALL
+// gate is declined (caller must abort, not call Reverse).
+func uninstallConfirmSeq(ctx context.Context, p Printer, plan []audit.ReverseAction, purgeFlag, removeConfigFlag, yes bool) (bool, bool, bool, error) {
 	// Print blast-radius summary so the user sees the full scope before the prompt.
 	nActions := len(plan)
 	restores, deletes := 0, 0
@@ -467,7 +480,7 @@ func uninstallConfirmSeq(ctx context.Context, p Printer, plan []audit.ReverseAct
 	} else if !interactive(false, false) {
 		// Non-interactive context (CI, pipe, no TTY): abort without hanging —
 		// and exit NON-ZERO so scripts can tell the uninstall did not happen.
-		return false, false, errMissingInput("yes")
+		return false, false, false, errMissingInput("yes")
 	}
 
 	// Stage 1: typed UNINSTALL confirm.
@@ -476,34 +489,66 @@ func uninstallConfirmSeq(ctx context.Context, p Printer, plan []audit.ReverseAct
 		"UNINSTALL",
 		yes)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 	if !ok {
-		return false, false, nil
+		return false, false, false, nil
 	}
 
-	// Stage 2: purge extra confirm.
-	if !purge {
-		return true, false, nil
+	removeConfig, removeState, err := resolveCleanupScope(ctx, p, purgeFlag, removeConfigFlag, yes)
+	if err != nil {
+		return false, false, false, err
+	}
+	return true, removeConfig, removeState, nil
+}
+
+// resolveCleanupScope decides whether to remove abysslink's config dir and/or
+// state dir (audit log + backups). Flags win; otherwise an interactive user
+// picks from a menu (so the flags are discoverable). Removing the state dir is
+// gated by an irreversibility confirm. Returns (removeConfig, removeState, err).
+func resolveCleanupScope(ctx context.Context, p Printer, purgeFlag, removeConfigFlag, yes bool) (bool, bool, error) {
+	removeConfig := purgeFlag || removeConfigFlag
+	removeState := purgeFlag
+
+	if !purgeFlag && !removeConfigFlag && !yes {
+		// Interactive (guaranteed: uninstallConfirmSeq returned for non-TTY).
+		choice, err := tui.Select(ctx, "What about abysslink's own config and audit log?",
+			[]string{cleanupKeepBoth, cleanupRemoveConfig, cleanupRemoveEverything}, yes)
+		if err != nil {
+			return false, false, err
+		}
+		switch choice {
+		case cleanupRemoveConfig:
+			removeConfig, removeState = true, false
+		case cleanupRemoveEverything:
+			removeConfig, removeState = true, true
+		default:
+			removeConfig, removeState = false, false
+		}
 	}
 
+	if removeState {
+		confirmed, err := confirmStateDeletion(ctx, p, yes)
+		if err != nil {
+			return false, false, err
+		}
+		removeState = confirmed // declining keeps the state dir; config choice stands
+	}
+	return removeConfig, removeState, nil
+}
+
+// confirmStateDeletion prints the irreversibility warning and asks the user to
+// confirm deleting the audit log + backups. With --yes it is auto-confirmed.
+func confirmStateDeletion(ctx context.Context, p Printer, yes bool) (bool, error) {
 	printerInfo(p, "")
-	printerInfo(p, styleWarn.Render("  WARNING: --purge will permanently delete the audit log and all backups."))
+	printerInfo(p, styleWarn.Render("  WARNING: this will permanently delete the audit log and all backups."))
 	printerInfo(p, styleWarn.Render("  This is NOT reversible. There will be no record of changes after this."))
 	printerInfo(p, "")
-
 	if yes {
-		slog.Warn("uninstall --yes: skipping --purge irreversibility confirmation gate")
-		return true, true, nil
+		slog.Warn("uninstall --yes: skipping audit-log/backups irreversibility confirmation gate")
+		return true, nil
 	}
-
-	purgeOK, err := tui.Confirm(ctx,
-		"--purge permanently deletes the audit log + backups. Proceed?",
-		yes)
-	if err != nil {
-		return true, false, err
-	}
-	return true, purgeOK, nil
+	return tui.Confirm(ctx, "Permanently delete the audit log + backups. Proceed?", yes)
 }
 
 // abysslinkConfigDir returns the XDG config dir for abysslink (~/.config/abysslink).
