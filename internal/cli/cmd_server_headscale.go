@@ -878,8 +878,7 @@ func headscaleStatusRunE(ctx context.Context, cc *cmdContext, p Printer) error {
 		return nil
 	}
 
-	printerInfo(p, styleTitle.Render("Headscale status"))
-	printerInfo(p, "")
+	commandHeader(p, "server headscale status", styleMuted.Render("service state and API reachability"))
 	printerInfo(p, "  Version:       "+report.Version)
 	printerInfo(p, "  Service:       "+report.ServiceState)
 	printerInfo(p, "  API reachable: "+fmt.Sprintf("%v", report.APIReachable))

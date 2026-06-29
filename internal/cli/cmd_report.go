@@ -284,9 +284,7 @@ func collectRigReachability(ctx context.Context, cc *cmdContext, strict bool, ri
 
 // printReportHuman renders the human-readable posture snapshot via the Printer.
 func printReportHuman(p Printer, findings []modules.Finding, entries []audit.Entry, rigResults []rigReachability) {
-	header := styleTitle.Render("abysslink report") + "  " + styleMuted.Render("posture snapshot")
-	printerInfo(p, styleHeaderBox.Render(header))
-	printerInfo(p, "")
+	commandHeader(p, "report", styleMuted.Render("posture snapshot"))
 
 	doctorHumanOutput(p, findings)
 	printerInfo(p, styleMuted.Render("  "+hrule()))

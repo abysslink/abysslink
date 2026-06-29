@@ -226,8 +226,8 @@ func TestArm_HeadAdvanced(t *testing.T) {
 	require.NoError(t, err)
 
 	output := buf.String()
-	// T-31-12: HEAD-advance warning (no emoji — project convention).
-	assert.Contains(t, output, "WARNING: HEAD has advanced", "should warn about HEAD advance")
+	// T-31-12: HEAD-advance warning, rendered as a NoteWarn callout box.
+	assert.Contains(t, output, "HEAD has advanced since arm", "should warn about HEAD advance")
 	assert.Contains(t, output, "restore skipped", "should indicate restore was skipped")
 
 	// Verify git stash apply was NOT called.

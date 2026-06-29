@@ -448,10 +448,11 @@ func newEnrollCmd() *cobra.Command {
 
 			hostname, _ := b.Hostname(ctx)
 
-			printerInfo(p, styleTitle.Render("Enroll rig: "+args[0]))
+			mode := styleMuted.Render("enroll fleet rig")
 			if cc.dryRun {
-				printerInfo(p, styleMuted.Render("Dry-run mode — no changes will be made. Use --apply to execute."))
+				mode = styleWarn.Render("preview only — run with --apply to make changes")
 			}
+			commandHeader(p, "enroll rig "+args[0], mode)
 
 			cfgPath, _ := cmd.Flags().GetString("config")
 			if cfgPath == "" {
@@ -580,7 +581,7 @@ func newEnrollPhoneCmd() *cobra.Command {
 				printerInfo(p, "  "+styleCode.Render(path))
 			} else {
 				// CLI-27: never swallow the runbook write failure silently.
-				printerError(p, "Warning: could not write the pairing runbook: "+err.Error())
+				emitNote(p, tui.NoteWarn, "Could not write the pairing runbook", []string{err.Error()})
 			}
 			return nil
 		},
@@ -597,14 +598,11 @@ func newEnrollPhoneCmd() *cobra.Command {
 // styleHeaderBox treatment so the enroll screen reads as the same polished TUI
 // rather than a bare bold title. dryRun selects the preview vs applying banner.
 func printEnrollPhoneHeader(p Printer, dryRun bool) {
-	var header string
+	mode := styleSuccess.Render("✦  applying")
 	if dryRun {
-		header = styleTitle.Render("abysslink enroll phone") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
-	} else {
-		header = styleTitle.Render("abysslink enroll phone") + "  " + styleSuccess.Render("✦  applying")
+		mode = styleWarn.Render("preview only — run with --apply to make changes")
 	}
-	printerInfo(p, styleHeaderBox.Render(header))
-	printerInfo(p, "")
+	commandHeader(p, "enroll phone", mode)
 }
 
 // stepHeader renders a numbered walkthrough step header in the brand style: an

@@ -391,7 +391,7 @@ func statusRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool, rig
 
 // printStatusAllRigsTable renders a human-readable table of per-rig status rows.
 func printStatusAllRigsTable(p Printer, rows []statusReport) {
-	printerInfo(p, styleTitle.Render("Fleet Status")+"\n")
+	commandHeader(p, "status", styleMuted.Render("fleet"))
 	header := fmt.Sprintf("  %-20s %-14s %-12s %-10s", "RIG", "TAILSCALE", "DISK", "NTFY")
 	printerInfo(p, styleMuted.Render(header))
 	for _, r := range rows {

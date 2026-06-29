@@ -74,8 +74,7 @@ func newUninstallCmd() *cobra.Command {
 				return fmt.Errorf("uninstall: %w", err)
 			}
 
-			printerInfo(p, styleTitle.Render("abysslink uninstall")+"  "+styleMuted.Render("reverse all changes"))
-			printerInfo(p, "")
+			commandHeader(p, "uninstall", styleMuted.Render("reverse all changes"))
 			printReversePlan(p, plan)
 			if !cc.jsonOut {
 				printerInfo(p, "")
@@ -540,10 +539,7 @@ func resolveCleanupScope(ctx context.Context, p Printer, purgeFlag, removeConfig
 // confirmStateDeletion prints the irreversibility warning and asks the user to
 // confirm deleting the audit log + backups. With --yes it is auto-confirmed.
 func confirmStateDeletion(ctx context.Context, p Printer, yes bool) (bool, error) {
-	printerInfo(p, "")
-	printerInfo(p, styleWarn.Render("  WARNING: this will permanently delete the audit log and all backups."))
-	printerInfo(p, styleWarn.Render("  This is NOT reversible. There will be no record of changes after this."))
-	printerInfo(p, "")
+	emitNote(p, tui.NoteDanger, "This permanently deletes the audit log and all backups", []string{"This is NOT reversible — there will be no record of changes after this."})
 	if yes {
 		slog.Warn("uninstall --yes: skipping audit-log/backups irreversibility confirmation gate")
 		return true, nil

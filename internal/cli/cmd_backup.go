@@ -85,8 +85,7 @@ func newBackupLsCmd() *cobra.Command {
 				return nil
 			}
 
-			printerInfo(p, styleTitle.Render("Files modified by abysslink"))
-			printerInfo(p, "")
+			commandHeader(p, "backup ls", styleMuted.Render("modified files"))
 			for _, t := range targets {
 				baks, _ := audit.Backups(t)
 				switch len(baks) {
@@ -226,9 +225,7 @@ func restoreDiffPreview(p Printer, target, backupPath, backupLabel string) error
 		currentHash = fmt.Sprintf("%x", sha256.Sum256(currentBytes))
 	}
 
-	printerInfo(p, "")
-	printerInfo(p, styleTitle.Render("Restore preview"))
-	printerInfo(p, "")
+	commandHeader(p, "backup restore", styleMuted.Render("restore preview"))
 
 	if currentMissing {
 		printerInfo(p, fmt.Sprintf(

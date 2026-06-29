@@ -218,7 +218,7 @@ func deviceLS(p Printer, jsonOut bool, st *device.Store) error {
 		return nil
 	}
 
-	printerInfo(p, styleTitle.Render("Devices")+"\n")
+	commandHeader(p, "device ls", styleMuted.Render("enrolled device credentials"))
 	header := fmt.Sprintf("  %-12s %-7s %-11s %-11s %-13s %-21s %-6s %s",
 		"NAME", "KIND", "ENROLLED", "ROTATED", "CERT EXPIRES", "LAST SEEN", "STALE", "REVOKED")
 	printerInfo(p, styleMuted.Render(header))

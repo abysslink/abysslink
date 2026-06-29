@@ -232,14 +232,11 @@ func printUpNotInitialised(p Printer, jsonOut bool) {
 }
 
 func printUpHeader(p Printer, dryRun bool) {
+	mode := styleSuccess.Render("✦  applying")
 	if dryRun {
-		header := styleTitle.Render("abysslink up") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
-		printerInfo(p, styleHeaderBox.Render(header))
-	} else {
-		header := styleTitle.Render("abysslink up") + "  " + styleSuccess.Render("✦  applying")
-		printerInfo(p, styleHeaderBox.Render(header))
+		mode = styleWarn.Render("preview only — run with --apply to make changes")
 	}
-	printerInfo(p, "")
+	commandHeader(p, "up", mode)
 }
 
 // netbirdSSHCheckGate enforces D-04: on a NetBird backend, abysslink up --apply

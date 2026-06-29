@@ -176,11 +176,11 @@ func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
 	}
 
 	// Branded title + muted column header, matching `device ls` (TUI-migration L6).
-	_, _ = fmt.Fprintln(out, styleTitle.Render("Enrolled rigs"))
+	_, _ = fmt.Fprintln(out, styleHeaderBox.Render(styleTitle.Render("abysslink rig ls")+"  "+styleMuted.Render("enrolled rigs")))
 	_, _ = fmt.Fprintln(out, "")
 	hdr := fmt.Sprintf("  %-20s %-30s %-12s %-25s", "NAME", "HOSTNAME", "BACKEND", "LAST SEEN")
 	_, _ = fmt.Fprintln(out, styleMuted.Render(hdr))
-	_, _ = fmt.Fprintln(out, styleMuted.Render("  "+repeatStr("─", 87)))
+	_, _ = fmt.Fprintln(out, styleMuted.Render("  "+ruleN(87)))
 
 	for _, r := range records {
 		lastSeen := r.LastSeen
@@ -383,13 +383,4 @@ func rigImportSummaries(rigs []config.RigConfig) []rigImportSummary {
 		out = append(out, rigImportSummary{Name: r.Name, Hostname: r.Hostname, Backend: r.Backend})
 	}
 	return out
-}
-
-// repeatStr returns s repeated n times.
-func repeatStr(s string, n int) string {
-	result := make([]byte, 0, len(s)*n)
-	for i := 0; i < n; i++ {
-		result = append(result, s...)
-	}
-	return string(result)
 }

@@ -267,7 +267,7 @@ func runFlowSteps(ctx context.Context, p Printer, runner shell.Runner, configPat
 		form, stepErr := stepFn(ctx, runner, p, state)
 		if stepErr != nil {
 			// D-09: step error — emit and continue (non-fatal by design).
-			printerInfo(p, ui.RenderMarkdown("**Error:** "+stepErr.Error(), !colorEnabled()))
+			emitNote(p, tui.NoteWarn, "Setup stage failed", []string{stepErr.Error()})
 			continue
 		}
 
@@ -881,9 +881,7 @@ func promptBackendServerURL(ctx context.Context, cmd *cobra.Command, r *initForm
 		)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx)
 	case "netbird":
 		// Emit degradation warning before prompting — wizard-time D-04 disclosure.
-		printerInfo(newPrinter(cmd), styleWarn.Render(
-			"WARN: NetBird does not support SSH checkPeriod enforcement. "+
-				"You will need to run `abysslink up --accept-no-sshcheck` on first use."))
+		emitNote(newPrinter(cmd), tui.NoteWarn, "NetBird does not enforce SSH checkPeriod", []string{"You will need to run `abysslink up --accept-no-sshcheck` on first use."})
 		return huh.NewForm(huh.NewGroup(
 			huh.NewInput().
 				Title("NetBird server URL").

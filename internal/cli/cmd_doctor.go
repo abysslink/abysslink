@@ -772,16 +772,12 @@ func printDoctorHeader(p Printer, cc *cmdContext) {
 	if cc.jsonOut {
 		return
 	}
-	header := styleTitle.Render("abysslink doctor") + "  " + styleMuted.Render("health check")
-	printerInfo(p, styleHeaderBox.Render(header))
-	printerInfo(p, "")
+	commandHeader(p, "doctor", styleMuted.Render("health check"))
 	// Fresh machine: tell the user to init before anything else — the checks
 	// below would otherwise recommend `up --apply` on a box that has never
 	// been initialised (U10).
 	if cc.cfgMissing {
-		printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("No abysslink.yaml found — this machine is not initialised."))
-		printerInfo(p, "  "+styleMuted.Render("Run ")+styleCode.Render("abysslink init")+styleMuted.Render(" first; checks below reflect built-in defaults."))
-		printerInfo(p, "")
+		emitNote(p, tui.NoteWarn, "No abysslink.yaml found — this machine is not initialised", []string{"Run `abysslink init` first; checks below reflect built-in defaults."})
 	}
 	emitSecurityNote(p, cc.jsonOut, "doctor-not-full-audit") // §7 note 11
 	emitSecurityNote(p, cc.jsonOut, "no-funnel")             // §7 note 8
