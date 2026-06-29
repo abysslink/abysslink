@@ -910,7 +910,7 @@ func printSuccessSummary(p Printer, cfg *config.Config) {
 	var sb strings.Builder
 	sb.WriteString(styleSuccess.Render("✓  Your rig is ready"))
 	sb.WriteString("\n\n")
-	sb.WriteString(styleBold.Render("Connect from your phone:"))
+	sb.WriteString(styleTitle.Render("Connect from your phone:"))
 	sb.WriteString("\n")
 
 	var connect string
