@@ -40,6 +40,7 @@ import (
 	"github.com/abysslink/abysslink/internal/qr"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/tui"
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"github.com/tailscale/hujson"
 )
@@ -513,7 +514,20 @@ func newEnrollPhoneCmd() *cobra.Command {
 				return nil
 			}
 
-			return runEnrollPhoneApply(ctx, cmd, cc, p, tag)
+			if err := runEnrollPhoneApply(ctx, cmd, cc, p, tag); err != nil {
+				// A checkpoint pause (install / create key / subscribe) was
+				// cancelled BEFORE any credential was minted — exit cleanly, not as
+				// a failure. The credential-save pause swallows its own abort
+				// (credentials are already shown by then), so reaching here means a
+				// genuine pre-mint cancel.
+				if errors.Is(err, huh.ErrUserAborted) {
+					printerInfo(p, "")
+					printerInfo(p, styleMuted.Render("  Enrollment cancelled — nothing was changed."))
+					return nil
+				}
+				return err
+			}
+			return nil
 		},
 	}
 	cmd.Flags().Bool("qr", false,
@@ -616,7 +630,11 @@ func enrollPhoneCredentialsStep(ctx context.Context, cmd *cobra.Command, cc *cmd
 
 	// §6 stop: the credentials above are shown ONCE — hold so the lock-screen
 	// note and runbook path below do not scroll the secrets off-screen first.
-	if err := tui.Pause(ctx, "Press Enter once you've saved these credentials", autoYes); err != nil {
+	// This is an ACKNOWLEDGMENT pause: the credentials are already minted and
+	// shown, so an abort (Esc / Ctrl-C) here is equivalent to "Continue" — fall
+	// through to the runbook rather than failing a successful enrollment with a
+	// red "user aborted" error (the bug the credential pause exposed).
+	if err := tui.Pause(ctx, "Press Enter once you've saved these credentials", autoYes); err != nil && !errors.Is(err, huh.ErrUserAborted) {
 		return err
 	}
 
