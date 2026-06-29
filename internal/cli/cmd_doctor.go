@@ -603,7 +603,7 @@ func doctorHumanOutput(p Printer, findings []modules.Finding) (hasFatal, hasWarn
 		if !seenMod[f.Module] {
 			seenMod[f.Module] = true
 			printerInfo(p, styleMuted.Render("  "+hrule()))
-			printerInfo(p, "  "+styleBold.Render(f.Module))
+			printerInfo(p, "  "+styleTitle.Render(f.Module))
 		}
 
 		switch f.Severity {

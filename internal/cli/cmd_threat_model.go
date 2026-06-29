@@ -122,17 +122,17 @@ func newThreatModelCmd() *cobra.Command {
 			printerInfo(p, styleTitle.Render("Abysslink threat model")+"  "+styleMuted.Render("(live status)"))
 
 			printerInfo(p, "")
-			printerInfo(p, styleBold.Render("  Base threat model"))
+			printerInfo(p, styleTitle.Render("  Base threat model"))
 			renderThreatRows(p, threatRows, state)
 
 			printerInfo(p, "")
-			printerInfo(p, styleBold.Render("  v3 surfaces"))
+			printerInfo(p, styleTitle.Render("  v3 surfaces"))
 			renderThreatRows(p, v3SurfaceRows, state)
 
 			if backend != "" {
 				if rows, ok := backendRows[backend]; ok {
 					printerInfo(p, "")
-					printerInfo(p, styleBold.Render(fmt.Sprintf("  Backend: %s", backend)))
+					printerInfo(p, styleTitle.Render(fmt.Sprintf("  Backend: %s", backend)))
 					renderThreatRows(p, rows, state)
 				} else {
 					printerInfo(p, "")

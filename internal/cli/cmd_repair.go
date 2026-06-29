@@ -123,13 +123,17 @@ func runModuleRepairs(ctx context.Context, p Printer, mods []modules.Module, nee
 			printerInfo(p, fmt.Sprintf("  [plan] would repair: %s", modName))
 			continue
 		}
-		printerInfo(p, fmt.Sprintf("  Repairing module: %s", modName))
+		// NOTE: m.Repair drives RunInteractive (sudo TTY passthrough) for the
+		// power/tailscale modules, so it must NOT run under a Bubble Tea spinner —
+		// that would suppress the password prompt and hang. Keep the static line;
+		// only the glyph/colour is branded.
+		printerInfo(p, "  "+iconSpinStr()+"  "+styleMuted.Render("Repairing module: "+modName))
 		if repErr := m.Repair(ctx); repErr != nil {
-			printerError(p, fmt.Sprintf("  repair [%s]: %v", modName, repErr))
+			printerError(p, "  "+iconFatalStr()+"  "+styleFatal.Render(fmt.Sprintf("repair [%s]: %v", modName, repErr)))
 			repairErrs = append(repairErrs, repErr)
 			continue
 		}
-		printerInfo(p, fmt.Sprintf("  Repaired: %s", modName))
+		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("Repaired: "+modName))
 	}
 	return repairErrs
 }
