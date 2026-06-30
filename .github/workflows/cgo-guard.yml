@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+#
+# cgo-guard.yml — Static-binary floor guard (TUI-08 / D-08)
+#
+# Builds all four release targets (darwin/amd64, darwin/arm64, linux/amd64,
+# linux/arm64) with CGO_ENABLED=0 and grep-asserts that no package in the
+# full dependency graph pulls in cgo.  Fails the PR if any TUI (or other)
+# dependency silently breaks the static-binary floor.
+#
+# Pinned actions are copied verbatim from test.yml to avoid divergence.
+# CGO is never re-enabled in this file (the only value ever set is 0).
+
+name: CGO Guard
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  cgo-guard:
+    name: "Four-target CGO_ENABLED=0 build + cgo-deps grep"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            golang.org:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            dl.google.com:443
+            go.dev:443
+            storage.googleapis.com:443
+            objects.googleapis.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            github.com:443
+            api.github.com:443
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # Build all four release targets with CGO_ENABLED=0.
+      # Pure-Go cross-compilation does not require QEMU or a cross-toolchain —
+      # just GOOS/GOARCH env vars.  Fails immediately if any target does not build.
+      - name: Four-target CGO_ENABLED=0 build
+        run: |
+          for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build ./... || exit 1
+            echo "OK: $t"
+          done
+
+      # Secondary dep-graph grep: fail if any package in the transitive closure
+      # is 'runtime/cgo'.  This catches a TUI (or other) dependency that pulls
+      # in cgo even if the four-target build above somehow succeeds on the host.
+      #
+      # CGO_ENABLED=0 is REQUIRED here: the guard asserts the *static binary's*
+      # graph (which is built with CGO_ENABLED=0), not the host default. On a
+      # native linux runner the default is CGO_ENABLED=1, under which pure-Go
+      # terminal deps (go-isatty/termenv/…) expose their cgo variants and pull
+      # runtime/cgo — packages that are NOT in the CGO_ENABLED=0 binary. Without
+      # this the grep is a false positive on every PR.
+      - name: Assert no cgo in dependency graph
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          if go list -deps ./... | grep -q '^runtime/cgo$'; then
+            echo "FAIL: runtime/cgo found in dependency graph — static-binary floor broken"
+            echo "Packages pulling cgo:"
+            go list -deps ./... | grep 'cgo'
+            exit 1
+          fi
+          echo "OK: no runtime/cgo in dependency graph"
+
+      # Tertiary check: no 'import "C"' in any Go source file in the module.
+      # This surfaces hand-rolled cgo that would not appear via 'go list -deps'
+      # until the file is compiled.
+      - name: Assert no import "C" in module source
+        run: |
+          if grep -rl 'import "C"' --include='*.go' .; then
+            echo "FAIL: cgo import found in module source"
+            exit 1
+          fi
+          echo "OK: no cgo import in module source"

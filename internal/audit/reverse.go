@@ -243,9 +243,16 @@ type ReverseAction struct {
 // glob because the audit log contains no signed backup entry for the target.
 const globFallbackWarning = "backup selected by filesystem glob (no signed chain entry for this target); content is NOT chain-verified"
 
+// driftWarning marks a target abysslink would restore or delete but whose
+// current on-disk content no longer matches what abysslink last wrote — i.e.
+// the user edited it after install. Such a target is left untouched (Action
+// "keep") rather than clobbered, so the user's later changes are never lost.
+const driftWarning = "modified after abysslink last wrote it — left untouched to avoid losing your changes (remove it manually if you intended to)"
+
 // PlanReverse computes how to undo every mutation in the audit log: a target
 // with a backup is restored to its earliest (pre-abysslink) content; a target
-// abysslink created (no backup) is deleted; an already-absent target is skipped.
+// abysslink created (no backup) is deleted; an already-absent target is skipped;
+// a target the user edited after install is kept (drift, never clobbered).
 //
 // CORE-06 backup selection: signed chain entries (Op="backup") are the
 // authoritative source for which .bak to restore. An attacker-planted,
@@ -254,56 +261,166 @@ const globFallbackWarning = "backup selected by filesystem glob (no signed chain
 // target (e.g. legacy unsigned logs); such actions carry a Warning and an
 // empty ChainHash so callers (and Reverse) know the content is unverified.
 func PlanReverse(logPath string) ([]ReverseAction, error) {
-	targets, err := MutatedTargets(logPath)
+	return PlanReverseExcluding(logPath, nil)
+}
+
+// PlanReverseExcluding is PlanReverse but omits every target in exclude from the
+// plan. Uninstall uses this for files a module reverses SURGICALLY — e.g.
+// ~/.claude/settings.json, which claudecode merges into and un-merges via
+// RemoveHooks — so those shared, user-owned files are never whole-file restored
+// or deleted (which would discard edits the user made after install).
+func PlanReverseExcluding(logPath string, exclude map[string]bool) ([]ReverseAction, error) {
+	// Read the log exactly once and build the mutated-target list and the
+	// per-target indexes in a single pass. The previous implementation called
+	// MutatedTargets (one full-log read) and then BackupsFromChain (another
+	// full-log read) for *every* target, making this O(targets × log-lines): on a
+	// real log (~15k lines, ~10k targets) that is ~150M json.Unmarshal calls, so
+	// uninstall — even its dry-run preview — appeared to hang for minutes. This
+	// pass is O(log-lines).
+	entries, err := ReadLog(logPath)
 	if err != nil {
 		return nil, err
 	}
 
-	plan := make([]ReverseAction, 0, len(targets))
-	for _, t := range targets {
-		// Chain-attested backups for this exact target. The ".bak." suffix in
-		// the prefix match prevents a sibling target like t+"2" from matching.
-		chainBaks, cerr := BackupsFromChain(logPath, t)
-		if cerr != nil {
-			return nil, cerr
+	seen := map[string]bool{}
+	var targets []string
+	// attested maps an original target to its chain-recorded backup sidecars in
+	// log (chronological) order. Backup targets are "<orig>.bak.<stamp>" and the
+	// stamp never contains ".bak.", so the LAST ".bak." splits orig from the
+	// sidecar — equivalent to the old anchored HasPrefix(e.Target, t+".bak.")
+	// match, but built once instead of re-scanned per target.
+	attested := map[string][]Entry{}
+	// restored records targets already reverted by a prior uninstall. Reverse
+	// appends an Op="restore" entry (signed or unsigned) whenever it restores a
+	// file, so this is the durable proof a target pre-existed abysslink even
+	// after its .bak sidecars have been consumed — what stops an idempotent
+	// re-run from mistaking a restored original for an abysslink-created file and
+	// deleting it.
+	restored := map[string]bool{}
+	// lastWrite maps a target to the SHA-256 of the content abysslink wrote to it
+	// most recently. Drift detection compares this against the current file: a
+	// mismatch means the user edited it after install, so a whole-file restore or
+	// delete would silently lose their changes.
+	lastWrite := map[string]string{}
+	for i := range entries {
+		e := entries[i]
+		if e.DryRun {
+			continue
 		}
-		var attested []Entry
-		for _, e := range chainBaks {
-			if !e.DryRun && strings.HasPrefix(e.Target, t+".bak.") {
-				attested = append(attested, e)
+		switch e.Op {
+		case "write":
+			if !seen[e.Target] {
+				seen[e.Target] = true
+				targets = append(targets, e.Target)
 			}
-		}
-
-		switch {
-		case len(attested) > 0:
-			// Earliest chain-recorded backup = pre-abysslink content. The
-			// chain hash travels with the action so Reverse can refuse a
-			// tampered .bak (verifyBackupHash) before restoring.
-			plan = append(plan, ReverseAction{
-				Target:    t,
-				Action:    "restore",
-				Backup:    attested[0].Target,
-				ChainHash: attested[0].Hash,
-			})
-		default:
-			baks, _ := Backups(t)
-			if len(baks) > 0 {
-				// CORE-06 fallback: no chain entry exists for this target —
-				// glob selection is the only option, flagged as unverified.
-				plan = append(plan, ReverseAction{
-					Target:  t,
-					Action:  "restore",
-					Backup:  baks[0],
-					Warning: globFallbackWarning,
-				})
-			} else if _, statErr := os.Stat(t); statErr == nil {
-				plan = append(plan, ReverseAction{Target: t, Action: "delete"})
-			} else {
-				plan = append(plan, ReverseAction{Target: t, Action: "skip"})
+			lastWrite[e.Target] = e.Hash
+		case "backup":
+			if idx := strings.LastIndex(e.Target, ".bak."); idx > 0 {
+				orig := e.Target[:idx]
+				attested[orig] = append(attested[orig], e)
 			}
+		case "restore":
+			restored[e.Target] = true
 		}
 	}
+
+	plan := make([]ReverseAction, 0, len(targets))
+	for _, t := range targets {
+		if exclude[t] {
+			continue // reversed surgically by its module; never whole-file restored
+		}
+		plan = append(plan, planReverseTarget(t, attested[t], restored[t], lastWrite[t]))
+	}
 	return plan, nil
+}
+
+// planReverseTarget decides the reverse action for a single mutated target and
+// applies the drift guard: a target abysslink would restore or delete but whose
+// current content differs from what it last wrote (lastWriteHash) is KEPT, not
+// clobbered. chain is the target's chain-recorded backup entries (oldest first);
+// alreadyRestored is true when a prior uninstall already recorded a restore.
+func planReverseTarget(t string, chain []Entry, alreadyRestored bool, lastWriteHash string) ReverseAction {
+	act := decideReverseAction(t, chain, alreadyRestored)
+	if (act.Action == "restore" || act.Action == "delete") && fileDrifted(t, lastWriteHash) {
+		return ReverseAction{Target: t, Action: "keep", Warning: driftWarning}
+	}
+	return act
+}
+
+// fileDrifted reports whether t's current on-disk content differs from
+// lastWriteHash (the SHA-256 abysslink last wrote to it). It returns false when
+// the hash is unknown (legacy log entries) or the file is gone — drift guards
+// only against overwriting content the user changed, not missing files.
+func fileDrifted(t, lastWriteHash string) bool {
+	if lastWriteHash == "" {
+		return false
+	}
+	content, err := os.ReadFile(t) //nolint:gosec // G304: t is a target path from the trusted audit log, not user input
+	if err != nil {
+		return false
+	}
+	return HashOf(content) != lastWriteHash
+}
+
+// decideReverseAction chooses restore / skip / delete for a target, ignoring
+// drift (planReverseTarget layers the drift guard on top).
+func decideReverseAction(t string, chain []Entry, alreadyRestored bool) ReverseAction {
+	// Keep only chain-attested backups whose sidecar still exists on disk. A
+	// successful uninstall deletes the .bak sidecars after restoring
+	// (reverseRestore), yet the log keeps the write+backup entries forever — so a
+	// re-run would otherwise re-plan a restore against a backup it already removed
+	// and fail with "no such file or directory".
+	var existing []Entry
+	for _, e := range chain {
+		if _, statErr := os.Stat(e.Target); statErr == nil {
+			existing = append(existing, e)
+		}
+	}
+
+	switch {
+	case len(existing) > 0:
+		// Earliest chain-recorded backup = pre-abysslink content. The chain hash
+		// travels with the action so Reverse can refuse a tampered .bak
+		// (verifyBackupHash) before restoring.
+		return ReverseAction{
+			Target:    t,
+			Action:    "restore",
+			Backup:    existing[0].Target,
+			ChainHash: existing[0].Hash,
+		}
+	case len(chain) > 0 || alreadyRestored:
+		// Either the log recorded backups for this target whose sidecars are now
+		// gone, or a prior uninstall already restored it — both prove the file
+		// pre-existed abysslink and its original content is back in place. It must
+		// be SKIPPED, never deleted: deleting a restored original would be data
+		// loss (idempotent re-run).
+		return ReverseAction{Target: t, Action: "skip"}
+	}
+
+	baks, _ := Backups(t)
+	switch {
+	case len(baks) > 0:
+		// CORE-06 fallback: no chain entry exists for this target — glob
+		// selection is the only option, flagged as unverified.
+		return ReverseAction{
+			Target:  t,
+			Action:  "restore",
+			Backup:  baks[0],
+			Warning: globFallbackWarning,
+		}
+	case fileExists(t):
+		// No backup was ever recorded and the file was never restored ⇒ abysslink
+		// created it from scratch ⇒ delete it.
+		return ReverseAction{Target: t, Action: "delete"}
+	default:
+		return ReverseAction{Target: t, Action: "skip"}
+	}
+}
+
+// fileExists reports whether path is present on disk.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // Reverse undoes every mutation recorded in the audit log. When dryRun is true
@@ -312,7 +429,14 @@ func PlanReverse(logPath string) ([]ReverseAction, error) {
 // now-redundant sidecar backups, returning a manifest of what happened. Errors
 // on individual targets are recorded per-action; the overall walk continues.
 func Reverse(logPath string, dryRun bool) ([]ReverseAction, error) {
-	plan, err := PlanReverse(logPath)
+	return ReverseExcluding(logPath, dryRun, nil)
+}
+
+// ReverseExcluding is Reverse but omits every target in exclude (see
+// PlanReverseExcluding) — used by uninstall for files reversed surgically by
+// their owning module rather than by whole-file restore.
+func ReverseExcluding(logPath string, dryRun bool, exclude map[string]bool) ([]ReverseAction, error) {
+	plan, err := PlanReverseExcluding(logPath, exclude)
 	if err != nil {
 		return nil, err
 	}

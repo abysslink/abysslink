@@ -110,23 +110,29 @@ func TestEnsureSSHRule_Idempotent(t *testing.T) {
 	assert.JSONEq(t, first, second, "second call should be idempotent")
 }
 
-func TestEnsureSSHRule_UpdatesCheckPeriod(t *testing.T) {
+func TestEnsureSSHRule_AcceptShape(t *testing.T) {
 	e, err := tailscale.NewACLEditor([]byte(`{}`))
 	require.NoError(t, err)
 
 	require.NoError(t, e.EnsureSSHRule("owner@example.com", "macuser", "12h"))
-	// Now update the checkPeriod.
-	require.NoError(t, e.EnsureSSHRule("owner@example.com", "macuser", "6h"))
 
-	// Should still have exactly one SSH rule.
 	var result struct {
 		SSH []struct {
-			CheckPeriod string `json:"checkPeriod"`
+			Action      string   `json:"action"`
+			Src         []string `json:"src"`
+			Users       []string `json:"users"`
+			CheckPeriod string   `json:"checkPeriod"`
 		} `json:"ssh"`
 	}
 	require.NoError(t, json.Unmarshal(e.Bytes(), &result))
 	require.Len(t, result.SSH, 1)
-	assert.Equal(t, "6h", result.SSH[0].CheckPeriod)
+	// The phone is tag:mobile (no user identity), so the rule must be accept with
+	// src=tag:mobile — a check/owner rule can never match it.
+	assert.Equal(t, "accept", result.SSH[0].Action)
+	assert.Equal(t, []string{"tag:mobile"}, result.SSH[0].Src)
+	assert.Empty(t, result.SSH[0].CheckPeriod, "accept rule carries no checkPeriod")
+	assert.Contains(t, result.SSH[0].Users, "macuser")
+	assert.Contains(t, result.SSH[0].Users, "autogroup:nonroot")
 }
 
 func TestNewACLEditor_InvalidHuJSON(t *testing.T) {
@@ -303,10 +309,12 @@ func TestEnsureGrant_PortsSplitAcrossGrants(t *testing.T) {
 		"grants whose union covers the required ports must not be modified")
 }
 
-func TestEnsureSSHRule_RewritesAcceptToCheck(t *testing.T) {
-	// A pre-existing action:"accept" rule is a no-reauth SSH path; it must
-	// NEVER satisfy the check requirement (immutable 12h checkPeriod default).
-	raw := `{"ssh":[{"action":"accept","src":["owner@example.com"],"dst":["tag:laptop"],"users":["macuser"]}]}`
+func TestEnsureSSHRule_RewritesLegacyCheckToAccept(t *testing.T) {
+	// A pre-existing legacy owner+check rule can NEVER match the tagged phone
+	// (tag:mobile has no user identity; Tailscale SSH check needs a user src).
+	// EnsureSSHRule must rewrite it IN PLACE to the working accept+tag:mobile
+	// rule so an existing tailnet converges on the next push.
+	raw := `{"ssh":[{"action":"check","src":["owner@example.com"],"dst":["tag:laptop"],"users":["macuser"],"checkPeriod":"12h"}]}`
 	e, err := tailscale.NewACLEditor([]byte(raw))
 	require.NoError(t, err)
 
@@ -314,24 +322,26 @@ func TestEnsureSSHRule_RewritesAcceptToCheck(t *testing.T) {
 
 	var got struct {
 		SSH []struct {
-			Action      string `json:"action"`
-			CheckPeriod string `json:"checkPeriod"`
+			Action      string   `json:"action"`
+			Src         []string `json:"src"`
+			CheckPeriod string   `json:"checkPeriod"`
 		} `json:"ssh"`
 	}
 	require.NoError(t, json.Unmarshal(e.Bytes(), &got))
-	require.Len(t, got.SSH, 1, "the weak rule must be rewritten in place, not duplicated")
-	assert.Equal(t, "check", got.SSH[0].Action, "accept must be rewritten to check")
-	assert.Equal(t, "12h", got.SSH[0].CheckPeriod)
+	require.Len(t, got.SSH, 1, "the legacy rule must be rewritten in place, not duplicated")
+	assert.Equal(t, "accept", got.SSH[0].Action, "check must be rewritten to accept")
+	assert.Equal(t, []string{"tag:mobile"}, got.SSH[0].Src, "owner src must be rewritten to tag:mobile")
+	assert.Empty(t, got.SSH[0].CheckPeriod, "checkPeriod must be dropped on an accept rule")
 }
 
-func TestEnsureSSHRule_ExistingCheckRuleIsNoOp(t *testing.T) {
-	raw := `{"ssh":[{"action":"check","src":["owner@example.com"],"dst":["tag:laptop"],"users":["macuser"],"checkPeriod":"12h"}]}`
+func TestEnsureSSHRule_ExistingAcceptRuleIsNoOp(t *testing.T) {
+	raw := `{"ssh":[{"action":"accept","src":["tag:mobile"],"dst":["tag:laptop"],"users":["macuser","autogroup:nonroot"]}]}`
 	e, err := tailscale.NewACLEditor([]byte(raw))
 	require.NoError(t, err)
 
 	before := append([]byte(nil), e.Bytes()...)
 	require.NoError(t, e.EnsureSSHRule("owner@example.com", "macuser", "12h"))
-	assert.Equal(t, string(before), string(e.Bytes()), "a matching check rule must be a no-op")
+	assert.Equal(t, string(before), string(e.Bytes()), "a correct accept rule must be a no-op")
 }
 
 func TestDiff(t *testing.T) {

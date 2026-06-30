@@ -128,7 +128,7 @@ func newRigImportCmd() *cobra.Command {
 			if cfgPath == "" {
 				cfgPath = defaultConfigPath()
 			}
-			return runRigImport(cfgPath, args[0], cc.apply, cmd.InOrStdin(), cmd.OutOrStdout())
+			return runRigImport(cfgPath, args[0], cc.apply, cc.jsonOut, cmd.InOrStdin(), cmd.OutOrStdout())
 		},
 	}
 }
@@ -175,10 +175,12 @@ func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
 		return nil
 	}
 
-	// Header.
+	// Branded title + muted column header, matching `device ls` (TUI-migration L6).
+	_, _ = fmt.Fprintln(out, styleHeaderBox.Render(styleTitle.Render("abysslink rig ls")+"  "+styleMuted.Render("enrolled rigs")))
+	_, _ = fmt.Fprintln(out, "")
 	hdr := fmt.Sprintf("  %-20s %-30s %-12s %-25s", "NAME", "HOSTNAME", "BACKEND", "LAST SEEN")
-	_, _ = fmt.Fprintln(out, styleBold.Render(hdr))
-	_, _ = fmt.Fprintln(out, styleMuted.Render("  "+repeatStr("─", 87)))
+	_, _ = fmt.Fprintln(out, styleMuted.Render(hdr))
+	_, _ = fmt.Fprintln(out, styleMuted.Render("  "+ruleN(87)))
 
 	for _, r := range records {
 		lastSeen := r.LastSeen
@@ -186,7 +188,7 @@ func runRigLs(cfgPath string, jsonOut bool, out io.Writer) error {
 			lastSeen = styleMuted.Render("never")
 		}
 		row := fmt.Sprintf("  %-20s %-30s %-12s %-25s",
-			r.Name, r.Hostname, r.Backend, lastSeen)
+			truncCell(r.Name, 20), truncCell(r.Hostname, 30), truncCell(r.Backend, 12), lastSeen)
 		_, _ = fmt.Fprintln(out, row)
 	}
 	return nil
@@ -267,7 +269,7 @@ func validateImportRigs(existing, incoming []config.RigConfig) error {
 	return nil
 }
 
-func runRigImport(cfgPath, importPath string, apply bool, in io.Reader, out io.Writer) error {
+func runRigImport(cfgPath, importPath string, apply, jsonOut bool, in io.Reader, out io.Writer) error {
 	// Read import file. "-" reads from in (stdin in production — CLI-26).
 	var data []byte
 	var err error
@@ -313,8 +315,19 @@ func runRigImport(cfgPath, importPath string, apply bool, in io.Reader, out io.W
 		return err
 	}
 
+	const keysNote = "HMAC signing keys are not imported — run `abysslink enroll rig <name> --apply` on this machine for each rig that should sign."
+
 	if !apply {
-		// Dry-run: report what would be imported via the io.Writer (WR-01: no fmt.Printf/Println).
+		// Dry-run: report what would be imported. Under --json emit one typed,
+		// ANSI-free record so the plan is machine-parseable instead of prose lines
+		// dribbled into the JSON stream (UX-04, matching runRigLs).
+		if jsonOut {
+			return json.NewEncoder(out).Encode(rigImportResult{
+				Action: "dry-run",
+				Rigs:   rigImportSummaries(incoming.Rigs),
+				Count:  len(incoming.Rigs),
+			})
+		}
 		for _, r := range incoming.Rigs {
 			_, _ = fmt.Fprintf(out, "[dry-run] Would import rig %q (hostname=%s, backend=%s)\n", r.Name, r.Hostname, r.Backend)
 		}
@@ -332,19 +345,42 @@ func runRigImport(cfgPath, importPath string, apply bool, in io.Reader, out io.W
 	// Confirmation on success (apply must not be silent — UX parity with the
 	// dry-run per-rig preview). Signing keys are NOT imported: FanOut needs a
 	// keychain entry per rig, so point at enroll for that half.
+	if jsonOut {
+		return json.NewEncoder(out).Encode(rigImportResult{
+			Action: "imported",
+			Rigs:   rigImportSummaries(incoming.Rigs),
+			Count:  len(incoming.Rigs),
+			Note:   keysNote,
+		})
+	}
 	for _, r := range incoming.Rigs {
 		_, _ = fmt.Fprintf(out, "Imported rig %q (hostname=%s, backend=%s)\n", r.Name, r.Hostname, r.Backend)
 	}
-	_, _ = fmt.Fprintf(out, "Imported %d rig(s). Note: HMAC signing keys are not imported — run `abysslink enroll rig <name> --apply` on this machine for each rig that should sign.\n", len(incoming.Rigs))
+	_, _ = fmt.Fprintf(out, "Imported %d rig(s). Note: %s\n", len(incoming.Rigs), keysNote)
 
 	return nil
 }
 
-// repeatStr returns s repeated n times.
-func repeatStr(s string, n int) string {
-	result := make([]byte, 0, len(s)*n)
-	for i := 0; i < n; i++ {
-		result = append(result, s...)
+// rigImportResult is the typed --json record emitted by `rig import`.
+type rigImportResult struct {
+	Action string             `json:"action"` // "dry-run" | "imported"
+	Rigs   []rigImportSummary `json:"rigs"`
+	Count  int                `json:"count"`
+	Note   string             `json:"note,omitempty"`
+}
+
+// rigImportSummary is the per-rig record in a rigImportResult.
+type rigImportSummary struct {
+	Name     string `json:"name"`
+	Hostname string `json:"hostname"`
+	Backend  string `json:"backend"`
+}
+
+// rigImportSummaries maps config rigs to their import summaries.
+func rigImportSummaries(rigs []config.RigConfig) []rigImportSummary {
+	out := make([]rigImportSummary, 0, len(rigs))
+	for _, r := range rigs {
+		out = append(out, rigImportSummary{Name: r.Name, Hostname: r.Hostname, Backend: r.Backend})
 	}
-	return string(result)
+	return out
 }

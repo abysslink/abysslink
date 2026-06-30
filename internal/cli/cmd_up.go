@@ -65,10 +65,7 @@ func newUpCmd() *cobra.Command {
 
 			p := newPrinter(cmd)
 
-			// D-04 gate: NetBird backend requires explicit --accept-no-sshcheck
-			// acknowledgment before apply proceeds. Prevents silent degradation of
-			// the immutable 12h checkPeriod enforcement floor (SC-1 / PR-C).
-			if err := netbirdSSHCheckGate(ctx, cmd, cc, p); err != nil {
+			if err := upPreflightGates(ctx, cmd, cc, p); err != nil {
 				return err
 			}
 
@@ -193,15 +190,53 @@ func runUpApplyPhase(ctx context.Context, cmd *cobra.Command, p Printer, r *modu
 // printUpHeader renders the `abysslink up` header box: a preview-only warning
 // in dry-run mode, the "applying" banner otherwise. Extracted from newUpCmd to
 // keep its cyclomatic complexity below the gocyclo ceiling.
-func printUpHeader(p Printer, dryRun bool) {
-	if dryRun {
-		header := styleBold.Render("abysslink up") + "  " + styleWarn.Render("preview only — run with --apply to make changes")
-		printerInfo(p, styleHeaderBox.Render(header))
-	} else {
-		header := styleBold.Render("abysslink up") + "  " + styleSuccess.Render("✦  applying")
-		printerInfo(p, styleHeaderBox.Render(header))
+// upPreflightGates runs the fail-closed checks that must pass before `up` does
+// any work. Bundled into one helper so newUpCmd's RunE stays under the gocyclo
+// ceiling. Order matters: the not-initialised refusal comes first because the
+// NetBird gate dereferences cc.cfg.Backend, which on a missing config is only
+// the synthesized default.
+func upPreflightGates(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer) error {
+	// Fresh machine: no abysslink.yaml exists. `up` converges an *existing*
+	// config; without one, loadCmdContext falls back to config.Defaults()
+	// (empty Identity.Email / Tailnet.Hostname), so `up --apply` would
+	// converge a zero-identity config and print a `<your-rig>` success banner.
+	// Refuse fail-closed and route to `init` — the sole owner of config
+	// bootstrap (U10 / D-01), mirroring the doctor/status not-initialised guards.
+	if cc.cfgMissing {
+		printUpNotInitialised(p, cc.jsonOut)
+		return &exitError{code: exitCodeFatal}
+	}
+	// D-04 gate: NetBird backend requires explicit --accept-no-sshcheck
+	// acknowledgment before apply proceeds. Prevents silent degradation of the
+	// immutable 12h checkPeriod enforcement floor (SC-1 / PR-C).
+	return netbirdSSHCheckGate(ctx, cmd, cc, p)
+}
+
+// printUpNotInitialised renders the fail-closed refusal when `up` runs on a
+// machine that has no abysslink.yaml. `up` converges an *existing* config, so
+// routing the user to `init` (the sole owner of config bootstrap) is the only
+// safe action — mirrors the doctor/status not-initialised guards (U10 / D-01).
+func printUpNotInitialised(p Printer, jsonOut bool) {
+	if jsonOut {
+		p.PrintJSON(map[string]string{
+			"status": "not-initialised",
+			"hint":   "run `abysslink init` to create abysslink.yaml",
+		})
+		return
 	}
 	printerInfo(p, "")
+	printerInfo(p, tui.Note(tui.NoteWarn, "No abysslink.yaml found — this machine is not initialised", []string{
+		"Run `abysslink init` first to create your config, then `abysslink up --apply`.",
+	}))
+	printerInfo(p, "")
+}
+
+func printUpHeader(p Printer, dryRun bool) {
+	mode := styleSuccess.Render("✦  applying")
+	if dryRun {
+		mode = styleWarn.Render("preview only — run with --apply to make changes")
+	}
+	commandHeader(p, "up", mode)
 }
 
 // netbirdSSHCheckGate enforces D-04: on a NetBird backend, abysslink up --apply
@@ -224,8 +259,10 @@ func netbirdSSHCheckGate(ctx context.Context, cmd *cobra.Command, cc *cmdContext
 	// Dry-run (scan only) does not mutate the system; the gate is informational only.
 	// We still emit the WARN so the user is aware, but do not block (CLI-21).
 	if cc.dryRun {
-		printerInfo(p, styleWarn.Render(warnSSHCheckText))
-		printerInfo(p, styleMuted.Render(warnSetupKeyText))
+		emitNote(p, tui.NoteWarn, "SSHCheck not available on NetBird", []string{
+			"checkPeriod enforcement is disabled on this backend.",
+			warnSetupKeyText,
+		})
 		return nil
 	}
 
@@ -337,11 +374,12 @@ func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modu
 	go func() {
 		actions, findings, err := r.PlanAll(workerCtx, func(evt modules.ModuleEvent) {
 			table.SendRow(tui.RowEvent{
-				Module:  evt.Module,
-				Index:   evt.Index,
-				Total:   evt.Total,
-				HasWarn: hasFindingSeverity(evt.Findings, modules.SeverityWarning),
-				WarnMsg: firstFindingMessage(evt.Findings, nil),
+				Module:     evt.Module,
+				Index:      evt.Index,
+				Total:      evt.Total,
+				HasActions: len(evt.Actions) > 0,
+				HasWarn:    hasFindingSeverity(evt.Findings, modules.SeverityWarning),
+				WarnMsg:    firstFindingMessage(evt.Findings, nil),
 			})
 		})
 		table.Done(err)
@@ -352,7 +390,7 @@ func runScanAnimated(ctx context.Context, _ Printer, r *modules.Runner, _ []modu
 		}{actions, findings, err}
 	}()
 
-	final, err := runTableProgram(table)
+	final, err := runTableProgram(ctx, table)
 	if err != nil || !final.Completed() {
 		// UI exited before the worker finished (program error or user abort):
 		// cancel the worker and drain its remaining events so it cannot block.
@@ -456,7 +494,7 @@ func runApply(ctx context.Context, cmd *cobra.Command, p Printer, r *modules.Run
 	// Note: printSudoNotice is driven by sudoLines only — interactiveLines (tailscale login)
 	// must NOT trigger the sudo notice, as login is an auth step, not privilege escalation.
 	printSudoNotice(p, unique)
-	printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
+	printerInfo(p, "  "+styleMuted.Render(hrule()))
 	printerInfo(p, "  "+styleBold.Render(fmt.Sprintf("Applying %d changes...", len(unique))))
 	printerInfo(p, "")
 
@@ -527,7 +565,7 @@ func runApplyAnimated(ctx context.Context, r *modules.Runner) ([]modules.Finding
 		}{findings, err}
 	}()
 
-	final, err := runTableProgram(table)
+	final, err := runTableProgram(ctx, table)
 	if err != nil || !final.Completed() {
 		cancel()
 		table.Drain()
@@ -544,10 +582,12 @@ func runApplyAnimated(ctx context.Context, r *modules.Runner) ([]modules.Finding
 
 // runTableProgram runs the LiveTable as a Bubble Tea program and returns
 // the final model. Factored out to keep animated helpers small.
-func runTableProgram(table *tui.LiveTable) (*tui.LiveTable, error) {
+func runTableProgram(ctx context.Context, table *tui.LiveTable) (*tui.LiveTable, error) {
 	// Import bubbletea to run the program.
-	// We run via tui.RunLiveTable to avoid direct bubbletea import here.
-	return tui.RunLiveTable(table)
+	// We run via tui.RunLiveTable to avoid direct bubbletea import here. ctx is
+	// threaded so a parent/SIGTERM cancel tears the program down and restores the
+	// terminal instead of leaving it in raw mode.
+	return tui.RunLiveTable(ctx, table)
 }
 
 // sudoActionsFromActions returns the display strings for actions that require
@@ -581,12 +621,9 @@ func printSudoNotice(p Printer, actions []modules.Action) {
 		return
 	}
 
+	lines := append([]string{"Your macOS/Linux password will be requested for:"}, sudoActions...)
 	printerInfo(p, "")
-	printerInfo(p, "  "+styleWarn.Render("⚠")+"  "+styleBold.Render("sudo required")+"  "+styleMuted.Render("your macOS/Linux password will be requested for:"))
-	printerInfo(p, "")
-	for _, line := range sudoActions {
-		printerInfo(p, "    "+line)
-	}
+	emitNote(p, tui.NoteWarn, "sudo required", lines)
 	printerInfo(p, "")
 }
 
@@ -654,8 +691,12 @@ func requireTailscaleDaemon(ctx context.Context, p Printer, runner shell.Runner)
 		printerInfo(p, "  "+iconWarnStr()+"  start command failed: "+styleMuted.Render(startErr.Error()))
 	}
 
-	printerInfo(p, "  "+iconSpinStr()+"  Waiting for tailscaled...")
-	if !waitForDaemon(ctx, runner) {
+	var daemonReady bool
+	_ = spinWork(ctx, p, "Waiting for tailscaled...", func(ctx context.Context) error {
+		daemonReady = waitForDaemon(ctx, runner)
+		return nil
+	})
+	if !daemonReady {
 		// Show the actual tailscale status output so the user can see why.
 		if diag, diagErr := runner.Run(ctx, "tailscale", "status"); diagErr == nil && diag.Stderr != "" {
 			printerInfo(p, "  "+styleMuted.Render("tailscale status: "+strings.TrimSpace(diag.Stderr)))
@@ -869,7 +910,7 @@ func printNextSteps(p Printer, findings []modules.Finding, cfg *config.Config) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleBold.Render("Next steps"))
+	sb.WriteString(styleTitle.Render("Next steps"))
 	sb.WriteString("\n\n")
 	for i, s := range steps {
 		sb.WriteString(s.title)
@@ -880,7 +921,7 @@ func printNextSteps(p Printer, findings []modules.Finding, cfg *config.Config) {
 		}
 		if i < len(steps)-1 {
 			sb.WriteString("\n")
-			sb.WriteString(styleMuted.Render(strings.Repeat("─", 48)))
+			sb.WriteString(styleMuted.Render(hrule()))
 			sb.WriteString("\n\n")
 		}
 	}
@@ -903,7 +944,7 @@ func printSuccessSummary(p Printer, cfg *config.Config) {
 	var sb strings.Builder
 	sb.WriteString(styleSuccess.Render("✓  Your rig is ready"))
 	sb.WriteString("\n\n")
-	sb.WriteString(styleBold.Render("Connect from your phone:"))
+	sb.WriteString(styleTitle.Render("Connect from your phone:"))
 	sb.WriteString("\n")
 
 	var connect string

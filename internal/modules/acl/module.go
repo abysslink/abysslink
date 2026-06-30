@@ -201,26 +201,13 @@ func (m *Module) applyAdmin(ctx context.Context, aclMgr backend.ACLManager, owne
 
 // applyManual writes the desired ACL to the generated dir, copies it to the
 // clipboard, and opens the admin editor for the user to paste and save.
-func (m *Module) applyManual(ctx context.Context, aclMgr backend.ACLManager, owner, user, checkPeriod string) error {
+func (m *Module) applyManual(ctx context.Context, aclMgr backend.ACLManager, owner, user, _ string) error {
+	// The generated ACL's SSH rule is an `accept` rule for tag:mobile (the
+	// enrolled phone is a tagged device with no user identity, so a check/owner
+	// re-auth rule can never match it). accept rules carry no checkPeriod, so the
+	// configured mobile.ssh_check_period does not appear in the ACL — the config
+	// ceiling (enforceCheckPeriodCeiling, in Apply/Verify) still guards it.
 	desired := aclMgr.DefaultACL(owner, user)
-	checkPeriodWarning := ""
-	if checkPeriod != "" && checkPeriod != "12h" {
-		editor, edErr := aclMgr.NewACLEditor(desired)
-		if edErr == nil {
-			edErr = editor.EnsureSSHRule(owner, user, checkPeriod)
-		}
-		if edErr != nil {
-			// Falling back to the 12h default is the safe direction, but the
-			// user configured a different period — never swallow the mismatch:
-			// log it AND surface it in the manual-step notice.
-			slog.Warn("acl apply: could not apply the configured checkPeriod to the generated ACL; falling back to the 12h default",
-				"configured", checkPeriod, "err", edErr)
-			checkPeriodWarning = "     WARNING: your configured mobile.ssh_check_period (" + checkPeriod +
-				") could not be applied — the generated ACL uses the 12h default.\n"
-		} else {
-			desired = editor.Bytes()
-		}
-	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -247,7 +234,6 @@ func (m *Module) applyManual(ctx context.Context, aclMgr backend.ACLManager, own
 	} else {
 		notice += "     Could not copy to clipboard — paste from: " + genPath + "\n"
 	}
-	notice += checkPeriodWarning
 	notice += "     Press [Enter] to open the Tailscale ACL editor, then paste and Save.\n"
 	notice += "     URL: " + aclEditorURL + "\n"
 

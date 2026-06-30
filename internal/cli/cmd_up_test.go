@@ -16,6 +16,9 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -23,6 +26,50 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestUpRefusesWhenNotInitialised: `up --apply` on a machine with no
+// abysslink.yaml must fail closed (exit 2) and route the user to `init`. It must
+// never fall back to config.Defaults() and converge a zero-identity config (the
+// `<your-rig>` apply bug). Mirrors the doctor/status not-initialised guards.
+func TestUpRefusesWhenNotInitialised(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no abysslink.yaml here
+
+	root := buildRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"up", "--apply"})
+
+	err := root.ExecuteContext(context.Background())
+	require.Error(t, err, "up with no config must not silently converge on Defaults")
+	var ee *exitError
+	require.True(t, errors.As(err, &ee), "expected exitError, got %v", err)
+	assert.Equal(t, exitCodeFatal, ee.ExitCode(), "missing config is fail-closed (exit 2)")
+
+	assert.Contains(t, out.String(), "not initialised")
+	assert.Contains(t, out.String(), "abysslink init")
+	assert.NotContains(t, out.String(), "applying", "must not enter the apply phase")
+	assert.NotContains(t, out.String(), "converged", "must not converge anything")
+}
+
+// TestUpRefusesWhenNotInitialised_JSON: the --json path emits a structured
+// not-initialised record and still exits 2, so scripted callers fail closed too.
+func TestUpRefusesWhenNotInitialised_JSON(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	root := buildRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"--json", "up", "--apply"})
+
+	err := root.ExecuteContext(context.Background())
+	require.Error(t, err)
+	var ee *exitError
+	require.True(t, errors.As(err, &ee), "expected exitError, got %v", err)
+	assert.Equal(t, exitCodeFatal, ee.ExitCode())
+	assert.Contains(t, out.String(), "not-initialised")
+}
 
 // unknownDiskFinding returns a FATAL hardening finding that carries the
 // Plan 02 UNKNOWN-state marker substring ("disk-encryption state is UNKNOWN").

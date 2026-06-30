@@ -23,6 +23,8 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"golang.org/x/term"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
 // stdinIsTTY reports whether os.Stdin is an interactive terminal.
@@ -45,7 +47,7 @@ func Confirm(ctx context.Context, prompt string, yes bool) (bool, error) {
 				Value(&result),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return false, err
 	}
 	return result, nil
@@ -72,31 +74,35 @@ func Select(ctx context.Context, title string, options []string, yes bool) (stri
 				Value(&result),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return "", err
 	}
 	return result, nil
 }
 
-// Pause displays a "Press Enter to continue…" message and waits for the user
-// to press Enter. If yes is true OR stdin is not a TTY (headless/CI), Pause
-// returns nil immediately without any interaction so automated runs never hang.
+// Pause displays msg and waits for the user to acknowledge with a single
+// "Continue" affordance. If yes is true OR stdin is not a TTY (headless/CI),
+// Pause returns nil immediately without any interaction so automated runs never
+// hang.
+//
+// A pause is an ACKNOWLEDGMENT, not a decision: the previous implementation
+// rendered a yes/no huh.Confirm whose result was discarded, so picking Yes or No
+// did the exact same thing — a fake choice that read as broken. It is now a huh
+// Note with a single "Continue" next-button: press Enter to proceed, Ctrl-C to
+// abort (huh returns an error the caller surfaces).
 func Pause(ctx context.Context, msg string, yes bool) error {
 	if yes || !stdinIsTTY() {
 		return nil
 	}
-	// Use a huh Note (non-interactive informational display) then a minimal
-	// Confirm prompt with no actual choice — the user presses Enter to proceed.
-	var dummy bool
 	form := huh.NewForm(
 		huh.NewGroup(
-			huh.NewNote().Title(msg),
-			huh.NewConfirm().
-				Title("Press Enter to continue…").
-				Value(&dummy),
+			huh.NewNote().
+				Title(msg).
+				Next(true).
+				NextLabel("Continue"),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -122,7 +128,7 @@ func PauseWithAction(ctx context.Context, msg, actionLabel string, yes bool) (bo
 				Value(&action),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return false, err
 	}
 	return action, nil
@@ -148,7 +154,7 @@ func ConfirmTyped(ctx context.Context, prompt, phrase string, yes bool) (bool, e
 				Value(&typed),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return false, err
 	}
 	return strings.TrimSpace(typed) == phrase, nil
@@ -171,15 +177,16 @@ func ConfirmBlast(ctx context.Context, summary string, count int, yes bool) (boo
 	}
 	var result bool
 	title := fmt.Sprintf("Apply %d change(s)? This will modify your system.", count)
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().Title(summary),
-			huh.NewConfirm().
-				Title(title).
-				Value(&result),
-		),
-	)
-	if err := form.RunWithContext(ctx); err != nil {
+	// Only include the summary note when there is a summary — rendering
+	// huh.NewNote().Title("") produces an empty titled note box above the confirm
+	// (e.g. when a plan has no sudo actions to summarise).
+	fields := make([]huh.Field, 0, 2)
+	if strings.TrimSpace(summary) != "" {
+		fields = append(fields, huh.NewNote().Title(summary))
+	}
+	fields = append(fields, huh.NewConfirm().Title(title).Value(&result))
+	form := huh.NewForm(huh.NewGroup(fields...))
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return false, err
 	}
 	return result, nil
@@ -196,7 +203,7 @@ func Input(ctx context.Context, title, defaultValue string) (string, error) {
 				Value(&result),
 		),
 	)
-	if err := form.RunWithContext(ctx); err != nil {
+	if err := form.WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return "", err
 	}
 	return result, nil

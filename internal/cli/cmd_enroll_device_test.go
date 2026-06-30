@@ -294,7 +294,9 @@ func TestEnrollPhone_DaemonUnreachable_Degrades(t *testing.T) {
 	p := NewHumanPrinterTo(&human, io.Discard)
 	offerCredentialPull(ctx, p, &qrOut, false, b, rotated, false, sshConnInfo{})
 	got := stripANSI(human.String())
-	assert.Contains(t, got, "showing credentials inline", "a degraded notice must be printed")
+	// "Daemon not reachable" survives the 54-col note-box wrap; the full
+	// "showing credentials inline" title now spans two lines inside the box.
+	assert.Contains(t, got, "Daemon not reachable", "a degraded notice must be printed")
 	assert.Contains(t, got, "abysslink daemon enable --apply", "the notice must tell the operator how to enable the one-scan pull")
 	assert.Contains(t, got, "Shown ONCE", "the box must still print on degrade")
 	assert.Equal(t, 1, strings.Count(got, b.Bearer), "the bearer must still print once on degrade")
@@ -306,7 +308,7 @@ func TestEnrollPhone_DaemonUnreachable_Degrades(t *testing.T) {
 	p2 := NewHumanPrinterTo(&human2, io.Discard)
 	offerCredentialPull(ctx, p2, &qrOut2, false, b, rotated, true, sshConnInfo{})
 	got2 := stripANSI(human2.String())
-	assert.Contains(t, got2, "showing credentials inline", "a degraded notice must be printed")
+	assert.Contains(t, got2, "Daemon not reachable", "a degraded notice must be printed")
 	assert.Contains(t, got2, "Scan with your phone to import", "per-credential QRs print on degrade with --qr")
 	assert.NotEmpty(t, qrOut2.String(), "per-credential QRs must render with --qr on degrade")
 	assert.NotContains(t, got2, "Scan with your phone to pull", "no one-scan capability-URL prompt on degrade")

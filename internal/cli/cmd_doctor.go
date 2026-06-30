@@ -35,6 +35,7 @@ import (
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -601,8 +602,8 @@ func doctorHumanOutput(p Printer, findings []modules.Finding) (hasFatal, hasWarn
 	for _, f := range findings {
 		if !seenMod[f.Module] {
 			seenMod[f.Module] = true
-			printerInfo(p, styleMuted.Render("  "+strings.Repeat("─", 50)))
-			printerInfo(p, "  "+styleBold.Render(f.Module))
+			printerInfo(p, styleMuted.Render("  "+hrule()))
+			printerInfo(p, "  "+styleTitle.Render(f.Module))
 		}
 
 		switch f.Severity {
@@ -681,9 +682,16 @@ Exit codes:
 			// web-UI dashboard uses (CollectDoctorFindings, B3). Keeping the
 			// ordering in one place stops the CLI and the dashboard from drifting.
 			// Skipped under --rig: the user asked for that rig's posture only.
+			// Show animated liveness while the (many shell-outs + network dials)
+			// local checks run — on a phone SSH session this is the difference
+			// between "working" and "hung". spinWork is json-safe (runs silently
+			// with a jsonPrinter), so the --json exit-code contract is unaffected.
 			var findings []modules.Finding
 			if !rt.rigOnly {
-				findings = collectDoctorFindings(ctx, cc, deps)
+				_ = spinWork(ctx, p, "Running checks…", func(ctx context.Context) error {
+					findings = collectDoctorFindings(ctx, cc, deps)
+					return nil
+				})
 			}
 
 			// --rig / --all-rigs: fan-out doctor --json to the targeted rigs and
@@ -728,18 +736,23 @@ Exit codes:
 
 			doctorHumanOutput(p, findings)
 
-			printerInfo(p, styleMuted.Render("  "+strings.Repeat("─", 50)))
+			printerInfo(p, styleMuted.Render("  "+hrule()))
 			printerInfo(p, doctorSeverityCounts(findings))
 			printerInfo(p, "")
 
+			// Verdict as a level-coloured callout box. The exact verdict sentence
+			// stays a single literal Note title (never split title+body), so any
+			// substring match on it survives the reflow.
 			switch {
 			case hasFatal:
-				printerInfo(p, "  "+iconFatalStr()+"  "+styleFatal.Render("FATAL  Fatal issues found — system is not safe."))
-				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair --apply  to auto-fix what can be fixed."))
+				printerInfo(p, tui.Note(tui.NoteDanger, "Fatal issues found — system is not safe.", []string{
+					"Run: abysslink repair --apply  to auto-fix what can be fixed.",
+				}))
 				printerInfo(p, "")
 			case hasWarn:
-				printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("WARN  Warnings found — review the issues above."))
-				printerInfo(p, "  "+styleMuted.Render("Run: abysslink repair --apply  to auto-fix what can be fixed."))
+				printerInfo(p, tui.Note(tui.NoteWarn, "Warnings found — review the issues above.", []string{
+					"Run: abysslink repair --apply  to auto-fix what can be fixed.",
+				}))
 				printerInfo(p, "")
 			}
 			return doctorExitErr(hasFatal, hasWarn)
@@ -759,16 +772,12 @@ func printDoctorHeader(p Printer, cc *cmdContext) {
 	if cc.jsonOut {
 		return
 	}
-	header := styleBold.Render("abysslink doctor") + "  " + styleMuted.Render("health check")
-	printerInfo(p, styleHeaderBox.Render(header))
-	printerInfo(p, "")
+	commandHeader(p, "doctor", styleMuted.Render("health check"))
 	// Fresh machine: tell the user to init before anything else — the checks
 	// below would otherwise recommend `up --apply` on a box that has never
 	// been initialised (U10).
 	if cc.cfgMissing {
-		printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("No abysslink.yaml found — this machine is not initialised."))
-		printerInfo(p, "  "+styleMuted.Render("Run ")+styleCode.Render("abysslink init")+styleMuted.Render(" first; checks below reflect built-in defaults."))
-		printerInfo(p, "")
+		emitNote(p, tui.NoteWarn, "No abysslink.yaml found — this machine is not initialised", []string{"Run `abysslink init` first; checks below reflect built-in defaults."})
 	}
 	emitSecurityNote(p, cc.jsonOut, "doctor-not-full-audit") // §7 note 11
 	emitSecurityNote(p, cc.jsonOut, "no-funnel")             // §7 note 8

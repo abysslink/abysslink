@@ -17,20 +17,25 @@ package cli
 
 import (
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	cterm "github.com/charmbracelet/x/term"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
-// Palette.
-const (
-	colorGreen  = lipgloss.Color("#04B575")
-	colorYellow = lipgloss.Color("#FFD060")
-	colorRed    = lipgloss.Color("#FF5F87")
-	colorBlue   = lipgloss.Color("#5C7CFA")
-	colorMuted  = lipgloss.Color("#6B7280")
-	colorWhite  = lipgloss.Color("#F8F8F2")
-	colorDim    = lipgloss.Color("#4B5563")
+// Palette — re-sourced from internal/ui (single source of color, D-03).
+// The hex values are IDENTICAL to their former local definitions; only the
+// definition site has moved. Rendered bytes on non-TTY/--json/NO_COLOR
+// surfaces are unchanged (D-04 byte-stability gate).
+var (
+	colorGreen  = ui.ColorSuccess       // #04B575
+	colorYellow = ui.ColorWarn          // #FFD060
+	colorRed    = ui.ColorFatal         // #FF5F87
+	colorBlue   = ui.ColorInfo          // #6E80F7
+	colorMuted  = ui.ColorMutedSemantic // #6B7280 (NOT brand steel — D-04)
+	colorDim    = ui.ColorDim           // #4B5563
 )
 
 // Text styles.
@@ -41,7 +46,15 @@ var (
 	styleInfo    = lipgloss.NewStyle().Foreground(colorBlue)
 	styleMuted   = lipgloss.NewStyle().Foreground(colorMuted)
 	styleBold    = lipgloss.NewStyle().Bold(true)
-	styleCode    = lipgloss.NewStyle().Foreground(colorBlue).Background(colorDim).Padding(0, 1)
+	// styleTitle is the brand-cyan bold for every command/section header (the
+	// TUI-migration single accent). Mirrors ui.StyleTitle but lives here so
+	// command files brand a title without each importing internal/ui. ANSI is
+	// stripped on non-TTY/NO_COLOR, so it is byte-identical to styleBold there.
+	styleTitle = lipgloss.NewStyle().Bold(true).Foreground(ui.ColorAccent)
+	// styleCode renders copy/run command snippets. Foreground is ColorFg
+	// (near-white) not colorBlue — blue-on-grey measured ~2:1, failing WCAG AA on
+	// the exact text the user most needs to read (T-003).
+	styleCode = lipgloss.NewStyle().Foreground(ui.ColorFg).Background(colorDim).Padding(0, 1)
 )
 
 // defaultBoxWidth is the box width used on wide terminals and when the
@@ -57,6 +70,64 @@ func boxWidth() int {
 		return w - 2
 	}
 	return defaultBoxWidth
+}
+
+// hrule returns a horizontal-rule separator sized to the current box width
+// (boxWidth()-2 for the box interior) instead of a hardcoded 48/50-column
+// literal. The fixed widths soft-wrapped onto a second line on narrow phone
+// terminals (leaving a short dangling fragment) and looked stubby on wide ones;
+// hrule tracks the terminal so separators line up with the boxes they sit
+// between. The glyph stays "─" on every surface for byte-stability with the
+// existing parity goldens (only the width became responsive).
+func hrule() string {
+	return strings.Repeat("─", max(1, boxWidth()-2))
+}
+
+// ruleN returns a horizontal rule of n "─" columns, shrunk to the terminal
+// width (minus 2) when the terminal is narrower than n. Used for fixed boxes
+// that are intentionally wider than boxWidth() — e.g. the device-credential
+// bundle, which must hold full SSH keys — so their top/bottom frame does not
+// overflow a narrow phone terminal. On a non-TTY (pipe/CI/tests) the size probe
+// fails and the full n is kept, so captures stay byte-stable.
+func ruleN(n int) string {
+	if w, _, err := cterm.GetSize(os.Stdout.Fd()); err == nil && w > 2 && w-2 < n {
+		n = w - 2
+	}
+	return strings.Repeat("─", max(1, n))
+}
+
+// statusCellStyle returns the palette style for a fleet status-cell word: red
+// for UNREACHABLE/offline, yellow for DEGRADED/unknown, green for
+// reachable/running/online/ok, muted otherwise. The literal word is preserved by
+// the caller — only its colour comes from here, the single source for fleet
+// tables (status --all-rigs, report rigs, panic fan-out). ANSI is stripped on
+// non-TTY/NO_COLOR, so byte-stable surfaces are unaffected.
+func statusCellStyle(state string) lipgloss.Style {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "unreachable", "offline":
+		return styleFatal
+	case "degraded", "unknown":
+		return styleWarn
+	case "reachable", "running", "online", "ok":
+		return styleSuccess
+	default:
+		return styleMuted
+	}
+}
+
+// truncCell truncates s to at most maxCols display columns, appending an
+// ellipsis when it overflows, so a long value (e.g. a backup path or hostname)
+// never shears the next column of a fixed-width %-Ns table. maxCols <= 1 returns
+// s unchanged.
+func truncCell(s string, maxCols int) string {
+	if maxCols <= 1 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= maxCols {
+		return s
+	}
+	return string(r[:maxCols-1]) + "…"
 }
 
 // boxBorder returns the border set for boxes: rounded glyphs on a TTY, an
@@ -91,6 +162,11 @@ var (
 			BorderForeground(colorBlue).
 			Padding(0, 2).
 			Width(boxWidth())
+
+	// styleFooterHint renders the persistent footer hint text in muted steel:
+	// "↑/↓ navigate  •  space toggle  •  enter select  •  esc back  •  ctrl+c quit"
+	// (UI-SPEC §Copywriting Contract "Persistent footer hint"). Consumed by Plan 35-03.
+	styleFooterHint = lipgloss.NewStyle().Foreground(colorMuted) //nolint:unused // wired by plan 35-03 (TUI-06)
 )
 
 // Icons.

@@ -41,8 +41,12 @@ func newRepairCmd() *cobra.Command {
 
 			p := newPrinter(cmd)
 
-			if cc.dryRun {
-				printerInfo(p, "Dry-run mode (use --apply to apply changes)")
+			if !cc.jsonOut {
+				mode := styleMuted.Render("repair drift")
+				if cc.dryRun {
+					mode = styleWarn.Render("preview only — run with --apply to make changes")
+				}
+				commandHeader(p, "repair", mode)
 			}
 
 			deps, err := buildDeps(ctx, cc)
@@ -79,7 +83,7 @@ func newRepairCmd() *cobra.Command {
 				return nil
 			}
 
-			repairErrs := runModuleRepairs(ctx, p, mods, needsRepair, cc.dryRun)
+			repairErrs := runModuleRepairs(ctx, p, mods, needsRepair, cc.dryRun, cc.jsonOut)
 
 			// F-59: replay manual steps deferred during Repair (e.g. acl manual
 			// mode) after all repairs ran — even when some modules failed, the
@@ -100,7 +104,7 @@ func newRepairCmd() *cobra.Command {
 // runModuleRepairs calls Repair on each module flagged in needsRepair, printing
 // progress. In dry-run mode it reports what it would repair without mutating.
 // It returns the errors from any modules that failed to repair.
-func runModuleRepairs(ctx context.Context, p Printer, mods []modules.Module, needsRepair map[string]bool, dryRun bool) []error {
+func runModuleRepairs(ctx context.Context, p Printer, mods []modules.Module, needsRepair map[string]bool, dryRun, jsonOut bool) []error {
 	modMap := make(map[string]modules.Module, len(mods))
 	for _, m := range mods {
 		modMap[m.Name()] = m
@@ -114,18 +118,33 @@ func runModuleRepairs(ctx context.Context, p Printer, mods []modules.Module, nee
 		}
 
 		// Dry-run prints ONLY the [plan] line — "Repairing module:" would
-		// falsely imply a mutation is happening (CLI-29).
+		// falsely imply a mutation is happening (CLI-29). The decorative progress
+		// is human-only: under --json it is suppressed so no {"msg"} glyph/prose
+		// leaks into the machine stream (repair has no structured json output;
+		// failures are still returned via repairErrs and surfaced by the exit code).
 		if dryRun {
-			printerInfo(p, fmt.Sprintf("  [plan] would repair: %s", modName))
+			if !jsonOut {
+				printerInfo(p, fmt.Sprintf("  [plan] would repair: %s", modName))
+			}
 			continue
 		}
-		printerInfo(p, fmt.Sprintf("  Repairing module: %s", modName))
+		// NOTE: m.Repair drives RunInteractive (sudo TTY passthrough) for the
+		// power/tailscale modules, so it must NOT run under a Bubble Tea spinner —
+		// that would suppress the password prompt and hang. Keep the static line;
+		// only the glyph/colour is branded.
+		if !jsonOut {
+			printerInfo(p, "  "+iconSpinStr()+"  "+styleMuted.Render("Repairing module: "+modName))
+		}
 		if repErr := m.Repair(ctx); repErr != nil {
-			printerError(p, fmt.Sprintf("  repair [%s]: %v", modName, repErr))
+			if !jsonOut {
+				printerError(p, "  "+iconFatalStr()+"  "+styleFatal.Render(fmt.Sprintf("repair [%s]: %v", modName, repErr)))
+			}
 			repairErrs = append(repairErrs, repErr)
 			continue
 		}
-		printerInfo(p, fmt.Sprintf("  Repaired: %s", modName))
+		if !jsonOut {
+			printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render("Repaired: "+modName))
+		}
 	}
 	return repairErrs
 }

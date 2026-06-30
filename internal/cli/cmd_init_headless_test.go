@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/browser"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -148,22 +149,23 @@ func TestMaybeFixSleep_SudoUsesRunInteractive(t *testing.T) {
 	}
 }
 
-// TestOpenURL_NoOpenerError asserts that openURL returns a non-nil error in the
-// error path. Coverage strategy differs by platform:
+// TestOpenURL_NoOpenerError asserts that browser.OpenURL returns a non-nil error
+// in the error path. Coverage strategy differs by platform:
 //
 //   - On macOS: "open" is always on PATH, so shell.LookPath("open") returns true
-//     and openURL calls runner.Run. A zero-scripted MockRunner returns an
+//     and browser.OpenURL calls runner.Run. A zero-scripted MockRunner returns an
 //     unexpected-call error, exercising the run-failure code path.
 //   - On other platforms where neither "open" nor "xdg-open" is on PATH:
-//     openURL returns "no browser opener found" before touching the runner.
+//     browser.OpenURL returns "no browser opener found" before touching the runner.
 //
 // Both branches return a non-nil error — the test asserts require.Error in both.
+// openURL was moved to internal/browser.OpenURL in Plan 35-05 (BRWS-01 wiring).
 func TestOpenURL_NoOpenerError(t *testing.T) {
 	// Zero scripted calls — any subprocess invocation returns an error from MockRunner.
 	runner := shell.NewMockRunner()
 
-	err := openURL(context.Background(), runner, "https://example.com")
-	require.Error(t, err, "openURL must return an error when opener absent or run fails")
+	err := browser.OpenURL(context.Background(), runner, "https://example.com")
+	require.Error(t, err, "browser.OpenURL must return an error when opener absent or run fails")
 
 	// On platforms where neither open nor xdg-open is on PATH, the error must
 	// contain "no browser opener found". On macOS, the mock runner's unexpected-call

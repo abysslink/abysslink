@@ -218,13 +218,13 @@ func deviceLS(p Printer, jsonOut bool, st *device.Store) error {
 		return nil
 	}
 
-	printerInfo(p, styleBold.Render("Devices")+"\n")
+	commandHeader(p, "device ls", styleMuted.Render("enrolled device credentials"))
 	header := fmt.Sprintf("  %-12s %-7s %-11s %-11s %-13s %-21s %-6s %s",
 		"NAME", "KIND", "ENROLLED", "ROTATED", "CERT EXPIRES", "LAST SEEN", "STALE", "REVOKED")
 	printerInfo(p, styleMuted.Render(header))
 	for _, row := range rows {
 		printerInfo(p, fmt.Sprintf("  %-12s %-7s %-11s %-11s %-13s %-21s %-6s %s",
-			row.Name, row.Kind, row.EnrolledAt,
+			truncCell(row.Name, 12), row.Kind, row.EnrolledAt,
 			orDash(row.RotatedAt), row.CertExpires, orNever(row.LastSeen),
 			yesOrDash(row.Stale), yesOrDash(row.Revoked)))
 	}

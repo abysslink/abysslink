@@ -391,6 +391,28 @@ func TestDoctorPushContentStorePublicBind(t *testing.T) {
 	assert.Contains(t, found.Message, "0.0.0.0")
 }
 
+// TestDoctorPushContentStoreDisabled verifies that when the content store
+// fail-closed and disabled itself (BACK-06), the push-contentstore-bind check is
+// OK — a disabled store binds to nothing, so it must NOT be a false "bound to a
+// public address" FATAL (the "disabled: <reason>" status string is not an
+// address).
+func TestDoctorPushContentStoreDisabled(t *testing.T) {
+	withStubDaemonStatus(t, func(context.Context) (*statusDaemonExtras, error) {
+		return extrasWithBothFields("ok", "disabled: bind address could not be confirmed as the tailnet IP (BACK-06)"), nil
+	})
+	findings := pushGatewayDoctorFindings(context.Background(), pushCfg())
+	var found *modules.Finding
+	for i := range findings {
+		if findings[i].Check == "push-contentstore-bind" {
+			found = &findings[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "push-contentstore-bind finding must be present")
+	assert.Equal(t, modules.SeverityOK, found.Severity, "a disabled content store must not be a public-bind FATAL")
+	assert.Contains(t, found.Message, "disabled")
+}
+
 // TestDoctorPushContentStoreTailnetBind verifies that when the content store is
 // bound to a tailnet IP, the push-contentstore-bind check emits OK.
 func TestDoctorPushContentStoreTailnetBind(t *testing.T) {

@@ -79,7 +79,12 @@ func TestApplyDesired_AddsToEmptyACL(t *testing.T) {
 	assert.Contains(t, out, "tag:mobile")
 	assert.Contains(t, out, "tcp:22")
 	assert.Contains(t, out, "udp:60000-61000")
-	assert.Contains(t, out, "6h")
+	// SSH rule is `accept` for the tagged phone — no checkPeriod (it can't do the
+	// 12h re-auth); the configured period does not appear in the ACL.
+	assert.Contains(t, out, `"accept"`)
+	assert.Contains(t, out, "autogroup:nonroot")
+	assert.NotContains(t, out, "checkPeriod")
+	assert.NotContains(t, out, `"6h"`)
 }
 
 func TestHasAdminCreds(t *testing.T) {
@@ -466,10 +471,10 @@ func TestApplyAdmin_PreservesUnmanagedACLSections(t *testing.T) {
 	assert.Contains(t, out, "udp:60000-61000")
 }
 
-// TestApplyManual_CustomCheckPeriodApplied: the success path — a custom (lower)
-// checkPeriod is reflected in the generated/copied ACL and no fallback warning
-// is surfaced.
-func TestApplyManual_CustomCheckPeriodApplied(t *testing.T) {
+// TestApplyManual_AcceptRuleCopied: manual mode generates and copies the ACL
+// with the accept SSH rule for the tagged phone — no checkPeriod appears (accept
+// rules can't do the 12h re-auth, so the configured period is not in the ACL).
+func TestApplyManual_AcceptRuleCopied(t *testing.T) {
 	r := shell.NewMockRunner(
 		shell.Call{Result: shell.Result{ExitCode: 0}},
 		shell.Call{Result: shell.Result{ExitCode: 0}},
@@ -482,8 +487,7 @@ func TestApplyManual_CustomCheckPeriodApplied(t *testing.T) {
 
 	require.NoError(t, m.applyManual(context.Background(), aclMgr, "owner@example.com", "testuser", "6h"))
 	require.Len(t, steps, 1)
-	assert.NotContains(t, steps[0].Body, "WARNING",
-		"no fallback warning when the custom checkPeriod is applied successfully")
+	assert.NotContains(t, steps[0].Body, "WARNING")
 
 	var copied string
 	for _, c := range r.RecordedCalls() {
@@ -495,55 +499,9 @@ func TestApplyManual_CustomCheckPeriodApplied(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, copied, "the generated ACL must be piped to the clipboard tool")
-	assert.Contains(t, copied, `"6h"`, "the generated ACL must carry the configured checkPeriod")
-}
-
-// failingEditorACLMgr wraps a real ACLManager but fails NewACLEditor — used to
-// force applyManual's custom-checkPeriod fallback path.
-type failingEditorACLMgr struct {
-	backend.ACLManager
-}
-
-func (f *failingEditorACLMgr) NewACLEditor(_ []byte) (backend.ACLEditor, error) {
-	return nil, assert.AnError
-}
-
-// TestApplyManual_CheckPeriodFallbackSurfaced: when the custom checkPeriod
-// cannot be applied, manual mode falls back to the 12h default — safe, but
-// it must be surfaced to the user in the manual-step notice, never silently
-// swallowed (review finding W9).
-func TestApplyManual_CheckPeriodFallbackSurfaced(t *testing.T) {
-	r := shell.NewMockRunner(
-		shell.Call{Result: shell.Result{ExitCode: 0}},
-		shell.Call{Result: shell.Result{ExitCode: 0}},
-	)
-
-	var steps []modules.ManualStep
-	m, realMgr := newManualTestModule(t, r, nil,
-		func(s modules.ManualStep) { steps = append(steps, s) },
-	)
-	aclMgr := &failingEditorACLMgr{ACLManager: realMgr}
-
-	require.NoError(t, m.applyManual(context.Background(), aclMgr, "owner@example.com", "testuser", "6h"),
-		"fallback to the 12h default is non-fatal")
-
-	require.Len(t, steps, 1)
-	assert.Contains(t, steps[0].Body, "WARNING", "the fallback must be surfaced in the manual-step notice")
-	assert.Contains(t, steps[0].Body, "6h", "the notice must name the configured period that was dropped")
-	assert.Contains(t, steps[0].Body, "12h default", "the notice must say what the generated ACL uses instead")
-
-	var copied string
-	for _, c := range r.RecordedCalls() {
-		switch c.Name {
-		case "pbcopy", "wl-copy", "xclip":
-			if c.Stdin != "" {
-				copied = c.Stdin
-			}
-		}
-	}
-	require.NotEmpty(t, copied)
-	assert.Contains(t, copied, `"12h"`, "the generated ACL falls back to the 12h default")
-	assert.NotContains(t, copied, `"6h"`, "the configured period was not applied")
+	assert.Contains(t, copied, `"accept"`, "the copied ACL must carry the accept SSH rule")
+	assert.Contains(t, copied, "tag:mobile")
+	assert.NotContains(t, copied, "checkPeriod", "accept rules carry no checkPeriod")
 }
 
 // TestVerify_CheckPeriodCeilingWarning aligns Verify with Apply's NET-01 gate:

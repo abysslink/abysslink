@@ -197,6 +197,19 @@ var noteIndex = func() map[string]*securityNote {
 	return idx
 }()
 
+// emitNote renders an ad-hoc callout via tui.Note and prints it through p. It
+// SELF-GUARDS on the JSON printer (no-op) exactly like emitSecurityNote, so a
+// human warning/danger box can never leak into the newline-delimited --json
+// stream. Use this instead of a bare printerInfo(p, tui.Note(...)) so the
+// json-safety holds without a per-call-site `if !cc.jsonOut` guard
+// (TUI-migration verify L1/L2/L4).
+func emitNote(p Printer, level tui.NoteLevel, title string, lines []string) {
+	if _, isJSON := p.(*jsonPrinter); isJSON {
+		return
+	}
+	printerInfo(p, tui.Note(level, title, lines))
+}
+
 // emitSecurityNote renders the security note with the given ID via tui.Note and
 // prints it through p. Call sites reference IDs only — text lives in allSecurityNotes.
 //

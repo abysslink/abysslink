@@ -24,7 +24,7 @@
   →  notify            1 change: start ntfy service
   →  watch             1 change: configure pane watchers
   ✓  claudecode        up to date
-  ────────────────────────────────────────────────
+  ────────────────────────────────────────────────────
   8 changes planned
 
   →  tailscale     install tailscale

@@ -35,6 +35,7 @@ import (
 	"github.com/abysslink/abysslink/internal/notifyv2"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -535,7 +536,7 @@ func armRollbackOffer(ctx context.Context, cc *cmdContext, p Printer, headSHA, s
 	currentHead := strings.TrimSpace(currentHeadRes.Stdout)
 	if currentHead != headSHA {
 		// T-31-12: HEAD-advance guard — stash may conflict; abort restore.
-		p.Print("WARNING: HEAD has advanced since arm — stash may conflict; restore skipped. Diff shown above.")
+		emitNote(p, tui.NoteWarn, "HEAD has advanced since arm", []string{"Stash may conflict; restore skipped. Diff shown above."})
 		return nil
 	}
 

@@ -20,6 +20,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
 // SecretBox renders a once-only red-bordered box containing the title, the
@@ -51,27 +53,26 @@ func SecretBox(title string, secrets []string) string {
 	if noColor() {
 		// Still render the box structure without colour.
 		return lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
+			Border(boxBorder()).
 			Padding(0, 2).
 			Width(secretBoxWidth()).
 			Render(body)
 	}
 
 	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#FF5F87")). // red
-		Foreground(lipgloss.Color("#FF5F87")).
+		Border(boxBorder()).
+		BorderForeground(ui.ColorFatal). // #FF5F87 — re-sourced from internal/ui (D-03)
+		Foreground(ui.ColorFatal).
 		Bold(true).
 		Padding(0, 2).
 		Width(secretBoxWidth()).
 		Render(body)
 }
 
-// secretBoxWidth returns the responsive width for the secret box.
+// secretBoxWidth returns the responsive width for the secret box: the shared
+// brand box width (cap 54, shrink on narrow terminals — never FLOORS at 54).
+// The previous standalone `min(54, …)` was identical; it now routes through the
+// single boxWidth() helper so the secret box, notes, and header stay in lockstep.
 func secretBoxWidth() int {
-	w := terminalWidth() - 4
-	if w < 54 {
-		return 54
-	}
-	return w
+	return boxWidth()
 }

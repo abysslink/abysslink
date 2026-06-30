@@ -18,6 +18,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,11 +43,12 @@ func TestUninstallConfirmSeq_NonInteractiveErrors(t *testing.T) {
 	}
 
 	// Tests run without a TTY, so this exercises the non-interactive branch.
-	ok, purgeOK, err := uninstallConfirmSeq(ctx, p, plan, false, false)
+	ok, removeConfig, removeState, err := uninstallConfirmSeq(ctx, p, plan, false, false, false)
 	require.Error(t, err, "non-interactive without --yes must return an error (exit non-zero)")
 	assert.Contains(t, err.Error(), "--yes", "the error must name the flag that supplies the missing input")
 	assert.False(t, ok, "ok must be false when aborting")
-	assert.False(t, purgeOK, "purgeOK must be false when ok=false")
+	assert.False(t, removeConfig, "removeConfig must be false when ok=false")
+	assert.False(t, removeState, "removeState must be false when ok=false")
 }
 
 // TestUninstallConfirmSeq_AutoYes asserts that with --yes the confirm sequence
@@ -61,10 +63,11 @@ func TestUninstallConfirmSeq_AutoYesBase(t *testing.T) {
 		{Action: "restore", Target: "/tmp/test-file"},
 	}
 
-	ok, purgeOK, err := uninstallConfirmSeq(ctx, p, plan, false, true /*yes*/)
+	ok, removeConfig, removeState, err := uninstallConfirmSeq(ctx, p, plan, false, false, true /*yes*/)
 	require.NoError(t, err)
 	assert.True(t, ok, "--yes must auto-confirm UNINSTALL")
-	assert.False(t, purgeOK, "purge=false must not trigger second confirm")
+	assert.False(t, removeConfig, "no flag + --yes must keep the config dir")
+	assert.False(t, removeState, "no flag + --yes must keep the state dir")
 }
 
 // TestUninstallConfirmSeq_AutoYesPurge asserts that with --yes and --purge both
@@ -78,10 +81,28 @@ func TestUninstallConfirmSeq_AutoYesPurge(t *testing.T) {
 		{Action: "restore", Target: "/tmp/test-file"},
 	}
 
-	ok, purgeOK, err := uninstallConfirmSeq(ctx, p, plan, true /*purge*/, true /*yes*/)
+	ok, removeConfig, removeState, err := uninstallConfirmSeq(ctx, p, plan, true /*purge*/, false, true /*yes*/)
 	require.NoError(t, err)
 	assert.True(t, ok, "--yes must auto-confirm UNINSTALL")
-	assert.True(t, purgeOK, "--yes + --purge must auto-confirm second gate")
+	assert.True(t, removeConfig, "--purge must remove the config dir")
+	assert.True(t, removeState, "--yes + --purge must auto-confirm removing the state dir")
+}
+
+// TestUninstallConfirmSeq_RemoveConfigFlag asserts --remove-config (without
+// --purge) resolves to removing the config dir but keeping the state dir, and
+// does not trigger the irreversibility gate.
+func TestUninstallConfirmSeq_RemoveConfigFlag(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	p := &testPrinter{out: &buf}
+
+	plan := []audit.ReverseAction{{Action: "restore", Target: "/tmp/test-file"}}
+
+	ok, removeConfig, removeState, err := uninstallConfirmSeq(ctx, p, plan, false /*purge*/, true /*removeConfig*/, true /*yes*/)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.True(t, removeConfig, "--remove-config must remove the config dir")
+	assert.False(t, removeState, "--remove-config must keep the state dir (audit log + backups)")
 }
 
 // TestUninstallConfirmSeq_PurgeMessagePrinted asserts that with --purge a warning
@@ -95,7 +116,7 @@ func TestUninstallConfirmSeq_PurgeMessagePrinted(t *testing.T) {
 		{Action: "restore", Target: "/tmp/test-file"},
 	}
 
-	_, _, err := uninstallConfirmSeq(ctx, p, plan, true /*purge*/, true /*yes*/)
+	_, _, _, err := uninstallConfirmSeq(ctx, p, plan, true /*purge*/, false, true /*yes*/)
 	require.NoError(t, err)
 
 	out := buf.String()
@@ -120,7 +141,7 @@ func TestUninstallConfirmSeq_BlastRadiusPrinted(t *testing.T) {
 		{Action: "restore", Target: "/tmp/file-c"},
 	}
 
-	_, _, err := uninstallConfirmSeq(ctx, p, plan, false, true /*yes*/)
+	_, _, _, err := uninstallConfirmSeq(ctx, p, plan, false, false, true /*yes*/)
 	require.NoError(t, err)
 
 	out := buf.String()
@@ -166,7 +187,7 @@ func TestUninstallCmd_ContainsTypedConfirmCall(t *testing.T) {
 
 	// Non-TTY + no --yes → errMissingInput → Reverse must not be called and the
 	// command exits non-zero (U8).
-	ok, _, err := uninstallConfirmSeq(ctx, p, nil, false, false)
+	ok, _, _, err := uninstallConfirmSeq(ctx, p, nil, false, false, false)
 	require.Error(t, err, "non-interactive uninstall without --yes must error")
 	assert.False(t, ok, "non-interactive uninstall without --yes must not proceed")
 }
@@ -192,13 +213,36 @@ func TestRemoveAbysslinkDirs_NoPurgeKeepsConfigDir(t *testing.T) {
 	var out bytes.Buffer
 	p := NewHumanPrinterTo(&out, &out)
 
-	failures := removeAbysslinkDirs(p, false /* purge */)
+	failures := removeAbysslinkDirs(p, false /* removeConfig */, false /* removeState */)
 	assert.Zero(t, failures)
 
 	assert.DirExists(t, cfgDir, "config dir must be KEPT without --purge (CLI-18)")
 	assert.DirExists(t, stateDir, "state dir must be KEPT without --purge")
 	assert.Contains(t, out.String(), "Kept", "output must tell the user the dirs were kept")
 	assert.Contains(t, out.String(), "--purge", "output must point at --purge for full removal")
+}
+
+// TestRemoveAbysslinkDirs_RemoveConfigKeepsState verifies --remove-config drops
+// the config dir but keeps the state dir (audit log + backups) for forensics.
+func TestRemoveAbysslinkDirs_RemoveConfigKeepsState(t *testing.T) {
+	cfgBase := t.TempDir()
+	stateBase := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgBase)
+	t.Setenv("XDG_STATE_HOME", stateBase)
+
+	cfgDir := abysslinkConfigDir()
+	stateDir := abysslinkStateDir()
+	require.NoError(t, os.MkdirAll(cfgDir, 0o700))
+	require.NoError(t, os.MkdirAll(stateDir, 0o700))
+
+	var out bytes.Buffer
+	p := NewHumanPrinterTo(&out, &out)
+
+	failures := removeAbysslinkDirs(p, true /* removeConfig */, false /* removeState */)
+	assert.Zero(t, failures)
+
+	assert.NoDirExists(t, cfgDir, "config dir must be removed with --remove-config")
+	assert.DirExists(t, stateDir, "state dir must be KEPT with --remove-config")
 }
 
 // TestRemoveAbysslinkDirs_PurgeRemovesBothDirs verifies that --purge removes
@@ -217,9 +261,80 @@ func TestRemoveAbysslinkDirs_PurgeRemovesBothDirs(t *testing.T) {
 	var out bytes.Buffer
 	p := NewHumanPrinterTo(&out, &out)
 
-	failures := removeAbysslinkDirs(p, true /* purge */)
+	failures := removeAbysslinkDirs(p, true /* removeConfig */, true /* removeState */)
 	assert.Zero(t, failures)
 
 	assert.NoDirExists(t, cfgDir, "config dir must be removed with --purge")
 	assert.NoDirExists(t, stateDir, "state dir must be removed with --purge")
+}
+
+// TestFoldSkipDirs_CollapsesTempFlood asserts that a flood of unique temp-dir
+// paths (the real-world cause of thousands of "skip" lines: each t.TempDir()
+// fixture is its own folder) collapses to a single subtree line, while skips in
+// distinct top-level trees stay separate and counts are exact.
+func TestFoldSkipDirs_CollapsesTempFlood(t *testing.T) {
+	var skips []string
+	for i := range 500 {
+		skips = append(skips, fmt.Sprintf("/var/folders/dh/R/T/TestX%d/001/abysslink.yaml", i))
+	}
+	skips = append(skips,
+		"/tmp/claude-501/a/abysslink.yaml",
+		"/tmp/claude-501/b/abysslink.yaml",
+		"/tmp/loose.yaml",
+	)
+
+	groups := foldSkipDirs(skips, skipFanout)
+
+	total := 0
+	byDir := map[string]int{}
+	for _, g := range groups {
+		total += g.count
+		byDir[g.dir] = g.count
+	}
+	assert.Equal(t, len(skips), total, "folding must preserve the total skip count")
+
+	// The 500-wide temp fan-out collapses to one line at the branching folder.
+	assert.Equal(t, 500, byDir["/var/folders/dh/R/T"], "wide temp fan-out must fold to its subtree root")
+	// A narrow tree (claude-501 has 2 children <= fanout) is NOT collapsed: each
+	// distinct leaf folder is kept so the few real leftovers stay visible.
+	assert.Equal(t, 1, byDir["/tmp/claude-501/a"], "narrow tree leaf folder must be kept")
+	assert.Equal(t, 1, byDir["/tmp/claude-501/b"], "narrow tree leaf folder must be kept")
+	// A loose file directly under /tmp is reported on its own folder line.
+	assert.Equal(t, 1, byDir["/tmp"], "loose file's folder must be reported")
+
+	// First group is the largest (sorted by count desc).
+	require.NotEmpty(t, groups)
+	assert.Equal(t, "/var/folders/dh/R/T", groups[0].dir)
+}
+
+// TestFoldSkipDirs_Empty returns no groups for no skips.
+func TestFoldSkipDirs_Empty(t *testing.T) {
+	assert.Empty(t, foldSkipDirs(nil, skipFanout))
+}
+
+// TestPrintReversePlan_FoldsSkipsKeepsActionable asserts the printed plan lists
+// restore/delete individually but folds skips into a grouped summary.
+func TestPrintReversePlan_FoldsSkipsKeepsActionable(t *testing.T) {
+	plan := []audit.ReverseAction{
+		{Target: "/Users/x/.config/abysslink/abysslink.yaml", Action: "restore"},
+		{Target: "/Users/x/.zshenv", Action: "delete"},
+	}
+	for i := range 50 {
+		plan = append(plan, audit.ReverseAction{
+			Target: fmt.Sprintf("/var/folders/dh/R/T/TestX%d/001/abysslink.yaml", i),
+			Action: "skip",
+		})
+	}
+
+	var out bytes.Buffer
+	p := NewHumanPrinterTo(&out, &out)
+	printReversePlan(p, plan)
+	got := out.String()
+
+	assert.Contains(t, got, "restore  /Users/x/.config/abysslink/abysslink.yaml")
+	assert.Contains(t, got, "delete   /Users/x/.zshenv")
+	assert.Contains(t, got, "50 already-absent target(s)")
+	assert.Contains(t, got, "/var/folders/dh/R/T")
+	// No per-file skip line should leak through.
+	assert.NotContains(t, got, "TestX0/001/abysslink.yaml")
 }

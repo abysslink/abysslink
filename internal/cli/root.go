@@ -70,7 +70,12 @@ func printCLIError(rootCmd *cobra.Command, err error) {
 
 	p := NewHumanPrinterTo(rootCmd.OutOrStdout(), rootCmd.ErrOrStderr())
 	lines := strings.Split(strings.TrimRight(err.Error(), "\n"), "\n")
-	p.Error("Error: " + lines[0])
+	// Brand the human-TTY error: the "Error:" label in semantic red. The literal
+	// "Error: <firstline>" text and the continuation lines are preserved verbatim
+	// (lipgloss strips the ANSI on a non-TTY/NO_COLOR surface, so piped/captured
+	// error text — and the Contains assertions in the tests — are unchanged). The
+	// --json {"error":…} path above is untouched.
+	p.Error(styleFatal.Render("Error:") + " " + lines[0])
 	for _, l := range lines[1:] {
 		p.Error(l)
 	}
@@ -187,6 +192,11 @@ Run 'abysslink <command> --help' for details on any command.`,
 		c.GroupID = "emergency"
 		root.AddCommand(c)
 	}
+
+	// Hidden commands — not assigned to a group (Hidden:true prevents them from
+	// appearing in help listings). Register after the grouped commands so they
+	// are still reachable by name but absent from `abysslink --help` output.
+	root.AddCommand(newGalleryCmd())
 
 	// UX review #3: unknown/missing nested subcommands must error (exit 1),
 	// not print parent help with exit 0. Applied to every parent below the

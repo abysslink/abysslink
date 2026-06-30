@@ -33,6 +33,7 @@ import (
 	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/secrets"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -93,7 +94,7 @@ func runAuditVerify(ctx context.Context, p Printer, logPath string, kc audit.Key
 	// the anchor) cannot be authenticated, so emit a prominent visible banner —
 	// slog.Warn alone is hidden at the default non-TTY level.
 	if kc == nil {
-		printerError(p, "HMAC checks SKIPPED — keychain unavailable; chain structure walked but signatures NOT authenticated")
+		emitNote(p, tui.NoteSecurity, "HMAC checks skipped", []string{"keychain unavailable — chain structure walked but signatures NOT authenticated"})
 	}
 
 	result, err := audit.Verify(ctx, logPath, kc)
@@ -463,7 +464,7 @@ func runAuditFix(ctx context.Context, p Printer, logPath string, kc audit.Keycha
 	if sock := daemon.SocketPath(); sock != "" {
 		if fi, err := os.Stat(sock); err == nil && fi.Mode().Perm()&0o077 != 0 {
 			if secFixChmod(ctx, p, logPath, sock, kc, dryRun) {
-				printerInfo(p, "note: restart abysslinkd — the socket is recreated on restart, so the durable fix is a restart")
+				emitNote(p, tui.NoteInfo, "Restart required", []string{"restart abysslinkd — the socket is recreated on restart, so the durable fix is a restart"})
 			}
 		}
 	}
@@ -595,7 +596,7 @@ func renderEntryTable(p Printer, entries []audit.Entry) {
 	printerInfo(p, fmt.Sprintf("%-20s  %-8s  %-40s  %s", "TIME", "OP", "TARGET", "DRY_RUN"))
 	for _, e := range entries {
 		printerInfo(p, fmt.Sprintf("%-20s  %-8s  %-40s  %v",
-			e.Time.Format("2006-01-02 15:04:05"), e.Op, e.Target, e.DryRun))
+			e.Time.Format("2006-01-02 15:04:05"), truncCell(e.Op, 8), truncCell(e.Target, 40), e.DryRun))
 	}
 }
 

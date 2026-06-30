@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/browser"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/modules"
@@ -56,6 +56,7 @@ func newRotateAnthropicCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			commandHeader(p, "rotate anthropic-key", styleMuted.Render("rotate the Anthropic API key"))
 
 			if cc.dryRun {
 				printerInfo(p, "[plan] open the Anthropic console, read the new key from "+newAnthropicKeyEnv+
@@ -63,7 +64,15 @@ func newRotateAnthropicCmd() *cobra.Command {
 				return nil
 			}
 
-			_ = openInBrowser(ctx, cc, "https://console.anthropic.com/settings/keys")
+			const consoleURL = "https://console.anthropic.com/settings/keys"
+			// Use the shared browser.OpenURL (probes xdg-open/open via LookPath and
+			// checks the exit code) instead of a GOOS-hardcoded opener that drops
+			// the error. Track whether the tab actually opened so the revoke hint
+			// below does not claim a tab that never appeared (e.g. a headless rig).
+			consoleOpened := browser.OpenURL(ctx, cc.runner, consoleURL) == nil
+			if !consoleOpened {
+				printerInfo(p, styleMuted.Render("Open the Anthropic console to manage keys: ")+styleCode.Render(consoleURL))
+			}
 			newKey := os.Getenv(newAnthropicKeyEnv)
 			if newKey == "" {
 				return fmt.Errorf("rotate anthropic-key: set %s to the new key (kept off argv), then re-run --apply", newAnthropicKeyEnv)
@@ -96,7 +105,11 @@ func newRotateAnthropicCmd() *cobra.Command {
 				return err
 			}
 			printerInfo(p, styleSuccess.Render("New Anthropic key verified and stored in the keychain."))
-			printerInfo(p, styleMuted.Render("Now REVOKE the old key in the console tab that just opened."))
+			if consoleOpened {
+				printerInfo(p, styleMuted.Render("Now REVOKE the old key in the console tab that just opened."))
+			} else {
+				printerInfo(p, styleMuted.Render("Now REVOKE the old key at ")+styleCode.Render(consoleURL))
+			}
 			return nil
 		},
 	}
@@ -115,6 +128,7 @@ func newRotateNtfyCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			commandHeader(p, "rotate ntfy-creds", styleMuted.Render("rotate the ntfy admin password"))
 
 			if cc.dryRun {
 				printerInfo(p, "[plan] generate a new ntfy admin password, update ntfy + the keychain, and reload the service. Re-run with --apply.")
@@ -192,14 +206,4 @@ func verifyAnthropicKey(ctx context.Context, key string) (bool, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden, nil
-}
-
-// openInBrowser opens a URL with the platform opener (best-effort).
-func openInBrowser(ctx context.Context, cc *cmdContext, url string) error {
-	opener := "xdg-open"
-	if runtime.GOOS == "darwin" {
-		opener = "open"
-	}
-	_, err := cc.runner.Run(ctx, opener, url)
-	return err
 }

@@ -25,6 +25,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/deadman"
+	"github.com/abysslink/abysslink/internal/tui"
 )
 
 // deadmanContactPath and deadmanFlagPath are package-var seams so tests can
@@ -210,7 +211,7 @@ func runDeadmanStatus(cmd *cobra.Command) error {
 	}
 	p.Printv("remaining", remaining.Round(time.Second).String())
 	if remaining == 0 {
-		printerInfo(p, styleWarn.Render("No-contact deadline has elapsed — lockdown will fire on the next daemon tick."))
+		emitNote(p, tui.NoteWarn, "No-contact deadline has elapsed", []string{"Lockdown will fire on the next daemon tick."})
 	}
 	return nil
 }
@@ -261,7 +262,7 @@ func runDeadmanHeartbeat(cmd *cobra.Command) error {
 	if cc.cfg.Deadman.Enabled {
 		p.Printv("remaining", interval.Round(time.Second).String())
 	} else {
-		printerInfo(p, styleMuted.Render("Note: the dead-man switch is currently OFF; enable it with `abysslink deadman enable --apply`."))
+		emitNote(p, tui.NoteInfo, "Dead-man switch is OFF", []string{"Enable it with: abysslink deadman enable --apply"})
 	}
 	return nil
 }

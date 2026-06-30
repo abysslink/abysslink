@@ -97,7 +97,7 @@ func initCmdWithFlags(t *testing.T, flags map[string]string) *cobra.Command {
 func TestRunInitForm_YesWithoutEmailFailsFast(t *testing.T) {
 	t.Setenv("ABYSSLINK_EMAIL", "")
 	cmd := initCmdWithFlags(t, nil)
-	cfg, err := runInitForm(cmd, true)
+	cfg, err := runInitForm(context.Background(), cmd, true)
 	require.Error(t, err, "init --yes without an email must fail fast, never write email: \"\"")
 	assert.Nil(t, cfg)
 	assert.Contains(t, err.Error(), "--email")
@@ -108,7 +108,7 @@ func TestRunInitForm_YesWithEmailFlagProducesLoadableConfig(t *testing.T) {
 		"email":    "ci@example.com",
 		"hostname": "Mohans-MacBook-Pro.local", // deliberately uppercase — must be sanitized
 	})
-	cfg, err := runInitForm(cmd, true)
+	cfg, err := runInitForm(context.Background(), cmd, true)
 	require.NoError(t, err)
 	assert.Equal(t, "ci@example.com", cfg.Identity.Email)
 	assert.Equal(t, "mohans-macbook-pro.local", cfg.Tailnet.Hostname,
@@ -121,14 +121,14 @@ func TestRunInitForm_YesWithEmailFlagProducesLoadableConfig(t *testing.T) {
 func TestRunInitForm_YesWithEmailEnvAccepted(t *testing.T) {
 	t.Setenv("ABYSSLINK_EMAIL", "env@example.com")
 	cmd := initCmdWithFlags(t, map[string]string{"hostname": "ci-rig"})
-	cfg, err := runInitForm(cmd, true)
+	cfg, err := runInitForm(context.Background(), cmd, true)
 	require.NoError(t, err)
 	assert.Equal(t, "env@example.com", cfg.Identity.Email)
 }
 
 func TestRunInitForm_InvalidEmailRejected(t *testing.T) {
 	cmd := initCmdWithFlags(t, map[string]string{"email": "not-an-email", "hostname": "ci-rig"})
-	_, err := runInitForm(cmd, true)
+	_, err := runInitForm(context.Background(), cmd, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a valid email")
 }
