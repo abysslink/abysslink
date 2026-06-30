@@ -88,6 +88,8 @@ type ACLEditor interface {
 	EnsureTagOwners(owner string) error
 	// EnsureGrant ensures the mobile→laptop grant exists.
 	EnsureGrant() error
-	// EnsureSSHRule ensures the SSH check rule with the given parameters exists.
+	// EnsureSSHRule ensures the SSH rule letting the tagged phone reach the rig.
+	// (checkPeriod is retained for compatibility; the tailscale editor emits an
+	// accept rule for tag:mobile, which carries no checkPeriod — see its impl.)
 	EnsureSSHRule(owner, sshUser, checkPeriod string) error
 }

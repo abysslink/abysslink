@@ -837,3 +837,17 @@ func TestValidate_ApprovalTimeoutOK(t *testing.T) {
 	cfg.Approval.TimeoutSeconds = 30 // above floor
 	require.NoError(t, config.Validate(cfg))
 }
+
+// TestLoad_RejectsBrowserCallbackKey asserts that a YAML document containing a
+// browser_callback: key is rejected by the strict KnownFields(true) decoder
+// (BRWS-03). The callback listener bind address is intentionally NOT a YAML
+// knob — D-05 (IMMUTABLE) mandates 127.0.0.1 + ephemeral port only; there is
+// no browser_callback field in the Config struct so any such key is unknown and
+// must fail load.
+func TestLoad_RejectsBrowserCallbackKey(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "browser-callback.yaml")
+	require.NoError(t, os.WriteFile(p, []byte("version: 1\nbrowser_callback:\n  bind_addr: 0.0.0.0\n"), 0o600))
+	_, err := config.Load(p)
+	require.Error(t, err, "browser_callback: key must be rejected by KnownFields(true)")
+}

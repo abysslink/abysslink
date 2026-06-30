@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"runtime"
@@ -32,6 +33,7 @@ import (
 	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/fleet"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -90,6 +92,11 @@ type statusDaemonExtras struct {
 	// The push-creds-keychain doctor check reads this field.
 	GatewayCredsStatus string `json:"gateway_creds_status,omitempty"`
 }
+
+// statusNow is a clock seam so tests can pin the timestamp to a fixed instant,
+// making the golden byte-stable (the panel writes time.Now().UTC() otherwise).
+// Restore in t.Cleanup — same pattern as fetchDaemonStatus / newRunner seams.
+var statusNow = func() time.Time { return time.Now() } //nolint:gochecknoglobals // test seam, mirrors fetchDaemonStatus
 
 // fetchDaemonStatus GETs /status from the local abysslinkd over its Unix
 // socket and decodes the BACK-07/DEVC-04 fields. A package var so tests can
@@ -224,7 +231,7 @@ func newStatusCmd() *cobra.Command {
 				return fmt.Errorf("status: %w", bErr)
 			}
 
-			tsRunning := "not running"
+			var tsRunning string // set below: running/stopped on success, "unknown" on query error
 			tsIP := ""
 			hostname := ""
 
@@ -241,6 +248,12 @@ func newStatusCmd() *cobra.Command {
 						tsIP = st.Self.TailscaleIPs[0].String()
 					}
 				}
+			} else {
+				// Distinguish a failed query (tailscaled unreachable / RPC error)
+				// from a confirmed-stopped backend: "not running" must mean we
+				// actually asked and it was down, not that we never got an answer (T-043).
+				tsRunning = "unknown"
+				slog.Debug("status: tailscale backend query failed", "err", tsErr)
 			}
 
 			tsSSH := "disabled"
@@ -260,6 +273,7 @@ func newStatusCmd() *cobra.Command {
 
 			diskEncrypt := diskEncryptionStatus(ctx, r)
 
+			now := statusNow()
 			rep := statusReport{
 				Tailscale:    tsRunning,
 				TailscaleIP:  tsIP,
@@ -270,7 +284,7 @@ func newStatusCmd() *cobra.Command {
 				DiskEncrypt:  diskEncrypt,
 				// RFC3339 UTC — the same format the fleet fan-out rows use, so
 				// JSON consumers parse exactly one timestamp format (U5).
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Timestamp: now.UTC().Format(time.RFC3339),
 			}
 
 			// BACK-07/DEVC-04: merge the daemon's wake/ack counters, content
@@ -287,7 +301,7 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			printStatusPanel(p, rep)
-			renderStatusExtras(p, rep, time.Now())
+			renderStatusExtras(p, rep, now)
 			return nil
 		},
 	}
@@ -305,8 +319,9 @@ func printStatusNotInitialised(p Printer, jsonOut bool) {
 		return
 	}
 	printerInfo(p, "")
-	printerInfo(p, "  "+iconWarnStr()+"  "+styleWarn.Render("Abysslink is not initialised on this machine."))
-	printerInfo(p, "  "+styleMuted.Render("Run ")+styleCode.Render("abysslink init")+styleMuted.Render(" to set it up."))
+	printerInfo(p, tui.Note(tui.NoteWarn, "Abysslink is not initialised on this machine", []string{
+		"Run `abysslink init` to set it up.",
+	}))
 	printerInfo(p, "")
 }
 
@@ -320,20 +335,19 @@ func printStatusNoRigs(p Printer, jsonOut bool) {
 	printerInfo(p, "  No rigs enrolled — enroll one with "+styleCode.Render("abysslink rig add")+".")
 }
 
-// statusAllRigs fans out `abysslink status --json` to every enrolled rig and
-// aggregates the results into a per-rig slice. Offline rigs appear as UNREACHABLE
-// rows (SC-2); --strict maps to exit 2 when any rig is offline (T-14-21,
-// matches root --help and the exitCodeFatal return below).
-func statusAllRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool) error {
-	return statusRigs(ctx, cc, p, strict, cc.cfg.Rigs)
-}
-
 // statusRigs fans out `abysslink status --json` to the targeted rigs only
 // (every enrolled rig under --all-rigs, a single rig under --rig, CLI-05).
 func statusRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool, rigs []config.RigConfig) error {
 	const perRigTimeout = 10 * time.Second
 
-	results, fanErr := fleet.FanOut(ctx, cc.runner, rigs, perRigTimeout, strict, []string{"status", "--json"})
+	// Animated liveness during the fan-out (10s/rig); spinWork is json-safe so
+	// the --json aggregate + exit code are unaffected.
+	var results []fleet.RigResult
+	var fanErr error
+	_ = spinWork(ctx, p, "Querying rigs…", func(ctx context.Context) error {
+		results, fanErr = fleet.FanOut(ctx, cc.runner, rigs, perRigTimeout, strict, []string{"status", "--json"})
+		return nil
+	})
 
 	var aggregate []statusReport
 	for _, r := range results {
@@ -377,7 +391,7 @@ func statusRigs(ctx context.Context, cc *cmdContext, p Printer, strict bool, rig
 
 // printStatusAllRigsTable renders a human-readable table of per-rig status rows.
 func printStatusAllRigsTable(p Printer, rows []statusReport) {
-	printerInfo(p, styleBold.Render("Fleet Status")+"\n")
+	commandHeader(p, "status", styleMuted.Render("fleet"))
 	header := fmt.Sprintf("  %-20s %-14s %-12s %-10s", "RIG", "TAILSCALE", "DISK", "NTFY")
 	printerInfo(p, styleMuted.Render(header))
 	for _, r := range rows {
@@ -389,7 +403,8 @@ func printStatusAllRigsTable(p Printer, rows []statusReport) {
 		if ntfy == "" {
 			ntfy = "-"
 		}
-		printerInfo(p, fmt.Sprintf("  %-20s %-14s %-12s %-10s", r.RigName, r.Tailscale, disk, ntfy))
+		ts := statusCellStyle(r.Tailscale).Render(fmt.Sprintf("%-14s", r.Tailscale))
+		printerInfo(p, fmt.Sprintf("  %-20s %s %-12s %-10s", truncCell(r.RigName, 20), ts, disk, ntfy))
 	}
 	printerInfo(p, "")
 }
@@ -501,7 +516,7 @@ func printStatusPanel(p Printer, rep statusReport) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleBold.Render("Abysslink Status"))
+	sb.WriteString(styleTitle.Render("Abysslink Status"))
 	sb.WriteString("\n\n")
 	for _, row := range []string{
 		statusRow("Tailscale", hostnameLabel, statusRowStateFor(rep.Tailscale)),

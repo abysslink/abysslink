@@ -36,6 +36,7 @@ import (
 	"github.com/abysslink/abysslink/internal/limitio"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
+	"github.com/abysslink/abysslink/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -209,7 +210,11 @@ func netbirdInitLinux(ctx context.Context, cfg *config.Config, cc *cmdContext, r
 	if serverURL == "" {
 		serverURL = "https://localhost:443"
 	}
-	if err := doNetBirdHealthCheck(ctx, serverURL+"/api/groups"); err != nil {
+	// Animated liveness during the health poll (up to 30s GET /api/groups);
+	// spinWork is json-safe and the success line prints after it stops.
+	if err := spinWork(ctx, p, "Waiting for netbird-server to respond…", func(ctx context.Context) error {
+		return doNetBirdHealthCheck(ctx, serverURL+"/api/groups")
+	}); err != nil {
 		return fmt.Errorf("netbird init: health-check: %w", err)
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  netbird-server is responding"))
@@ -697,7 +702,7 @@ func netbirdStatusRunE(ctx context.Context, cc *cmdContext, p Printer) error {
 	cfg := cc.cfg
 
 	// SSHCheck WARN fires on every status call (D-03 mandatory degradation).
-	printerInfo(p, styleWarn.Render("WARN: SSHCheck not available on NetBird — checkPeriod enforcement disabled"))
+	emitNote(p, tui.NoteWarn, "SSHCheck not available on NetBird", []string{"checkPeriod enforcement is disabled on this backend."})
 
 	// Get version.
 	var version string
@@ -756,8 +761,7 @@ func netbirdStatusRunE(ctx context.Context, cc *cmdContext, p Printer) error {
 		return nil
 	}
 
-	printerInfo(p, styleBold.Render("NetBird server status"))
-	printerInfo(p, "")
+	commandHeader(p, "server netbird status", styleMuted.Render("service state and API reachability"))
 	printerInfo(p, "  Version:       "+report.Version)
 	printerInfo(p, "  Service:       "+report.ServiceState)
 	printerInfo(p, "  API reachable: "+fmt.Sprintf("%v", report.APIReachable))

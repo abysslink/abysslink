@@ -108,11 +108,13 @@ func (p *jsonPrinter) Printv(key, value string) {
 	_ = p.enc.Encode(map[string]string{key: stripANSI(value)})
 }
 
-// Error writes the error message to stderr as {"error": "<msg>"}.
+// Error writes the error message to stderr as {"error": "<msg>"}. ANSI escape
+// sequences are stripped (matching Print/Printv) so a styled error string passed
+// via printerError never leaks colour codes into the machine-readable channel.
 func (p *jsonPrinter) Error(msg string) {
 	enc := json.NewEncoder(p.err)
 	enc.SetEscapeHTML(false)
-	_ = enc.Encode(map[string]string{"error": msg})
+	_ = enc.Encode(map[string]string{"error": stripANSI(msg)})
 }
 
 // PrintJSON encodes v as a single JSON object (one line) using SetEscapeHTML(false).

@@ -101,6 +101,11 @@ func newACLPushCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			mode := styleMuted.Render("converge tailnet ACL")
+			if !cc.apply {
+				mode = styleWarn.Render("preview only — run with --apply to make changes")
+			}
+			commandHeader(p, "acl push", mode)
 
 			// CLI-01: acl push mutates the tailnet ACL (or writes the generated
 			// policy file + clipboard + browser in manual mode). Dry-run is the
@@ -108,6 +113,15 @@ func newACLPushCmd() *cobra.Command {
 			// mutation and NO side effects (no policy-file write, no clipboard,
 			// no editor).
 			if !cc.apply {
+				// NetBird manages access via its own policy model; the Tailscale
+				// tag-owner / mobile→laptop grant / SSH-check primitives are no-ops
+				// on it (netbird_editor: EnsureTagOwners/EnsureGrant/EnsureSSHRule
+				// all return nil). Do not preview rules abysslink will not apply.
+				if cc.cfg.Backend.Type == "netbird" {
+					printerInfo(p, "[plan] backend is NetBird — abysslink does not push the Tailscale tag-owner / mobile→laptop grant / SSH-check ACL.")
+					printerInfo(p, styleMuted.Render("NetBird access control is managed in its dashboard. Dry-run; nothing for abysslink to apply here."))
+					return nil
+				}
 				a := cc.cfg.Tailnet.Admin
 				mode := "push via admin API"
 				if a.Tailnet == "" || a.OAuthClientID == "" || os.Getenv(oauthSecretEnv) == "" {
@@ -150,6 +164,15 @@ func newACLValidateCmd() *cobra.Command {
 				return err
 			}
 			p := newPrinter(cmd)
+			commandHeader(p, "acl validate", styleMuted.Render("check tailnet ACL"))
+			// NetBird's ACL editor primitives are no-ops, so convergeACL would never
+			// modify the policy and validate would falsely certify "contains
+			// abysslink's required rules". Be honest: the Tailscale ACL contract does
+			// not apply to NetBird.
+			if cc.cfg.Backend.Type == "netbird" {
+				printerInfo(p, styleMuted.Render("ACL validation is not applicable to the NetBird backend — access control is managed in the NetBird dashboard, not via a Tailscale-style ACL."))
+				return nil
+			}
 			cur, _, err := aclMgr.GetACL(ctx)
 			if err != nil {
 				return fmt.Errorf("acl validate: %w", err)

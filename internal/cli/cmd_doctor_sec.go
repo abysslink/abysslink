@@ -348,8 +348,13 @@ func secSSHCiphersCheckPathRunner(ctx context.Context, runner shell.Runner, path
 
 // --- Audit log checks (2).
 
+// secAuditLogPath is a test seam so parity goldens can pin the audit log path
+// to a fixed value, preventing process-specific t.TempDir() paths from baking
+// into the golden output (same pattern as auditDefaultLogPath in cmd_doctor.go).
+var secAuditLogPath = audit.DefaultLogPath //nolint:gochecknoglobals // test seam, mirrors auditDefaultLogPath
+
 func secAuditLogExistsCheck() modules.Finding {
-	logPath, err := audit.DefaultLogPath()
+	logPath, err := secAuditLogPath()
 	if err != nil {
 		return modules.Finding{Module: "sec", Check: "sec-audit-log-exists", Severity: modules.SeverityFatal,
 			Message: "cannot determine audit log path: " + err.Error()}
@@ -368,7 +373,7 @@ func secAuditLogExistsCheckPath(logPath string) modules.Finding {
 }
 
 func secAuditLogPermsCheck() modules.Finding {
-	logPath, err := audit.DefaultLogPath()
+	logPath, err := secAuditLogPath()
 	if err != nil {
 		return modules.Finding{Module: "sec", Check: "sec-audit-log-perms", Severity: modules.SeverityFatal,
 			Message: "cannot determine audit log path: " + err.Error()}

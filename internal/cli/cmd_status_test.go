@@ -130,7 +130,7 @@ func TestStatusAllRigs(t *testing.T) {
 	var out bytes.Buffer
 	p := NewHumanPrinterTo(&out, &out)
 
-	err := statusAllRigs(context.Background(), cc, p, false /* strict=false */)
+	err := statusRigs(context.Background(), cc, p, false /* strict=false */, cc.cfg.Rigs)
 	assert.NoError(t, err, "exit 0 when strict=false even with an offline rig (SC-2)")
 
 	output := out.String()
@@ -164,7 +164,7 @@ func TestStatusAllRigs_Strict(t *testing.T) {
 	var out bytes.Buffer
 	p := NewHumanPrinterTo(&out, &out)
 
-	err := statusAllRigs(context.Background(), cc, p, true /* strict=true */)
+	err := statusRigs(context.Background(), cc, p, true /* strict=true */, cc.cfg.Rigs)
 	var ee *exitError
 	assert.True(t, errors.As(err, &ee), "strict+unreachable must return exitError")
 	if ee != nil {
@@ -199,7 +199,7 @@ func TestStatusAllRigs_JSON(t *testing.T) {
 	var out bytes.Buffer
 	p := NewJSONPrinterTo(&out, io.Discard)
 
-	err := statusAllRigs(context.Background(), cc, p, false)
+	err := statusRigs(context.Background(), cc, p, false, cc.cfg.Rigs)
 	assert.NoError(t, err)
 
 	output := out.String()

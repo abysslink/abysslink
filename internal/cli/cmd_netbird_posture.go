@@ -87,7 +87,7 @@ func netbirdPostureListRunE(ctx context.Context, cc *cmdContext, p Printer) erro
 		printerInfo(p, "No posture checks configured.")
 		return nil
 	}
-	printerInfo(p, styleBold.Render("NetBird posture checks"))
+	commandHeader(p, "netbird posture list", styleMuted.Render("configured posture checks"))
 	for _, c := range checks {
 		printerInfo(p, fmt.Sprintf("  %s  %s  %s", c.ID, c.Name, c.Description))
 	}

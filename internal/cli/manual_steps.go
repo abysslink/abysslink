@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/abysslink/abysslink/internal/browser"
 	"github.com/abysslink/abysslink/internal/tui"
 )
 
@@ -54,7 +55,7 @@ func runStepInteraction(ctx context.Context, msg string, recopy func(context.Con
 		if rerr := recopy(ctx); rerr != nil {
 			p.Error(fmt.Sprintf("  ! copy failed: %v", rerr))
 		} else {
-			p.Print("  ✓ copied to clipboard")
+			p.Print("  " + iconDoneStr() + " copied to clipboard")
 		}
 	}
 }
@@ -105,7 +106,7 @@ func flushManualSteps(ctx context.Context, cc *cmdContext, p Printer) error {
 			slog.Warn("manual step prompt interrupted", "title", s.Title, "err", err)
 		}
 		if s.URL != "" {
-			if err := openURL(ctx, cc.runner, s.URL); err != nil {
+			if err := browser.OpenURL(ctx, cc.runner, s.URL); err != nil {
 				slog.Warn("could not open URL for manual step; visit it manually",
 					"title", s.Title, "url", s.URL, "err", err)
 			}

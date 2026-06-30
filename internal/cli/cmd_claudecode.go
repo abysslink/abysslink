@@ -72,8 +72,7 @@ func newClaudeCodeDisableCmd() *cobra.Command {
 				return fmt.Errorf("claudecode disable: %w", err)
 			}
 
-			printerInfo(p, styleBold.Render("abysslink claudecode disable")+"  "+styleMuted.Render("remove notify hooks"))
-			printerInfo(p, "")
+			commandHeader(p, "claudecode disable", styleMuted.Render("remove notify hooks"))
 
 			if len(removed) == 0 {
 				printerInfo(p, "  No abysslink notify hooks found in ~/.claude/settings.json.")

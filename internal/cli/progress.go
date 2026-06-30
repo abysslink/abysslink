@@ -56,7 +56,7 @@ func printPlanDetail(p Printer, actions []modules.Action, _ []modules.Finding, d
 		return
 	}
 
-	printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
+	printerInfo(p, "  "+styleMuted.Render(hrule()))
 
 	var countLine string
 	if dryRun {
@@ -117,7 +117,7 @@ func printFinalSummary(p Printer, actions []modules.Action, findings []modules.F
 	plannedCount := len(uniqueActions(actions))
 	elapsedStr := fmt.Sprintf("%.1fs", elapsed.Seconds())
 
-	printerInfo(p, "  "+styleMuted.Render(strings.Repeat("─", 48)))
+	printerInfo(p, "  "+styleMuted.Render(hrule()))
 
 	if errCount == 0 && applyErr == nil {
 		printerInfo(p, "  "+iconDoneStr()+"  "+styleSuccess.Render(

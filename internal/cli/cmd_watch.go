@@ -180,7 +180,7 @@ func newWatchListCmd() *cobra.Command {
 				printerInfo(p, "No watchers configured.")
 				return nil
 			}
-			printerInfo(p, styleBold.Render("Watchers"))
+			commandHeader(p, "watch list", styleMuted.Render("configured watchers"))
 			for _, pane := range w.Panes {
 				printerInfo(p, "  pane  "+pane)
 			}

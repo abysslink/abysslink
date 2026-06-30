@@ -1,17 +1,17 @@
 {
     "ssh": [
         {
-            "action": "check",
+            "action": "accept",
             "src": [
-                "owner@example.com"
+                "tag:mobile"
             ],
             "dst": [
                 "tag:laptop"
             ],
             "users": [
-                "macuser"
-            ],
-            "checkPeriod": "12h"
+                "macuser",
+                "autogroup:nonroot"
+            ]
         }
     ]
 }

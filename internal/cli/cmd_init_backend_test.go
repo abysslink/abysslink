@@ -16,6 +16,7 @@
 package cli
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,7 +31,7 @@ func TestRunInitFormDefaultsTailscale(t *testing.T) {
 	cmd := newInitCmd()
 	require.NoError(t, cmd.Flags().Set("email", "test@example.com"))
 	require.NoError(t, cmd.Flags().Set("hostname", "test-rig"))
-	cfg, err := runInitForm(cmd, true)
+	cfg, err := runInitForm(context.Background(), cmd, true)
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, "tailscale", cfg.Backend.Type,

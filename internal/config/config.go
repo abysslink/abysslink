@@ -62,6 +62,14 @@ func ValidateUnixUser(user string) error {
 }
 
 // Config is the top-level abysslink.yaml structure.
+//
+// Security-excluded YAML keys (permanently absent from this struct):
+//   - funnel: Tailscale Funnel is rejected at schema level (D-?); KnownFields(true)
+//     at config.go:834 rejects the key because no field carries `yaml:"funnel"`.
+//   - browser_callback.bind_addr: not exposed — the OAuth callback listener always
+//     binds 127.0.0.1 (D-05/BRWS-03); KnownFields(true) rejects any
+//     browser_callback key from YAML at decode time because no BrowserCallback
+//     field exists in this struct. TestLoad_RejectsBrowserCallbackKey verifies this.
 type Config struct {
 	Version    int         `yaml:"version"`
 	Backend    Backend     `yaml:"backend"`

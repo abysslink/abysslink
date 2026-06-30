@@ -556,3 +556,75 @@ func splitHostPortTest(hostport string) (string, string, error) {
 	}
 	return hostport[:i], hostport[i+1:], nil
 }
+
+// TestTeardown_RemovesDockerContainer asserts Teardown issues `docker rm -f`
+// for the abysslink-ntfy container when Docker is available and the container
+// exists, and reports the removed resource.
+func TestTeardown_RemovesDockerContainer(t *testing.T) {
+	r := shell.NewMockRunner(
+		// dockerAvailable: docker info
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		// ntfyDockerExists: docker inspect --format={{.Id}}
+		shell.Call{Result: shell.Result{Stdout: "abc123\n", ExitCode: 0}},
+		// docker rm -f
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	items, err := m.Teardown(context.Background(), false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"removed docker container abysslink-ntfy"}, items)
+
+	calls := r.RunCalls()
+	require.Len(t, calls, 3)
+	assert.Equal(t, []string{"docker", "rm", "-f", "abysslink-ntfy"}, calls[2],
+		"Teardown must force-remove the container")
+}
+
+// TestTeardown_DryRunPreviewsOnly asserts dry-run reports the container without
+// issuing docker rm.
+func TestTeardown_DryRunPreviewsOnly(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}},                     // docker info
+		shell.Call{Result: shell.Result{Stdout: "abc123\n", ExitCode: 0}}, // docker inspect
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	items, err := m.Teardown(context.Background(), true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"docker container abysslink-ntfy"}, items)
+
+	for _, c := range r.RunCalls() {
+		assert.NotEqual(t, []string{"docker", "rm", "-f", "abysslink-ntfy"}, c,
+			"dry-run must not remove the container")
+	}
+}
+
+// TestTeardown_NoDockerIsNoop asserts Teardown is a silent no-op when Docker is
+// unavailable (no error, nothing removed, no inspect/rm attempted).
+func TestTeardown_NoDockerIsNoop(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 1}}, // docker info fails
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	items, err := m.Teardown(context.Background(), false)
+	require.NoError(t, err)
+	assert.Empty(t, items)
+	assert.Len(t, r.RunCalls(), 1, "must stop after docker info when Docker is unavailable")
+}
+
+// TestTeardown_ContainerAbsentIsNoop asserts no rm is issued when the container
+// does not exist.
+func TestTeardown_ContainerAbsentIsNoop(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0}}, // docker info ok
+		shell.Call{Result: shell.Result{ExitCode: 1}}, // docker inspect: no such container
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	items, err := m.Teardown(context.Background(), false)
+	require.NoError(t, err)
+	assert.Empty(t, items)
+	assert.Len(t, r.RunCalls(), 2, "must not attempt docker rm when the container is absent")
+}

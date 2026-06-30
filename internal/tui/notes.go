@@ -19,6 +19,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/abysslink/abysslink/internal/ui"
 )
 
 // NoteLevel identifies the severity / intent of a Note callout box.
@@ -34,8 +36,10 @@ const (
 
 // noteLevelMeta holds the display attributes for a single NoteLevel.
 type noteLevelMeta struct {
-	// borderColor is the lipgloss border colour; empty string → default (used under NO_COLOR).
-	borderColor lipgloss.Color
+	// borderColor is the lipgloss border colour. Typed as the TerminalColor
+	// interface so it accepts both flat lipgloss.Color and the semantic
+	// AdaptiveColor tones from internal/ui (T-002). nil → default (NO_COLOR path).
+	borderColor lipgloss.TerminalColor
 	// unicodeLabel is the icon+word label shown when colour is available.
 	unicodeLabel string
 	// asciiLabel is the plain-text fallback used when noColor() is true.
@@ -43,10 +47,10 @@ type noteLevelMeta struct {
 }
 
 var noteLevelTable = map[NoteLevel]noteLevelMeta{
-	NoteInfo:     {borderColor: "#5C7CFA", unicodeLabel: "● INFO", asciiLabel: "* INFO"},
-	NoteWarn:     {borderColor: "#FFD060", unicodeLabel: "⚠ WARN", asciiLabel: "! WARN"},
-	NoteSecurity: {borderColor: "#00B4D8", unicodeLabel: "● SECURITY", asciiLabel: "* SECURITY"},
-	NoteDanger:   {borderColor: "#FF5F87", unicodeLabel: "✕ DANGER", asciiLabel: "x DANGER"},
+	NoteInfo:     {borderColor: ui.ColorInfo, unicodeLabel: "● INFO", asciiLabel: "* INFO"},             // #6E80F7
+	NoteWarn:     {borderColor: ui.ColorWarn, unicodeLabel: "⚠ WARN", asciiLabel: "! WARN"},             // #FFD060
+	NoteSecurity: {borderColor: ui.ColorSecurity, unicodeLabel: "● SECURITY", asciiLabel: "* SECURITY"}, // #00B4D8 (ui.ColorSecurity)
+	NoteDanger:   {borderColor: ui.ColorFatal, unicodeLabel: "✕ DANGER", asciiLabel: "x DANGER"},        // #FF5F87
 }
 
 // noteLevelLabel returns the label string (icon + word) for level, choosing
@@ -66,15 +70,13 @@ func noteLevelLabel(level NoteLevel) string {
 // When noColor() is true, no colour is applied to the border.
 func noteBoxStyle(level NoteLevel) lipgloss.Style {
 	base := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(boxBorder()).
 		Padding(0, 2)
 
-	// Responsive width: floor at 54, grow to terminal width - 4 if larger.
-	w := terminalWidth() - 4
-	if w < 54 {
-		w = 54
-	}
-	base = base.Width(w)
+	// Brand box width (cap 54, shrink on narrow terminals) — the SAME width as
+	// the header and SecretBox so every framed box lines up instead of notes
+	// stretching the full viewport (T-001 floor stays removed via the min()).
+	base = base.Width(boxWidth())
 
 	if noColor() {
 		return base

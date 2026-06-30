@@ -252,6 +252,18 @@ func pushContentStoreBindFinding(extras *statusDaemonExtras, daemonErr error) mo
 		return pushOKFinding("push-contentstore-bind",
 			"content-store bind address unknown (daemon did not report; older daemon or content store disabled)")
 	}
+	// A content store that fail-closed and disabled itself (BACK-06: it could not
+	// confirm its bind address is the tailnet IP, so it refused to bind anywhere)
+	// reports a "disabled: <reason>" STATUS string, not a bind address. That is
+	// the SAFE state — nothing is exposed — so it must not be mistaken for a
+	// public bind: feeding the status string to isPublicBind would FATAL it
+	// (every non-tailnet non-empty string reads as public). The advisory lives in
+	// the separate content-store-disabled check; here it is simply not an
+	// exposure. Fixes the false "bound to a public address (disabled: …)" FATAL.
+	if strings.HasPrefix(bindLabel, "disabled") {
+		return pushOKFinding("push-contentstore-bind",
+			"content store is disabled (not bound to any address) — no public exposure; see the content-store check to enable it")
+	}
 	if isPublicBind(bindLabel) {
 		return pushFatalFinding("push-contentstore-bind",
 			fmt.Sprintf("content store is bound to a public address (%s) — MUST bind to the tailnet IP only; restart abysslinkd with correct content_store.bind_addr", bindLabel))

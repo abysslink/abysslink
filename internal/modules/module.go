@@ -76,3 +76,39 @@ type Module interface {
 	// Repair attempts to fix all non-fatal findings from Verify.
 	Repair(ctx context.Context) error
 }
+
+// Teardowner is an OPTIONAL interface a module implements when it creates
+// non-file resources — a Docker container, a running daemon, a registered
+// service — that abysslink's file-backup reversal (uninstall) cannot undo.
+// `uninstall` type-asserts every module for this interface and, after reversing
+// file mutations, calls Teardown on those that implement it.
+//
+// Teardown must be best-effort and idempotent: a resource that is already gone
+// is success (return no items, no error), and a missing prerequisite (e.g.
+// Docker not installed) is not an error. When dryRun is true it must not mutate
+// anything and only report what it would remove. The returned strings are
+// human-readable resource identifiers for display, e.g.
+// "docker container abysslink-ntfy".
+type Teardowner interface {
+	Teardown(ctx context.Context, dryRun bool) ([]string, error)
+}
+
+// ConfigReverter is an OPTIONAL interface a module implements when it MERGES
+// into a shared, user-owned config file (e.g. ~/.claude/settings.json) instead
+// of owning the whole file. On uninstall such a module removes ONLY its own
+// additions, preserving edits the user made after install — far safer than the
+// audit log's whole-file restore/delete, which would roll the file back to its
+// pre-abysslink state (or delete it outright) and lose those edits.
+//
+// uninstall (1) collects OwnedPaths from every ConfigReverter and EXCLUDES them
+// from the generic whole-file audit reversal, then (2) calls ReverseConfig to do
+// the surgical removal. ReverseConfig must be best-effort and idempotent: a file
+// already clean or missing returns no items and no error. When dryRun is true it
+// must not mutate anything and only report what it would remove. The returned
+// strings are human-readable descriptors of what was (or would be) removed.
+type ConfigReverter interface {
+	// OwnedPaths returns the absolute paths this module reverses surgically, so
+	// uninstall can exclude them from whole-file restore/delete.
+	OwnedPaths() []string
+	ReverseConfig(ctx context.Context, dryRun bool) ([]string, error)
+}

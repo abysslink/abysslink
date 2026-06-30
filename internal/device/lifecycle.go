@@ -41,6 +41,11 @@ type Bundle struct {
 	// SSHPrivateKeyPEM is the device's ed25519 private key in OpenSSH PEM
 	// format. NEVER persisted or logged.
 	SSHPrivateKeyPEM string
+	// SSHPublicKeyAuthorizedKey is the device's own ed25519 PUBLIC key as a
+	// single authorized_keys-format line. It is not a secret (the public half of
+	// the keypair) and is shown for reference — SSH clients authenticate with the
+	// certificate, which already carries this key, so it is rarely pasted.
+	SSHPublicKeyAuthorizedKey string
 	// SSHCertAuthorizedKey is the signed SSH user certificate as a single
 	// authorized_keys-format line (what the phone installs next to its key).
 	SSHCertAuthorizedKey string
@@ -58,6 +63,7 @@ type minted struct {
 	bearer    string
 	bearerSHA string
 	privPEM   string
+	pubLine   string
 	certLine  string
 	caLine    string
 	pubKeyFP  string
@@ -107,6 +113,7 @@ func (s *Store) mintLocked(ctx context.Context, name string, f *storeFile) (*min
 		bearer:    bearer,
 		bearerSHA: hashBearer(bearer),
 		privPEM:   string(pem.EncodeToMemory(pemBlock)),
+		pubLine:   authorizedKeyLine(sshPub),
 		certLine:  authorizedKeyLine(cert),
 		caLine:    authorizedKeyLine(ca.PublicKey()),
 		pubKeyFP:  ssh.FingerprintSHA256(sshPub),
@@ -121,9 +128,10 @@ func (m *minted) bundle(name string) *Bundle {
 		Name:                     name,
 		PushToken:                m.pushToken,
 		Bearer:                   m.bearer,
-		SSHPrivateKeyPEM:         m.privPEM,
-		SSHCertAuthorizedKey:     m.certLine,
-		CAPublicKeyAuthorizedKey: m.caLine,
+		SSHPrivateKeyPEM:          m.privPEM,
+		SSHPublicKeyAuthorizedKey: m.pubLine,
+		SSHCertAuthorizedKey:      m.certLine,
+		CAPublicKeyAuthorizedKey:  m.caLine,
 		CertNotAfter:             m.notAfter,
 	}
 }

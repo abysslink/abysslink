@@ -1,0 +1,4 @@
+  [1/4]  ✓  tailscale         done
+  [2/4]  ⚠  ntfy              not installed
+  [3/4]  ⚠  mosh              version below floor
+  [4/4]  ✓  ssh               done

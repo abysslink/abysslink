@@ -22,10 +22,42 @@ import (
 	"golang.org/x/term"
 )
 
-// noColor reports whether NO_COLOR is set (https://no-color.org).
+// noColor reports whether colour and the unicode-glyph styling should be
+// suppressed. It mirrors the inverse of cli.colorEnabled() so the internal/tui
+// renderers (Note, SecretBox, JourneyHeader) take their ASCII-glyph + ASCII-box
+// fallback on exactly the same surfaces the rest of the CLI drops colour on:
+//   - NO_COLOR is set (https://no-color.org), OR
+//   - CLICOLOR=0 (https://bixense.com/clicolors), OR
+//   - stdout is not a terminal (pipe, file, CI, redirected log, --json).
+//
+// Previously it checked NO_COLOR alone, so a piped tui box still emitted unicode
+// glyphs (●/⚠/✕) and rounded borders while the surrounding CLI degraded to the
+// clean ASCII fallback — two different "is colour on?" truths in one binary
+// (T-018). internal/tui stays a leaf package: it computes this itself rather
+// than importing internal/cli.
 func noColor() bool {
-	_, set := os.LookupEnv("NO_COLOR")
-	return set
+	if _, set := os.LookupEnv("NO_COLOR"); set {
+		return true
+	}
+	if os.Getenv("CLICOLOR") == "0" {
+		return true
+	}
+	return !term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// boxBorder returns the border set used by the tui callout boxes (Note,
+// SecretBox, JourneyHeader): lipgloss's rounded glyphs on a colour TTY, and an
+// ASCII +/-/| set when noColor() is true. This matches cli.boxBorder() so a
+// piped/redirected capture renders a clean ASCII box instead of a unicode one
+// that mojibakes in plain pagers (T-018).
+func boxBorder() lipgloss.Border {
+	if noColor() {
+		return lipgloss.Border{
+			Top: "-", Bottom: "-", Left: "|", Right: "|",
+			TopLeft: "+", TopRight: "+", BottomLeft: "+", BottomRight: "+",
+		}
+	}
+	return lipgloss.RoundedBorder()
 }
 
 // terminalWidth returns the current terminal width, defaulting to 80 if
@@ -38,32 +70,16 @@ func terminalWidth() int {
 	return w
 }
 
-// Styles groups the lipgloss styles used across TUI components.
-type Styles struct {
-	Success lipgloss.Style
-	Warning lipgloss.Style
-	Error   lipgloss.Style
-	Muted   lipgloss.Style
-	Bold    lipgloss.Style
-}
+// brandBoxWidth caps the inner width of every tui callout box (Note, SecretBox)
+// at 54 columns, matching cli.defaultBoxWidth and the `up`/`enroll` header box.
+// One width for every framed box means they line up on a wide terminal instead
+// of some hugging 54 cols (header, secret) while notes sprawl the full viewport
+// — the "mix of old and new" the notes used to create.
+const brandBoxWidth = 54
 
-// DefaultStyles returns the standard abysslink colour palette.
-// All colours are suppressed when NO_COLOR is set.
-func DefaultStyles() Styles {
-	if noColor() {
-		return Styles{
-			Success: lipgloss.NewStyle(),
-			Warning: lipgloss.NewStyle(),
-			Error:   lipgloss.NewStyle(),
-			Muted:   lipgloss.NewStyle(),
-			Bold:    lipgloss.NewStyle().Bold(true),
-		}
-	}
-	return Styles{
-		Success: lipgloss.NewStyle().Foreground(lipgloss.Color("10")), // bright green
-		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("11")), // bright yellow
-		Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("9")),  // bright red
-		Muted:   lipgloss.NewStyle().Foreground(lipgloss.Color("8")),  // dark grey
-		Bold:    lipgloss.NewStyle().Bold(true),
-	}
+// boxWidth returns the responsive inner width for tui callout boxes: capped at
+// brandBoxWidth on wide terminals and shrinking on narrow (phone) terminals so
+// the box never overflows the viewport (T-001 — no hard floor).
+func boxWidth() int {
+	return max(1, min(brandBoxWidth, terminalWidth()-4))
 }
