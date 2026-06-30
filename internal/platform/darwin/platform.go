@@ -112,6 +112,12 @@ func (p *Platform) runPrivileged(ctx context.Context, name string, args ...strin
 // keeps resolving across `brew upgrade` (which only re-points its own symlink).
 func (p *Platform) SymlinkIntoSystemPath(ctx context.Context, binaryPath string) error {
 	link := filepath.Join(systemPathDir, filepath.Base(binaryPath))
+	if link == binaryPath {
+		// The binary already lives in the system PATH dir (Intel Homebrew:
+		// brew --prefix == /usr/local). Linking it onto itself would create a
+		// self-referential symlink; there is nothing to do.
+		return nil
+	}
 	if dst, err := os.Readlink(link); err == nil && dst == binaryPath {
 		return nil // already linked correctly — no privilege needed
 	}

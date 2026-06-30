@@ -133,29 +133,39 @@ func (m *Module) reachabilityFindings(ctx context.Context) []modules.Finding {
 	return findings
 }
 
-// Plan computes actions needed.
+// Plan computes actions needed. It must reflect every mutation Apply will make,
+// because the runner invokes Apply ONLY when Plan returns ≥1 action (so apply
+// never exceeds the dry-run preview). Critically, that includes reachability
+// work on an ALREADY-INSTALLED mosh: linking mosh-server onto the non-login PATH
+// and allowing it through the firewall. Omitting these would skip Apply on every
+// already-installed machine — exactly the host where mosh fails at connect with
+// "No response from Mosh server". All probes here are read-only (dry-run safe).
 func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	if !m.cfg.Modules.Mosh.Enabled {
 		return nil, nil
 	}
 
-	findings, err := m.Detect(ctx)
-	if err != nil {
-		return nil, err
+	if !m.moshInstalled(ctx) {
+		// A fresh install is never on the non-login PATH and not yet firewall-
+		// allowed; Apply installs and then runs the same reachability steps.
+		return []modules.Action{{
+			Module:      m.Name(),
+			Description: "install mosh and make mosh-server reachable (PATH + firewall)",
+			Reversible:  false,
+		}}, nil
 	}
 
-	var actions []modules.Action
-	for _, f := range findings {
-		if f.Check == "installed" {
-			actions = append(actions, modules.Action{
-				Module:      m.Name(),
-				Description: "install mosh",
-				Reversible:  false,
-			})
-		}
+	// Installed — surface reachability gaps so the runner calls Apply to close
+	// them. Reuses the same read-only probes Verify reports to the user.
+	if len(m.reachabilityFindings(ctx)) > 0 {
+		return []modules.Action{{
+			Module:      m.Name(),
+			Description: "make mosh-server reachable: link onto PATH and allow through firewall",
+			Reversible:  false,
+		}}, nil
 	}
 
-	return actions, nil
+	return nil, nil
 }
 
 // Apply executes planned changes.

@@ -180,6 +180,53 @@ func brewPrefixCall() shell.Call {
 	return shell.Call{Result: shell.Result{Stdout: "/opt/homebrew\n"}}
 }
 
+func TestPlan_Installed_WithGaps_EmitsReachabilityAction(t *testing.T) {
+	// The regression: an already-installed-but-unreachable mosh must still
+	// produce an action, else the runner skips Apply and never fixes it.
+	r := shell.NewMockRunner(installedCall(), brewPrefixCall())
+	plat := &fakeDarwinPlatform{fw: &fakeAppFirewall{status: "enabled", allowed: false}, onSystemPath: false}
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: plat})
+
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	require.Len(t, actions, 1, "installed-but-unreachable must plan an action")
+	assert.Equal(t, "mosh", actions[0].Module)
+}
+
+func TestPlan_Installed_NoGaps_NoAction(t *testing.T) {
+	r := shell.NewMockRunner(installedCall(), brewPrefixCall())
+	plat := &fakeDarwinPlatform{fw: &fakeAppFirewall{status: "enabled", allowed: true}, onSystemPath: true}
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: plat})
+
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	assert.Empty(t, actions, "fully reachable mosh plans nothing (converged)")
+}
+
+func TestPlan_NotInstalled_EmitsInstallAction(t *testing.T) {
+	r := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 127, Stderr: "command not found"}})
+	plat := &fakeDarwinPlatform{fw: &fakeAppFirewall{status: "enabled"}}
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: plat})
+
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	assert.Contains(t, actions[0].Description, "install mosh")
+	assert.True(t, r.Done(), "not-installed path must not probe reachability")
+}
+
+func TestPlan_Disabled_NoAction(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Modules.Mosh.Enabled = false
+	r := shell.NewMockRunner() // any runner call would error
+	m := New(modules.Deps{Cfg: cfg, Runner: r, Platform: &fakeDarwinPlatform{fw: &fakeAppFirewall{}}})
+
+	actions, err := m.Plan(context.Background(), true)
+	require.NoError(t, err)
+	assert.Empty(t, actions)
+	assert.True(t, r.Done(), "disabled module must not probe")
+}
+
 func TestApply_Darwin_LinksAndAllowsWhenMissing(t *testing.T) {
 	r := shell.NewMockRunner(installedCall(), brewPrefixCall())
 	fw := &fakeAppFirewall{status: "enabled", allowed: false}

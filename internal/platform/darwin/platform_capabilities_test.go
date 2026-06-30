@@ -77,6 +77,17 @@ func TestSymlinkIntoSystemPath_AlreadyLinked_NoOp(t *testing.T) {
 	assert.Empty(t, r.RunCalls(), "already-correct link must not re-run mkdir/ln")
 }
 
+func TestSymlinkIntoSystemPath_SelfLink_NoOp(t *testing.T) {
+	dir := redirectSystemPathDir(t)
+	// Intel case: the binary already lives in systemPathDir, so link == binaryPath.
+	target := filepath.Join(dir, "mosh-server")
+	r := shell.NewMockRunner() // zero scripted calls — a self-link must not mkdir/ln
+	p := New(r)
+
+	require.NoError(t, p.SymlinkIntoSystemPath(context.Background(), target))
+	assert.Empty(t, r.RunCalls(), "binary already in system PATH dir → no self-symlink")
+}
+
 func TestIsOnSystemPath(t *testing.T) {
 	dir := redirectSystemPathDir(t)
 	p := New(shell.NewMockRunner())
