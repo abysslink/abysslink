@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="logos/abysslink.png" alt="Abysslink logo" width="140">
+<img src="logos/abysslink.png" alt="Abysslink logo" width="220">
 
 # Abysslink
 
