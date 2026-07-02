@@ -905,3 +905,31 @@ func TestNotifyWrap_SignalKilledMapsTo128PlusSignum(t *testing.T) {
 	assert.Equal(t, "failed ✗", cap.v2Msgs[0].Title)
 	assert.Equal(t, "high", cap.v2Msgs[0].Priority)
 }
+
+// TestClassifyClaudeNotification covers the Notification-hook type detection:
+// permission/select/idle messages get distinct titles, and the real message is
+// always passed through as the body (feature: surface the select-option and
+// other notification types, not one hardcoded "Claude needs you").
+func TestClassifyClaudeNotification(t *testing.T) {
+	cases := []struct {
+		msg       string
+		wantTitle string
+		wantBody  string
+	}{
+		{"Claude needs your permission to use Bash", "Claude needs approval", "Claude needs your permission to use Bash"},
+		{"Select an option to continue", "Claude needs a decision", "Select an option to continue"},
+		{"Choose which files to edit", "Claude needs a decision", "Choose which files to edit"},
+		{"Claude is waiting for your input", "Claude needs input", "Claude is waiting for your input"},
+		{"", "Claude needs you", "waiting for input"},
+		{"Something unexpected happened", "Claude", "Something unexpected happened"},
+	}
+	for _, c := range cases {
+		title, body, prio := classifyClaudeNotification(c.msg)
+		assert.Equal(t, c.wantTitle, title, "title for %q", c.msg)
+		assert.Equal(t, c.wantBody, body, "body must carry Claude's real message for %q", c.msg)
+		assert.NotEmpty(t, prio, "priority must be set for %q", c.msg)
+	}
+	// Permission/approval is the most urgent tier.
+	_, _, prio := classifyClaudeNotification("Claude needs your permission to run rm -rf")
+	assert.Equal(t, "max", prio, "approval prompts must be max priority")
+}

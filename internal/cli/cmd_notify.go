@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -98,6 +99,7 @@ func newNotifyCmd() *cobra.Command {
 	}
 
 	cmd.Flags().Bool("stdin", false, "Read notification body from stdin")
+	cmd.Flags().Bool("claude-hook", false, "Read a Claude Code Notification hook payload from stdin; derive a typed title (approval/decision/input) and use Claude's real message as the body")
 	cmd.Flags().String("priority", "default", "Notification priority: min|low|default|high|max (urgent = max)")
 	cmd.Flags().String("tag", "", "User-supplied label (ntfy X-Tags; comma-separate for multiple)")
 	cmd.Flags().String("topic", "", "Routing key (default from config)")
@@ -131,6 +133,14 @@ func runNotifyCmd(c *cobra.Command, args []string) error {
 	f, err := parseNotifyFlags(c)
 	if err != nil {
 		return err
+	}
+
+	// Claude Code Notification hook mode: read the hook JSON from stdin and
+	// classify the notification type (approval / decision / input) so the phone
+	// shows WHAT Claude wants — including a permission or select-option prompt —
+	// instead of one hardcoded "Claude needs you". Takes no positional args.
+	if claudeHook, _ := c.Flags().GetBool("claude-hook"); claudeHook {
+		return runNotifyClaudeHook(ctx, nm, f)
 	}
 
 	// D-32: wrap mode — everything after `--` is exec'd with inherited
@@ -185,6 +195,64 @@ func runNotifySend(ctx context.Context, c *cobra.Command, cc *cmdContext, deps m
 		Tags:     f.tag,
 		Topic:    f.topic,
 	})
+}
+
+// claudeHookInput is the subset of the Claude Code Notification hook stdin JSON
+// we consume. Claude Code passes the human-readable reason in `message`
+// (e.g. "Claude needs your permission to use Bash", or a select/choice prompt).
+type claudeHookInput struct {
+	Message       string `json:"message"`
+	HookEventName string `json:"hook_event_name"`
+}
+
+// runNotifyClaudeHook reads a Claude Code Notification hook payload from stdin
+// and fires a self-hosted push whose title reflects the notification TYPE
+// (approval / decision / input) and whose body is Claude's real message. This
+// makes a permission or select-option prompt distinguishable on the phone from
+// a plain idle wait — the old wiring fired one hardcoded "Claude needs you"
+// for every notification and discarded the payload entirely.
+//
+// A hook must never hard-fail Claude Code, so every error degrades to the
+// generic push rather than returning non-zero.
+func runNotifyClaudeHook(ctx context.Context, nm *notifymod.Module, f notifyFlags) error {
+	raw, err := io.ReadAll(os.Stdin)
+	title, body, prio := "Claude needs you", "waiting for input", "high"
+	if err == nil {
+		var in claudeHookInput
+		_ = json.Unmarshal(raw, &in) // best-effort; empty/garbled → generic below
+		title, body, prio = classifyClaudeNotification(in.Message)
+	}
+	// An explicit --priority wins; otherwise use the type-derived urgency.
+	if f.priority != "" {
+		prio = f.priority
+	}
+	return notifySendV1(ctx, nm, title, body, notifymod.SendOptions{
+		Priority: prio,
+		Tags:     f.tag,
+		Topic:    f.topic,
+	})
+}
+
+// classifyClaudeNotification maps a Claude Code Notification `message` to a
+// typed title + priority, passing the real message through as the body. The
+// hook payload has no structured type field, so classification is keyword-based
+// and ordered most-specific-first (permission before the generic input case).
+func classifyClaudeNotification(message string) (title, body, priority string) {
+	body = strings.TrimSpace(message)
+	m := strings.ToLower(body)
+	switch {
+	case body == "":
+		return "Claude needs you", "waiting for input", "high"
+	case strings.Contains(m, "permission") || strings.Contains(m, "approve") || strings.Contains(m, "allow"):
+		return "Claude needs approval", body, "max"
+	case strings.Contains(m, "select") || strings.Contains(m, "choose") || strings.Contains(m, "option"):
+		return "Claude needs a decision", body, "high"
+	case strings.Contains(m, "waiting") || strings.Contains(m, "input") || strings.Contains(m, "idle"):
+		return "Claude needs input", body, "high"
+	default:
+		// Unknown notification reason — still surface Claude's real text.
+		return "Claude", body, "high"
+	}
 }
 
 // runNotifyFanOut handles the resolved --rig/--all-rigs branch: it rejects the

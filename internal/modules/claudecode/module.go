@@ -37,7 +37,12 @@ const anthropicKeyEnv = "ANTHROPIC_API_KEY"
 
 // notifyHookCommand fires when Claude Code is waiting for input — the primary
 // "buzz my phone" trigger.
-var notifyHookCommand = hookBinary() + ` notify "Claude needs you" "waiting for input"`
+// The Notification hook pipes Claude Code's notification JSON on stdin;
+// `notify --claude-hook` parses it, classifies the type (approval / decision /
+// input, incl. permission and select-option prompts), and uses Claude's real
+// message as the push body — instead of a single hardcoded string for every
+// notification.
+var notifyHookCommand = hookBinary() + ` notify --claude-hook`
 
 // stopHookCommand fires when a Claude Code session ends.
 var stopHookCommand = hookBinary() + ` notify "Claude stopped" "Session ended"`
