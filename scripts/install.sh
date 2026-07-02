@@ -106,6 +106,20 @@ download() {
     fi
 }
 
+# Best-effort download: returns non-zero (does NOT die) when the URL is absent.
+# Used for optional assets like the cosign bundle, which older releases predate.
+try_download() {
+    _url="$1"
+    _dest="$2"
+    if have_cmd curl; then
+        curl -fsSL -o "${_dest}" "${_url}" 2>/dev/null
+    elif have_cmd wget; then
+        wget -qO "${_dest}" "${_url}" 2>/dev/null
+    else
+        die "curl or wget is required"
+    fi
+}
+
 # --------------------------------------------------------------------------- #
 # Verify SHA-256 checksum                                                      #
 # --------------------------------------------------------------------------- #
@@ -207,15 +221,26 @@ main() {
 
     verify_checksum "${_tmpdir}/${_tarball}" "${_tmpdir}/${_sums_file}"
 
-    # Download the cosign v3 bundle unconditionally (it is always published) and
-    # verify it. Fails CLOSED when cosign is present and verification fails; warns
-    # (but continues — checksum already verified) when cosign is absent.
+    # The cosign v3 bundle is published for every release cut through the
+    # signed release workflow. Pre-bundle releases (e.g. v1.0.0) don't carry it,
+    # so fetch it best-effort: when present, verify (fail CLOSED if cosign is
+    # installed and verification fails); when absent, warn and continue on the
+    # already-verified SHA-256 checksum — UNLESS ABYSSLINK_REQUIRE_COSIGN=1, in
+    # which case a missing bundle is fatal (fail closed).
     _bundle_file="${_sums_file}.bundle"
     info "downloading cosign bundle ..."
-    download "${_base_url}/${_bundle_file}" "${_tmpdir}/${_bundle_file}"
-    verify_cosign_bundle \
-        "${_tmpdir}/${_sums_file}" \
-        "${_tmpdir}/${_bundle_file}"
+    if try_download "${_base_url}/${_bundle_file}" "${_tmpdir}/${_bundle_file}"; then
+        verify_cosign_bundle \
+            "${_tmpdir}/${_sums_file}" \
+            "${_tmpdir}/${_bundle_file}"
+    else
+        if [ "${ABYSSLINK_REQUIRE_COSIGN:-0}" = "1" ]; then
+            die "cosign bundle not published for ${_version} (ABYSSLINK_REQUIRE_COSIGN=1) — refusing to install (fail closed)"
+        fi
+        printf '\n  WARNING: no cosign bundle for %s — this release predates bundle signing.\n' "${_version}"
+        printf '  The SHA-256 checksum was verified. Signature verification skipped.\n'
+        printf '  Pin a newer release (ABYSSLINK_VERSION=vX.Y.Z) or set ABYSSLINK_REQUIRE_COSIGN=1 to fail closed.\n\n'
+    fi
 
     info "extracting ${_tarball} …"
     tar -xzf "${_tmpdir}/${_tarball}" -C "${_tmpdir}"

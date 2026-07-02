@@ -11,13 +11,20 @@
 set -euo pipefail
 
 if command -v gitleaks &>/dev/null; then
-    # detect --staged scans only what is about to be committed; --redact keeps
-    # any matched secret out of the hook's own output. --exit-code 1 makes a
-    # finding block the commit.
-    gitleaks detect --staged --redact --exit-code 1 \
-        --log-level warn \
-        --source "$(git rev-parse --show-toplevel)" \
-        --no-banner
+    # Scan ONLY the staged content that is about to be committed. --redact keeps
+    # any matched secret out of the hook's own output; --exit-code 1 makes a
+    # finding block the commit. The staged-scan CLI moved between gitleaks
+    # versions: `gitleaks git --staged` (>= 8.19, repo path positional) vs the
+    # older `gitleaks protect --staged --source <path>` (<= 8.18). `detect`
+    # never had --staged. Dispatch on which subcommand the installed binary has.
+    _repo_root="$(git rev-parse --show-toplevel)"
+    if gitleaks git --help >/dev/null 2>&1; then
+        gitleaks git --staged --redact --exit-code 1 \
+            --log-level warn --no-banner "${_repo_root}"
+    else
+        gitleaks protect --staged --redact --exit-code 1 \
+            --log-level warn --no-banner --source "${_repo_root}"
+    fi
 else
     # Graceful degradation (RESEARCH.md Pattern 7): gitleaks is optional on dev
     # machines. The CI gitleaks-action provides the hard gate, so a missing

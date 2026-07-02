@@ -37,6 +37,13 @@ START=$(now)
 FAILS=0
 STEP_N=0
 
+# Per-run scratch files (mktemp, not predictable /tmp names) — the --apply drill
+# runs as root, so a fixed /tmp path is a symlink-clobber vector (CWE-59/377) and
+# breaks a second user on a shared box. Cleaned up on exit.
+FD_OUT="$(mktemp "${TMPDIR:-/tmp}/firedrill.out.XXXXXX")"
+FD_DOCTOR="$(mktemp "${TMPDIR:-/tmp}/firedrill.doctor.XXXXXX")"
+trap 'rm -f "$FD_OUT" "$FD_DOCTOR"' EXIT INT TERM
+
 say() { printf '%s\n' "$*"; }
 hr() { printf '%s\n' "------------------------------------------------------------"; }
 
@@ -49,14 +56,14 @@ run_step() {
   local t0 t1 rc
   t0=$(now)
   printf '[%d] %-46s ' "$STEP_N" "$label"
-  if "$@" >/tmp/firedrill.out 2>&1; then rc=0; else rc=$?; fi
+  if "$@" >"$FD_OUT" 2>&1; then rc=0; else rc=$?; fi
   t1=$(now)
   local dt=$((t1 - t0))
   if [ "$rc" -eq 0 ]; then
     printf 'OK   (%ds)\n' "$dt"
   else
     printf 'FAIL (%ds, exit %d)\n' "$dt" "$rc"
-    say "      -> last output:"; sed 's/^/      | /' /tmp/firedrill.out | tail -6
+    say "      -> last output:"; sed 's/^/      | /' "$FD_OUT" | tail -6
     FAILS=$((FAILS + 1))
   fi
   return 0
@@ -99,9 +106,9 @@ run_step "version smoke" 5 "$BIN" version
 # 2. Read-only health snapshot (doctor is fail-closed; non-zero is informative,
 #    not a harness failure — capture it but don't fail the drill on doctor verdict).
 STEP_N=$((STEP_N + 1)); printf '[%d] %-46s ' "$STEP_N" "doctor --json (read-only health)"
-t0=$(now); "$BIN" --json doctor >/tmp/firedrill.doctor.json 2>/dev/null; t1=$(now)
-if [ -s /tmp/firedrill.doctor.json ]; then
-  findings=$(grep -o '"severity"' /tmp/firedrill.doctor.json | wc -l | tr -d ' ')
+t0=$(now); "$BIN" --json doctor >"$FD_DOCTOR" 2>/dev/null; t1=$(now)
+if [ -s "$FD_DOCTOR" ]; then
+  findings=$(grep -o '"severity"' "$FD_DOCTOR" | wc -l | tr -d ' ')
   printf 'OK   (%ds, %s findings)\n' "$((t1 - t0))" "$findings"
 else
   printf 'WARN (%ds, no JSON — doctor may need a config; non-blocking here)\n' "$((t1 - t0))"

@@ -5,6 +5,7 @@
 ```bash
 git clone https://github.com/abysslink/abysslink
 cd abysslink
+make dev-setup   # one-time: wires .githooks (pre-commit gitleaks secret scan)
 make lint test
 ```
 
