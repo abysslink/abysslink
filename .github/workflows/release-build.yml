@@ -57,10 +57,16 @@ jobs:
           # uploads.github.com: goreleaser POSTs release assets there (not
           # api.github.com). aur.archlinux.org:22: the AUR publisher pushes the
           # PKGBUILD over SSH when AUR_SSH_PRIVATE_KEY is provisioned.
+          # raw.githubusercontent.com / get.anchore.io / toolbox-data.anchore.io:
+          # the "Install Syft" step (anchore/sbom-action/download-syft) fetches
+          # the install script + binary from these (same set grype.yml uses).
           allowed-endpoints: >
             api.github.com:443
             uploads.github.com:443
             codeload.github.com:443
+            raw.githubusercontent.com:443
+            get.anchore.io:443
+            toolbox-data.anchore.io:443
             proxy.golang.org:443
             sum.golang.org:443
             objects.githubusercontent.com:443
