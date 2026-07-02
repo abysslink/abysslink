@@ -41,6 +41,9 @@ const (
 	serverConfigPath       = ".config/ntfy/server.yml"
 	dockerServerConfigPath = ".config/ntfy/server-docker.yml"
 	dockerContainerName    = "abysslink-ntfy"
+	// dockerComposeProject groups abysslink's Docker containers under one folder
+	// in the Docker Desktop UI (Docker Desktop groups by this label).
+	dockerComposeProject = "abysslink"
 	// stateDirPath is the auth-file parent directory (relative to $HOME) shared
 	// by the native and Docker paths. The native server.yml points its auth-file
 	// here, so it MUST exist before `ntfy serve` starts.
@@ -576,6 +579,11 @@ behind-proxy: false
 		"run", "-d",
 		"--name", dockerContainerName,
 		"--restart", "unless-stopped",
+		// Group under an "abysslink" project in the Docker Desktop UI. Docker
+		// Desktop groups standalone containers by the compose-project label, so
+		// this is purely cosmetic — it does not pull in Compose.
+		"--label", "com.docker.compose.project=" + dockerComposeProject,
+		"--label", "com.docker.compose.service=ntfy",
 		"-p", fmt.Sprintf("%s:%s:80", tailnetIP, port),
 		"-v", cfgPath + ":/etc/ntfy/server.yml:ro",
 		"-v", dataDir + ":/var/lib/ntfy",

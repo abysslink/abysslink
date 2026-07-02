@@ -262,6 +262,11 @@ func TestApplyDockerBindsTailnetIPOnly(t *testing.T) {
 		assert.NotContains(t, portMapping, forbidden,
 			"NET-01a: -p mapping must never expose %q", forbidden)
 	}
+
+	// Docker Desktop grouping: the container carries the compose-project label so
+	// it shows under an "abysslink" folder.
+	assert.Contains(t, runArgs, "com.docker.compose.project=abysslink",
+		"docker run must label the container for the abysslink UI group")
 }
 
 func TestVerifyReturnsNil(t *testing.T) {
