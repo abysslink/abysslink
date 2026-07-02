@@ -17,6 +17,7 @@ package approve
 
 import (
 	"context"
+	"errors"
 	"go/parser"
 	"go/token"
 	"os"
@@ -29,6 +30,52 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestWaitTwoWaitersOneResolveNoLeak locks in finding [12]: with two concurrent
+// WaitByID waiters on ONE requestID and a single Resolve, the buffered
+// Resolution is consumed by one waiter; the other must NOT block forever on the
+// drained single-shot channel (which would leak its goroutine and, in the
+// daemon, its HTTP handler). Both waiters must return, and both must observe the
+// real (approved) decision.
+func TestWaitTwoWaitersOneResolveNoLeak(t *testing.T) {
+	r := NewRegistry(nil)
+	var hash [32]byte
+	const id = "req-dup-waiters"
+	_, err := r.Open(id, hash, TierSensitive, "")
+	require.NoError(t, err)
+
+	const n = 2
+	results := make(chan error, n)
+	// Bounded context so the waiter that does not consume the channel reaches its
+	// ctx.Done branch (pre-fix: an unguarded `<-req.ch` there blocked forever).
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	for i := 0; i < n; i++ {
+		go func() {
+			_, werr := r.WaitByID(ctx, id, false)
+			results <- werr
+		}()
+	}
+
+	// Let both waiters enter their select, then resolve approved exactly once.
+	time.Sleep(20 * time.Millisecond)
+	require.True(t, r.Resolve(id, StateApproved))
+
+	approved := 0
+	for got := 0; got < n; got++ {
+		select {
+		case werr := <-results:
+			if werr == nil {
+				approved++
+			} else {
+				assert.True(t, errors.Is(werr, ErrDenied), "unexpected error: %v", werr)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("waiter leaked: only %d/%d waiters returned (lost-CAS waiter blocked forever)", got, n)
+		}
+	}
+	assert.Equal(t, n, approved, "both waiters must observe the real approved resolution, none fabricating deny")
+}
 
 // TestCAS_FirstAnswerWins: open a pendingReq; call resolve(stateApproved) in
 // goroutine 1 and resolve(stateDenied) in goroutine 2 concurrently; exactly

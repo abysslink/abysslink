@@ -138,6 +138,14 @@ func (g *UnifiedPushGateway) Send(ctx context.Context, w Wake) error {
 	}
 	defer resp.Body.Close() //nolint:errcheck // response body close error is non-actionable on read path
 
+	// 404/410: the UnifiedPush registration is gone — the device unregistered or
+	// the endpoint was decommissioned (UnifiedPush spec). Signal a dead token so
+	// the retry goroutine prunes the device and dequeues the entry (D-12) instead
+	// of retrying a permanently-undeliverable endpoint forever (finding [10]).
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return ErrDeadToken
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("unifiedpush: returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
