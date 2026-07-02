@@ -234,47 +234,51 @@ func projectName(cwd string) string {
 // generic push rather than returning non-zero.
 func runNotifyClaudeHook(ctx context.Context, nm *notifymod.Module, f notifyFlags) error {
 	raw, err := io.ReadAll(os.Stdin)
-	title, body, prio := "Claude needs you", "waiting for input", "high"
+	title, body, prio, tag := "Claude needs you", "waiting for input", "high", "bell"
 	if err == nil {
 		var in claudeHookInput
 		_ = json.Unmarshal(raw, &in) // best-effort; empty/garbled → generic below
-		title, body, prio = classifyClaudeNotification(in.Message)
+		title, body, prio, tag = classifyClaudeNotification(in.Message)
 		// Prefix the project (cwd folder) so a push names WHICH Claude session
 		// needs you when several run at once: "abysslink · Claude needs approval".
 		if proj := projectName(in.Cwd); proj != "" {
 			title = proj + " · " + title
 		}
 	}
-	// An explicit --priority wins; otherwise use the type-derived urgency.
+	// An explicit --priority / --tag wins; otherwise use the type-derived values.
 	if f.priority != "" {
 		prio = f.priority
 	}
+	if f.tag != "" {
+		tag = f.tag
+	}
 	return notifySendV1(ctx, nm, title, body, notifymod.SendOptions{
 		Priority: prio,
-		Tags:     f.tag,
+		Tags:     tag,
 		Topic:    f.topic,
 	})
 }
 
 // classifyClaudeNotification maps a Claude Code Notification `message` to a
-// typed title + priority, passing the real message through as the body. The
-// hook payload has no structured type field, so classification is keyword-based
-// and ordered most-specific-first (permission before the generic input case).
-func classifyClaudeNotification(message string) (title, body, priority string) {
+// typed title, priority, and an ntfy emoji tag (rendered as an emoji prefix by
+// ntfy clients for at-a-glance type), passing the real message through as the
+// body. The hook payload has no structured type field, so classification is
+// keyword-based and ordered most-specific-first (permission before input).
+func classifyClaudeNotification(message string) (title, body, priority, tag string) {
 	body = strings.TrimSpace(message)
 	m := strings.ToLower(body)
 	switch {
 	case body == "":
-		return "Claude needs you", "waiting for input", "high"
+		return "Claude needs you", "waiting for input", "high", "bell"
 	case strings.Contains(m, "permission") || strings.Contains(m, "approve") || strings.Contains(m, "allow"):
-		return "Claude needs approval", body, "max"
+		return "Claude needs approval", body, "max", "closed_lock_with_key" // 🔐
 	case strings.Contains(m, "select") || strings.Contains(m, "choose") || strings.Contains(m, "option"):
-		return "Claude needs a decision", body, "high"
+		return "Claude needs a decision", body, "high", "grey_question" // ❔
 	case strings.Contains(m, "waiting") || strings.Contains(m, "input") || strings.Contains(m, "idle"):
-		return "Claude needs input", body, "high"
+		return "Claude needs input", body, "high", "keyboard" // ⌨️
 	default:
 		// Unknown notification reason — still surface Claude's real text.
-		return "Claude", body, "high"
+		return "Claude", body, "high", "robot" // 🤖
 	}
 }
 

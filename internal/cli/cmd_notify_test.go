@@ -924,13 +924,13 @@ func TestClassifyClaudeNotification(t *testing.T) {
 		{"Something unexpected happened", "Claude", "Something unexpected happened"},
 	}
 	for _, c := range cases {
-		title, body, prio := classifyClaudeNotification(c.msg)
+		title, body, prio, _ := classifyClaudeNotification(c.msg)
 		assert.Equal(t, c.wantTitle, title, "title for %q", c.msg)
 		assert.Equal(t, c.wantBody, body, "body must carry Claude's real message for %q", c.msg)
 		assert.NotEmpty(t, prio, "priority must be set for %q", c.msg)
 	}
 	// Permission/approval is the most urgent tier.
-	_, _, prio := classifyClaudeNotification("Claude needs your permission to run rm -rf")
+	_, _, prio, _ := classifyClaudeNotification("Claude needs your permission to run rm -rf")
 	assert.Equal(t, "max", prio, "approval prompts must be max priority")
 }
 
