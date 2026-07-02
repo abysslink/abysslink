@@ -162,6 +162,10 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 			Module:      m.Name(),
 			Description: "make mosh-server reachable: link onto PATH and allow through firewall",
 			Reversible:  false,
+			// The PATH symlink into /usr/local/bin (root-owned on macOS) and the
+			// firewall allow both shell out through sudo — flag it so up --apply
+			// disables the spinner for the password prompt.
+			RequiresSudo: true,
 		}}, nil
 	}
 

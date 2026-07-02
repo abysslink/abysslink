@@ -602,12 +602,20 @@ func sudoActionsFromActions(actions []modules.Action) []string {
 
 	var result []string
 	for _, a := range actions {
-		for _, kw := range sudoKeywords {
-			if strings.Contains(strings.ToLower(a.Description), kw) ||
-				strings.Contains(strings.ToLower(a.Module), kw) {
-				result = append(result, fmt.Sprintf("%-18s %s", a.Module, styleMuted.Render(a.Description)))
-				break
+		// Explicit flag first (the reliable path); fall back to the description
+		// keyword heuristic for modules that don't set RequiresSudo yet.
+		matched := a.RequiresSudo
+		if !matched {
+			for _, kw := range sudoKeywords {
+				if strings.Contains(strings.ToLower(a.Description), kw) ||
+					strings.Contains(strings.ToLower(a.Module), kw) {
+					matched = true
+					break
+				}
 			}
+		}
+		if matched {
+			result = append(result, fmt.Sprintf("%-18s %s", a.Module, styleMuted.Render(a.Description)))
 		}
 	}
 	return result

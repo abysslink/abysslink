@@ -195,3 +195,24 @@ func TestApplyAnimationEnabled_JsonOutDisables(t *testing.T) {
 	assert.False(t, applyAnimationEnabled(true, nil, nil),
 		"applyAnimationEnabled must return false when jsonOut=true")
 }
+
+// TestSudoActionsFromActions_RequiresSudoFlag asserts an action that declares
+// RequiresSudo is detected even when its description matches no keyword — the
+// mosh "make mosh-server reachable" case that raced the spinner and garbled the
+// sudo password prompt before the flag existed.
+func TestSudoActionsFromActions_RequiresSudoFlag(t *testing.T) {
+	acts := []modules.Action{
+		{Module: "mosh", Description: "make mosh-server reachable: link onto PATH and allow through firewall", RequiresSudo: true},
+		{Module: "notify", Description: "send a test notification"}, // no sudo
+		{Module: "power", Description: "disable pmset sleep"},       // keyword fallback
+	}
+	got := sudoActionsFromActions(acts)
+	assert.Len(t, got, 2, "mosh (flag) and power (keyword) require sudo; notify does not")
+	joined := strings.Join(got, "\n")
+	assert.Contains(t, joined, "mosh", "RequiresSudo action must be detected")
+	assert.NotContains(t, joined, "notify", "non-sudo action must not be flagged")
+
+	// The whole point: a RequiresSudo action force-disables the apply spinner.
+	assert.False(t, applyAnimationEnabled(false, sudoActionsFromActions(acts), nil),
+		"a RequiresSudo action must disable the animated spinner")
+}
