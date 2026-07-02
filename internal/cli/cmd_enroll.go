@@ -549,29 +549,37 @@ func runEnrollPhoneApply(ctx context.Context, cmd *cobra.Command, cc *cmdContext
 	hasCreds := enrollHasAdminCreds(b, cc.cfg)
 	autoYes, _ := cmd.Flags().GetBool("yes")
 
+	// term.go invariant: --json implies non-interactive, and a blocking huh Pause
+	// must be gated on interactive() first. Otherwise `enroll phone --apply --json`
+	// (stdin still a TTY) paints raw ANSI form frames into the NDJSON stream,
+	// corrupting it, and `... --json > creds.json` silently hangs on an invisible
+	// form. Gate every §6 pause on the same predicate cmd_lock.go / cmd_init.go
+	// use so --json (and any non-interactive session) skips the pause (finding [28]).
+	skipPauses := !interactive(autoYes, cc.jsonOut)
+
 	// Step 1 — install Tailscale on the phone (external action → §6 stop).
 	printerInfo(p, "")
 	printerInfo(p, stepHeader(1, "Install Tailscale on your phone (scan to open the download page):"))
 	printQR(p, cmd.OutOrStdout(), cc.jsonOut, "tailscale-download", "https://tailscale.com/download")
 	printerInfo(p, "")
-	if err := enrollPhoneInstallPause(ctx, p, autoYes); err != nil {
+	if err := enrollPhoneInstallPause(ctx, p, skipPauses); err != nil {
 		return err
 	}
 
 	// Step 2 — auth key (manual create + sign-in, or admin-API mint + poll).
-	if err := enrollPhoneAuthKeyStep(ctx, cmd, cc, p, adminAPI, hasCreds, tag, autoYes); err != nil {
+	if err := enrollPhoneAuthKeyStep(ctx, cmd, cc, p, adminAPI, hasCreds, tag, skipPauses); err != nil {
 		return err
 	}
 
 	// Step 3 — ntfy subscription (external action → §6 stop when the QR shows).
 	if printNtfyQR(ctx, p, cmd.OutOrStdout(), cc, b) {
-		if err := tui.Pause(ctx, "Press Enter once you've subscribed in the ntfy app", autoYes); err != nil {
+		if err := tui.Pause(ctx, "Press Enter once you've subscribed in the ntfy app", skipPauses); err != nil {
 			return err
 		}
 	}
 
 	// One-time device credentials + printable runbook (final step).
-	return enrollPhoneCredentialsStep(ctx, cmd, cc, p, b, autoYes)
+	return enrollPhoneCredentialsStep(ctx, cmd, cc, p, b, skipPauses)
 }
 
 // enrollHasAdminCreds reports whether an admin OAuth client is fully configured,
@@ -589,7 +597,7 @@ func enrollHasAdminCreds(b backend.Client, cfg *config.Config) bool {
 // per §6). Without one it prints the manual key-create instructions and stops on
 // the external create+sign-in action (§6). Body prose is styleMuted to match
 // step 3; only the copy-paste values (tag, URL) keep the styleCode chip.
-func enrollPhoneAuthKeyStep(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer, adminAPI backend.AdminAPI, hasCreds bool, tag string, autoYes bool) error {
+func enrollPhoneAuthKeyStep(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer, adminAPI backend.AdminAPI, hasCreds bool, tag string, skipPauses bool) error {
 	if hasCreds {
 		if err := enrollWithAdminKey(ctx, p, cmd.OutOrStdout(), cc.jsonOut, adminAPI, tag); err != nil {
 			return fmt.Errorf("enroll phone: %w", err)
@@ -606,13 +614,13 @@ func enrollPhoneAuthKeyStep(ctx context.Context, cmd *cobra.Command, cc *cmdCont
 	printerInfo(p, styleMuted.Render("   Create a key tagged ")+styleCode.Render(tag)+styleMuted.Render(" at:"))
 	printerInfo(p, "   "+styleCode.Render("https://login.tailscale.com/admin/settings/keys"))
 	printerInfo(p, styleMuted.Render("   Then sign in on the phone with that key."))
-	return tui.Pause(ctx, "Press Enter once you've created the key and signed in on your phone", autoYes)
+	return tui.Pause(ctx, "Press Enter once you've created the key and signed in on your phone", skipPauses)
 }
 
 // enrollPhoneCredentialsStep mints (or rotates) the one-time device credential
 // bundle, prints it ONCE, stops so the user can save it (§6), then writes the
 // printable runbook.
-func enrollPhoneCredentialsStep(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer, b backend.Client, autoYes bool) error {
+func enrollPhoneCredentialsStep(ctx context.Context, cmd *cobra.Command, cc *cmdContext, p Printer, b backend.Client, skipPauses bool) error {
 	// DEVC-01/DEVC-02: a re-enroll of an active "phone" rotates the existing
 	// record instead of failing. The bundle is printed ONCE, never persisted.
 	bundle, rotated, mintErr := enrollPhoneDeviceBundle(ctx, cc)
@@ -634,7 +642,7 @@ func enrollPhoneCredentialsStep(ctx context.Context, cmd *cobra.Command, cc *cmd
 	// shown, so an abort (Esc / Ctrl-C) here is equivalent to "Continue" — fall
 	// through to the runbook rather than failing a successful enrollment with a
 	// red "user aborted" error (the bug the credential pause exposed).
-	if err := tui.Pause(ctx, "Press Enter once you've saved these credentials", autoYes); err != nil && !errors.Is(err, huh.ErrUserAborted) {
+	if err := tui.Pause(ctx, "Press Enter once you've saved these credentials", skipPauses); err != nil && !errors.Is(err, huh.ErrUserAborted) {
 		return err
 	}
 
@@ -719,9 +727,9 @@ func printQR(p Printer, out io.Writer, jsonOut bool, label, payload string) {
 // a no-op under autoYes=true or when stdin is not a TTY (non-interactive), so
 // automated / CI runs never hang. The key-scan and device-join poll in
 // enrollWithAdminKey are NOT gated — they are pollable (the tool detects the join).
-func enrollPhoneInstallPause(ctx context.Context, p Printer, autoYes bool) error {
+func enrollPhoneInstallPause(ctx context.Context, p Printer, skipPauses bool) error {
 	_ = p // Pause handles its own output; Printer is accepted for future use
-	return tui.Pause(ctx, "Press Enter once Tailscale is installed on your phone", autoYes)
+	return tui.Pause(ctx, "Press Enter once Tailscale is installed on your phone", skipPauses)
 }
 
 // enrollWithAdminKey mints a tagged auth key, shows its QR, and polls for the
@@ -775,6 +783,13 @@ func enrollWithAdminKey(ctx context.Context, p Printer, out io.Writer, jsonOut b
 		return errors.New("timed out after 2 minutes")
 	})
 	if pollErr != nil {
+		if errors.Is(pollErr, tui.ErrAborted) {
+			// finding [5]: the user cancelled the join spinner (Ctrl-C/Esc). The
+			// phone has NOT joined — never print the "Phone joined:" success line
+			// and never fall through to mint one-time device credentials for a
+			// phone that never appeared. Stop hard with a clear, non-success error.
+			return fmt.Errorf("enroll: cancelled while waiting for the phone to join — no device credentials were minted")
+		}
 		if errors.Is(pollErr, context.Canceled) || errors.Is(pollErr, context.DeadlineExceeded) {
 			return pollErr
 		}

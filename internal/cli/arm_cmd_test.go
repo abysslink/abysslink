@@ -112,7 +112,9 @@ func TestArm_StashCreate(t *testing.T) {
 }
 
 // TestArm_CleanTree verifies that when git stash create returns empty (clean
-// working tree), runArm does not emit a rollback offer (Pitfall 4, D-08).
+// working tree), the dry-run rollback offer reports the clean arm-time state but
+// STILL offers --apply — the agent may have modified tracked files, and
+// restoring means reverting them to the arm-time HEAD (finding [2], case c).
 func TestArm_CleanTree(t *testing.T) {
 	const fakeHead = "abc123def456"
 
@@ -131,8 +133,17 @@ func TestArm_CleanTree(t *testing.T) {
 
 	output := buf.String()
 	assert.Contains(t, output, "clean at arm time", "should report clean working tree")
-	assert.NotContains(t, output, "dry-run", "should NOT show dry-run rollback offer for clean tree")
-	assert.NotContains(t, output, "--apply", "should NOT show --apply option for clean tree")
+	assert.Contains(t, output, "--apply", "clean-at-arm-time still offers restore so agent edits to tracked files can be reverted (finding [2])")
+
+	// Dry-run must never mutate: no reset/stash apply.
+	for _, c := range mr.RecordedCalls() {
+		if c.Name == "git" && len(c.Args) >= 2 && c.Args[0] == "reset" {
+			t.Fatalf("git reset must NOT be called in dry-run mode; got: %v", c.Args)
+		}
+		if c.Name == "git" && len(c.Args) >= 2 && c.Args[0] == "stash" && c.Args[1] == "apply" {
+			t.Fatalf("git stash apply must NOT be called in dry-run mode; got: %v", c.Args)
+		}
+	}
 }
 
 // TestArm_DryRunRollback verifies that when stashSHA is non-empty and apply=false,
@@ -179,6 +190,7 @@ func TestArm_ApplyRollback(t *testing.T) {
 		shell.Call{Result: shell.Result{Stdout: fakeStash}}, // git stash create
 		shell.Call{Result: shell.Result{Stdout: ""}},        // git diff <headSHA>
 		shell.Call{Result: shell.Result{Stdout: fakeHead}},  // git rev-parse HEAD (advance check — same SHA)
+		shell.Call{}, // git reset --hard <headSHA> (restore tracked files to baseline)
 		shell.Call{}, // git stash apply <stashSHA>
 	)
 	mr.AddArmedCall(makeArmedHandle(42), nil)
@@ -192,15 +204,26 @@ func TestArm_ApplyRollback(t *testing.T) {
 	output := buf.String()
 	assert.Contains(t, output, "restored to arm-time state", "should confirm rollback succeeded")
 
-	// Verify git stash apply was called with the correct stash SHA.
-	var foundApply bool
-	for _, c := range mr.RecordedCalls() {
-		if c.Name == "git" && len(c.Args) >= 3 && c.Args[0] == "stash" && c.Args[1] == "apply" {
+	// Verify git reset --hard <headSHA> ran BEFORE git stash apply — finding [2]:
+	// resetting tracked files to the arm-time HEAD is what makes the subsequent
+	// stash apply a genuine restore rather than a merge onto the agent's tree.
+	resetIdx, applyIdx := -1, -1
+	for i, c := range mr.RecordedCalls() {
+		if c.Name != "git" {
+			continue
+		}
+		if len(c.Args) >= 3 && c.Args[0] == "reset" && c.Args[1] == "--hard" {
+			assert.Equal(t, fakeHead, c.Args[2], "reset --hard must target the arm-time HEAD SHA")
+			resetIdx = i
+		}
+		if len(c.Args) >= 3 && c.Args[0] == "stash" && c.Args[1] == "apply" {
 			assert.Equal(t, fakeStash, c.Args[2], "stash apply must use arm-time stash SHA")
-			foundApply = true
+			applyIdx = i
 		}
 	}
-	assert.True(t, foundApply, "git stash apply must be called in --apply mode")
+	require.NotEqual(t, -1, resetIdx, "git reset --hard <headSHA> must be called in --apply mode (finding [2])")
+	require.NotEqual(t, -1, applyIdx, "git stash apply must be called in --apply mode")
+	assert.Less(t, resetIdx, applyIdx, "reset --hard must run BEFORE stash apply")
 }
 
 // TestArm_HeadAdvanced verifies that when HEAD has advanced since arm time and
@@ -363,8 +386,9 @@ func TestArm_LadderMode_ApproveResume(t *testing.T) {
 
 	swwDone := make(chan error, 1)
 	go func() {
-		swwDone <- armSpawnWatchWait(ctx, cc, aud, nm, kc, sigFn,
+		_, e := armSpawnWatchWait(ctx, cc, aud, nm, kc, sigFn,
 			[]string{"loop-cmd"}, "" /*castPath*/, "" /*stashSHA*/, "armhash", false)
+		swwDone <- e
 	}()
 
 	// Wait until the watcher is constructed and the observer is registered.
@@ -452,8 +476,9 @@ func TestArm_RegistersAndDeregistersPgid(t *testing.T) {
 
 	swwDone := make(chan error, 1)
 	go func() {
-		swwDone <- armSpawnWatchWait(context.Background(), cc, aud, nm, nil /*kc*/, sigFn,
+		_, e := armSpawnWatchWait(context.Background(), cc, aud, nm, nil /*kc*/, sigFn,
 			[]string{"sleep"}, "" /*castPath*/, "" /*stashSHA*/, "armhash5150", false)
+		swwDone <- e
 	}()
 
 	// During the run the pgid must be in the registry's state file.
@@ -510,7 +535,7 @@ func TestArm_RegistryFailureIsFailSoft(t *testing.T) {
 	var nm *notifymod.Module
 	sigFn := func(_ int, _ syscall.Signal) error { return nil }
 
-	err := armSpawnWatchWait(context.Background(), cc, aud, nm, nil /*kc*/, sigFn,
+	_, err := armSpawnWatchWait(context.Background(), cc, aud, nm, nil /*kc*/, sigFn,
 		[]string{"true"}, "", "", "armhash6161", false)
 	require.NoError(t, err, "a registry failure must NOT abort the arm (fail-soft)")
 }
@@ -671,7 +696,7 @@ func TestArm_MinimizeAgentEnv_RoutesToMinimalSpawn(t *testing.T) {
 		var nm *notifymod.Module
 		sigFn := func(_ int, _ syscall.Signal) error { return nil }
 
-		err := armSpawnWatchWait(context.Background(), cc, aud, nm, nil /*kc*/, sigFn,
+		_, err := armSpawnWatchWait(context.Background(), cc, aud, nm, nil /*kc*/, sigFn,
 			[]string{"claude"}, "", "", "armhash7272", false)
 		require.NoError(t, err)
 		return runner

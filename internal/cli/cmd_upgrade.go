@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -48,6 +49,11 @@ const (
 // (200 MiB). Reads use an N+1 sentinel — never a silent truncation. Declared
 // as a var so tests can exercise the overflow path with a small ceiling.
 var upgradeArtifactCeiling int64 = 200 << 20 //nolint:gochecknoglobals // test seam for the overflow-sentinel path; production value is constant
+
+// gitDescribeSuffixRe matches a `git describe` "N-g<sha>" version suffix (e.g.
+// "16-g10e83c2", with an optional trailing "-dirty") so a non-release build is
+// never misclassified as up to date against a clean release tag.
+var gitDescribeSuffixRe = regexp.MustCompile(`^[0-9]+-g[0-9a-f]{7,}(-dirty)?$`)
 
 // upgradeExitUpdateAvailable is the `upgrade --check` exit code signalling that
 // a newer release exists (convention: softwareupdate / gh-style distinct code
@@ -166,9 +172,52 @@ func compareUpgradeVersions(installed, latest string) int {
 	if semverLT(lv, iv) {
 		return upgradeInstalledNewer
 	}
-	// Same major.minor.patch but different raw tags (pre-release suffix):
-	// treat as up to date rather than flapping.
-	return upgradeUpToDate
+
+	// Same major.minor.patch but different raw tags. semverParts() ignored the
+	// suffix, so resolve the relationship by inspecting the suffixes directly —
+	// returning upgradeUpToDate here (the old behaviour) wrongly stranded rc
+	// installs and non-release `make build` binaries as "already up to date".
+	iSuffix := versionSuffix(iv)
+	lSuffix := versionSuffix(lv)
+	switch {
+	case isGitDescribeSuffix(iSuffix):
+		// Non-release `make build` (vX.Y.Z-N-g<sha>): cannot be ordered against a
+		// release tag — never claim it is already up to date (matches the doc:
+		// non-release builds may install the latest but are never told up-to-date).
+		return upgradeUnknownInstalled
+	case iSuffix != "" && lSuffix == "":
+		// Installed is a pre-release of the SAME version (e.g. 4.1.0-rc.1) and the
+		// latest is the final release (4.1.0): per SemVer the pre-release sorts
+		// BEFORE the release, so the final is a newer available upgrade.
+		return upgradeNewerAvailable
+	case iSuffix == "" && lSuffix != "":
+		// Installed is the final release; latest is a pre-release of the same
+		// version — the installed build is newer.
+		return upgradeInstalledNewer
+	default:
+		// Two differing pre-release suffixes on the same version (rc.1 vs rc.2) —
+		// not confidently orderable without full SemVer precedence; treat as up to
+		// date to avoid a flapping upgrade/downgrade loop.
+		return upgradeUpToDate
+	}
+}
+
+// versionSuffix returns the portion of a normalized version after the first
+// SemVer separator ('-' pre-release or '+' build metadata), or "" for a plain
+// release version. semverParts() strips this suffix before comparing.
+func versionSuffix(normalized string) string {
+	if idx := strings.IndexAny(normalized, "-+"); idx >= 0 {
+		return normalized[idx+1:]
+	}
+	return ""
+}
+
+// isGitDescribeSuffix reports whether a version suffix is the `git describe`
+// "N-g<sha>" form (e.g. "16-g10e83c2", optionally "-dirty") emitted by a
+// non-release `make build`. Such a build carries commits ahead of a tag and
+// cannot be ordered against a clean release tag.
+func isGitDescribeSuffix(suffix string) bool {
+	return gitDescribeSuffixRe.MatchString(suffix)
 }
 
 // applyUpgrade downloads the release for the current OS/arch, verifies its
@@ -246,6 +295,22 @@ func applyUpgrade(ctx context.Context, p Printer, runner shell.Runner, tag strin
 	}
 	printerInfo(p, styleSuccess.Render("  ✓  upgraded to "+tag))
 	printerInfo(p, "  Run "+styleCode.Render("abysslink version")+" to confirm.")
+
+	// Also upgrade a co-installed abysslinkd so daemon-side security fixes land
+	// (replacing only the CLI stranded the daemon on stale code). Best-effort:
+	// the CLI upgrade already succeeded, so a daemon-side problem only warrants a
+	// loud warning, never a failed command.
+	switch replaced, dErr := upgradeSiblingDaemon(ctx, nil, selfPath, filepath.Join(tmpDir, tarball), tmpDir); {
+	case dErr != nil:
+		printerInfo(p, styleWarn.Render("  ⚠  abysslinkd was NOT upgraded ("+dErr.Error()+")"))
+		printerInfo(p, "     Reinstall via install.sh / your package manager and restart the daemon.")
+	case replaced:
+		printerInfo(p, styleSuccess.Render("  ✓  abysslinkd upgraded"))
+		printerInfo(p, "  Restart the daemon to run the new version: "+
+			styleCode.Render("abysslink daemon stop --apply")+" then "+
+			styleCode.Render("abysslink daemon start --apply")+" (or your service manager).")
+	}
+	// replaced == false && dErr == nil → no sibling daemon installed; nothing to say.
 	return nil
 }
 
@@ -332,8 +397,21 @@ func sha256File(path string) (string, error) {
 	return fmt.Sprintf("%x", sum), nil
 }
 
-// extractBinary extracts the `abysslink` binary from a .tar.gz archive to outDir.
+// daemonBinaryName is the co-installed long-running daemon binary that
+// install.sh (and the release archive) places next to the abysslink CLI.
+const daemonBinaryName = "abysslinkd"
+
+// extractBinary extracts the `abysslink` CLI binary from a .tar.gz archive to
+// outDir. It is a thin wrapper over extractNamedBinary for the CLI's own name.
 func extractBinary(tarPath, outDir string) (string, error) {
+	return extractNamedBinary(tarPath, outDir, "abysslink")
+}
+
+// extractNamedBinary extracts the binary whose base name is want (matching an
+// optional Windows ".exe" suffix) from a .tar.gz archive to outDir, returning
+// the extracted path. The match is exact — extracting "abysslink" never picks
+// up "abysslinkd", and vice versa.
+func extractNamedBinary(tarPath, outDir, want string) (string, error) {
 	f, err := os.Open(tarPath) //nolint:gosec // G304: tarPath is an internally-staged download temp path, not user input
 	if err != nil {
 		return "", err
@@ -359,7 +437,7 @@ func extractBinary(tarPath, outDir string) (string, error) {
 			continue
 		}
 		base := filepath.Base(hdr.Name)
-		if base != "abysslink" && base != "abysslink.exe" {
+		if base != want && base != want+".exe" {
 			continue
 		}
 		outPath := filepath.Join(outDir, base)
@@ -382,7 +460,46 @@ func extractBinary(tarPath, outDir string) (string, error) {
 		}
 		return outPath, nil
 	}
-	return "", fmt.Errorf("abysslink binary not found in archive")
+	return "", fmt.Errorf("%s binary not found in archive", want)
+}
+
+// siblingDaemonPath returns the path to the abysslinkd binary that install.sh
+// places next to the CLI, preserving a Windows ".exe" suffix when the CLI itself
+// carries one.
+func siblingDaemonPath(cliPath string) string {
+	base := daemonBinaryName
+	if strings.HasSuffix(strings.ToLower(filepath.Base(cliPath)), ".exe") {
+		base += ".exe"
+	}
+	return filepath.Join(filepath.Dir(cliPath), base)
+}
+
+// upgradeSiblingDaemon replaces a co-installed abysslinkd binary sitting next to
+// the CLI with the daemon binary from the same (already signature+checksum
+// verified) release tarball, so daemon-side security fixes actually land on
+// self-update installs — replacing only the CLI left the long-running daemon
+// executing stale code forever. It is best-effort and never fails the CLI
+// upgrade that already completed:
+//   - returns (false, nil) when no sibling daemon is installed (nothing to do);
+//   - returns (false, err) when the tarball has no daemon binary OR the replace
+//     failed — the caller warns that abysslinkd is now version-skewed;
+//   - returns (true, nil) when the daemon was replaced (caller prints a restart notice).
+//
+// The atomic, audit-backed replace path is reused via atomicReplace (nil sa →
+// production keychain-backed audit; tests inject a mock-keychain SignedAudit).
+func upgradeSiblingDaemon(ctx context.Context, sa *audit.SignedAudit, cliPath, tarballPath, tmpDir string) (bool, error) {
+	daemonPath := siblingDaemonPath(cliPath)
+	if _, err := os.Stat(daemonPath); err != nil {
+		return false, nil // no co-installed daemon — nothing to upgrade
+	}
+	newDaemon, err := extractNamedBinary(tarballPath, tmpDir, daemonBinaryName)
+	if err != nil {
+		return false, fmt.Errorf("daemon binary not in release archive: %w", err)
+	}
+	if err := atomicReplace(ctx, daemonPath, newDaemon, sa); err != nil {
+		return false, fmt.Errorf("replace %s: %w", daemonPath, err)
+	}
+	return true, nil
 }
 
 // atomicReplace replaces dst with src via audit.WriteFilePath — streaming

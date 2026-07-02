@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,6 +48,19 @@ func TestCompareUpgradeVersions(t *testing.T) {
 		{"v2.0.0", "v1.9.9", upgradeInstalledNewer},
 		{"dev", "v1.2.3", upgradeUnknownInstalled},
 		{"unknown", "v1.2.3", upgradeUnknownInstalled},
+		// finding [27]: an rc install must be able to upgrade to the same-version
+		// final release (SemVer: 4.1.0-rc.1 < 4.1.0), not be told "up to date".
+		{"v4.1.0-rc.1", "v4.1.0", upgradeNewerAvailable},
+		{"v4.1.0-beta.2", "v4.1.0", upgradeNewerAvailable},
+		// A final release is newer than a same-version pre-release.
+		{"v4.1.0", "v4.1.0-rc.1", upgradeInstalledNewer},
+		// git-describe `make build` binaries are non-release → unknown, never
+		// "already up to date" (contradicted the func's own doc).
+		{"v3.0.2-16-g10e83c2", "v3.0.2", upgradeUnknownInstalled},
+		{"3.0.2-16-g10e83c2-dirty", "v3.0.2", upgradeUnknownInstalled},
+		// Two differing pre-release suffixes on the same version stay up-to-date
+		// (not confidently orderable → no flapping).
+		{"v4.1.0-rc.1", "v4.1.0-rc.2", upgradeUpToDate},
 	}
 	for _, c := range cases {
 		got := compareUpgradeVersions(c.installed, c.latest)
@@ -184,6 +198,124 @@ func TestDownloadFile_OverflowSentinel(t *testing.T) {
 	err := downloadFile(context.Background(), srv.URL, dest)
 	require.Error(t, err, "an over-ceiling download must fail")
 	assert.Contains(t, err.Error(), "ceiling")
+}
+
+// ── finding [17]: co-installed abysslinkd is upgraded in lockstep ────────────
+
+// writeTarGzFiles writes a .tar.gz containing the given name→payload regular
+// files, returning the archive path.
+func writeTarGzFiles(t *testing.T, dir string, files map[string][]byte) string {
+	t.Helper()
+	tarPath := filepath.Join(dir, "multi.tar.gz")
+	f, err := os.Create(tarPath) //nolint:gosec // test temp path
+	require.NoError(t, err)
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	for name, payload := range files {
+		require.NoError(t, tw.WriteHeader(&tar.Header{
+			Name:     name,
+			Mode:     0o755,
+			Size:     int64(len(payload)),
+			Typeflag: tar.TypeReg,
+		}))
+		_, err = tw.Write(payload)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+	require.NoError(t, f.Close())
+	return tarPath
+}
+
+// newMockSignedAudit builds a SignedAudit backed by a mock keychain + temp log so
+// the atomic-replace path is exercisable on platforms without a real keychain
+// backend (Linux CI has no libsecret/secret-tool).
+func newMockSignedAudit(t *testing.T, dir string) *audit.SignedAudit {
+	t.Helper()
+	mockKC := &mockKeychainStore{entries: map[string]string{}}
+	sa, err := audit.NewSigned(filepath.Join(dir, "audit.log"), mockKC)
+	require.NoError(t, err)
+	return sa
+}
+
+// TestExtractNamedBinary_PicksExactBinary verifies the generalized extractor
+// selects the requested binary and never confuses abysslink with abysslinkd.
+func TestExtractNamedBinary_PicksExactBinary(t *testing.T) {
+	dir := t.TempDir()
+	tarPath := writeTarGzFiles(t, dir, map[string][]byte{
+		"abysslink":  []byte("CLI-payload"),
+		"abysslinkd": []byte("DAEMON-payload"),
+	})
+
+	outCLI, err := extractNamedBinary(tarPath, dir, "abysslink")
+	require.NoError(t, err)
+	got, err := os.ReadFile(outCLI) //nolint:gosec // test temp path
+	require.NoError(t, err)
+	assert.Equal(t, "CLI-payload", string(got), "extracting abysslink must not pick up abysslinkd")
+
+	outDaemon, err := extractNamedBinary(tarPath, dir, "abysslinkd")
+	require.NoError(t, err)
+	got, err = os.ReadFile(outDaemon) //nolint:gosec // test temp path
+	require.NoError(t, err)
+	assert.Equal(t, "DAEMON-payload", string(got), "extracting abysslinkd must yield the daemon binary")
+}
+
+// TestUpgradeSiblingDaemon_ReplacesCoInstalledDaemon covers the core of finding
+// [17]: a stale abysslinkd next to the CLI is atomically replaced with the
+// tarball's daemon binary so daemon-side security fixes actually land.
+func TestUpgradeSiblingDaemon_ReplacesCoInstalledDaemon(t *testing.T) {
+	dir := t.TempDir()
+	cliPath := filepath.Join(dir, "abysslink")
+	require.NoError(t, os.WriteFile(cliPath, []byte("cli"), 0o755)) //nolint:gosec // test binary perms
+	daemonPath := filepath.Join(dir, "abysslinkd")
+	require.NoError(t, os.WriteFile(daemonPath, []byte("STALE-daemon"), 0o755)) //nolint:gosec // test binary perms
+
+	tmpDir := t.TempDir()
+	tarPath := writeTarGzFiles(t, tmpDir, map[string][]byte{
+		"abysslink":  []byte("new-cli"),
+		"abysslinkd": []byte("NEW-daemon"),
+	})
+
+	replaced, err := upgradeSiblingDaemon(context.Background(), newMockSignedAudit(t, dir), cliPath, tarPath, tmpDir)
+	require.NoError(t, err)
+	assert.True(t, replaced, "a co-installed daemon must be replaced")
+
+	got, err := os.ReadFile(daemonPath) //nolint:gosec // test temp path
+	require.NoError(t, err)
+	assert.Equal(t, "NEW-daemon", string(got), "the stale daemon must be overwritten with the tarball's daemon")
+}
+
+// TestUpgradeSiblingDaemon_NoSiblingIsNoop verifies that with no co-installed
+// daemon the function is a clean no-op (the common single-binary CLI install).
+func TestUpgradeSiblingDaemon_NoSiblingIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	cliPath := filepath.Join(dir, "abysslink")
+	require.NoError(t, os.WriteFile(cliPath, []byte("cli"), 0o755)) //nolint:gosec // test binary perms
+
+	tmpDir := t.TempDir()
+	tarPath := writeTarGzFiles(t, tmpDir, map[string][]byte{"abysslinkd": []byte("NEW")})
+
+	replaced, err := upgradeSiblingDaemon(context.Background(), newMockSignedAudit(t, dir), cliPath, tarPath, tmpDir)
+	require.NoError(t, err)
+	assert.False(t, replaced, "no co-installed daemon → no-op")
+}
+
+// TestUpgradeSiblingDaemon_TarballMissingDaemon_Errors verifies the skew-warning
+// path: a co-installed daemon plus a tarball with no daemon binary surfaces an
+// error so the caller can warn the daemon is now version-skewed.
+func TestUpgradeSiblingDaemon_TarballMissingDaemon_Errors(t *testing.T) {
+	dir := t.TempDir()
+	cliPath := filepath.Join(dir, "abysslink")
+	require.NoError(t, os.WriteFile(cliPath, []byte("cli"), 0o755))                            //nolint:gosec // test binary perms
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "abysslinkd"), []byte("stale"), 0o755)) //nolint:gosec // test binary perms
+
+	tmpDir := t.TempDir()
+	tarPath := writeTarGzFiles(t, tmpDir, map[string][]byte{"abysslink": []byte("new-cli")}) // no daemon
+
+	replaced, err := upgradeSiblingDaemon(context.Background(), newMockSignedAudit(t, dir), cliPath, tarPath, tmpDir)
+	require.Error(t, err, "a tarball without the daemon binary must surface an error")
+	assert.False(t, replaced)
+	assert.Contains(t, err.Error(), "not in release archive")
 }
 
 // TestDownloadFile_UnderCeilingOK is the happy path under the same seam.

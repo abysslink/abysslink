@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/shell"
 )
@@ -71,6 +72,15 @@ type versionFloor struct {
 	kind      floorKind     // kindProtocol or kindStdlibVendored
 	checkID   string        // stable Finding.Check ID used by findingFix map (e.g. "ntfy-version")
 	severity  floorSeverity // below-floor severity; zero value = FATAL (CVE rows)
+
+	// applies gates the row on the active configuration. When nil the row always
+	// probes (tmux, Tailscale). When set and it returns false the component is
+	// not part of this install (e.g. the NetBird client floor on a Tailscale-
+	// backend rig, or EternalTerminal when disabled): the binary is NOT probed
+	// and the row reports SeverityOK "not configured" — an absent binary for a
+	// component the operator never enabled must never degrade doctor to WARN and
+	// strand the 0-exit "healthy" state.
+	applies func(*config.Config) bool
 }
 
 // versionFloors is the package-level floor table.  Add rows here to extend
@@ -90,6 +100,7 @@ var versionFloors = []versionFloor{
 		cvss:      "9.8",
 		kind:      kindProtocol,
 		checkID:   "ntfy-version",
+		applies:   func(c *config.Config) bool { return c.Modules.Ntfy.Enabled },
 	},
 	{
 		component: "tmux",
@@ -120,6 +131,9 @@ var versionFloors = []versionFloor{
 		minVer:    "0.57.0",
 		checkID:   "nb-client-version",
 		// severity zero value = floorSevFatal (fail-closed).
+		// Only relevant on a NetBird-backend rig; a stock Tailscale install has
+		// no netbird binary and must not be permanently WARNed for its absence.
+		applies: func(c *config.Config) bool { return c.Backend.Type == "netbird" },
 	},
 	{
 		// EternalTerminal prefer-mosh capability floor (SUPL-04): below 6.2.0
@@ -130,6 +144,9 @@ var versionFloors = []versionFloor{
 		minVer:    "6.2.0",
 		checkID:   "et-version",
 		severity:  floorSevWarn,
+		// Only relevant when the EternalTerminal module is enabled (disabled by
+		// default); otherwise the `et` binary is legitimately absent.
+		applies: func(c *config.Config) bool { return c.Modules.EternalTerminal.Enabled },
 	},
 }
 
@@ -146,14 +163,39 @@ var versionFloors = []versionFloor{
 //
 // The detector is wired into collectDoctorFindings by Plan 04; it is NOT wired
 // here (D-11: remediation text lives in findingFix, not in the detector message).
-func versionFloorFindings(ctx context.Context, runner shell.Runner) []modules.Finding {
+//
+// cfg gates each row on relevance (see versionFloor.applies): a component the
+// active config never enables reports OK "not configured" instead of probing an
+// absent binary and permanently WARNing — otherwise a stock Tailscale install
+// (no netbird / no EternalTerminal) could never reach the 0-exit "healthy" state.
+func versionFloorFindings(ctx context.Context, cfg *config.Config, runner shell.Runner) []modules.Finding {
+	if cfg == nil {
+		cfg = config.Defaults()
+	}
+
 	var findings []modules.Finding
 
 	for _, f := range versionFloors {
+		if f.applies != nil && !f.applies(cfg) {
+			findings = append(findings, notApplicableFloorFinding(f))
+			continue
+		}
 		findings = append(findings, probeFloor(ctx, runner, f))
 	}
 
 	return findings
+}
+
+// notApplicableFloorFinding reports an OK finding for a floor row whose component
+// is not part of the active configuration. The binary is deliberately NOT probed
+// so an absent binary for a never-enabled component cannot degrade doctor to WARN.
+func notApplicableFloorFinding(f versionFloor) modules.Finding {
+	return modules.Finding{
+		Module:   "cli",
+		Check:    f.checkID,
+		Severity: modules.SeverityOK,
+		Message:  fmt.Sprintf("%s: %s is not configured on this rig — version floor not applicable", f.checkID, f.component),
+	}
 }
 
 // probeFloor executes one version-floor check and returns a single Finding.
