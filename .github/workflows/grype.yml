@@ -23,6 +23,11 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  schedule:
+    # Weekly re-scan so CVEs published against unchanged dependencies between
+    # commits are still caught (push/PR-only scanning misses them).
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  workflow_dispatch:
 
 permissions:
   contents: read

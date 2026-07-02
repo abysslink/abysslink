@@ -698,11 +698,15 @@ Exit codes:
 			// merge findings.
 			strictFlag, _ := cmd.Flags().GetBool("strict")
 			if rt.fanOut && len(rt.rigs) > 0 {
-				var fanErr error
-				findings, fanErr = appendRigsFindings(ctx, cc, findings, strictFlag, rt.rigs)
-				if fanErr != nil && strictFlag {
-					return &exitError{code: exitCodeFatal}
-				}
+				// Do NOT early-return on a strict fan-out error. The
+				// unreachable-rig finding appended by appendRigsFindings is
+				// already SeverityFatal under --strict, so falling through
+				// renders every collected finding via the normal JSON/human
+				// path and doctorExitErr still yields exit 2. Bailing here
+				// dropped ALL findings — empty --json stdout and a silent human
+				// exit that violated the documented 0/1/2 + findings-array
+				// contract.
+				findings, _ = appendRigsFindings(ctx, cc, findings, strictFlag, rt.rigs)
 			} else if rt.fanOut && !cc.jsonOut {
 				// --all-rigs with zero enrolled rigs: say so instead of
 				// silently degrading to local-only output (U3).

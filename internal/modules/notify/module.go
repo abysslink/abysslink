@@ -80,6 +80,14 @@ const (
 
 	keychainService = "abysslink"
 	keychainAccount = "ntfy-password"
+
+	// ntfyServiceLabel is the user-level service unit the ntfy module installs
+	// (internal/modules/ntfy/module.go Apply → platform.ServiceInstall). On Linux
+	// the platform writes it as ~/.config/systemd/user/dev.abysslink.ntfy.service
+	// and on macOS as a launchd label. Both start branches of Apply MUST use this
+	// exact label — starting the bare "ntfy" unit exits 5 ("Unit ntfy.service not
+	// found") because abysslink never installs a user unit by that name.
+	ntfyServiceLabel = "dev.abysslink.ntfy"
 )
 
 // Module implements the notify module.
@@ -193,7 +201,7 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 func (m *Module) Apply(ctx context.Context) error {
 	switch runtime.GOOS {
 	case "darwin":
-		res, err := m.runner.Run(ctx, "launchctl", "start", "dev.abysslink.ntfy")
+		res, err := m.runner.Run(ctx, "launchctl", "start", ntfyServiceLabel)
 		if err == nil && res.ExitCode == 0 {
 			slog.Info("notify apply: started ntfy via launchctl")
 			return nil
@@ -205,14 +213,17 @@ func (m *Module) Apply(ctx context.Context) error {
 			"exit", res.ExitCode, "stderr", strings.TrimSpace(res.Stderr))
 		return nil
 	default: // linux
-		res, err := m.runner.Run(ctx, "systemctl", "--user", "start", "ntfy")
+		// Start the exact user unit the ntfy module installs (dev.abysslink.ntfy);
+		// the bare "ntfy" unit does not exist and exits 5, so the auto-fix always
+		// failed before this. Matches the darwin label above.
+		res, err := m.runner.Run(ctx, "systemctl", "--user", "start", ntfyServiceLabel)
 		if err == nil && res.ExitCode == 0 {
-			slog.Info("notify apply: started ntfy via systemctl")
+			slog.Info("notify apply: started ntfy via systemctl", "unit", ntfyServiceLabel)
 			return nil
 		} else if err != nil {
-			return fmt.Errorf("notify apply: systemctl start ntfy: %w", err)
+			return fmt.Errorf("notify apply: systemctl --user start %s: %w", ntfyServiceLabel, err)
 		}
-		return fmt.Errorf("notify apply: systemctl start ntfy exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		return fmt.Errorf("notify apply: systemctl --user start %s exited %d: %s", ntfyServiceLabel, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 }
 

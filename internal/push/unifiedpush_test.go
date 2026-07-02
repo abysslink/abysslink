@@ -18,6 +18,7 @@ package push_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -214,4 +215,23 @@ func TestUnifiedPushNon200(t *testing.T) {
 	err := gw.Send(context.Background(), w)
 	require.Error(t, err, "non-2xx response must return an error")
 	assert.Contains(t, err.Error(), "HTTP 503", "error must contain the HTTP status code")
+}
+
+// TestUnifiedPushDeadToken verifies that HTTP 404 and 410 (registration gone)
+// map to push.ErrDeadToken so the retry goroutine prunes the device instead of
+// retrying a decommissioned endpoint forever (finding [10]).
+func TestUnifiedPushDeadToken(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusGone} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+		}))
+		t.Cleanup(srv.Close)
+
+		push.SetUPHTTPClient(srv.Client())
+		gw := push.NewUnifiedPushGateway(nil)
+		err := gw.Send(context.Background(), testWake(srv.URL+"/notify"))
+		assert.True(t, errors.Is(err, push.ErrDeadToken),
+			"HTTP %d must return ErrDeadToken, got: %v", code, err)
+	}
+	push.SetUPHTTPClient(nil)
 }

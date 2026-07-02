@@ -30,7 +30,7 @@
             pname = "abysslink";
             inherit version;
             src = ./.;
-            vendorHash = "sha256-0HZ+Pd4FsPR/1f1PEvNj5GCCvlXpPms+jI7IwoEQZpk=";
+            vendorHash = "sha256-ZT094nVSjFBQHTV3GBwgEVxVx3GJ5cYLWf+yDttIc8Q=";
             subPackages = [ "cmd/abysslink" "cmd/abysslinkd" ];
             ldflags = [
               "-s"
@@ -78,7 +78,14 @@
           quickstart-vm = pkgs.testers.runNixOSTest {
             name = "abysslink-quickstart-firedrill";
             nodes.machine = { ... }: {
-              environment.systemPackages = [ self.packages.${system}.abysslink ];
+              # tailscale is required: doctor's core module checks shell out to
+              # the `tailscale` binary; without it doctor errors before emitting
+              # any findings and the `grep -q severity` assertion below fails
+              # (the Monday-cron red-gate this fixes).
+              environment.systemPackages = [
+                self.packages.${system}.abysslink
+                pkgs.tailscale
+              ];
             };
             testScript = ''
               machine.start()

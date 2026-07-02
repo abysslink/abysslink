@@ -531,7 +531,15 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// HTML confirmation for the phone (ntfy view tap opens Safari); JSON otherwise.
-	s.writeApproveResult(w, r, true, reqIDPrefix(requestID))
+	// Render the REAL final decision: a late Approve tap that LOST the CAS (already
+	// denied by the TTY arm or a headless timeout-deny) must NOT falsely render
+	// "Approved — will continue" on a security surface (finding [23]).
+	approved, known := s.finalApproveOutcome(requestID, won, true)
+	if !known {
+		s.writeApproveMiss(w, r)
+		return
+	}
+	s.writeApproveResult(w, r, approved, reqIDPrefix(requestID))
 }
 
 // handleDeny serves GET /deny/{token} (APPR-04): identical structure to
@@ -591,7 +599,15 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// HTML confirmation for the phone (ntfy view tap opens Safari); JSON otherwise.
-	s.writeApproveResult(w, r, false, reqIDPrefix(requestID))
+	// Render the REAL final decision: a late Deny tap that LOST the CAS (already
+	// approved) must NOT falsely render "Denied — blocked" while the approved
+	// command actually runs (finding [23]).
+	approved, known := s.finalApproveOutcome(requestID, won, false)
+	if !known {
+		s.writeApproveMiss(w, r)
+		return
+	}
+	s.writeApproveResult(w, r, approved, reqIDPrefix(requestID))
 }
 
 // wantsHTML reports whether the caller is a browser (the ntfy "view" tap opens
@@ -657,6 +673,25 @@ func (s *Server) writeApproveMiss(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNotFound)
+}
+
+// finalApproveOutcome resolves the REAL decision to render on the phone
+// confirmation page after a capability-URL tap (finding [23]). On a won CAS the
+// outcome is the tapped action. On a lost CAS the request was already resolved —
+// possibly the OPPOSITE way (a TTY/phone deny, or a headless timeout-deny) — so
+// it reads the registry's actual resolved state rather than asserting the tapped
+// action succeeded, which would be a false safety signal on a security surface.
+// known=false means the request is no longer in the registry (already pruned);
+// the caller then shows the neutral miss page rather than fabricate a decision.
+func (s *Server) finalApproveOutcome(requestID string, won, tappedApproved bool) (approved, known bool) {
+	if won {
+		return tappedApproved, true
+	}
+	st, resolved := s.approveRegistry.StateOf(requestID)
+	if !resolved {
+		return false, false
+	}
+	return st == approve.StateApproved, true
 }
 
 // writeApproveResult writes the 200 result: an HTML confirmation page for a

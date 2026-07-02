@@ -1,0 +1,2 @@
+# mkdocs docs-site build deps — consumed by .github/workflows/docs.yml
+mkdocs-material>=9.0

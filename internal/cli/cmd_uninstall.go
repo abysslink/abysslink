@@ -431,8 +431,8 @@ func runModuleTeardowns(ctx context.Context, p Printer, mods []modules.Module, d
 // --purge / --remove-config flag was passed). Discoverability: an interactive
 // user never has to know the flag names — they pick from this menu.
 const (
-	cleanupKeepBoth      = "Keep ~/.config/abysslink and the audit log + backups (recommended)"
-	cleanupRemoveConfig  = "Remove ~/.config/abysslink, keep the audit log + backups"
+	cleanupKeepBoth         = "Keep ~/.config/abysslink and the audit log + backups (recommended)"
+	cleanupRemoveConfig     = "Remove ~/.config/abysslink, keep the audit log + backups"
 	cleanupRemoveEverything = "Remove everything: config, audit log and backups (IRREVERSIBLE)"
 )
 

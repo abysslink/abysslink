@@ -116,10 +116,8 @@
         fix: Upgrade tmux to >= 3.2 for session-typed notifications (D-27): brew upgrade tmux  (or your distro package manager); the daemon runs fine without it 
     ⚠  WARN  tailscale-version  tailscale-version: could not probe version ("tailscale" version exited 1) — version is unknown; upgrade Tailscale to >= 1.98.1 to meet the floor
         fix: Upgrade Tailscale to >= 1.98.1: brew upgrade tailscale  (or download from https://pkgs.tailscale.com) — below the floor is a fail-closed security gate 
-    ⚠  WARN  nb-client-version  nb-client-version: could not probe version ("netbird" version exited 1) — version is unknown; upgrade NetBird (client) to >= 0.57.0 to meet the floor
-        fix: Upgrade the NetBird client to >= 0.57.0: see https://github.com/netbirdio/netbird/releases  (or your package manager); below the floor is fail-closed 
-    ⚠  WARN  et-version  et-version: could not probe version ("et" --version exited 1) — version is unknown; upgrade EternalTerminal to >= 6.2.0 to meet the floor
-        fix: Upgrade EternalTerminal to >= 6.2.0 to prefer the ET transport: brew upgrade eternal-terminal  — advisory only; mosh remains a working fallback 
+    ✓  nb-client-version
+    ✓  et-version
     ⚠  WARN  tailscale-statedir  tailscale-statedir: could not query Tailnet Lock status (tailscale lock status --json failed) — Lock-statedir posture unknown; ensure tailscaled is running then re-run abysslink doctor
         fix: Run tailscaled with a persistent statedir (systemd default /var/lib/tailscale, or set TS_STATE_DIR) — Tailnet Lock signing checks are not enforced without it; this is a fail-closed gate 
     ⚠  WARN  openssh-version  openssh-version: could not probe ssh version (ssh -V failed) — version unknown; install OpenSSH >= 10.0 for post-quantum KEX (mosh remains a working fallback)

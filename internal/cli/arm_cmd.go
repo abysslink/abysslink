@@ -18,6 +18,7 @@ package cli
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -280,12 +281,16 @@ func loadArmHMACKey(ctx context.Context, kc secrets.KeychainStore) ([]byte, erro
 //
 // kc may be nil (no keychain backend). sigFn may be nil in production (the
 // watcher uses its default real signal sender); tests inject a fake.
+// It returns the wrapped child's exit code (0 on success) so the caller can
+// propagate a non-zero agent status; a non-nil error is reserved for
+// infrastructure failures (bad runner, spawn failure, invalid pgid) that occur
+// BEFORE the agent runs (finding [9]).
 func armSpawnWatchWait(ctx context.Context, cc *cmdContext, aud armAuditWriter, nm *notifymod.Module,
 	kc secrets.KeychainStore, sigFn armSigFn,
-	userCmd []string, castPath, stashSHA, armHashHex string, hasAsciinema bool) error {
+	userCmd []string, castPath, stashSHA, armHashHex string, hasAsciinema bool) (int, error) {
 	armedRunner, ok := cc.runner.(shell.ArmedRunner)
 	if !ok {
-		return fmt.Errorf("arm: runner %T does not implement ArmedRunner — cannot arm process", cc.runner)
+		return 0, fmt.Errorf("arm: runner %T does not implement ArmedRunner — cannot arm process", cc.runner)
 	}
 
 	spawnCmd := userCmd[0]
@@ -317,10 +322,10 @@ func armSpawnWatchWait(ctx context.Context, cc *cmdContext, aud armAuditWriter, 
 		handle, err = armedRunner.RunArmed(ctx, spawnCmd, spawnArgs...)
 	}
 	if err != nil {
-		return fmt.Errorf("arm: spawn: %w", err)
+		return 0, fmt.Errorf("arm: spawn: %w", err)
 	}
 	if handle.PGID <= 0 {
-		return fmt.Errorf("arm: invalid pgid %d returned by RunArmed — cannot signal process group", handle.PGID)
+		return 0, fmt.Errorf("arm: invalid pgid %d returned by RunArmed — cannot signal process group", handle.PGID)
 	}
 	slog.Info("arm: process armed", "pgid", handle.PGID, "cmd", userCmd[0], "cast_path", castPath)
 
@@ -392,10 +397,33 @@ func armSpawnWatchWait(ctx context.Context, cc *cmdContext, aud armAuditWriter, 
 	watchCancel()
 	<-watchDone
 
-	if exitErr := handle.Wait(); exitErr != nil {
-		slog.Info("arm: process exited with error", "err", exitErr)
+	// Capture the child's exit status so runArm can propagate it (finding [9]).
+	exitErr := handle.Wait()
+	childExit := childExitCode(exitErr)
+	if childExit != 0 {
+		slog.Info("arm: process exited with error", "err", exitErr, "exit_code", childExit)
 	}
-	return nil
+	return childExit, nil
+}
+
+// childExitCode maps a handle.Wait() error to a process exit code. exec.ExitError
+// (via os.ProcessState) exposes ExitCode() through this anonymous interface, so
+// the code is extracted WITHOUT importing os/exec here (the os/exec hard rule
+// keeps that package inside internal/shell). A nil error is exit 0. ExitCode()
+// returns -1 for a signal-terminated process (e.g. a ladder SIGKILL); any
+// non-positive code from a non-nil wait error becomes a generic failure (1) so a
+// killed or otherwise-failed agent never masquerades as exit 0 (finding [9]).
+func childExitCode(exitErr error) int {
+	if exitErr == nil {
+		return 0
+	}
+	var ec interface{ ExitCode() int }
+	if errors.As(exitErr, &ec) {
+		if code := ec.ExitCode(); code > 0 {
+			return code
+		}
+	}
+	return 1
 }
 
 // armLockdownPreflight resolves the dead-man lockdown flag and refuses to arm
@@ -476,12 +504,28 @@ func runArm(ctx context.Context, cc *cmdContext, nm *notifymod.Module, aud armAu
 
 	// Steps 5-7: spawn, watch, wait. sigFn is nil in production (the watcher
 	// uses its default real signal sender); tests inject a fake.
-	if err := armSpawnWatchWait(ctx, cc, aud, nm, kc, nil /*sigFn*/, userCmd, castPath, stashSHA, armHashHex, hasAsciinema); err != nil {
+	childExit, err := armSpawnWatchWait(ctx, cc, aud, nm, kc, nil /*sigFn*/, userCmd, castPath, stashSHA, armHashHex, hasAsciinema)
+	if err != nil {
 		return err
 	}
 
-	// Step 8 — Rollback offer.
-	return armRollbackOffer(ctx, cc, p, headSHA, stashSHA, apply)
+	// Step 8 — Rollback offer. It runs regardless of the agent's exit status so a
+	// failed/killed agent still gets its working-tree diff and (with --apply) its
+	// restore.
+	if rbErr := armRollbackOffer(ctx, cc, p, headSHA, stashSHA, apply); rbErr != nil {
+		return rbErr
+	}
+
+	// Propagate the wrapped agent's non-zero exit status so `abysslink arm -- <cmd>`
+	// mirrors every standard wrapper (time, ssh, asciinema) instead of masking a
+	// failed or ladder-killed agent behind exit 0 (finding [9]). The message is a
+	// visible one-liner; exitError carries the code with err==nil so Execute just
+	// returns the code (the message is already printed here).
+	if childExit != 0 {
+		printerError(p, fmt.Sprintf("agent exited %d", childExit))
+		return &exitError{code: childExit}
+	}
+	return nil
 }
 
 // armCastDir returns the directory for storing cast files, honoring XDG_DATA_HOME.
@@ -502,48 +546,72 @@ func armCastDir() string {
 // armRollbackOffer shows the diff since arm time and optionally restores the
 // working tree to the arm-time state. The --apply flag gates the restore.
 //
-// Security: git stash apply is guarded by a HEAD-advance check (T-31-12).
-// Never attempts a potentially-conflicting stash apply if HEAD has advanced.
+// Restoring is TWO steps (finding [2]). armSnapshot uses `git stash create`,
+// which records the arm-time dirty state but leaves the worktree UNCHANGED — so
+// at rollback time the tree carries the AGENT's edits. Applying the stash alone
+// would merge the arm-time snapshot ON TOP of the agent's tree: files the agent
+// touched but the stash did not would stay dirty, and overlapping files would
+// conflict — while the command still (falsely) claimed "restored". So we first
+// `git reset --hard <headSHA>` to discard every agent modification to a tracked
+// file (untracked files are left alone), THEN replay the arm-time snapshot with
+// `git stash apply <stashSHA>` onto that clean baseline. Both steps must succeed
+// before we print "restored". Guarded by a HEAD-advance check (T-31-12): a stash
+// created against the arm-time HEAD cannot be safely replayed once HEAD moved.
 func armRollbackOffer(ctx context.Context, cc *cmdContext, p Printer, headSHA, stashSHA string, apply bool) error {
 	if headSHA == "" {
 		p.Print("arm: git snapshot unavailable — no rollback offer")
 		return nil
 	}
+	gitEnv := map[string]string{"GIT_TERMINAL_PROMPT": "0"}
 
-	// Always show diff since arm time (informational).
-	diffRes, _ := cc.runner.RunWithEnv(ctx, map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "git", "diff", headSHA)
+	// Always show diff since arm time (informational). This reflects the combined
+	// agent + arm-time delta versus the arm-time HEAD.
+	diffRes, _ := cc.runner.RunWithEnv(ctx, gitEnv, "git", "diff", headSHA)
 	if diffRes.Stdout != "" {
 		p.Print(fmt.Sprintf("Changes since arm time:\n%s", diffRes.Stdout))
 	} else {
 		p.Print("No changes since arm time.")
 	}
 
-	if stashSHA == "" {
-		p.Print("Working tree was clean at arm time — nothing to restore.")
-		return nil
-	}
-
 	if !apply {
+		if stashSHA == "" {
+			// Clean at arm time still offers a restore: the agent may have modified
+			// tracked files, and restoring means reverting them to the arm-time HEAD
+			// (finding [2], case c).
+			p.Print("Working tree was clean at arm time.")
+		}
 		p.Print("(dry-run) Pass --apply to restore working tree to arm-time state")
 		return nil
 	}
 
 	// --apply path: check if HEAD has advanced since arm time (T-31-12).
-	currentHeadRes, err := cc.runner.RunWithEnv(ctx, map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "git", "rev-parse", "HEAD")
+	currentHeadRes, err := cc.runner.RunWithEnv(ctx, gitEnv, "git", "rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("arm: rollback: cannot read current HEAD: %w", err)
 	}
-	currentHead := strings.TrimSpace(currentHeadRes.Stdout)
-	if currentHead != headSHA {
-		// T-31-12: HEAD-advance guard — stash may conflict; abort restore.
+	if strings.TrimSpace(currentHeadRes.Stdout) != headSHA {
+		// T-31-12: HEAD-advance guard — reset/stash may conflict; abort restore.
 		emitNote(p, tui.NoteWarn, "HEAD has advanced since arm", []string{"Stash may conflict; restore skipped. Diff shown above."})
 		return nil
 	}
 
-	_, restoreErr := cc.runner.RunWithEnv(ctx, map[string]string{"GIT_TERMINAL_PROMPT": "0"}, "git", "stash", "apply", stashSHA)
-	if restoreErr != nil {
-		return fmt.Errorf("arm: rollback failed: %w", restoreErr)
+	// Step 1 — discard every agent modification to a tracked file by resetting the
+	// index + working tree to the arm-time HEAD (== current HEAD, guarded above).
+	// This does NOT touch untracked files. Without it, `git stash apply` would
+	// merge onto the agent's tree rather than restore (finding [2], cases a/b).
+	if _, resetErr := cc.runner.RunWithEnv(ctx, gitEnv, "git", "reset", "--hard", headSHA); resetErr != nil {
+		return fmt.Errorf("arm: rollback: reset to arm-time HEAD: %w", resetErr)
 	}
+
+	// Step 2 — replay the arm-time working-tree snapshot onto the clean baseline,
+	// but only when there was one. A clean-at-arm-time tree needs no replay: the
+	// reset above already restored the arm-time state.
+	if stashSHA != "" {
+		if _, restoreErr := cc.runner.RunWithEnv(ctx, gitEnv, "git", "stash", "apply", stashSHA); restoreErr != nil {
+			return fmt.Errorf("arm: rollback failed: %w", restoreErr)
+		}
+	}
+
 	p.Print("Working tree restored to arm-time state.")
 	return nil
 }

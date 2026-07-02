@@ -52,3 +52,8 @@ jobs:
 
       - name: Run golangci-lint
         run: golangci-lint run ./...
+
+      - name: Check install.sh copies are in sync
+        # Root install.sh serves the short curl URL; scripts/install.sh is
+        # canonical. Byte-identical or users get different installers by URL.
+        run: cmp install.sh scripts/install.sh

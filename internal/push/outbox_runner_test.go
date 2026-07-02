@@ -18,12 +18,41 @@ package push
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	bbolt "go.etcd.io/bbolt"
 )
+
+// stubGateway records every Send call so a test can assert whether a wake was
+// dispatched. It always succeeds.
+type stubGateway struct{ sends int }
+
+func (g *stubGateway) Send(_ context.Context, _ Wake) error { g.sends++; return nil }
+
+// transientGateway always returns a generic (transient) error, driving the
+// backoff/age-bound branch of processEntry.
+type transientGateway struct{}
+
+func (transientGateway) Send(_ context.Context, _ Wake) error { return errors.New("transient failure") }
+
+// stubDeviceStore is a minimal DeviceStore for revocation tests.
+type stubDeviceStore struct{ records []DeviceRecord }
+
+func (s *stubDeviceStore) List() []DeviceRecord { return s.records }
+
+func (s *stubDeviceStore) RevokeByID(_ context.Context, id string) error {
+	for i := range s.records {
+		if s.records[i].ID == id {
+			s.records[i].Revoked = true
+			return nil
+		}
+	}
+	return nil
+}
 
 // readOutboxEntry reads the stored entry for (deviceID, msgID) directly from the
 // outbox bucket. Whitebox helper (same package) so a test can observe the
@@ -85,4 +114,69 @@ func TestProcessEntryNoGatewayDropsAfterMaxAttempts(t *testing.T) {
 		"every intermediate reschedule (all but the final drop) accrues BackoffPending")
 	assert.EqualValues(t, 0, counters.ProviderAccepted.Load(), "a no-gateway entry never reaches a provider")
 	assert.EqualValues(t, 0, counters.Sent.Load(), "a no-gateway entry is never sent")
+}
+
+// TestProcessEntrySkipsRevokedDevice locks in finding [11]: a wake queued for a
+// device that is revoked (or removed) before the retry tick must be dequeued and
+// NEVER dispatched to the now-lost/decommissioned push endpoint — revocation
+// blanks the record but does not itself dequeue in-flight entries.
+func TestProcessEntrySkipsRevokedDevice(t *testing.T) {
+	db := openTestDB(t)
+	o := NewOutbox(db)
+	counters := &GatewayCounters{}
+	gw := &stubGateway{}
+	gateways := map[string]Gateway{"unifiedpush": gw}
+	const deviceID = "dev-revoked"
+
+	e := sampleEntry("01J7MSGREVOKED000000000001")
+	require.NoError(t, o.Enqueue(deviceID, e))
+
+	devices := &stubDeviceStore{records: []DeviceRecord{{ID: deviceID, Platform: "unifiedpush", Revoked: true}}}
+	processEntry(context.Background(), o, gateways, devices, counters, deviceID, e)
+
+	assert.Equal(t, 0, gw.sends, "a revoked device must never receive its queued wake")
+	_, ok := readOutboxEntry(t, o, deviceID, e.MsgID)
+	assert.False(t, ok, "the revoked-device entry must be dequeued")
+	assert.EqualValues(t, 1, counters.PrunedTokens.Load(), "the skipped entry is counted as pruned")
+
+	// An entry for a device that is absent from the store entirely is also skipped.
+	e2 := sampleEntry("01J7MSGABSENT0000000000001")
+	require.NoError(t, o.Enqueue("dev-absent", e2))
+	processEntry(context.Background(), o, gateways, devices, counters, "dev-absent", e2)
+	assert.Equal(t, 0, gw.sends, "an absent device must never receive its queued wake")
+	_, ok = readOutboxEntry(t, o, "dev-absent", e2.MsgID)
+	assert.False(t, ok, "the absent-device entry must be dequeued")
+}
+
+// TestProcessEntryDropsAgedOutEntry locks in finding [10]: a transiently-failing
+// entry older than maxOutboxAge is dropped rather than rescheduled forever, so a
+// permanently-undeliverable endpoint cannot grow the outbox unbounded.
+func TestProcessEntryDropsAgedOutEntry(t *testing.T) {
+	db := openTestDB(t)
+	o := NewOutbox(db)
+	counters := &GatewayCounters{}
+	gateways := map[string]Gateway{"unifiedpush": transientGateway{}}
+	const deviceID = "dev-old"
+
+	e := sampleEntry("01J7MSGAGEDOUT0000000000001")
+	e.FirstTriedUnix = time.Now().Add(-(maxOutboxAge + time.Hour)).Unix() // past the bound
+	require.NoError(t, o.Enqueue(deviceID, e))
+
+	devices := &stubDeviceStore{records: []DeviceRecord{{ID: deviceID, Platform: "unifiedpush"}}}
+	processEntry(context.Background(), o, gateways, devices, counters, deviceID, e)
+
+	_, ok := readOutboxEntry(t, o, deviceID, e.MsgID)
+	assert.False(t, ok, "an entry past maxOutboxAge must be dropped, not rescheduled")
+	assert.EqualValues(t, 1, counters.PrunedTokens.Load(), "the aged-out drop is counted as pruned")
+	assert.EqualValues(t, 0, counters.BackoffPending.Load(), "an aged-out entry must not be rescheduled")
+
+	// A fresh transient failure (within the age bound) still reschedules normally.
+	fresh := sampleEntry("01J7MSGFRESH00000000000001")
+	fresh.FirstTriedUnix = time.Now().Unix()
+	require.NoError(t, o.Enqueue(deviceID, fresh))
+	processEntry(context.Background(), o, gateways, devices, counters, deviceID, fresh)
+	got, ok := readOutboxEntry(t, o, deviceID, fresh.MsgID)
+	require.True(t, ok, "a fresh transient failure must be rescheduled, not dropped")
+	assert.EqualValues(t, 1, got.Attempts, "a rescheduled entry accrues an attempt")
+	assert.EqualValues(t, 1, counters.BackoffPending.Load(), "the fresh reschedule accrues BackoffPending")
 }

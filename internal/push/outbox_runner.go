@@ -78,6 +78,34 @@ const retryInterval = 5 * time.Second
 // outbox cannot accumulate undeliverable wakes for a missing gateway.
 const maxNoGatewayAttempts = 10
 
+// maxOutboxAge bounds how long a transiently-failing entry may live in the
+// outbox before it is dropped (finding [10]). Without it, a dead/unreachable
+// push endpoint that never returns ErrDeadToken (e.g. the UnifiedPush leg before
+// its 404/410 mapping, or a black-holed endpoint) keeps every entry alive
+// forever, retried every ≤5min, so push_outbox.db grows monotonically and
+// BackoffPending climbs unbounded. Entries older than this (measured from
+// FirstTriedUnix) are dequeued with a Warn, mirroring maxNoGatewayAttempts.
+const maxOutboxAge = 24 * time.Hour
+
+// deviceActive reports whether deviceID is present and non-revoked in the
+// current device list. A device revoked or removed AFTER an entry was queued
+// must not receive its pending wakes: revocation blanks the record but does not
+// itself dequeue in-flight entries, which carry their own copy of the push token
+// (finding [11]). An absent device (never enrolled / fully removed) is treated as
+// inactive too. Returns true (send) when devices is nil — a headless/no-store
+// runner cannot check revocation and preserves prior behavior.
+func deviceActive(devices DeviceStore, deviceID string) bool {
+	if devices == nil {
+		return true
+	}
+	for _, d := range devices.List() {
+		if d.ID == deviceID {
+			return !d.Revoked
+		}
+	}
+	return false
+}
+
 // RunOutboxRetry is the persistent outbox retry goroutine. It scans the outbox
 // bucket every retryInterval for entries with NextRetryUnix ≤ now and drives
 // them through the appropriate Gateway leg:
@@ -164,36 +192,26 @@ func findLastColon(key string, msgIDLen int) int {
 // processEntry dispatches one outbox entry through its gateway and handles the
 // result: success → Dequeue + MarkSeen; dead-token → prune; transient → backoff.
 func processEntry(ctx context.Context, outbox *Outbox, gateways map[string]Gateway, devices DeviceStore, counters *GatewayCounters, deviceID string, e outboxEntry) {
+	// Security (revocation, finding [11]): a device revoked or removed after this
+	// entry was queued must NEVER receive its pending wakes — the entry carries
+	// its own copy of the push token (D-17 secret-class) plus title + fetch
+	// metadata, and Revoke/RevokeByID only blanks the record, it does not dequeue
+	// in-flight entries. Check the CURRENT device store before dispatch and
+	// skip+dequeue any entry whose device is now inactive.
+	if !deviceActive(devices, deviceID) {
+		if err := outbox.Dequeue(deviceID, e.MsgID); err != nil {
+			slog.Warn("push: dequeue of revoked/absent-device entry failed",
+				"device_id", deviceID, "msg_id", e.MsgID, "err", err)
+		}
+		counters.PrunedTokens.Add(1)
+		slog.Warn("push: skipping wake for revoked/absent device — entry dequeued",
+			"device_id", deviceID, "msg_id", e.MsgID)
+		return
+	}
+
 	gw, ok := gateways[e.Platform]
 	if !ok {
-		// No gateway registered for this platform (e.g. an enabled-but-unwired
-		// APNs/FCM leg). WR-06: a permanently-missing gateway must NOT reschedule
-		// the same undeliverable entry forever — that grows the outbox unbounded.
-		// Reschedule with backoff for a bounded number of attempts (the leg may
-		// be wired on a daemon restart), then drop the entry so a never-wired
-		// platform cannot accumulate undeliverable wakes.
-		e.Attempts++
-		if e.Attempts >= maxNoGatewayAttempts {
-			if err := outbox.Dequeue(deviceID, e.MsgID); err != nil {
-				slog.Warn("push: dequeue of undeliverable no-gateway entry failed",
-					"device_id", deviceID, "msg_id", e.MsgID, "err", err)
-			}
-			slog.Warn("push: no gateway for platform after max attempts; entry dropped",
-				"device_id", deviceID,
-				"msg_id", e.MsgID,
-				"platform", e.Platform,
-				"attempts", e.Attempts)
-			return
-		}
-		e.NextRetryUnix = time.Now().Add(NextBackoff(e.Attempts)).Unix()
-		_ = outbox.Enqueue(deviceID, e)
-		counters.BackoffPending.Add(1)
-		slog.Info("push: no gateway for platform; retry scheduled",
-			"device_id", deviceID,
-			"msg_id", e.MsgID,
-			"platform", e.Platform,
-			"attempt", e.Attempts,
-			"next_retry_unix", e.NextRetryUnix)
+		handleNoGateway(outbox, counters, deviceID, e)
 		return
 	}
 
@@ -246,18 +264,61 @@ func processEntry(ctx context.Context, outbox *Outbox, gateways map[string]Gatew
 		counters.PrunedTokens.Add(1)
 
 	default:
-		// Transient error: schedule next retry with full-jitter exponential backoff.
-		e.Attempts++
-		e.NextRetryUnix = time.Now().Add(NextBackoff(e.Attempts)).Unix()
-		if err := outbox.Enqueue(deviceID, e); err != nil {
-			slog.Warn("push: re-enqueue for retry failed", "device_id", deviceID, "msg_id", e.MsgID, "err", err)
-		}
-		counters.BackoffPending.Add(1)
-		slog.Info("push: retry scheduled",
-			"device_id", deviceID,
-			"msg_id", e.MsgID,
-			"attempt", e.Attempts,
-			"next_retry_unix", e.NextRetryUnix)
-		// NOTE: never log sendErr if it might contain a token/credential.
+		handleTransientError(outbox, counters, deviceID, e)
 	}
+}
+
+// handleNoGateway handles an outbox entry whose platform has no registered
+// gateway (e.g. an enabled-but-unwired APNs/FCM leg). WR-06: a permanently
+// missing gateway must NOT reschedule the same undeliverable entry forever —
+// that grows the outbox unbounded. Reschedule with backoff for a bounded number
+// of attempts (the leg may be wired on a daemon restart), then drop the entry.
+func handleNoGateway(outbox *Outbox, counters *GatewayCounters, deviceID string, e outboxEntry) {
+	e.Attempts++
+	if e.Attempts >= maxNoGatewayAttempts {
+		if err := outbox.Dequeue(deviceID, e.MsgID); err != nil {
+			slog.Warn("push: dequeue of undeliverable no-gateway entry failed",
+				"device_id", deviceID, "msg_id", e.MsgID, "err", err)
+		}
+		slog.Warn("push: no gateway for platform after max attempts; entry dropped",
+			"device_id", deviceID, "msg_id", e.MsgID, "platform", e.Platform, "attempts", e.Attempts)
+		return
+	}
+	e.NextRetryUnix = time.Now().Add(NextBackoff(e.Attempts)).Unix()
+	_ = outbox.Enqueue(deviceID, e)
+	counters.BackoffPending.Add(1)
+	slog.Info("push: no gateway for platform; retry scheduled",
+		"device_id", deviceID, "msg_id", e.MsgID, "platform", e.Platform,
+		"attempt", e.Attempts, "next_retry_unix", e.NextRetryUnix)
+}
+
+// handleTransientError schedules the next retry with full-jitter exponential
+// backoff, or drops the entry once it exceeds maxOutboxAge (finding [10]): a
+// permanently undeliverable endpoint that never returns ErrDeadToken (e.g. a
+// black-holed UnifiedPush URL) would otherwise live forever, retried every
+// ≤5min, growing the outbox unbounded.
+func handleTransientError(outbox *Outbox, counters *GatewayCounters, deviceID string, e outboxEntry) {
+	e.Attempts++
+
+	if e.FirstTriedUnix > 0 && time.Since(time.Unix(e.FirstTriedUnix, 0)) >= maxOutboxAge {
+		if err := outbox.Dequeue(deviceID, e.MsgID); err != nil {
+			slog.Warn("push: dequeue of aged-out undeliverable entry failed",
+				"device_id", deviceID, "msg_id", e.MsgID, "err", err)
+		}
+		counters.PrunedTokens.Add(1)
+		slog.Warn("push: outbox entry exceeded max age; dropped",
+			"device_id", deviceID, "msg_id", e.MsgID,
+			"attempts", e.Attempts, "first_tried_unix", e.FirstTriedUnix)
+		return
+	}
+
+	e.NextRetryUnix = time.Now().Add(NextBackoff(e.Attempts)).Unix()
+	if err := outbox.Enqueue(deviceID, e); err != nil {
+		slog.Warn("push: re-enqueue for retry failed", "device_id", deviceID, "msg_id", e.MsgID, "err", err)
+	}
+	counters.BackoffPending.Add(1)
+	slog.Info("push: retry scheduled",
+		"device_id", deviceID, "msg_id", e.MsgID,
+		"attempt", e.Attempts, "next_retry_unix", e.NextRetryUnix)
+	// NOTE: never log sendErr if it might contain a token/credential.
 }

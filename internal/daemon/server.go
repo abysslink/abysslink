@@ -855,6 +855,17 @@ func (s *Server) handleApproveWait(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(waitErr, approve.ErrDenied) {
+			// A headless timeout-deny is resolved by the registry itself: no phone
+			// tapped Deny, so neither handleDeny nor handleApprove ran its
+			// won-gated counter update, and approvePending would otherwise drift up
+			// forever (finding [24]). Account for it HERE, exactly once. A phone-tap
+			// deny arrives as a plain ErrDenied (not the timeout sentinel) and was
+			// already counted where the CAS was won in handleDeny — never
+			// double-count it.
+			if errors.Is(waitErr, approve.ErrHeadlessTimeoutDenied) {
+				s.approveDenied.Add(1)
+				s.approvePending.Add(-1)
+			}
 			// Explicitly denied — 200 with approved:false (WR-06).
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(approveWaitResponse{

@@ -19,6 +19,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -27,6 +28,14 @@ import (
 
 	"github.com/abysslink/abysslink/internal/ui"
 )
+
+// ErrAborted is returned by RunSpinner when the user cancels the spinner
+// (Ctrl-C / Esc / Ctrl-D) before the wrapped work completed. Because Bubble Tea
+// runs the terminal in raw mode, that keypress arrives as a KeyMsg — NOT a
+// SIGINT — so the caller's context is never cancelled on its own. Callers MUST
+// treat ErrAborted as a hard stop: the work did NOT succeed and may still be
+// winding down in the background — never report success (finding [5]).
+var ErrAborted = errors.New("aborted by user")
 
 // PlainStatus returns a non-animated status line containing the label.
 // Used when animation is disabled (non-TTY, NO_COLOR, --json).
@@ -84,6 +93,13 @@ func (m spinnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the cancel keys are consistent across every interactive surface (T-023).
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyCtrlD, tea.KeyEsc:
+			// Record the abort BEFORE quitting. Quitting without setting
+			// done/err would leave sm.err nil, and RunSpinner would report
+			// success while the work goroutine is still running detached — the
+			// exact footgun in finding [5] (lock init nil-panic + silent lock,
+			// enroll printing "Phone joined:" for a phone that never joined).
+			m.done = true
+			m.err = ErrAborted
 			return m, tea.Quit
 		}
 		return m, nil
@@ -150,12 +166,23 @@ func RunSpinner(ctx context.Context, label string, work func(context.Context) er
 		return work(ctx)
 	}
 
+	// Derive a cancellable context for the background work. On a Ctrl-C/Esc/Ctrl-D
+	// abort Bubble Tea delivers a KeyMsg (raw mode) and the PARENT ctx is never
+	// cancelled, so the work goroutine would otherwise keep running fully detached
+	// after the user cancelled. Cancelling workCtx when the program exits gives
+	// work a chance to observe the cancellation and stop its side effects — for a
+	// mutation like lock init that means `tailscale lock init` can be interrupted
+	// before it commits (finding [5]). Stopping side effects remains work's
+	// responsibility; the spinner only signals.
+	workCtx, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
+
 	result := make(chan error, 1)
 	go func() {
-		result <- work(ctx)
+		result <- work(workCtx)
 	}()
 
-	m := newSpinnerModel(label, result, ctx)
+	m := newSpinnerModel(label, result, workCtx)
 	prog := tea.NewProgram(m, tea.WithContext(ctx))
 	finalModel, err := prog.Run()
 	if err != nil {
@@ -167,8 +194,19 @@ func RunSpinner(ctx context.Context, label string, work func(context.Context) er
 		}
 		return fmt.Errorf("spinner program: %w", err)
 	}
+	// The program exited cleanly. Distinguish genuine work-completion from a user
+	// abort: on Ctrl-C/Esc/Ctrl-D the model records ErrAborted. A model that
+	// exited without EITHER a workDoneMsg or a recorded abort (done==false) is
+	// also treated as an abort, so RunSpinner NEVER returns nil for work that did
+	// not actually complete (finding [5]).
 	if sm, ok := finalModel.(spinnerModel); ok {
-		return sm.err
+		if sm.err != nil {
+			return sm.err
+		}
+		if !sm.done {
+			return ErrAborted
+		}
+		return nil
 	}
-	return nil
+	return ErrAborted
 }

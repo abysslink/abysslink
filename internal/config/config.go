@@ -589,7 +589,15 @@ type TailnetLock struct {
 
 // Mobile holds settings for the enrolled phone device.
 type Mobile struct {
-	Tag            string   `yaml:"tag"`
+	Tag string `yaml:"tag"`
+	// Ports is INFORMATIONAL only: it documents the mobile→laptop ports abysslink
+	// opens, but it is NOT the source of truth for the tailnet ACL. The authoritative
+	// grant is the fixed set in internal/tailscale/acl.go (requiredGrantPorts:
+	// tcp/22, tcp/2586 ntfy, tcp/2587 content-store, udp/60000-61000) — editing this
+	// field does not change the ACL. Kept (and its default aligned with the real
+	// grant) so the value never misleads; retained rather than removed because
+	// config load uses KnownFields(true) and dropping it would reject existing
+	// configs that set mobile.ports.
 	Ports          []string `yaml:"ports"`
 	SSHCheckPeriod string   `yaml:"ssh_check_period"`
 }
@@ -611,18 +619,25 @@ type BasicModule struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+// DefaultNtfyPort is the ntfy listen port opened by the mobile→laptop tailnet
+// ACL grant (internal/tailscale/acl.go requiredGrantPorts: tcp:2586). The grant
+// is a fixed set today (EnsureGrant takes no port arguments), so a customized
+// modules.ntfy.port would be silently blocked on the phone — validateMobileGrantPorts
+// rejects the mismatch until the grant derives its ports from config.
+const DefaultNtfyPort = 2586
+
 // NtfyModule configures the ntfy push-notification server.
 type NtfyModule struct {
 	Enabled bool `yaml:"enabled"`
-	Port    int  `yaml:"port,omitempty"` // 0 means use default (2586)
+	Port    int  `yaml:"port,omitempty"` // 0 means use default (DefaultNtfyPort)
 }
 
-// ListenPort returns the configured port or the safe default (2586).
+// ListenPort returns the configured port or the safe default (DefaultNtfyPort).
 func (m NtfyModule) ListenPort() int {
 	if m.Port > 0 {
 		return m.Port
 	}
-	return 2586
+	return DefaultNtfyPort
 }
 
 // NotifyModule configures the generic notification API.
@@ -735,8 +750,10 @@ func Defaults() *Config {
 			},
 		},
 		Mobile: Mobile{
-			Tag:            "mobile",
-			Ports:          []string{"tcp/22", "udp/60000-61000"},
+			Tag: "mobile",
+			// Aligned with the authoritative ACL grant (internal/tailscale/acl.go
+			// requiredGrantPorts). Informational only — see Mobile.Ports doc.
+			Ports:          []string{"tcp/22", "tcp/2586", "tcp/2587", "udp/60000-61000"},
 			SSHCheckPeriod: "12h",
 		},
 		Modules: Modules{
@@ -988,6 +1005,7 @@ func Validate(cfg *Config) error {
 		validateApproval,
 		validateBudget,
 		validateDeadman,
+		validateMobileGrantPorts,
 	} {
 		if err := validate(cfg); err != nil {
 			return err
@@ -1317,6 +1335,31 @@ func validateBudget(cfg *Config) error {
 	}
 	if g := b.KillGraceSeconds; g != 0 && (g < 1 || g > 30) {
 		return fmt.Errorf("config: budget.kill_grace_seconds %d must be between 1 and 30", g)
+	}
+	return nil
+}
+
+// validateMobileGrantPorts fails closed when a module is configured to listen on
+// a port the mobile→laptop tailnet ACL grant does not open. The grant is a FIXED
+// set today (internal/tailscale/acl.go requiredGrantPorts: tcp/22, tcp/2586 ntfy,
+// tcp/2587 content-store, udp/60000-61000) and EnsureGrant takes no port
+// arguments, so a customized ntfy or content-store port would converge cleanly,
+// bind correctly, and pass the rig-local reachability probe — yet leave the
+// phone silently ACL-blocked with every notification dropped. Until the ACL
+// derivation from config exists, reject the mismatch with a clear, actionable
+// error rather than ship a silent black hole. This is the least-surprising,
+// fail-closed choice (the alternative — threading the port through the no-arg
+// EnsureGrant interface across every backend — is a larger change).
+func validateMobileGrantPorts(cfg *Config) error {
+	if p := cfg.Modules.Ntfy.ListenPort(); p != DefaultNtfyPort {
+		return fmt.Errorf("config: modules.ntfy.port %d is not yet supported — the mobile→laptop tailnet ACL grant only opens tcp/%d for ntfy, "+
+			"so a custom port would be silently blocked on the phone; keep the default %d (0 or unset also means %d)",
+			p, DefaultNtfyPort, DefaultNtfyPort, DefaultNtfyPort)
+	}
+	if p := cfg.ContentStore.EffectivePort(); p != DefaultContentStorePort {
+		return fmt.Errorf("config: content_store.port %d is not yet supported — the mobile→laptop tailnet ACL grant only opens tcp/%d for the content store, "+
+			"so a custom port would be silently blocked on the phone; keep the default %d (0 or unset also means %d)",
+			p, DefaultContentStorePort, DefaultContentStorePort, DefaultContentStorePort)
 	}
 	return nil
 }

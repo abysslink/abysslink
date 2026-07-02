@@ -2,6 +2,11 @@
 # Run `abysslink init` to generate a configured version for your machine.
 version: 1
 
+# Control-plane backend: tailscale (default) | headscale | netbird.
+# Self-hosted backends also need a `server:` stanza — see docs/configuration.md.
+backend:
+  type: tailscale
+
 identity:
   email: you@example.com
   unix_user: you
@@ -13,6 +18,12 @@ tailnet:
     enabled: true
     disablement_secrets: 2
     share_with_support: false
+  # Non-secret admin-API settings for ACL push / auth-key minting. The OAuth
+  # client SECRET is never stored here — it comes from ABYSSLINK_TS_OAUTH_SECRET
+  # (env or keychain). Empty = manual clipboard + browser mode.
+  # admin:
+  #   tailnet: "-"             # tailnet name, e.g. you@github; "-" = default
+  #   oauth_client_id: ""      # NOT secret
 
 mobile:
   tag: mobile
@@ -54,6 +65,10 @@ modules:
     enabled: false
   atuin:
     enabled: false
+  sandbox:
+    enabled: false
+  asciinema:
+    enabled: false
 
 # Optional consumer of the notify API — one of many possible.
 claudecode:
@@ -93,3 +108,71 @@ content_store:
   # bind_addr: ""          # literal tailnet IP only; never 0.0.0.0 or :: (BACK-06)
   # enroll_ttl_seconds: 300  # first-contact bootstrap-token lifetime; [30, 900],
                              # 0 = default 300; independent of ttl_seconds (BACK-09)
+
+# Daemon-side tmux session registry — powers needs_input detection. ON by
+# default. Timing knobs: 0 = compiled-in default.
+session_registry:
+  enabled: true
+  # ignore_sessions: []    # session names exempt from the needs_input heuristic
+  # idle_secs: 30          # no-output threshold; 0 = 30s, floor 10s (clamped up)
+  # poll_active_secs: 5    # poll cadence while any pane is active; 0 = 5s
+  # poll_idle_secs: 15     # backed-off cadence when all panes are idle; 0 = 15s
+  # prompt_regex: ""       # extends built-in prompt sentinels; must compile
+  # cooldown_secs: 300     # per-(pane, kind) re-notify suppression; 0 = 300s
+
+# Push-gateway legs. UnifiedPush/ntfy is the default path; the APNs and FCM
+# legs are EXPERIMENTAL and disabled by default.
+gateway:
+  unifiedpush:
+    enabled: true          # sovereign ntfy/UnifiedPush wake path (default ON)
+  apns:
+    enabled: false         # experimental; bundle_id required when enabled
+    # bundle_id: ""
+    # key_source: keychain # keychain | file (file needs cred_file_path)
+    # cred_file_path: ""   # .p8 key path when key_source: file
+  fcm:
+    enabled: false         # experimental
+    # creds_source: keychain # keychain | file (file needs cred_file_path)
+    # cred_file_path: ""   # service-account JSON path when creds_source: file
+
+# Phone approve loop. Shadow mode by default — set enforcing: true to block
+# tool executions until the phone (or TTY fallback) approves.
+gate:
+  enforcing: false
+
+approval:
+  timeout_seconds: 120     # phone approve window; valid 10-3600
+  # extra_critical: []     # extra action-name substrings forced to the critical
+                           # tier — add-only, may only tighten
+
+# Kill-switch thresholds used by `abysslink arm`. Shadow mode by default —
+# the notify -> SIGSTOP -> kill ladder is opt-in via ladder: true.
+# Numeric knobs: 0 = compiled-in default.
+budget:
+  ladder: false            # true enables the escalation ladder
+  # wall_clock_minutes: 30 # wall-clock run limit; floor 1
+  # loop_n: 8              # identical-command repeats that count as a loop; floor 2
+  # loop_window: 20        # command-count sliding window; floor 5
+  # kill_grace_seconds: 5  # SIGTERM -> SIGKILL grace; [1, 30]
+  # minimize_agent_env: false # spawn the armed agent with a minimized allowlist
+                              # env (breaks agents that read API keys from env)
+  # token_tiers:           # opt-in token-spend observation; off unless jsonl_path set
+  #   jsonl_path: ""
+  #   warn_tokens: 0       # soft tier (notify only); 0 = disabled
+  #   stop_tokens: 0       # hard tier (trips the ladder); 0 = disabled
+
+# Opt-in dead-man switch: daemon-hosted no-contact lockdown timer.
+deadman:
+  enabled: false           # OFF by default — opt-in
+  # interval_hours: 24     # 0 = 24h default; floor 1h when enabled
+
+# Prometheus metrics + daily ntfy digest — both OFF by default.
+observability:
+  metrics:
+    enabled: false
+    # bind_addr: ""        # tailnet IP only; never 0.0.0.0 or ::
+    # port: 0
+  digest:
+    enabled: false
+    # hour: 8              # unset = 08:00; explicit 0 = midnight; valid 0-23
+    # ntfy_topic: ""

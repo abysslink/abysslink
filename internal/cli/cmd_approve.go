@@ -35,6 +35,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/spf13/cobra"
 )
@@ -154,6 +155,36 @@ Two modes:
 	return cmd
 }
 
+// approveBlockingTimeoutFallback is the --blocking deadline used when the config
+// cannot be read (fresh install, missing/malformed file). It matches the
+// daemon's own compiled-in default (cfg.Approval.TimeoutSeconds = 120) so the
+// two halves of the protocol agree even without a config on disk.
+const approveBlockingTimeoutFallback = 120 * time.Second
+
+// approveNonBlockingTimeout is the short deadline used without --blocking (the
+// test / no-daemon smoke path).
+const approveNonBlockingTimeout = 10 * time.Second
+
+// resolveApproveTimeout picks the approval-wait deadline for runApproveCheck.
+//
+// With --blocking it honors approval.timeout_seconds from the operator's config
+// so the CLI's deadline matches the daemon's wait timeout and capability-URL TTL
+// (both derive from cfg.Approval.TimeoutSeconds). Without this, a longer
+// operator setting (e.g. 300s) was silently ignored on the client half: the hook
+// subprocess timed out at a hardcoded 120s and exited deny even though the phone
+// approved and the daemon recorded it. It falls back to the daemon default
+// (120s) only when the config is unreadable.
+func resolveApproveTimeout(blocking bool) time.Duration {
+	if !blocking {
+		return approveNonBlockingTimeout
+	}
+	cfg, err := config.Load(defaultConfigPath())
+	if err != nil || cfg.Approval.TimeoutSeconds <= 0 {
+		return approveBlockingTimeoutFallback
+	}
+	return time.Duration(cfg.Approval.TimeoutSeconds) * time.Second
+}
+
 // runApproveCheck implements the PreToolUse hook executor (--check [--blocking]).
 //
 // Protocol (D-03 race — first answer wins):
@@ -195,12 +226,12 @@ func runApproveCheck(ctx context.Context, blocking bool) error {
 	rawHash := sha256.Sum256([]byte(hashSrc))
 	closureHashHex := hex.EncodeToString(rawHash[:])
 
-	// Set up the approval timeout.
-	timeout := 120 * time.Second // default (cfg.Approval.TimeoutSeconds default)
-	if !blocking {
-		timeout = 10 * time.Second // short for tests / no-daemon path
-	}
-	approveCtx, cancel := context.WithTimeout(ctx, timeout)
+	// Set up the approval timeout. With --blocking this MUST match the daemon's
+	// own wait timeout (derived from cfg.Approval.TimeoutSeconds) — a shorter
+	// client deadline would make the hook exit deny at 120s even though the
+	// operator configured a longer window and the daemon already recorded the
+	// approval.
+	approveCtx, cancel := context.WithTimeout(ctx, resolveApproveTimeout(blocking))
 	defer cancel()
 
 	// Dial daemon with a tight connection timeout.

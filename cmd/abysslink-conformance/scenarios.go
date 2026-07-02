@@ -43,9 +43,12 @@ func testVersionOutput(ctx context.Context, binPath string) error {
 // testInitCreatesConfig runs `abysslink --config <path> init --yes` and verifies that
 // the config file is created and contains valid YAML.
 func testInitCreatesConfig(ctx context.Context, binPath, _ string, configPath string) error {
+	// Non-interactive `init --yes` requires an identity email (Phase 34/35): a
+	// config without identity.email cannot be loaded. Pass the conformance email
+	// so the harness exercises the real headless-init path.
 	out, err := runAbysslink(ctx, binPath,
 		"--config", configPath,
-		"init", "--yes",
+		"init", "--yes", "--email", "conformance@abysslink.test",
 	)
 	if err != nil {
 		return fmt.Errorf("init exited non-zero: %w (output: %s)", err, out)
@@ -353,9 +356,11 @@ func testInitYesNoHang(ctx context.Context, binPath string) error {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	cfgPath := filepath.Join(tmpDir, "abysslink.yaml")
+	// Headless init requires an identity email (Phase 34/35) — supply one so the
+	// scenario reaches the real init flow instead of the missing-email early exit.
 	out, initErr := runAbysslink(ctx, binPath,
 		"--config", cfgPath,
-		"init", "--yes",
+		"init", "--yes", "--email", "conformance@abysslink.test",
 	)
 
 	// A Go panic is a hard fail regardless of exit code.

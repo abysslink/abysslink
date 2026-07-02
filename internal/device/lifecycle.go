@@ -125,14 +125,14 @@ func (s *Store) mintLocked(ctx context.Context, name string, f *storeFile) (*min
 // bundle assembles the one-time Bundle for name from m.
 func (m *minted) bundle(name string) *Bundle {
 	return &Bundle{
-		Name:                     name,
-		PushToken:                m.pushToken,
-		Bearer:                   m.bearer,
+		Name:                      name,
+		PushToken:                 m.pushToken,
+		Bearer:                    m.bearer,
 		SSHPrivateKeyPEM:          m.privPEM,
 		SSHPublicKeyAuthorizedKey: m.pubLine,
 		SSHCertAuthorizedKey:      m.certLine,
 		CAPublicKeyAuthorizedKey:  m.caLine,
-		CertNotAfter:             m.notAfter,
+		CertNotAfter:              m.notAfter,
 	}
 }
 

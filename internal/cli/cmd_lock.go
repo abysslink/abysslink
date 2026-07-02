@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -127,6 +128,17 @@ func newLockInitCmd() *cobra.Command {
 				res, e = lc.LockInit(ctx, n, cc.cfg.Tailnet.Lock.ShareWithSupport)
 				return e
 			}); err != nil {
+				if errors.Is(err, tui.ErrAborted) {
+					// A cancel here is a HARD stop, never a success: LockInit was
+					// in flight and its control-plane state is now UNCERTAIN. If it
+					// committed, Tailnet Lock is ENABLED with disablement secrets
+					// that were NEVER displayed — the permanent-lockout disaster
+					// the docs warn about. Do not touch the (still-nil) result;
+					// surface the uncertainty loudly (finding [5]).
+					printerError(p, "lock init cancelled before it finished — Tailnet Lock state is UNCERTAIN.")
+					printerError(p, "Run `abysslink lock status`; if it is enabled, the disablement secrets were not shown — reset Tailnet Lock and re-init.")
+					return fmt.Errorf("lock init: aborted before completion — verify with `abysslink lock status`")
+				}
 				return fmt.Errorf("lock init: %w", err)
 			}
 			// Fail closed: never render an empty "shown ONCE" box or demand the

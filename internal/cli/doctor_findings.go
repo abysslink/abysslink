@@ -161,7 +161,7 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	// here so they surface in both `abysslink doctor` and (via Task 2) the
 	// shared-set threat-model render. Appending after mod3 preserves the
 	// canonical order and avoids double-emission (this is the only call site).
-	findings = append(findings, versionFloorFindings(ctx, cc.runner)...)
+	findings = append(findings, versionFloorFindings(ctx, cc.cfg, cc.runner)...)
 
 	// Bespoke SUPL-04 transport floor detectors (cmd_doctor_floors.go): the
 	// Tailscale statedir-when-locked FATAL gate and the OpenSSH version + PQ-KEX

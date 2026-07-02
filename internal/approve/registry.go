@@ -49,6 +49,15 @@ var ErrDenied = errors.New("approve: request denied")
 // signalling the caller to fall back to a local TTY confirm.
 var ErrTimeout = errors.New("approve: request timed out — falling back to TTY confirm")
 
+// ErrHeadlessTimeoutDenied is returned by Wait when the registry itself won the
+// deny CAS on context expiry with no TTY and no explicit answer (the D-10
+// headless timeout-deny). It wraps ErrDenied so existing errors.Is(err,
+// ErrDenied) checks continue to treat it as a denial; a caller that must account
+// for a registry-resolved timeout-deny exactly once (e.g. the daemon's
+// pending/denied counters — a phone-tap deny is counted where the CAS is won, in
+// handleDeny) distinguishes it via errors.Is(err, ErrHeadlessTimeoutDenied).
+var ErrHeadlessTimeoutDenied = fmt.Errorf("approve: request timed out with no answer (headless deny): %w", ErrDenied)
+
 // Resolution is the outcome of a single pending approval request.
 type Resolution struct {
 	// Approved is true only when a phone or TTY explicitly approved the action.
@@ -239,9 +248,10 @@ func (r *Registry) Resolve(requestID string, newState uint32) bool {
 // cancels. On context expiry:
 //   - hasTTY=true: returns (Resolution{}, ErrTimeout) so the caller can fall
 //     back to a local TTY confirm (APPR-02, D-09).
-//   - hasTTY=false: calls resolve(stateDenied) and returns
-//     (Resolution{Approved:false}, ErrDenied). No timeout or error path ever
-//     produces Approved:true (APPR-02, D-10).
+//   - hasTTY=false: attempts resolve(stateDenied). If it wins the CAS it returns
+//     (Resolution{Approved:false}, ErrHeadlessTimeoutDenied); if it loses, the
+//     request was already resolved and it returns that resolution (ErrDenied on a
+//     deny). No timeout or error path ever produces Approved:true (APPR-02, D-10).
 func (r *Registry) Wait(ctx context.Context, req *pendingReq, hasTTY bool) (Resolution, error) {
 	select {
 	case res := <-req.ch:
@@ -264,15 +274,22 @@ func (r *Registry) Wait(ctx context.Context, req *pendingReq, hasTTY bool) (Reso
 			case <-req.ch:
 			default:
 			}
-			return Resolution{Approved: false}, ErrDenied
+			// Signal that WE (the registry) resolved this via headless timeout so
+			// the caller can account for it exactly once (D-10 counters).
+			return Resolution{Approved: false}, ErrHeadlessTimeoutDenied
 		}
-		// We lost the CAS: another goroutine already resolved this request.
-		// Read its actual resolution from the channel instead of fabricating deny.
-		res := <-req.ch
-		if res.Approved {
-			return res, nil
+		// We lost the CAS: another goroutine already resolved this request (a
+		// phone tap via Resolve, or a concurrent waiter's timeout deny). Read the
+		// resolved state ATOMICALLY rather than the single-shot channel: with two
+		// waiters on one requestID a peer may already have consumed the one
+		// buffered Resolution, and a blocking `<-req.ch` here would leak this
+		// goroutine — and its HTTP handler — forever (G3). state is guaranteed
+		// non-pending: the winner's CompareAndSwap landed before our resolve()
+		// observed the CAS failure.
+		if req.state.Load() == stateApproved {
+			return Resolution{Approved: true}, nil
 		}
-		return res, ErrDenied
+		return Resolution{Approved: false}, ErrDenied
 	}
 }
 
@@ -288,6 +305,27 @@ func (r *Registry) WaitByID(ctx context.Context, requestID string, hasTTY bool) 
 		return Resolution{}, fmt.Errorf("approve: WaitByID: request not found: %s", safePrefix(requestID))
 	}
 	return r.Wait(ctx, req, hasTTY)
+}
+
+// StateOf reports the resolved decision of a request without advancing its CAS
+// state, for callers (e.g. the daemon's late capability-URL tap) that lost the
+// Resolve CAS and must render the REAL outcome rather than assert their own
+// tapped action succeeded (finding [23]). It returns:
+//   - (StateApproved, true) — the request was approved;
+//   - (StateDenied,   true) — the request was denied (explicit or headless timeout);
+//   - (statePending,  false) — the request is unknown (pruned) or still pending.
+func (r *Registry) StateOf(requestID string) (state uint32, resolved bool) {
+	r.mu.Lock()
+	req, ok := r.pending[requestID]
+	r.mu.Unlock()
+	if !ok {
+		return statePending, false
+	}
+	s := req.state.Load()
+	if s == statePending {
+		return statePending, false
+	}
+	return s, true
 }
 
 // Prune removes a request from the pending map after its lifecycle is complete.

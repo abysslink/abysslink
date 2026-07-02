@@ -30,7 +30,7 @@ if [[ ! -f "$CLAIMS_FILE" ]]; then
   exit 0
 fi
 
-while IFS='|' read -r _ num claim source pointer status _; do
+while IFS='|' read -r _ num _claim _source pointer _status _; do
   # Skip header rows, separator rows, and blank lines
   # A data row has a claim ID in column 2 (e.g. "C-01", " C-01 ", etc.)
   [[ "$num" =~ ^[[:space:]]*C-[0-9]+ ]] || continue

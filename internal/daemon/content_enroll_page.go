@@ -88,10 +88,10 @@ var enrollFieldNote = map[string]string{ //nolint:gochecknoglobals // static hin
 // enrollPageField is one rendered credential row. Guide rows (Guide=true) carry
 // only a Label + Note (e.g. "leave empty") with no value/buttons.
 type enrollPageField struct {
-	Key   string // bundle key — used for ordering/notes; never rendered
-	ID    string // DOM id (f0, f1, …) — server-controlled, never user data
-	Label string
-	Value string
+	Key    string // bundle key — used for ordering/notes; never rendered
+	ID     string // DOM id (f0, f1, …) — server-controlled, never user data
+	Label  string
+	Value  string
 	File   string // download filename; empty = no Download button
 	Note   string // hint shown under the value (what it is / where it goes)
 	Guide  bool   // true = label + note only (no value, no Copy/Download)

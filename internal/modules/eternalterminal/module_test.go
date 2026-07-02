@@ -198,9 +198,12 @@ func TestApply_Disabled_NoOp(t *testing.T) {
 }
 
 func TestApply_InstallsViaPlatform(t *testing.T) {
-	// et --version → not found (triggers install).
+	// et --version → not found (triggers install); then tailscale ip --4 for the
+	// etserver bind address (--bindip). etserver is absent so it is not probed
+	// (short-circuit), so the next runner call is the tailnet-IP resolution.
 	r := shell.NewMockRunner(
 		shell.Call{Result: shell.Result{ExitCode: 127, Stderr: "command not found"}},
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "100.64.1.2\n"}}, // tailscale ip --4
 	)
 	plat := &mockPlatform{}
 	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: plat})
@@ -211,16 +214,36 @@ func TestApply_InstallsViaPlatform(t *testing.T) {
 	assert.Equal(t, "dev.abysslink.etserver", plat.services[0].Label)
 	assert.True(t, plat.services[0].KeepAlive)
 	assert.True(t, plat.services[0].RunAtLoad)
-	// Service must run etserver on port 2022.
+	// Service must run etserver on port 2022, pinned to the tailnet IP (no 0.0.0.0).
 	assert.Contains(t, plat.services[0].Args, "etserver")
 	assert.Contains(t, plat.services[0].Args, "2022")
+	assert.Contains(t, plat.services[0].Args, "--bindip")
+	assert.Contains(t, plat.services[0].Args, "100.64.1.2")
+}
+
+// TestApply_FailsClosedWithoutTailnetIP asserts etserver is NOT installed with a
+// wildcard bind when the tailnet IP cannot be resolved (backend down / not yet
+// authenticated) — the service install must fail rather than expose 0.0.0.0.
+func TestApply_FailsClosedWithoutTailnetIP(t *testing.T) {
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "et version 6.4.9\n"}},       // et present
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "etserver version 6.4.9\n"}}, // etserver present
+		shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "not logged in"}},            // tailscale ip --4 fails
+	)
+	plat := &mockPlatform{}
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: plat})
+	err := m.Apply(context.Background())
+	require.Error(t, err)
+	assert.Empty(t, plat.services, "must not install a wildcard-bound etserver when the tailnet IP is unresolvable")
 }
 
 func TestApply_AlreadyInstalled_SkipsInstall(t *testing.T) {
-	// BOTH binaries present — no install needed.
+	// BOTH binaries present — no install needed; still resolves the tailnet IP
+	// for the etserver --bindip restriction.
 	r := shell.NewMockRunner(
 		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "et version 6.4.9\n"}},       // et
 		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "etserver version 6.4.9\n"}}, // etserver
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "100.64.1.2\n"}},             // tailscale ip --4
 	)
 	plat := &mockPlatform{}
 	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: plat})
@@ -228,6 +251,7 @@ func TestApply_AlreadyInstalled_SkipsInstall(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, plat.installed, "must not install when et AND etserver are already present")
 	require.Len(t, plat.services, 1)
+	assert.Contains(t, plat.services[0].Args, "--bindip")
 	assert.True(t, r.Done())
 }
 
@@ -238,6 +262,7 @@ func TestApply_ServerMissing_StillInstalls(t *testing.T) {
 	r := shell.NewMockRunner(
 		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "et version 6.4.9\n"}},  // et present
 		shell.Call{Result: shell.Result{ExitCode: 127, Stderr: "command not found"}}, // etserver missing
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "100.64.1.2\n"}},        // tailscale ip --4
 	)
 	plat := &mockPlatform{}
 	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r, Platform: plat})
@@ -262,7 +287,10 @@ func TestDetect_ServiceUnitPresent_NoWarning(t *testing.T) {
 		t.Skipf("unsupported GOOS %s", runtime.GOOS)
 	}
 	require.NoError(t, os.MkdirAll(filepath.Dir(unitPath), 0o750))
-	require.NoError(t, os.WriteFile(unitPath, []byte("unit"), 0o600))
+	// A unit written by the fixed Apply pins the tailnet IP via --bindip; write a
+	// representative unit so neither the missing-unit nor the missing-bind
+	// (NET-10) warning fires.
+	require.NoError(t, os.WriteFile(unitPath, []byte("ExecStart=etserver --port 2022 --bindip 100.64.1.2"), 0o600))
 
 	r := shell.NewMockRunner(
 		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "et version 6.4.9\n"}},
@@ -274,7 +302,41 @@ func TestDetect_ServiceUnitPresent_NoWarning(t *testing.T) {
 	for _, f := range findings {
 		assert.NotEqual(t, "et_service_unit_installed", f.Check,
 			"unit written by Apply at %s must satisfy Detect", unitPath)
+		assert.NotEqual(t, "et_bind_address", f.Check,
+			"unit with --bindip must not trigger the bind-address warning")
 	}
+}
+
+// TestDetect_ServiceUnitMissingBindIP_Warns is the NET-10 regression test: a
+// unit that predates the bind fix (no --bindip) must surface the wildcard-bind
+// warning so `repair --apply` rebinds etserver to the tailnet IP.
+func TestDetect_ServiceUnitMissingBindIP_Warns(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	unitPath, err := etServiceUnitPath(runtime.GOOS)
+	require.NoError(t, err)
+	if unitPath == "" {
+		t.Skipf("unsupported GOOS %s", runtime.GOOS)
+	}
+	require.NoError(t, os.MkdirAll(filepath.Dir(unitPath), 0o750))
+	require.NoError(t, os.WriteFile(unitPath, []byte("ExecStart=etserver --port 2022"), 0o600))
+
+	r := shell.NewMockRunner(
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "et version 6.4.9\n"}},
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "etserver version 6.4.9\n"}},
+	)
+	m := New(modules.Deps{Cfg: enabledCfg(), Runner: r})
+	findings, err := m.Detect(context.Background())
+	require.NoError(t, err)
+	var found bool
+	for _, f := range findings {
+		if f.Check == "et_bind_address" {
+			found = true
+			assert.Equal(t, modules.SeverityWarning, f.Severity)
+		}
+	}
+	assert.True(t, found, "unit without --bindip must trigger the et_bind_address warning")
 }
 
 // TestVerify_ReturnsNil: Verify must not re-run Detect — runner.Doctor calls

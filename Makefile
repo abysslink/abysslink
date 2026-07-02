@@ -25,7 +25,9 @@ GOSEC_EXCLUDES := G304,G101,G302,G306,G204,G703
 # `make build` and the released binary agree on the embedded commit ldflag.
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT     ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+# Deterministic committer date (not wall-clock) so `make build` is reproducible
+# — matches .github/workflows/repro-check.yml and goreleaser's {{.CommitDate}}.
+BUILD_DATE ?= $(shell git log -1 --format='%cI' 2>/dev/null || echo "unknown")
 
 LDFLAGS    := -s -w \
   -X $(MODULE)/internal/cli.version=$(VERSION) \
@@ -33,7 +35,7 @@ LDFLAGS    := -s -w \
   -X $(MODULE)/internal/cli.buildDate=$(BUILD_DATE)
 
 .PHONY: build test lint cover release install clean conformance security-audit repro-check
-.PHONY: check-webui-isolation check-webui-build-tags check-htmx-sri vendor-htmx security-gosec
+.PHONY: check-webui-isolation check-webui-build-tags check-htmx-sri vendor-htmx security-gosec check-install-sync dev-setup
 .PHONY: vex-suppression-proof
 
 ## build: compile CLI and daemon binaries (reproducible: SOURCE_DATE_EPOCH from git)
@@ -53,7 +55,7 @@ test:
 ## semgrep (pipx install semgrep). The gosec excludes (GOSEC_EXCLUDES) mirror the
 ## golangci-lint gosec config + justified #nosec///nolint suppressions; the
 ## remaining real findings are fixed at the root or carry inline justifications.
-lint: check-webui-build-tags check-webui-isolation
+lint: check-webui-build-tags check-webui-isolation check-install-sync
 	$(GOLANGCI) run ./...
 	@gofmt -l . | grep -v vendor | grep . && echo "gofmt: files need formatting (run gofmt -w .)" && exit 1 || true
 	$(MAKE) security-gosec
@@ -64,6 +66,18 @@ lint: check-webui-build-tags check-webui-isolation
 ## exclude list lives in exactly one place (GOSEC_EXCLUDES).
 security-gosec:
 	gosec -quiet -exclude=$(GOSEC_EXCLUDES) ./...
+
+## check-install-sync: the repo-root install.sh exists only so the short
+## `curl .../main/install.sh` URL works; scripts/install.sh is canonical.
+## They must stay byte-identical or the two URLs serve different installers.
+check-install-sync:
+	@cmp -s install.sh scripts/install.sh || { echo "install.sh and scripts/install.sh differ — copy scripts/install.sh over install.sh"; exit 1; }
+
+## dev-setup: one-time contributor setup — wires the repo's .githooks
+## (pre-commit gitleaks secret scan, AUD-08). Without this the hook never runs.
+dev-setup:
+	git config core.hooksPath .githooks
+	@echo "core.hooksPath -> .githooks (pre-commit secret scan active)"
 
 ## check-webui-build-tags: assert every .go file under internal/modules/webui/
 ## carries //go:build webui (Pitfall 5 — a single untagged file leaks the package
@@ -94,20 +108,20 @@ check-webui-build-tags:
 ## optional. Re-adding it would force-couple a core, non-optional feature to the
 ## opt-in build tag. The dashboard stack itself remains strictly tag-gated.
 check-webui-isolation:
-	@$(GO) build -o /tmp/abysslinkd-base ./cmd/abysslinkd
-	@deps=$$($(GO) list -deps ./cmd/abysslinkd | grep -c 'internal/modules/webui\|tailscale.com/safeweb' || true); \
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	  $(GO) build -o "$$tmp/abysslinkd-base" ./cmd/abysslinkd; \
+	  deps=$$($(GO) list -deps ./cmd/abysslinkd | grep -c 'internal/modules/webui\|tailscale.com/safeweb' || true); \
 	  if [ "$$deps" -ne 0 ]; then \
 	    echo "FAIL: base binary depends on $$deps web-dashboard package(s)"; \
 	    $(GO) list -deps ./cmd/abysslinkd | grep 'internal/modules/webui\|tailscale.com/safeweb'; \
-	    rm -f /tmp/abysslinkd-base; exit 1; \
-	  fi
-	@syms=$$($(GO) tool nm /tmp/abysslinkd-base | grep -c 'internal/modules/webui\|tailscale.com/safeweb' || true); \
+	    exit 1; \
+	  fi; \
+	  syms=$$($(GO) tool nm "$$tmp/abysslinkd-base" | grep -c 'internal/modules/webui\|tailscale.com/safeweb' || true); \
 	  if [ "$$syms" -ne 0 ]; then \
 	    echo "FAIL: base binary contains $$syms web-dashboard symbol(s)"; \
-	    rm -f /tmp/abysslinkd-base; exit 1; \
-	  fi
-	@rm -f /tmp/abysslinkd-base
-	@echo "OK: base binary contains zero web-dashboard symbols"
+	    exit 1; \
+	  fi; \
+	  echo "OK: base binary contains zero web-dashboard symbols"
 
 ## check-htmx-sri: verify the SHA-384 of the vendored htmx.min.js matches the
 ## HTMXIntegrity constant in sri_const_gen.go. Until Plan 03 vendors the real
@@ -151,16 +165,17 @@ install:
 ## repro-check: build binary twice and assert byte-identical output
 repro-check:
 	@echo "=== Reproducibility check ==="
-	@mkdir -p /tmp/abysslink-repro-1 /tmp/abysslink-repro-2
-	SOURCE_DATE_EPOCH=$$(git log -1 --format='%ct') \
-	  $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o /tmp/abysslink-repro-1/abysslink ./cmd/abysslink
-	SOURCE_DATE_EPOCH=$$(git log -1 --format='%ct') \
-	  $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o /tmp/abysslink-repro-2/abysslink ./cmd/abysslink
-	@sha256sum /tmp/abysslink-repro-1/abysslink /tmp/abysslink-repro-2/abysslink
-	@diff /tmp/abysslink-repro-1/abysslink /tmp/abysslink-repro-2/abysslink \
-	  && echo "OK: byte-identical" \
-	  || (echo "FAIL: binaries differ"; exit 1)
-	@rm -rf /tmp/abysslink-repro-1 /tmp/abysslink-repro-2
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	  SOURCE_DATE_EPOCH=$$(git log -1 --format='%ct') \
+	    $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o "$$tmp/abysslink-1" ./cmd/abysslink; \
+	  SOURCE_DATE_EPOCH=$$(git log -1 --format='%ct') \
+	    $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o "$$tmp/abysslink-2" ./cmd/abysslink; \
+	  sha256sum "$$tmp/abysslink-1" "$$tmp/abysslink-2"; \
+	  if diff "$$tmp/abysslink-1" "$$tmp/abysslink-2"; then \
+	    echo "OK: byte-identical"; \
+	  else \
+	    echo "FAIL: binaries differ"; exit 1; \
+	  fi
 
 ## clean: remove build artifacts
 clean:

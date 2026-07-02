@@ -50,7 +50,7 @@ here only so you know the lay of the land:
 ## Recommendation
 
 For most users, a single well-backed-up Headscale node is the right answer: run
-`abysslink backup` and keep the SQLite database and node keys safe. If you require true
+`abysslink server headscale backup` and keep the SQLite database and node keys safe. If you require true
 HA, use a managed PostgreSQL provider with a community deployment, or wait for upstream
 Headscale to ship first-class HA support, and track the
 [Headscale roadmap](https://github.com/juanfont/headscale).

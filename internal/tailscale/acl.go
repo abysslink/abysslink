@@ -35,12 +35,17 @@ const (
 )
 
 // requiredGrantPorts is the minimal mobile→laptop port set abysslink needs:
-// SSH (22), ntfy push (2586), the tailnet content store + first-contact
-// credential pull (2587 — the BACK-06/BACK-09 HTTPS listener; without this the
-// phone is blocked at the tailnet ACL and the pull/content fetch is
-// "not reachable"), and the mosh UDP range. 2587 is config.DefaultContentStorePort;
-// a customized content_store.port would need a manual grant (ACL port derivation
-// from config is a follow-up — EnsureGrant is a no-arg interface method today).
+// SSH (22), ntfy push (2586 — config.DefaultNtfyPort), the tailnet content store
+// + first-contact credential pull (2587 — config.DefaultContentStorePort, the
+// BACK-06/BACK-09 HTTPS listener; without this the phone is blocked at the
+// tailnet ACL and the pull/content fetch is "not reachable"), and the mosh UDP
+// range.
+//
+// These ports are FIXED: EnsureGrant takes no port arguments, so the grant
+// cannot yet learn a customized ntfy/content_store port. To keep that from
+// becoming a silent phone-side ACL black hole, config.validateMobileGrantPorts
+// REJECTS a non-default modules.ntfy.port or content_store.port at load time
+// (fail-closed) until ACL port derivation from config is implemented.
 var requiredGrantPorts = []string{"tcp:22", "tcp:2586", "tcp:2587", "udp:60000-61000"}
 
 // aclDoc is the internal representation of the ACL sections abysslink manages.

@@ -229,6 +229,50 @@ func TestBudgetModule_Apply_WritesConfig(t *testing.T) {
 	assert.Contains(t, string(written), "budget:")
 }
 
+// TestBudgetModule_Apply_MergesPreservesExistingConfig is the T-31-17 regression
+// test: Apply must MERGE the budget: block into the existing abysslink.yaml, never
+// clobber it. It writes a full config (identity/tailnet) to disk, runs Apply, and
+// asserts the written bytes still carry identity/tailnet AND now carry the budget
+// block — proving a `repair --apply` can no longer brick the config.
+func TestBudgetModule_Apply_MergesPreservesExistingConfig(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "abysslink.yaml")
+
+	// A valid, budget-less config already on disk.
+	onDisk := config.Defaults()
+	onDisk.Version = 1
+	onDisk.Identity.Email = "operator@example.com"
+	onDisk.Identity.UnixUser = "operator"
+	onDisk.Tailnet.Hostname = "rig-alpha"
+	onDisk.Budget = config.BudgetConfig{} // budget block absent
+	data, err := config.Marshal(onDisk)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgFile, data, 0o600))
+
+	mockAudit := newMockAudit()
+	// The module's in-memory cfg is deliberately DIFFERENT (empty) to prove Apply
+	// merges into the authoritative on-disk config, not the in-memory one.
+	m := budget.NewWithConfigPath(modules.Deps{Cfg: zeroCfg(), Audit: mockAudit}, cfgFile)
+
+	require.NoError(t, m.Apply(context.Background()))
+
+	written, ok := mockAudit.written[cfgFile]
+	require.True(t, ok, "Apply must write the merged config")
+	got := string(written)
+	assert.Contains(t, got, "operator@example.com", "identity must survive the merge (no clobber)")
+	assert.Contains(t, got, "rig-alpha", "tailnet hostname must survive the merge")
+	assert.Contains(t, got, "budget:", "budget block must be added")
+	assert.Contains(t, got, "wall_clock_minutes: 30", "shadow-mode defaults must be applied")
+
+	// The merged output must re-load and re-validate — the pre-fix clobber
+	// produced a config that failed config.Validate with "identity.email is required".
+	merged := filepath.Join(tmpDir, "merged.yaml")
+	require.NoError(t, os.WriteFile(merged, written, 0o600))
+	_, err = config.LoadForRead(merged)
+	require.NoError(t, err, "merged config must load and validate (no clobber)")
+}
+
 // TestBudgetModule_Verify_DelegatesToDetect: Verify re-runs Detect and returns its findings.
 func TestBudgetModule_Verify_DelegatesToDetect(t *testing.T) {
 	t.Parallel()

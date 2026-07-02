@@ -17,6 +17,7 @@ package budget
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -173,24 +174,26 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	return actions, nil
 }
 
-// shadowModeDefaults is the budget: YAML block with shadow-mode defaults (D-05).
-// These values are written by Apply when the block is absent from abysslink.yaml.
-const shadowModeDefaults = `budget:
-  # wall_clock_minutes: wall-clock run limit before a threshold trip.
-  # Zero means default 30m. Floor 1m.
-  wall_clock_minutes: 30
-  # loop_n: number of identical closure-hash repeats in the sliding window
-  # that constitutes a loop. Zero means default 8. Floor 2.
-  loop_n: 8
-  # loop_window: command-count sliding window size. Zero means default 20.
-  loop_window: 20
-  # kill_grace_seconds: SIGTERM grace period before SIGKILL in the kill ladder.
-  # Zero means default 5. Floor 1, ceiling 30.
-  kill_grace_seconds: 5
-  # ladder: enables the full escalation ladder (notify → SIGSTOP → kill).
-  # Default false (shadow mode — D-05). Set true to enable SIGSTOP on threshold.
-  ladder: false
-`
+// applyShadowModeDefaults fills the budget: block with the D-05 shadow-mode
+// defaults (wall_clock_minutes:30, loop_n:8, loop_window:20, kill_grace_seconds:5),
+// fixing any out-of-bounds value and filling absent (zero) fields, while
+// PRESERVING valid operator customizations and the Ladder / TokenTiers /
+// MinimizeAgentEnv fields — a repair must never silently flip the kill ladder on
+// or wipe token-tier config. Bounds mirror config.validateBudget.
+func applyShadowModeDefaults(b *config.BudgetConfig) {
+	if b.WallClockMinutes < 1 {
+		b.WallClockMinutes = 30
+	}
+	if b.LoopN < 2 {
+		b.LoopN = 8
+	}
+	if b.LoopWindow < 5 {
+		b.LoopWindow = 20
+	}
+	if b.KillGraceSeconds < 1 || b.KillGraceSeconds > 30 {
+		b.KillGraceSeconds = 5
+	}
+}
 
 // resolveConfigPath returns the path to abysslink.yaml. It honours:
 //  1. m.configPath if explicitly set (test injection).
@@ -213,12 +216,19 @@ func (m *Module) resolveConfigPath() (string, error) {
 	return filepath.Join(home, ".config", "abysslink", "abysslink.yaml"), nil
 }
 
-// Apply writes the budget: block with shadow-mode defaults to abysslink.yaml
+// Apply MERGES the budget: block with shadow-mode defaults into abysslink.yaml
 // via audit.AuditWriter.WriteFile (never raw os.WriteFile — CLAUDE.md invariant).
+//
+// It writes the FULL config, not a budget-only document: an overwrite of only
+// the budget block would clobber identity/tailnet/rigs/modules, fail
+// config.Validate ("identity.email is required"), and brick every subsequent
+// command until the .bak is restored (T-31-17). The base config is the current
+// on-disk abysslink.yaml when present (authoritative), falling back to the
+// module's in-memory config only when the file does not exist yet.
 //
 // THREAT: T-31-17 — the write is recorded in the audit chain; the audit writer
 // creates a backup and appends an entry before writing.
-func (m *Module) Apply(ctx context.Context) error {
+func (m *Module) Apply(_ context.Context) error {
 	if m.audit == nil {
 		return fmt.Errorf("budget apply: audit writer is nil")
 	}
@@ -233,15 +243,53 @@ func (m *Module) Apply(ctx context.Context) error {
 		return fmt.Errorf("budget apply: mkdir %s: %w", filepath.Dir(cfgPath), err)
 	}
 
-	slog.Info("budget apply: writing budget: block to config", "path", cfgPath)
+	base, err := m.loadBaseConfig(cfgPath)
+	if err != nil {
+		return err
+	}
+	applyShadowModeDefaults(&base.Budget)
+
+	data, err := config.Marshal(base)
+	if err != nil {
+		return fmt.Errorf("budget apply: marshal merged config: %w", err)
+	}
+
+	slog.Info("budget apply: merging budget: block into config", "path", cfgPath)
 
 	// WriteFile records the mutation in the audit chain AND writes atomically.
 	// This satisfies T-31-17 and the CLAUDE.md invariant (no direct os.WriteFile).
-	if err := m.audit.WriteFile(cfgPath, []byte(shadowModeDefaults), 0o600, false); err != nil {
+	if err := m.audit.WriteFile(cfgPath, data, 0o600, false); err != nil {
 		return fmt.Errorf("budget apply: write config: %w", err)
 	}
 
 	return nil
+}
+
+// loadBaseConfig returns the config to merge the budget block into. It NEVER
+// returns a budget-only document — that would clobber the user's abysslink.yaml.
+// Resolution order:
+//  1. the on-disk config at cfgPath (authoritative — preserves everything),
+//  2. on a pure validation error, the parsed-but-invalid config is still used
+//     as the merge base (a validation failure must not become a data-loss event),
+//  3. when the file does not exist yet, the module's in-memory config (which in
+//     the real flow was loaded from that same path),
+//  4. a genuine read failure (permissions/IO) fails closed rather than clobber.
+func (m *Module) loadBaseConfig(cfgPath string) (*config.Config, error) {
+	onDisk, err := config.LoadForRead(cfgPath)
+	switch {
+	case err == nil:
+		return onDisk, nil
+	case onDisk != nil:
+		slog.Warn("budget apply: on-disk config failed validation; merging budget block into it anyway", "err", err)
+		return onDisk, nil
+	case errors.Is(err, os.ErrNotExist):
+		if m.cfg == nil {
+			return config.Defaults(), nil
+		}
+		return m.cfg, nil
+	default:
+		return nil, fmt.Errorf("budget apply: load existing config (refusing to clobber): %w", err)
+	}
 }
 
 // Verify re-runs Detect and returns its findings.

@@ -33,7 +33,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read       # checkout only; no write access
+      # goreleaser runs `release` here: it must CREATE the draft GitHub release
+      # and upload the dist assets (v3.0.0 failed with "403 Resource not
+      # accessible by integration" under contents: read). The draft is only
+      # flipped public by release.yml's `publish` job after sign + verify pass.
+      contents: write
       id-token: write      # OIDC for keyless Sigstore provenance signing (L3)
       attestations: write  # publish the SLSA build provenance attestation (L3)
     outputs:
@@ -46,12 +50,33 @@ jobs:
           # Build endpoints + Sigstore endpoints required for keyless
           # provenance signing (fulcio cert issuance, rekor transparency log,
           # tuf trust-root refresh).
+          # go.dev / dl.google.com / storage.googleapis.com / codeload /
+          # release-assets.githubusercontent.com are required by setup-go's
+          # toolchain download (same set repro-check.yml uses) — their absence
+          # killed the v3.0.1/v3.0.2 releases at "Set up Go" (ECONNREFUSED).
+          # uploads.github.com: goreleaser POSTs release assets there (not
+          # api.github.com). aur.archlinux.org:22: the AUR publisher pushes the
+          # PKGBUILD over SSH when AUR_SSH_PRIVATE_KEY is provisioned.
+          # raw.githubusercontent.com / get.anchore.io / toolbox-data.anchore.io:
+          # the "Install Syft" step (anchore/sbom-action/download-syft) fetches
+          # the install script + binary from these (same set grype.yml uses).
           allowed-endpoints: >
             api.github.com:443
+            uploads.github.com:443
+            codeload.github.com:443
+            raw.githubusercontent.com:443
+            get.anchore.io:443
+            toolbox-data.anchore.io:443
             proxy.golang.org:443
             sum.golang.org:443
             objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
             github.com:443
+            goreleaser.com:443
+            go.dev:443
+            dl.google.com:443
+            storage.googleapis.com:443
+            aur.archlinux.org:22
             fulcio.sigstore.dev:443
             rekor.sigstore.dev:443
             tuf-repo-cdn.sigstore.dev:443
@@ -78,6 +103,12 @@ jobs:
           args: release --clean --skip=sign
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional publishing credentials for the Homebrew tap and AUR.
+          # If the secrets are not provisioned these resolve to "" and
+          # .goreleaser.yaml's skip_upload guards skip those publishers —
+          # the release itself still succeeds (see LAUNCH.md §Pre-steps).
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
       - name: Extract version tag
         id: meta

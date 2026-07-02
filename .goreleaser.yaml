@@ -169,7 +169,10 @@ nfpms:
 
 # NOTE: The abysslink/homebrew-tap GitHub repo and the HOMEBREW_TAP_GITHUB_TOKEN secret
 # must be provisioned by an operator before tagging a release (see LAUNCH.md §Pre-steps).
-# skip_upload prevents publishing on snapshot builds.
+# skip_upload prevents publishing on snapshot builds AND when the tap token is
+# absent/empty (index .Env never errors on an unset var), so a release can
+# succeed before the tap is provisioned — cask publishing lights up
+# automatically once the secret exists.
 homebrew_casks:
   - name: abysslink
     ids:
@@ -192,7 +195,11 @@ homebrew_casks:
               args: ["-dr", "com.apple.quarantine", "#{staged_path}/abysslinkd"]
           end
     generate_completions_from_executable:
-      executable: "bin/abysslink"
+      # The default archive stages binaries at the archive ROOT (no bin/ dir and
+      # no wrap_in_directory), matching the quarantine hook's "#{staged_path}/abysslink".
+      # A "bin/abysslink" path here makes Homebrew's completion generation ENOENT
+      # and silently ship no completions.
+      executable: "abysslink"
       args:
         - completion
       shell_parameter_format: cobra
@@ -204,14 +211,16 @@ homebrew_casks:
       owner: abysslink
       name: homebrew-tap
       branch: main
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+      token: '{{ index .Env "HOMEBREW_TAP_GITHUB_TOKEN" }}'
     commit_author:
       name: goreleaserbot
       email: hello@abysslink.dev
-    skip_upload: "{{ .IsSnapshot }}"
+    skip_upload: '{{ or .IsSnapshot (eq (index .Env "HOMEBREW_TAP_GITHUB_TOKEN") "") }}'
 
 # NOTE: The AUR abysslink-bin package and AUR_SSH_PRIVATE_KEY secret must be provisioned
 # by an operator before tagging a release (see LAUNCH.md §Pre-steps).
+# Same graceful-skip contract as homebrew_casks above: missing/empty key ⇒
+# skip_upload, release still succeeds.
 aurs:
   - name: abysslink-bin
     ids:
@@ -222,8 +231,8 @@ aurs:
     maintainers:
       - "Abysslink Contributors <hello at abysslink dot dev>"
     license: Apache-2.0
-    git_url: "ssh://[email protected]/abysslink-bin.git"
-    private_key: "{{ .Env.AUR_SSH_PRIVATE_KEY }}"
+    git_url: "ssh://aur@aur.archlinux.org/abysslink-bin.git"
+    private_key: '{{ index .Env "AUR_SSH_PRIVATE_KEY" }}'
     provides:
       - abysslink
     conflicts:
@@ -241,7 +250,7 @@ aurs:
     commit_author:
       name: goreleaserbot
       email: hello@abysslink.dev
-    skip_upload: "{{ .IsSnapshot }}"
+    skip_upload: '{{ or .IsSnapshot (eq (index .Env "AUR_SSH_PRIVATE_KEY") "") }}'
 
 changelog:
   sort: asc
