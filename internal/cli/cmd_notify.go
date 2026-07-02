@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -199,10 +200,27 @@ func runNotifySend(ctx context.Context, c *cobra.Command, cc *cmdContext, deps m
 
 // claudeHookInput is the subset of the Claude Code Notification hook stdin JSON
 // we consume. Claude Code passes the human-readable reason in `message`
-// (e.g. "Claude needs your permission to use Bash", or a select/choice prompt).
+// (e.g. "Claude needs your permission to use Bash", or a select/choice prompt)
+// and the session's working directory in `cwd` (used to name the project).
 type claudeHookInput struct {
 	Message       string `json:"message"`
 	HookEventName string `json:"hook_event_name"`
+	Cwd           string `json:"cwd"`
+}
+
+// projectName returns the folder name of a Claude session's cwd (e.g.
+// "/Users/me/dev/abysslink" -> "abysslink"), so a push can name which project
+// needs you when several Claude sessions run at once. Empty for an unusable cwd.
+func projectName(cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return ""
+	}
+	base := filepath.Base(filepath.Clean(cwd))
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return ""
+	}
+	return base
 }
 
 // runNotifyClaudeHook reads a Claude Code Notification hook payload from stdin
@@ -221,6 +239,11 @@ func runNotifyClaudeHook(ctx context.Context, nm *notifymod.Module, f notifyFlag
 		var in claudeHookInput
 		_ = json.Unmarshal(raw, &in) // best-effort; empty/garbled → generic below
 		title, body, prio = classifyClaudeNotification(in.Message)
+		// Prefix the project (cwd folder) so a push names WHICH Claude session
+		// needs you when several run at once: "abysslink · Claude needs approval".
+		if proj := projectName(in.Cwd); proj != "" {
+			title = proj + " · " + title
+		}
 	}
 	// An explicit --priority wins; otherwise use the type-derived urgency.
 	if f.priority != "" {

@@ -933,3 +933,14 @@ func TestClassifyClaudeNotification(t *testing.T) {
 	_, _, prio := classifyClaudeNotification("Claude needs your permission to run rm -rf")
 	assert.Equal(t, "max", prio, "approval prompts must be max priority")
 }
+
+// TestProjectName covers naming the Claude session by its cwd folder so a push
+// tells you WHICH project needs you.
+func TestProjectName(t *testing.T) {
+	assert.Equal(t, "abysslink", projectName("/Users/me/dev/abysslink"))
+	assert.Equal(t, "abysslink", projectName("/Users/me/dev/abysslink/"))
+	assert.Equal(t, "myapp", projectName("myapp"))
+	assert.Equal(t, "", projectName(""))
+	assert.Equal(t, "", projectName("/"))
+	assert.Equal(t, "", projectName("   "))
+}
