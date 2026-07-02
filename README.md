@@ -1,11 +1,13 @@
 <div align="center">
 
+<img src="logos/abysslink.png" alt="Abysslink logo" width="140">
+
 # Abysslink
 
 ### Across the abyss. Linked.
 
 **Vibe-code from your phone — securely.**
-*Drive Claude Code, Cursor, Aider, Codex, or any AI coding agent on your laptop straight from your phone — over hardened SSH on a private mesh VPN, audited and reversible by default. Kick off an agent, get a push the second it needs you, tap back in, type the next instruction. (Also rock-solid as plain secure SSH to your own box.) One static Go binary, macOS + Linux.*
+*Drive Claude Code, Cursor, Aider, Codex, or any AI coding agent on your laptop straight from your phone — over hardened SSH on a private mesh VPN, audited and reversible by default. Kick off an agent, get a push the second it needs you, tap back in, type the next instruction. (Also rock-solid as plain secure SSH to your own box.) A single static Go binary plus an optional daemon, macOS + Linux.*
 
 [![CI](https://img.shields.io/github/actions/workflow/status/abysslink/abysslink/test.yml?branch=main&label=ci&logo=github)](https://github.com/abysslink/abysslink/actions/workflows/test.yml)
 [![Security](https://img.shields.io/github/actions/workflow/status/abysslink/abysslink/security.yml?branch=main&label=security&logo=github)](https://github.com/abysslink/abysslink/actions/workflows/security.yml)
@@ -28,7 +30,7 @@ Abysslink converges your laptop into a remote-access rig you can safely drive fr
 
 **Built for vibe coders first.** Start an AI agent on a real machine, then step away from the desk — Abysslink keeps you in the loop from your phone: a push the second the agent stops or needs input, a tap back into the *live* `tmux` session, type the next instruction, repeat. No copy-pasting terminal output into a chat bot; you're in the actual shell. And because it's hardened SSH underneath, it doubles as a rock-solid secure remote shell to your own box — without exposing it to the public internet or handing your keystrokes to a third party.
 
-One static Go binary. macOS + Linux. Apache-2.0.
+One small static Go binary (plus an optional daemon for the real-time features). macOS + Linux. Apache-2.0.
 
 > [!NOTE]
 > **Agent-agnostic by design.** "Vibe-code Claude from your phone" is the headline demo, but Claude Code is just **one opt-in consumer** of a generic `notify`/`watch` core. Swap in Cursor, Aider, Codex, a `make deploy`, a long test run — or nothing at all, and use Abysslink as plain hardened SSH. There is zero agent-specific logic in the networking, SSH, or notification layers.
@@ -37,7 +39,9 @@ One static Go binary. macOS + Linux. Apache-2.0.
 
 ## Table of contents
 
+- [What using it feels like](#what-using-it-feels-like)
 - [Why this exists](#why-this-exists)
+- [How it compares](#how-it-compares)
 - [Features](#features)
   - [Networking & access](#networking--access)
   - [Session resilience](#session-resilience)
@@ -60,6 +64,22 @@ One static Go binary. macOS + Linux. Apache-2.0.
 - [Roadmap](#roadmap)
 - [License](#license)
 - [Acknowledgments](#acknowledgments)
+
+---
+
+## What using it feels like
+
+You don't need to know what a "mesh VPN" is to understand the experience:
+
+1. **Evening.** You start an AI coding agent on your laptop and leave the desk. The laptop stays home; nothing about it is exposed to the internet.
+2. **Later, on the couch (or the bus).** Your phone buzzes: *"rig-1 · claude · pane %3 needs input."* Not a marketing notification — the agent actually stopped and is waiting for you.
+3. **One tap.** Your phone's terminal app opens *the exact live session* on your laptop — same screen, same scrollback, cursor where the agent left it. You read what it did, type the next instruction, pocket the phone.
+4. **If the agent goes off the rails**, one command armed it earlier with a kill-switch: your phone can freeze it mid-keystroke and roll the code back to the snapshot taken before it started.
+5. **Any morning.** `abysslink doctor` re-verifies the whole setup and *refuses to pass* if something drifted into an unsafe state. Every change the tool ever made is backed up, logged, and reversible — `abysslink uninstall` puts everything back.
+
+Under the hood that's Tailscale (a private encrypted network between just your devices), hardened SSH (the remote-terminal protocol, locked down), tmux (sessions that survive disconnects), mosh (a connection that survives wifi↔cell hops), and ntfy (push notifications served from your own laptop). Abysslink's job is wiring all of that together *correctly* — the secure-by-default way that takes a weekend and a dozen footguns to get right by hand — in about ten minutes.
+
+**No cloud in the middle. No company reading your code. Nothing to subscribe to.**
 
 ---
 
@@ -87,6 +107,25 @@ Most "control my laptop from my phone" setups fail in one of three ways. Abyssli
 </table>
 
 The mesh-VPN model means **your phone and laptop talk directly to each other.** The coordination server (Tailscale, or a self-hosted Headscale / NetBird control plane) exchanges public keys only — it never sees your traffic, commands, or output. If it went offline, your devices keep talking.
+
+---
+
+## How it compares
+
+Named alternatives, honestly. Several of these are excellent — they just make a different trade.
+
+| | Where the agent runs | Who sits in the data path | Real terminal into *your* machine | Agent-agnostic | Setup it does for you |
+|---|---|---|---|---|---|
+| **Abysslink** | Your laptop | **Nobody** — direct WireGuard peer-to-peer | ✅ (SSH + tmux + mosh) | ✅ any agent, or no agent | VPN + ACLs + SSH hardening + push + audit/undo + health checks |
+| **Claude Code web / mobile app** (Anthropic) | Anthropic's cloud sandboxes | Anthropic | ❌ (cloud VM, GitHub-connected repos) | ❌ Claude only | Nothing to set up — that's the appeal and the trade |
+| **Claude Code Channels** (Anthropic) | Your laptop | Telegram / Discord / iMessage + Anthropic | ❌ (chat bridge, not a shell) | ❌ Claude only | Minimal |
+| **Happy** (slopus/happy) | Your laptop | An E2E-encrypted relay server | ❌ (wraps the agent's UI; not a general shell) | Claude + Codex | Its own app + relay; no host hardening |
+| **Omnara** | Your laptop | Their servers (SaaS) | ❌ | Claude + Codex | SaaS onboarding; OSS repo archived Feb 2026 |
+| **OpenClaw** | Your laptop/server | Your messaging apps (WhatsApp/Telegram/…) | ❌ (messaging-first) | ✅ many | Huge surface area — the opposite philosophy: maximal plugins vs. minimal audited core |
+| **Blink / Termius / Moshi alone** | — (they're terminal clients) | Depends on your setup | ✅ *if* you build the server side yourself | ✅ | None — they're the phone half; Abysslink is the laptop half (and orchestrates them) |
+| **Tailscale SSH + a weekend of scripts** | Your laptop | Nobody | ✅ | ✅ | This *is* the DIY version of Abysslink — minus hardened defaults, ACL least-privilege, deny-all push, backups, audit log, revocation, doctor, and undo |
+
+If you want zero setup and don't mind your code in a vendor cloud: use Anthropic's official apps — they're good. Abysslink is for when the code, the secrets, and the machine have to stay yours.
 
 ---
 
@@ -127,7 +166,9 @@ The mesh-VPN model means **your phone and laptop talk directly to each other.** 
 - **Sandboxed where the OS allows it** — Linux Landlock confines filesystem access for sensitive operations.
 - **Per-device, revocable credentials** — `abysslink enroll phone` mints a per-device push token, a bearer credential, and a short-lived **SSH certificate** from an in-process CA (keys in the OS keychain). When the daemon is reachable it stages the bundle and prints one single-use QR your phone scans to pull every credential over the tailnet (no key hand-copying); the one-time secret box still prints as the source of truth, and `--qr` is the offline per-credential fallback. `abysslink panic` and `abysslink device revoke` revoke them atomically — the daemon stops honouring the bearer immediately and `sshd` rejects the revoked certificate (via an auto-installed CA-trust + revocation list). Device `last_seen` is tracked and stale devices are flagged.
 - **Emergency kill switch** — `abysslink panic` tears down the VPN session, revokes the phone's auth key, and destroys the local API key in seconds, with **no confirmation prompt**.
-- **Agent Apoptosis** — `abysslink arm -- claude` wraps an AI agent with a wall-clock and loop-budget monitor. When a threshold trips, the ladder fires from your phone: SIGSTOP → approve/kill dialog → optional rollback to the pre-arm git snapshot. Freeze a runaway AI agent from your pocket without touching the laptop.
+- **Agent Apoptosis** — `abysslink arm -- claude` wraps an AI agent with a wall-clock and loop-budget monitor, a pre-run git snapshot, and an asciinema flight recorder. It ships in **shadow mode** (observe + notify only); with `budget.ladder: true` a tripped threshold fires the full ladder from your phone: SIGSTOP → approve/kill dialog → optional rollback to the pre-arm snapshot. Freeze a runaway AI agent from your pocket without touching the laptop.
+- **Phone approve loop (opt-in)** — with `gate.enforcing: true`, risky agent actions block until you tap **Approve** or **Deny** on your phone (signed, single-use, audit-logged requests; a timeout falls back to the terminal prompt — it never auto-approves).
+- **Dead-man switch (opt-in)** — `abysslink deadman enable --apply` arms a daemon-hosted no-contact timer: if you don't heartbeat for N hours, armed agent runs are disarmed and autonomy is revoked, with everything audit-logged.
 
 ---
 
@@ -175,7 +216,7 @@ inputs.abysslink.url = "github:abysslink/abysslink";
 Download a release tarball (`abysslink_<version>_<os>_<arch>.tar.gz`, containing both `abysslink` and `abysslinkd`) from [Releases](https://github.com/abysslink/abysslink/releases) and verify before use. Each release ships one signed checksum manifest — verify the cosign signature on the manifest, then your tarball's SHA-256 against it:
 
 ```bash
-VERSION=v3.0.0   # the release you downloaded
+VERSION=vX.Y.Z   # the release you downloaded — use the latest from the Releases page
 
 # Download the checksum manifest and its cosign v3 bundle
 curl -fsSL "https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt"        -o checksums.txt
@@ -421,8 +462,8 @@ See [who-sees-what](docs/who-sees-what.md) for a per-push-path data visibility b
 
 | Version | Supported |
 |---|---|
-| `v1.x` | ✅ |
-| `< v1.0` | ❌ |
+| Latest minor release line (see [Releases](https://github.com/abysslink/abysslink/releases)) | ✅ |
+| Older majors | ❌ |
 
 Report vulnerabilities **privately** per **[SECURITY.md](SECURITY.md)** — do not open a public issue. 90-day coordinated disclosure; CVE coordination available. Full threat model and hardening guide: **[docs/security.md](docs/security.md)**.
 
@@ -498,7 +539,9 @@ flowchart LR
 | [docs/cli-reference.md](docs/cli-reference.md) | Every command and global flag. |
 | [docs/configuration.md](docs/configuration.md) | Full `abysslink.yaml` schema and defaults. |
 | [docs/security.md](docs/security.md) | Threat model, defense-in-depth, hardening. |
-| [docs/modules/](docs/modules/) | Per-module docs (tailscale, ssh, tmux, mosh, ntfy, watch, claudecode). |
+| [docs/agent-safety.md](docs/agent-safety.md) | The `arm` kill-switch, phone approve loop, dead-man switch, panic, device credentials. |
+| [docs/push-notifications.md](docs/push-notifications.md) | How push works: opaque wake, tailnet content fetch, UnifiedPush/APNs/FCM paths. |
+| [docs/modules/](docs/modules/) | Per-module docs (tailscale, ssh, tmux, mosh, ntfy, watch, claudecode, code-server, ttyd, …). |
 | [docs/operations/faq.md](docs/operations/faq.md) | Frequently asked questions. |
 | [docs/operations/troubleshooting.md](docs/operations/troubleshooting.md) | When something won't converge. |
 | [docs/headscale-ha.md](docs/headscale-ha.md) · [docs/netbird-scim.md](docs/netbird-scim.md) | Self-hosted control-plane operations. |
@@ -528,8 +571,12 @@ make conformance        # behavioural conformance suite against a built binary
 - [x] Tamper-evident, signed audit log + reversible mutations
 - [x] Fleet / multi-rig fan-out + Wake-on-LAN
 - [x] Read-only web dashboard + Prometheus metrics (opt-in)
+- [x] Per-device revocable credentials (SSH CA + KRL) & one-scan phone enrollment
+- [x] Agent safety: `arm` kill-switch, phone approve loop, dead-man switch
+- [x] Push gateway with sovereign UnifiedPush path (direct APNs/FCM legs experimental, off by default)
 - [ ] Hosted documentation site
-- [ ] Additional notification backends beyond ntfy
+- [ ] Secure memory & audit HMAC-key rotation
+- [ ] Hardware-backed keys (Secure Enclave / FIDO2, opt-in)
 - [ ] Windows (WSL) tier-2 support
 
 ---
