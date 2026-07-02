@@ -203,13 +203,15 @@ func TestApplyDockerBindsTailnetIPOnly(t *testing.T) {
 	//      Self.DNSName — NET-19: the hostname is now parsed structurally,
 	//      not by string-matching the first "DNSName" line)
 	//   2. docker pull
-	//   3. docker rm -f
-	//   4. docker run -d ... (the call under test)
-	//   5. ensureAdminUserDocker → docker exec -i ... (RunWithStdin)
+	//   3. freeHostPort → docker rm -f
+	//   4. freeHostPort → docker ps --filter publish (empty: no holders → run now)
+	//   5. docker run -d ... (the call under test)
+	//   6. ensureAdminUserDocker → docker exec -i ... (RunWithStdin)
 	r := shell.NewMockRunner(
 		shell.Call{Result: shell.Result{Stdout: `{"Self":{"DNSName":"rig.example.ts.net."}}`, ExitCode: 0}},
 		shell.Call{Result: shell.Result{ExitCode: 0}},
 		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{Stdout: "", ExitCode: 0}},
 		shell.Call{Result: shell.Result{ExitCode: 0}},
 		shell.Call{Result: shell.Result{ExitCode: 0}},
 	)
@@ -627,4 +629,75 @@ func TestTeardown_ContainerAbsentIsNoop(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, items)
 	assert.Len(t, r.RunCalls(), 2, "must not attempt docker rm when the container is absent")
+}
+
+// TestDockerRunWithPortRetry_RecoversFromBusyPort asserts the macOS Docker
+// Desktop port-forwarder race is ridden out: a first `docker run` that fails
+// with "address already in use" is retried after a re-sweep, and the second
+// run succeeds. This is the fix for the user-reported HTTP 500 "ports are not
+// available … bind: address already in use" on the tailnet IP:port.
+func TestDockerRunWithPortRetry_RecoversFromBusyPort(t *testing.T) {
+	r := shell.NewMockRunner(
+		// attempt 1: docker run → busy port
+		shell.Call{Result: shell.Result{ExitCode: 125, Stderr: "docker: Error response from daemon: ports are not available: exposing port TCP 100.71.14.55:2586 -> 127.0.0.1:0: listen tcp4 100.71.14.55:2586: bind: address already in use."}},
+		// freeHostPort re-sweep: docker rm -f, then docker ps (no holders)
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: ""}},
+		// attempt 2: docker run → success
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	res, err := m.dockerRunWithPortRetry(context.Background(), "100.71.14.55", "2586",
+		[]string{"run", "-d", "--name", dockerContainerName})
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.ExitCode, "run should succeed on retry after the port frees")
+
+	// Two `docker run` attempts must have been made.
+	var runs int
+	for _, c := range r.RunCalls() {
+		if len(c) >= 2 && c[0] == "docker" && c[1] == "run" {
+			runs++
+		}
+	}
+	assert.Equal(t, 2, runs, "must retry the run exactly once after a busy-port failure")
+}
+
+// TestFreeHostPort_SweepsOrphanOnMatchingBind asserts freeHostPort removes an
+// orphan container publishing the exact tailnet IP:port (left from a previous
+// IP), but never a container binding the same port number on a different host.
+func TestFreeHostPort_SweepsOrphanOnMatchingBind(t *testing.T) {
+	r := shell.NewMockRunner(
+		// docker rm -f abysslink-ntfy
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+		// docker ps --filter publish=2586 → one orphan on our IP, one elsewhere
+		shell.Call{Result: shell.Result{ExitCode: 0, Stdout: "orphanID 100.71.14.55:2586->80/tcp\notherID 127.0.0.1:2586->80/tcp"}},
+		// docker rm -f orphanID
+		shell.Call{Result: shell.Result{ExitCode: 0}},
+	)
+	m := New(modules.Deps{Cfg: config.Defaults(), Runner: r, Platform: &testPlatform{}})
+
+	m.freeHostPort(context.Background(), "100.71.14.55", "2586")
+
+	var removed []string
+	for _, c := range r.RunCalls() {
+		if len(c) >= 3 && c[0] == "docker" && c[1] == "rm" && c[2] == "-f" {
+			removed = append(removed, c[len(c)-1])
+		}
+	}
+	assert.Contains(t, removed, dockerContainerName, "must remove our own container")
+	assert.Contains(t, removed, "orphanID", "must remove the orphan bound to our tailnet IP:port")
+	assert.NotContains(t, removed, "otherID", "must NOT remove a container binding the port on a different host IP")
+}
+
+func TestIsPortInUse(t *testing.T) {
+	for _, s := range []string{
+		"listen tcp4 100.71.14.55:2586: bind: address already in use",
+		"Bind for 0.0.0.0:2586 failed: port is already allocated",
+		"ports are not available: exposing port TCP 100.71.14.55:2586",
+	} {
+		assert.True(t, isPortInUse(s), "should detect busy port: %q", s)
+	}
+	assert.False(t, isPortInUse("no such image"), "unrelated error must not be a port conflict")
+	assert.False(t, isPortInUse(""), "empty stderr is not a port conflict")
 }
