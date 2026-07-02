@@ -37,6 +37,7 @@ Abysslink reads `~/.config/abysslink/abysslink.yaml` (override with `--config`, 
 | `tmux.enabled` / `tmux.session` | bool / string | `true` / `main` | |
 | `mosh.enabled` | bool | `true` | |
 | `notify.enabled` / `notify.default_topic` | bool / string | `true` / `rig` | |
+| `notify.click_url` | string | `""` | URL a notification opens on tap (ntfy `X-Click`). Set to an `ssh://` deep link matching your saved terminal-app host (e.g. `ssh://me@rig.tailnet-name.ts.net`) so tapping connects with saved creds instead of a new connection. Empty → daemon composes `ssh://<user>@<short-hostname>`. |
 | `ntfy.enabled` / `ntfy.port` | bool / int | `true` / `2586` | Binds to the tailnet IP only. |
 | `watch.enabled` / `watch.panes` | bool / list | `true` / `[main]` | Plus `files:` and `http:` watchers — see below. |
 | `code_server`, `ttyd`, `eternal_terminal`, `syncthing`, `upsnap`, `atuin`, `sandbox`, `asciinema` | bool | `false` | Optional modules (`enabled: true`). |

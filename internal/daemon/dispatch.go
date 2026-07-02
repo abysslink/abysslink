@@ -130,10 +130,17 @@ func newDispatcher(n Notifier, cfg *config.Config) *dispatcher {
 		cooldown = time.Duration(cfg.SessionRegistry.CooldownSecs) * time.Second
 	}
 	host := notifyv2.ShortHostname()
+	// An operator-set click_url (an ssh:// deep link matching their saved
+	// terminal-app host) overrides the composed short-hostname link so tapping
+	// a notification connects with saved credentials instead of a new session.
+	clickURL := composeClickURL(host)
+	if cfg != nil && cfg.Modules.Notify.ClickURL != "" {
+		clickURL = cfg.Modules.Notify.ClickURL
+	}
 	return &dispatcher{
 		notifier:    n,
 		now:         time.Now,
-		clickURL:    composeClickURL(host),
+		clickURL:    clickURL,
 		hostname:    host,
 		cooldownDur: cooldown,
 		retryBase:   retryBaseDefault,

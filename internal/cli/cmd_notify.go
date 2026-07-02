@@ -141,7 +141,7 @@ func runNotifyCmd(c *cobra.Command, args []string) error {
 	// shows WHAT Claude wants — including a permission or select-option prompt —
 	// instead of one hardcoded "Claude needs you". Takes no positional args.
 	if claudeHook, _ := c.Flags().GetBool("claude-hook"); claudeHook {
-		return runNotifyClaudeHook(ctx, nm, f)
+		return runNotifyClaudeHook(ctx, nm, f, cc.cfg.Modules.Notify.ClickURL)
 	}
 
 	// D-32: wrap mode — everything after `--` is exec'd with inherited
@@ -232,7 +232,7 @@ func projectName(cwd string) string {
 //
 // A hook must never hard-fail Claude Code, so every error degrades to the
 // generic push rather than returning non-zero.
-func runNotifyClaudeHook(ctx context.Context, nm *notifymod.Module, f notifyFlags) error {
+func runNotifyClaudeHook(ctx context.Context, nm *notifymod.Module, f notifyFlags, clickURL string) error {
 	raw, err := io.ReadAll(os.Stdin)
 	title, body, prio, tag := "Claude needs you", "waiting for input", "high", "bell"
 	if err == nil {
@@ -256,6 +256,9 @@ func runNotifyClaudeHook(ctx context.Context, nm *notifymod.Module, f notifyFlag
 		Priority: prio,
 		Tags:     tag,
 		Topic:    f.topic,
+		// Tapping the push opens this URL (e.g. ssh://me@rig.ts.net) in the
+		// terminal app; matched to a saved host it connects with saved creds.
+		Click: clickURL,
 	})
 }
 
