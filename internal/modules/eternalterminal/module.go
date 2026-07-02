@@ -113,10 +113,14 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		slog.Debug("etserver version", "output", strings.TrimSpace(res.Stdout))
 	}
 
-	// Check whether the service unit is installed for this platform.
+	// Check whether the service unit is installed for this platform. When the
+	// unit exists, additionally verify it pins the tailnet IP (--bindip) — a
+	// unit that predates the bind fix would leave etserver on 0.0.0.0 (NET-10).
 	serviceUnitFinding := m.detectServiceUnit(ctx)
 	if serviceUnitFinding != nil {
 		findings = append(findings, *serviceUnitFinding)
+	} else if bindFinding := m.detectBindRestriction(); bindFinding != nil {
+		findings = append(findings, *bindFinding)
 	}
 
 	return findings, nil
@@ -156,6 +160,34 @@ func (m *Module) detectServiceUnit(_ context.Context) *modules.Finding {
 	return nil
 }
 
+// detectBindRestriction inspects the installed etserver service unit and warns
+// when it does NOT pin a bind address (--bindip). etserver's default is to
+// listen on 0.0.0.0 (all interfaces), reachable from any LAN the laptop joins,
+// outside the tailnet ACL — a violation of the tailnet-IP-only listener
+// invariant. Mirrors ttyd's NET-10 missing-`-i` check. Returns nil when the
+// unit pins a bind address or cannot be read (existence is handled by
+// detectServiceUnit, which runs first).
+func (m *Module) detectBindRestriction() *modules.Finding {
+	unitPath, err := etServiceUnitPath(runtime.GOOS)
+	if err != nil || unitPath == "" {
+		return nil // path/platform issues already surfaced by detectServiceUnit
+	}
+	data, err := os.ReadFile(unitPath) //nolint:gosec // G304: unit path derives from the fixed service label, not user input
+	if err != nil {
+		return nil // existence already handled by detectServiceUnit
+	}
+	if strings.Contains(string(data), "--bindip") {
+		return nil
+	}
+	return &modules.Finding{
+		Module:   m.Name(),
+		Check:    "et_bind_address",
+		Severity: modules.SeverityWarning,
+		Message: fmt.Sprintf("etserver service unit (%s) does not pin a bind address (--bindip) — etserver may listen on all interfaces (0.0.0.0), "+
+			"reachable outside the tailnet; run `abysslink repair --apply` to rebind etserver to the tailnet IP", etServiceLabel),
+	}
+}
+
 // Plan computes the actions needed to reach the desired state.
 func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 	if !m.cfg.Modules.EternalTerminal.Enabled {
@@ -186,6 +218,12 @@ func (m *Module) Plan(ctx context.Context, _ bool) ([]modules.Action, error) {
 			actions = append(actions, modules.Action{
 				Module:      m.Name(),
 				Description: "install etserver service unit (systemd or launchd)",
+				Reversible:  true,
+			})
+		case "et_bind_address":
+			actions = append(actions, modules.Action{
+				Module:      m.Name(),
+				Description: "reinstall etserver service unit with --bindip <tailnetIP> (was listening on all interfaces)",
 				Reversible:  true,
 			})
 		}
@@ -220,15 +258,26 @@ func (m *Module) Apply(ctx context.Context) error {
 		}
 	}
 
+	// Pin etserver to the tailnet IP. etserver's --bindip defaults to empty =
+	// listen on ALL interfaces (0.0.0.0), which would expose tcp/2022 to any LAN
+	// the laptop joins, outside the tailnet ACL — a violation of the tailnet-IP-
+	// only listener invariant. Resolve the tailnet IP first and fail closed if it
+	// is unavailable rather than install a wildcard-bound service (mirrors the
+	// syncthing / code-server bind pattern).
+	ip, err := modules.TailnetIP(ctx, m.runner)
+	if err != nil {
+		return fmt.Errorf("eternal-terminal apply: resolve tailnet IP for etserver bind (refusing to bind all interfaces): %w", err)
+	}
+
 	if err := m.plat.ServiceInstall(ctx, platform.ServiceSpec{
 		Label:     etServiceLabel,
-		Args:      []string{"etserver", "--port", "2022"},
+		Args:      []string{"etserver", "--port", "2022", "--bindip", ip},
 		KeepAlive: true,
 		RunAtLoad: true,
 	}); err != nil {
 		return fmt.Errorf("eternal-terminal apply: install service: %w", err)
 	}
-	slog.Info("eternal-terminal apply: etserver installed on tcp/2022 (grant " + etACLPort + " in the tailnet ACL)")
+	slog.Info("eternal-terminal apply: etserver installed on " + ip + ":2022 (grant " + etACLPort + " in the tailnet ACL)")
 	return nil
 }
 

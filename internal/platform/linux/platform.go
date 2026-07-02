@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/abysslink/abysslink/internal/platform"
@@ -142,28 +143,76 @@ type lsblkOutput struct {
 
 // lsblkDevice represents a single block device entry in lsblk JSON output.
 type lsblkDevice struct {
-	Name     string        `json:"name"`
-	Type     string        `json:"type"`
-	Children []lsblkDevice `json:"children"`
+	Name       string        `json:"name"`
+	Type       string        `json:"type"`
+	MountPoint string        `json:"mountpoint"`
+	Children   []lsblkDevice `json:"children"`
 }
 
-// hasCryptDevice recursively scans a device tree for TYPE=crypt entries.
-func hasCryptDevice(devices []lsblkDevice) bool {
+// diskMountMatch tracks the deepest mountpoint covering the target path seen so
+// far and whether that device's chain contains a crypt (LUKS) ancestor.
+type diskMountMatch struct {
+	found      bool
+	mountpoint string
+	crypt      bool
+}
+
+// cryptCoversPath reports whether the filesystem that actually hosts target —
+// the device with the LONGEST (deepest) mountpoint that is an ancestor of
+// target — has a "crypt" (LUKS) ancestor in its device chain.
+//
+// The longest-match rule is load-bearing for the fail-closed disk-encryption
+// gate (CLAUDE.md immutable default): a stray crypt node elsewhere in the tree
+// — encrypted swap, a plugged-in LUKS USB, a separate encrypted /home — must
+// NOT make an unencrypted root report as encrypted. Only the deepest mountpoint
+// covering target reflects where that path really lives. This mirrors
+// hardening.isHomeEncrypted (internal/modules/hardening/detect_linux.go, W5).
+func cryptCoversPath(target string, devices []lsblkDevice) bool {
+	best := diskMountMatch{}
 	for _, dev := range devices {
-		if strings.EqualFold(dev.Type, "crypt") {
-			return true
-		}
-		if hasCryptDevice(dev.Children) {
-			return true
+		findPathMount(target, dev, false, &best)
+	}
+	return best.found && best.crypt
+}
+
+// findPathMount recurses the device tree. parentIsCrypt tracks whether any
+// ancestor in the chain has type == "crypt"; the deepest mountpoint covering
+// target wins because that is the filesystem target resides on.
+func findPathMount(target string, dev lsblkDevice, parentIsCrypt bool, best *diskMountMatch) {
+	isCrypt := parentIsCrypt || strings.EqualFold(dev.Type, "crypt")
+
+	if dev.MountPoint != "" && isUnderPath(target, dev.MountPoint) {
+		if !best.found || len(filepath.Clean(dev.MountPoint)) > len(filepath.Clean(best.mountpoint)) {
+			best.found = true
+			best.mountpoint = dev.MountPoint
+			best.crypt = isCrypt
 		}
 	}
-	return false
+
+	for _, child := range dev.Children {
+		findPathMount(target, child, isCrypt, best)
+	}
 }
 
-// DiskEncryptionStatus checks whether the root filesystem sits on a LUKS device
-// by running lsblk -J -o NAME,TYPE and scanning for TYPE=crypt.
+// isUnderPath returns true if target is at or under base.
+func isUnderPath(target, base string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	return !strings.HasPrefix(rel, "..")
+}
+
+// DiskEncryptionStatus checks whether the ROOT filesystem sits on a LUKS device.
+//
+// It runs lsblk -J -o NAME,TYPE,MOUNTPOINT and requires a crypt (LUKS) ancestor
+// on the device chain that actually hosts "/" — the deepest mountpoint covering
+// root. A crypt device anywhere else in the tree (encrypted swap, a plugged-in
+// LUKS USB, a separate encrypted /home) does NOT satisfy the gate: this is the
+// fail-closed disk-encryption invariant (CLAUDE.md immutable default), so an
+// unencrypted root reports DiskUnencrypted regardless of any other crypt device.
 func (p *Platform) DiskEncryptionStatus(ctx context.Context) (platform.DiskState, error) {
-	result, err := p.runner.Run(ctx, "lsblk", "-J", "-o", "NAME,TYPE")
+	result, err := p.runner.Run(ctx, "lsblk", "-J", "-o", "NAME,TYPE,MOUNTPOINT")
 	if err != nil {
 		return platform.DiskUnknown, fmt.Errorf("lsblk: %w", err)
 	}
@@ -173,7 +222,7 @@ func (p *Platform) DiskEncryptionStatus(ctx context.Context) (platform.DiskState
 		return platform.DiskUnknown, nil
 	}
 
-	if hasCryptDevice(out.Blockdevices) {
+	if cryptCoversPath("/", out.Blockdevices) {
 		return platform.DiskEncrypted, nil
 	}
 	return platform.DiskUnencrypted, nil
