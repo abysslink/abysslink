@@ -22,7 +22,7 @@ Two environment knobs:
 
 ```sh
 # Pin a specific release instead of the latest
-curl -fsSL https://abysslink.dev/install.sh | ABYSSLINK_VERSION=v3.0.0 sh
+curl -fsSL https://abysslink.dev/install.sh | ABYSSLINK_VERSION=v3.0.2 sh
 
 # Fail closed when cosign is not installed (instead of warning and continuing)
 curl -fsSL https://abysslink.dev/install.sh | ABYSSLINK_REQUIRE_COSIGN=1 sh
@@ -54,6 +54,11 @@ go install github.com/abysslink/abysslink/cmd/abysslinkd@latest   # daemon — w
 - **The notify socket** — `abysslink notify` and the Claude Code hooks deliver through it (falling back to a direct push when it's down).
 - **The tailnet content store** — serves opaque notification bodies and the one-scan **credential pull** for `enroll phone` over the tailnet (HTTPS, bound to the tailnet IP only).
 - **Ack receipts** — records true phone-side delivery receipts.
+- **The phone approve loop** — hosts the `/approve` endpoints that `abysslink approve` and gate enforcement use.
+- **The tmux session registry** — detects sessions waiting for input (`needs_input` notifications; on by default, `session_registry` in the config).
+- **The dead-man switch timer** — opt-in no-contact lockdown timer (`abysslink deadman`).
+- **Metrics + daily digest** — optional Prometheus metrics listener and daily status digest (`observability` in the config).
+- **The web dashboard** — opt-in, only in binaries compiled with the `webui` build tag.
 
 The release installer ships it; `go install` and `make install` install it alongside the CLI (see above). Run it as a login service so it starts on boot and stays up:
 
@@ -75,7 +80,14 @@ Run the interactive setup wizard on your rig:
 abysslink init
 ```
 
-This creates `~/.config/abysslink/abysslink.yaml` with safe defaults. Review it before proceeding.
+`init` is a guided setup, not just a config writer. It:
+
+1. Probes the prerequisite tools (`tailscale`, `tmux`, `mosh`, `ntfy`, and optionally `cosign`) and offers to install any that are missing via your platform package manager, then makes sure `tailscaled` is running.
+2. On macOS, offers two `sudo` security fixes: enabling the Application Firewall and disabling sleep on AC power.
+3. Asks for your backend (Tailscale by default; self-hosted Headscale or NetBird also supported), email, and hostname, then shows a preview of the generated `~/.config/abysslink/abysslink.yaml` for confirmation before writing it.
+4. Walks the guided 8-stage setup journey: Account → Prereqs → Converge → Lock → Enroll → Verify → ACL → Done.
+
+Interrupted? Run `abysslink init --resume` to continue from the last completed stage (progress is saved in `journey-state.json`). Non-interactive runs (CI, scripts) must consent explicitly: `abysslink init --yes --email you@example.com` (or set `ABYSSLINK_EMAIL`).
 
 ### Optional: admin API for full automation
 
@@ -121,7 +133,7 @@ abysslink up --apply
 This will:
 
 1. Verify Tailscale is running and Tailnet Lock is enabled
-2. Harden `sshd_config` (backup written to `~/.local/share/abysslink/backups/`)
+2. Harden `sshd_config` (a timestamped backup is written alongside the file as `sshd_config.bak.<timestamp>` and the mutation is recorded in the audit log at `~/.local/state/abysslink/audit.log`)
 3. Start the ntfy notification server bound to your tailnet IP
 4. Configure tmux with safe defaults
 5. Set up file watchers

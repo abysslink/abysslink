@@ -16,7 +16,7 @@ No. There is no telemetry in v1, and there never will be unless you explicitly o
 
 ### Can I use Abysslink without Tailscale?
 
-No. Tailscale is the only supported VPN in v1. The entire security model is built around the tailnet being the trust boundary. Support for Headscale (self-hosted Tailscale control plane) and NetBird is planned for v2+.
+Tailscale is the default backend, but since v3.0.0 two self-hosted control planes are supported as first-class alternatives: Headscale (`backend.type: headscale`) and NetBird (`backend.type: netbird`), provisioned with `abysslink server headscale init` / `abysslink server netbird init`. The security model still requires an overlay network as the trust boundary — there is no plain-internet mode.
 
 ### Does Abysslink support Windows?
 
@@ -30,7 +30,7 @@ If your laptop is stolen and the disk is unencrypted, the attacker has everythin
 
 ### Where are secrets stored?
 
-In the OS keychain (macOS Keychain, Linux `libsecret`). Never in plain text on disk. Never in the config file. Never in the audit log.
+In the OS keychain — the macOS Keychain on macOS; on Linux, `libsecret` (`secret-tool`) or `pass`, probed in that order. Never in plain text on disk. Never in the config file. Never in the audit log.
 
 ### Can I disable Tailnet Lock?
 
@@ -50,7 +50,7 @@ No. The `claudecode` module is one opt-in consumer of the generic notification s
 
 1. Enable the claudecode module: `abysslink enable claudecode --apply` (sets `claudecode.enabled: true` in `abysslink.yaml`)
 2. Run `abysslink up --apply` to install the hooks
-3. Install ntfy on your phone and subscribe to your rig's topic
+3. Enroll your phone: `abysslink enroll phone --apply` — one QR scan pulls the device credentials (bearer + push token) over the tailnet. Manually subscribing to a topic in the ntfy app does not work: the rig's ntfy server runs deny-all authentication, so anonymous subscriptions are rejected
 4. Start a Claude session — you'll get a push notification when it completes
 
 ## Releases and updates
@@ -61,7 +61,7 @@ No. The `claudecode` module is one opt-in consumer of the generic notification s
 curl -fsSL https://abysslink.dev/install.sh | sh
 ```
 
-The installer always fetches the latest release by default. Pin a version with `ABYSSLINK_VERSION=v0.2.0`.
+The installer always fetches the latest release by default. Pin a version with `ABYSSLINK_VERSION=v3.0.2`.
 
 ### How are releases signed?
 
@@ -69,4 +69,4 @@ Releases are signed with [cosign](https://docs.sigstore.dev/cosign/overview/) us
 
 ### Is there a Homebrew tap?
 
-Yes: `brew install abysslink/tap/abysslink`. The tap is updated automatically on each release.
+Not yet. The release pipeline is wired for `abysslink/tap`, but the tap is not published. Use the install script or `go install` for now (see the [Quickstart](../quickstart.md)).

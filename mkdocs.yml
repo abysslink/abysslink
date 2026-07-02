@@ -28,14 +28,33 @@ nav:
     - ntfy: modules/ntfy.md
     - watch: modules/watch.md
     - claudecode: modules/claudecode.md
+    - code-server: modules/codeserver.md
+    - ttyd: modules/ttyd.md
+    - "Eternal Terminal": modules/eternal-terminal.md
+    - "Web UI": modules/webui.md
+    - "Deferred Modules": modules/deferred-modules.md
+  - Reference:
+    - Configuration: configuration.md
+    - "CLI Reference": cli-reference.md
+    - "Push Notifications": push-notifications.md
   - Security:
+    - "Security Policy": security.md
     - Threat Model: security/threat-model.md
     - Hardening: security/hardening.md
+    - "Agent Safety": agent-safety.md
     - "Claims Audit": claims-audit.md
     - "Who Sees What": who-sees-what.md
+    - "Verifying a Release": VERIFYING.md
   - Operations:
     - Troubleshooting: operations/troubleshooting.md
     - FAQ: operations/faq.md
+    - "Headscale HA": headscale-ha.md
+    - "NetBird SCIM": netbird-scim.md
+    - "Fleet Notify Verification": fleet-notify-verification.md
+    - "Release Checklist": RELEASE-CHECKLIST.md
+  - Testing:
+    - "CI Fire Drill": testing/ci-firedrill.md
+    - "Push Real-Device Runbook": testing/push-real-device.md
   - Contributing:
     - Contributing: contributing.md
     - "Built with AI": ai-story.md

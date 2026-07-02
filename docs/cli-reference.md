@@ -1,6 +1,6 @@
 # CLI reference
 
-Complete command surface for `abysslink`. For the common 80%, see the [README usage section](../README.md#usage). Flags below are the command's **local** flags; every command also accepts the [global flags](#global-flags). Run `abysslink <command> --help` for the authoritative, build-current details.
+Complete command surface for `abysslink`. For the common 80%, see the [README usage section](https://github.com/abysslink/abysslink/blob/main/README.md#usage). Flags below are the command's **local** flags; every command also accepts the [global flags](#global-flags). Run `abysslink <command> --help` for the authoritative, build-current details.
 
 ## Global flags
 
@@ -25,10 +25,10 @@ Persistent flags on the root command, available to every subcommand:
 
 | Command | Local flags | Description |
 |---|---|---|
-| `init` | `--yes`, `--resume` | Interactive bootstrap → `abysslink.yaml`; `--resume` continues from the last completed stage. |
+| `init` | `--yes`, `--resume`, `--email <addr>`, `--hostname <name>` | Interactive bootstrap → `abysslink.yaml` + guided 8-stage setup journey; `--resume` continues from the last completed stage (`journey-state.json`). Non-interactive runs require `--yes --email <addr>` (or `ABYSSLINK_EMAIL`); `--hostname` defaults to the sanitized OS hostname. |
 | `up` | `--force-unsafe`, `--accept-checkperiod-extension`, `--accept-no-sshcheck` | Converge the system to match config (dry-run by default). The `--accept-*` flags are required acknowledgements for weakening a hardened default. |
 | `status` | — | One-screen health summary (`--json` for machines). |
-| `doctor` | `--offline` | Exhaustive verification of all modules and security posture; `--offline` skips checks that need network access. |
+| `doctor` | `--offline`, `--profile <at-risk>` | Exhaustive verification of all modules and security posture; `--offline` skips checks that need network access. `--profile at-risk` tightens disk-encryption/bind/version floors to FATAL and requires the dead-man switch. |
 | `report` | `--tail <n>` | Read-only security-posture snapshot; include the last N audit entries. |
 | `repair` | — | Auto-fix failures detected by `doctor` (needs `--apply`). |
 | `enroll phone` | `--qr` | Mint a tagged auth key, show a QR, walk through pairing. Dry-run by default — pairing requires `--apply` (`--yes` to skip the pause stops). After minting the device bundle it stages it into the running daemon and prints **one** single-use capability-URL QR the phone scans to pull all credentials over the tailnet (`GET /enroll/{token}`, expires per `content_store.enroll_ttl_seconds`); the one-time secret box always prints too. If the daemon is unreachable or the content listener is disabled it falls back to the box (never fails enrollment). `--qr` adds the per-credential QRs as an offline fallback. |
@@ -39,6 +39,10 @@ Persistent flags on the root command, available to every subcommand:
 | Command | Local flags | Description |
 |---|---|---|
 | `notify [title] [body]` | `--stdin`, `--priority <min\|low\|default\|high\|max>` (`urgent` = `max`), `--tag <s>`, `--topic <s>`, `--kind <needs_input\|command_done\|approval_request\|watch_fired\|agent_stopped>`, `--pane <%N>` | Send a push; `notify -- <cmd>` wraps a command and pushes on exit. `--kind`/`--pane` force a session-typed v2 notification (pane autodetected from `$TMUX_PANE`). |
+| `approve` | `--check [--blocking]`, `--permission-request` | Claude Code hook executor for the phone approve loop (invoked by hooks configured by `up --apply`, not directly by users). `--check` blocks until the phone/TTY approves (exit `0`) or denies (exit `2`); `--blocking` applies the full `approval.timeout_seconds` deadline. `--permission-request` writes allow JSON to stdout immediately. |
+| `arm -- <cmd> [args...]` | `--apply` (execute working-tree rollback on exit) | Arm an agent run with the apoptosis kill-switch: git snapshot, flight recorder, wall-clock/loop budgets. Shadow mode (notify only) by default; enable the SIGSTOP→kill ladder with `budget.ladder: true`. |
+| `deadman enable\|heartbeat\|status` | `enable`: `--interval-hours <n>` (`0` = 24h default, floor 1h) | Opt-in dead-man switch: daemon-hosted no-contact timer that fires a lockdown (disarm agents, revoke autonomy, audit) after N hours of operator silence; `heartbeat` resets the deadline (`enable` needs `--apply`). |
+| `device ls\|revoke <name>\|ca` | — | Manage enrolled device credentials: list devices and credential state, revoke one device's bearer + push token + SSH cert (needs `--apply`), or print the device SSH CA public key for `TrustedUserCAKeys`. |
 | `watch add` | `--pane <p>` · `--file <path> --grep <re> [--poll <s>]` · `--http <url> [--expect <code>] [--interval <s>]` · `--label <s>` | Add an idle-pane / file-tail / HTTP-change watcher. |
 | `watch remove` | `--pane <p>`, `--file <path>`, `--http <url>` | Remove a watcher by its identifier. |
 | `watch list` | — | List configured watchers. |
@@ -51,12 +55,12 @@ Persistent flags on the root command, available to every subcommand:
 | `audit verify` | `--pentest`, `--fix`, `--format json` | Verify the chain; `--pentest` runs the full `sec-*` suite, `--fix` applies safe permission fixes. |
 | `audit tail` | `--n <count>` (`20`) | Show the most recent audit entries. |
 | `audit ls\|export` | — | List every entry / export as raw JSONL. |
-| `upgrade` | `--check`, `--apply` | Self-update with cosign + SLSA verification; `--check` only reports, exiting `3` when a newer release is available. |
+| `upgrade` | `--check`, `--apply`, `--force` | Self-update with cosign + SLSA verification; `--check` only reports, exiting `3` when a newer release is available. `--force` allows a downgrade when the installed build is newer than the latest release. |
 | `verify` | `--json`, `--bundle <path>`, `--version <v>` | Verify the installed binary's cosign signature and provenance. |
 | `version` | `--provenance`, `--json` | Print version (and SLSA provenance / cosign bundle URLs). |
 | `daemon start\|stop\|enable\|disable\|status` | — | Manage the `abysslinkd` background daemon (lifecycle subcommands need `--apply`). |
-| `server headscale init\|upgrade\|status\|backup` | `--version <v>` | Provision / manage a self-hosted Headscale control server. |
-| `server netbird init\|status\|upgrade\|backup` | `--binary-path <path>` | Provision / manage a self-hosted NetBird control server. |
+| `server headscale init\|upgrade\|status\|backup` | `upgrade`: `--version <v>` | Provision / manage a self-hosted Headscale control server. Only `upgrade` takes `--version`. |
+| `server netbird init\|status\|upgrade\|backup` | `init`/`upgrade`: `--binary-path <path>` | Provision / manage a self-hosted NetBird control server. Only `init` and `upgrade` take `--binary-path`. |
 | `rig ls` | — | List enrolled rigs (`--json` for an array). |
 | `rig export` / `rig import <file>` | — | Export the `rigs:` config section as YAML (no secrets) / merge a rigs YAML doc into local config (`-` reads stdin; needs `--apply`). |
 
@@ -72,7 +76,7 @@ Persistent flags on the root command, available to every subcommand:
 | `netbird posture create` | `--name <s>`, `--description <s>`, `--checks <json>` | Create a NetBird posture check. |
 | `netbird posture list\|delete <id>` | — | List / delete posture checks. |
 | `netbird events` | `--follow` | Tail NetBird audit events (`--follow` streams). |
-| `uninstall` | `--purge` | Reverse every change; `--purge` also removes config + state (audit log + backups). |
+| `uninstall` | `--purge`, `--remove-config` | Reverse every change; `--purge` also removes config + state (audit log + backups); `--remove-config` removes only `~/.config/abysslink`, keeping the state dir. |
 
 ## Emergency
 
@@ -81,3 +85,5 @@ Persistent flags on the root command, available to every subcommand:
 | `panic` | — | Disconnect, revoke the phone, destroy the local API key — **no confirmation**. |
 
 **Module names** accepted by `enable`/`disable`: `ssh`, `tmux`, `mosh`, `ntfy`, `notify`, `watch`, `claudecode`, `code-server`, `ttyd`, `eternal-terminal`, `syncthing`, `upsnap`, `atuin`, `sandbox`, `asciinema`. (The web dashboard is configured via the `webui` stanza, not `enable`.)
+
+**Shell completion**: `completion <bash|zsh|fish|powershell>` generates the autocompletion script for the given shell (Cobra built-in; see `abysslink completion <shell> --help` for install instructions).

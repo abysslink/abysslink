@@ -32,7 +32,7 @@ lsblk -o NAME,TYPE,MOUNTPOINT | grep crypt
 sudo dmsetup status
 ```
 
-LUKS must be the encryption layer for the root filesystem or the partition that contains `/home`. Abysslink checks `/proc/mounts` and `/proc/crypto` to verify.
+LUKS must be the encryption layer for the root filesystem or the partition that contains `/home`. Abysslink runs `lsblk -J -o NAME,TYPE` and scans the device tree for a `TYPE=crypt` device to verify.
 
 !!! warning
     Abysslink does not support eCryptfs, VeraCrypt, or other non-LUKS Linux
@@ -42,43 +42,44 @@ LUKS must be the encryption layer for the root filesystem or the partition that 
 
 ### Tailnet Lock
 
-Tailnet Lock prevents unauthorized devices from joining your tailnet even with a valid auth key. Enable it in the Tailscale admin console or via CLI:
+Tailnet Lock prevents unauthorized devices from joining your tailnet even with a valid auth key. Enable it with:
 
 ```sh
-tailscale lock init
+abysslink lock init --apply
 ```
 
-Print the rotation secret once and store it securely offline:
+This wraps `tailscale lock init --gen-disablement=N` and prints the **disablement secrets once** — they are never stored on disk and cannot be recovered from `lock status`. Store them securely offline; losing them risks permanent lockout.
 
-```sh
-tailscale lock status
-```
-
-Abysslink prints the rotation secret **once** at setup time and never stores it.
+To generate fresh disablement secrets, run `abysslink lock rotate` — it walks you through a manual disable + re-init (intentionally manual, so the secrets are never stored).
 
 ### Key expiry
 
-Set key expiry to 90 days or less in the Tailscale admin console. Abysslink checks key expiry at startup and warns if expiry is within 7 days.
+Set key expiry to 90 days or less in the Tailscale admin console. This is a manual step — Abysslink does not check or manage key expiry.
 
 ## SSH hardening
 
-Abysslink writes a hardened `sshd_config` fragment. Key settings:
+In openssh-fallback mode, Abysslink installs a hardened sshd drop-in at `/etc/ssh/sshd_config.d/99-abysslink.conf`, validated with `sshd -t` before reload:
 
 ```
+# Managed by abysslink — hardened sshd (openssh-fallback mode). Do not edit.
 PasswordAuthentication no
-ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
 PermitRootLogin no
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
 AllowUsers <configured user>
-ClientAliveInterval 120
-ClientAliveCountMax 3
 ```
 
-A backup of the original `sshd_config` is written before any modification.
+When the device SSH CA is wired, two additive directives are appended: `TrustedUserCAKeys` and `RevokedKeys` (KRL). In Tailscale SSH mode, session freshness is enforced by the ACL `checkPeriod` (12h) instead.
+
+A timestamped backup is written alongside any mutated file (as `<file>.bak.<timestamp>`) before modification.
 
 ## ntfy hardening
 
 ntfy must bind to the Tailscale tailnet IP only. Abysslink derives this address
-at runtime using `tailscale ip --1` and writes it to the ntfy server config.
+at runtime using `tailscale ip --4` and writes it to the ntfy server config.
 
 Never configure ntfy to bind to `0.0.0.0` — `abysslink doctor` will fail if it detects this.
 
@@ -86,7 +87,7 @@ Never configure ntfy to bind to `0.0.0.0` — `abysslink doctor` will fail if it
 
 All file mutations go through `internal/audit`, which writes:
 
-1. A backup of the original file to `~/.local/share/abysslink/backups/`
-2. An audit log entry with timestamp, operation, target path, and diff hash
+1. A timestamped backup of the original file, alongside it as `<file>.bak.<timestamp>`
+2. An audit log entry (`~/.local/state/abysslink/audit.log`) with timestamp, operation, target path, and diff hash
 
 Secrets are never written to the audit log.

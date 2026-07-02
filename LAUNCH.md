@@ -1,13 +1,13 @@
 # Abysslink Launch Runbook
 
-This runbook documents the three blocking gates and all post copy for the v4.0.0 public
+This runbook documents the blocking gates and all post copy for the v4.0.0 public
 launch. Complete the blocking gates in order before executing any post template.
 
 ---
 
 ## Blocking Gates
 
-All three gates must pass before executing the §Post Templates section. These are
+All four gates must pass before executing the §Post Templates section. These are
 human-verified, operator-owned actions — no automated CI can claim them passed.
 
 - [ ] **GATE-LNCH-02** (operator): Fresh macOS + Ubuntu VMs — run the quickstart end-to-end
@@ -35,13 +35,22 @@ human-verified, operator-owned actions — no automated CI can claim them passed
       in `abysslink status`. Must run on real hardware (not simulator).
       Record device + OS: _______________ Date: _______________
 
+- [ ] **GATE-LNCH-06** (operator): Install funnel verified. A published (non-draft)
+      GitHub release with `.bundle` assets exists; `curl -fsSL .../install.sh | sh`
+      succeeds on a clean macOS and a clean Linux machine; the `abysslink/homebrew-tap`
+      repo exists and `brew tap abysslink/homebrew-tap && brew install abysslink`
+      installs. (Context: the release pipeline has been red since v3.0.0 — only v1.0.0
+      is published, without `.bundle` assets — and the tap repo does not exist yet.
+      The install commands in every post template depend on this gate.)
+      Result: _______________ Tester: _______________ Date: _______________
+
 ---
 
 ## Timing
 
 - Post Tuesday–Thursday, 8–10 AM ET (peak Hacker News and Reddit traffic).
 - 48h founder-response plan: monitor hourly for first 6h, then 3× daily for 48h.
-- Have Show HN open in a tab, ready to submit. Do not submit until all three gates are
+- Have Show HN open in a tab, ready to submit. Do not submit until all four gates are
   checked.
 
 ---
@@ -59,7 +68,7 @@ Complete these one-time setup actions before running `git tag v4.0.0`:
 
 3. Register `abysslink-bin` on AUR (one-time, requires an AUR account):
    ```sh
-   ssh [email protected] setup-repo abysslink-bin
+   ssh aur@aur.archlinux.org setup-repo abysslink-bin
    ```
 
 4. Generate an ED25519 key pair for AUR:
@@ -93,10 +102,12 @@ I built a CLI that lets you freeze a runaway AI agent from your phone.
 
 The use case: you kick off Claude Code (or Aider, Codex, any agent) on your laptop,
 step away, and something goes wrong — the agent is running in a loop, spending tokens,
-eating disk state. Abysslink's kill-switch (we call it Apoptosis) lets you tap one
-button on your phone and the agent gets SIGSTOP. From there you can approve a
-resume or kill it outright, and the working tree rolls back to the pre-arm git
-snapshot automatically.
+eating disk state. Abysslink's kill-switch (we call it Apoptosis) wraps the run with
+a git snapshot, a flight recorder, and wall-clock/loop budgets. It ships in shadow
+mode by default — when a budget trips, your phone gets a notification. Enable the
+full ladder (budget.ladder: true) and that trip freezes the agent with SIGSTOP;
+from your phone you approve a resume or kill it outright, with optional rollback
+of the working tree to the pre-arm git snapshot.
 
 But the kill-switch is the headline; the rest of the tool is a phone-to-rig setup
 that covers the boring-but-hard parts: one-command Tailscale + SSH + tmux + mosh
@@ -124,15 +135,19 @@ Who sees what (push paths): docs/who-sees-what.md
 
 **Tags:** `cli` `security` `go` `selfhosted`
 
-**Title:** `Show HN: Abysslink – phone-to-laptop CLI that freezes runaway AI agents from your pocket`
+**Title:** `Abysslink: a phone-to-laptop CLI that freezes runaway AI agents from your pocket`
+
+**Note:** Disclose authorship per Lobsters norms — submit with the "authored by" checkbox ticked and open with "author here" in the first comment.
 
 **Body:**
 
 ```
 A Go CLI that sets up a paranoid-by-default phone-to-laptop remote-control stack
 (Tailscale, SSH, tmux, mosh, self-hosted ntfy) and adds an AI agent kill-switch:
-`abysslink arm -- claude` wraps the agent, monitors wall-clock and loop budget, and
-fires SIGSTOP when a threshold trips — approve resume or kill from your phone.
+`abysslink arm -- claude` wraps the agent and monitors wall-clock and loop budget.
+Shadow mode (the default) notifies your phone when a threshold trips; with the
+ladder enabled (budget.ladder: true) the trip fires SIGSTOP — approve resume or
+kill from your phone.
 
 Security design: SLSA L3, cosign keyless, dual SBOM, audit log with HMAC chain,
 push payload is metadata-only (content fetched over tailnet), ntfy bound to tailnet
@@ -161,9 +176,10 @@ from the daemon over the tailnet. APNs / FCM / ntfy.sh never see content. Detail
 docs/who-sees-what.md
 
 Bonus feature: `abysslink arm -- claude` wraps an AI agent with a kill-switch. When
-a budget threshold trips (wall-clock, command loops) your phone gets a notification;
-tap to SIGSTOP the agent, approve/kill from the dialog, optional rollback to pre-arm
-git snapshot.
+a budget threshold trips (wall-clock, command loops) your phone gets a notification —
+that's the shadow-mode default. Enable the ladder (budget.ladder: true) and the trip
+fires SIGSTOP: approve/kill from the dialog, optional rollback to the pre-arm git
+snapshot.
 
 One static Go binary. Apache-2.0. Quickstart under 10 min.
 ```
@@ -183,8 +199,9 @@ it goes sideways.
 The workflow: `abysslink arm -- claude` wraps the agent. When Claude stops or needs
 input, your phone buzzes with the exact pane ("rig-1 · claude · %3 needs input") and
 a tap drops you into the live tmux session. If it starts looping or running up the
-wall-clock budget, the kill-switch fires: SIGSTOP → approve/kill dialog → optional
-rollback to the pre-arm git snapshot.
+wall-clock budget, your phone gets a warning (shadow mode is the default); with the
+ladder enabled (budget.ladder: true) the kill-switch fires: SIGSTOP → approve/kill
+dialog → optional rollback to the pre-arm git snapshot.
 
 It's built on a private Tailscale mesh so the push notification body is fetched over
 the tailnet, not through APNs/FCM. The opt-in Claude Code hook integration is a few
@@ -209,6 +226,7 @@ rig. CLI-first design:
 - `abysslink doctor` is a deep preflight checker that fails closed on unencrypted disk
 - `--dry-run` is the default for every mutating op; explicit `--apply` required
 - `abysslink arm -- <cmd>` wraps any long-running process with a phone kill-switch
+  (shadow mode by default; full SIGSTOP ladder via budget.ladder: true)
 - YAML config (strict schema; unknown keys rejected); TUI wizard via `abysslink init`
 - `abysslink audit verify` checks the hash-chained tamper-evident audit log
 

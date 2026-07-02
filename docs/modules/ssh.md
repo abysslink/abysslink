@@ -1,15 +1,38 @@
 # SSH Module
 
-The SSH module hardens `sshd_config` with paranoid-by-default settings.
+The SSH module manages the rig's SSH transport in one of two modes:
 
-## What it configures
+- **`mode: tailscale`** (default) — Tailscale SSH is the transport. The module
+  turns the OpenSSH daemon *off* (macOS Remote Login, or the `sshd`/`ssh`
+  systemd unit on Linux) so there is exactly one SSH listener, brokered by
+  tailnet identity.
+- **`mode: openssh-fallback`** — the module installs a hardened sshd drop-in
+  (below) for setups that keep OpenSSH running.
 
-- Disables password authentication (`PasswordAuthentication no`)
-- Disables root login (`PermitRootLogin no`)
-- Sets `ClientAliveInterval` and `ClientAliveCountMax` for session keepalive
-- Sets `checkPeriod` to 12 hours (cannot be increased without `--accept-checkperiod-extension`)
-- Restricts `AllowUsers` to the configured user
-- Enables `AuthorizedKeysFile` pointing to a single controlled key file
+## The hardened drop-in (openssh-fallback mode)
+
+Installed at `/etc/ssh/sshd_config.d/99-abysslink.conf`, validated with
+`sshd -t` *before* the privileged install (an invalid staged config is removed
+so a later sshd restart can never fail because of it):
+
+```
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+PermitRootLogin no
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+AllowUsers <your-user>
+```
+
+When a device CA is enrolled, two additive lines are appended (see below):
+`TrustedUserCAKeys /etc/ssh/abysslink_device_ca.pub` and
+`RevokedKeys /etc/ssh/abysslink.krl`.
+
+The drop-in contains no `ClientAlive*` directives. Session freshness on the
+Tailscale backend is enforced by the ACL `checkPeriod` (12h re-authentication);
+the openssh-fallback mode has no equivalent control.
 
 ## Device SSH certificate trust & revocation
 
@@ -40,39 +63,66 @@ the immutable hardening above is never weakened.
 ## Configuration
 
 ```yaml
-ssh:
-  check_period: "12h"   # minimum enforced; cannot be raised without explicit flag
-  allow_users:
-    - myuser
-  authorized_keys_file: "~/.ssh/authorized_keys"
+modules:
+  ssh:
+    enabled: true
+    mode: tailscale        # or: openssh-fallback
+
+mobile:
+  ssh_check_period: "12h"  # Tailscale SSH ACL checkPeriod (not an sshd setting)
 ```
+
+`ssh_check_period` is enforced as the `checkPeriod` attribute of the Tailscale
+SSH ACL rule that `abysslink acl` pushes — it forces re-authentication of
+phone sessions every 12 hours. It can be lowered freely; raising it above 12h
+requires the explicit `--accept-checkperiod-extension` flag.
 
 ## Backup and audit
 
-Every modification to `sshd_config` is preceded by a backup written to
-`~/.local/share/abysslink/backups/` with a timestamp in the filename. The
-audit log records the diff hash (never the content).
+Every file the module mutates is first backed up as a sidecar
+`<file>.bak.<timestamp>` in the same directory as the original. The audit log
+at `~/.local/state/abysslink/audit.log` records the diff hash — never the
+content.
 
 ## `abysslink doctor` checks
 
+Module checks (all warnings — `doctor` exits 1):
+
+| Check | Meaning |
+|-------|---------|
+| `remote_login` (macOS) | Remote Login is On while `mode: tailscale` — macOS sshd should be off |
+| `remote_login_unknown` (macOS) | Remote Login state could not be determined; check System Settings manually |
+| `sshd_running` (Linux) | sshd is active while `mode: tailscale` |
+| `fallback_config` | `mode: openssh-fallback` but the hardened drop-in is not installed |
+
+Security sweep checks (`sec-ssh-*`, run in every doctor pass; they parse the
+effective sshd config and degrade to OK when sshd is not installed):
+
 | Check | Failure behaviour |
 |-------|------------------|
-| `PasswordAuthentication no` | `doctor` exits 1 |
-| `PermitRootLogin no` | `doctor` exits 1 |
-| `checkPeriod` ≤ 12h | `doctor` exits 1 |
-| Authorized keys file exists | `doctor` exits 1 |
+| `sec-ssh-permitroot` — `PermitRootLogin yes` | **fatal** (`doctor` exits 2) |
+| `sec-ssh-x11forwarding` — `X11Forwarding yes` | warning |
+| `sec-ssh-agentforwarding` — `AllowAgentForwarding yes` | warning |
+| `sec-ssh-maxauthtries` — `MaxAuthTries > 4` | warning |
+| `sec-ssh-logingracetime` — `LoginGraceTime > 60s` | warning |
+| `sec-ssh-ciphers` — weak cipher configured | warning |
+
+Device-certificate drift checks (run only when a device CA is enrolled):
+
+| Check | Failure behaviour |
+|-------|------------------|
 | Device CA-trust file matches the enrolled CA | warns (`ca-trust-drift` / `ca-trust-missing`) — run `up --apply` |
 | Installed KRL matches the store's revoked serials | warns (`krl-drift` / `krl-missing`) — run `up --apply` |
 
-The two device-cert checks are **report-only drift checks** (warn, never exit 1)
-and run only when a device CA is enrolled. When `ssh-keygen` can't decode the
-installed KRL the check reports `devssh-unknown` rather than a misleading OK —
-it never renders a green ✓ for a control it could not actually verify.
+The two device-cert checks are **report-only drift checks** (warn, never fatal).
+When `ssh-keygen` can't decode the installed KRL the check reports
+`devssh-unknown` rather than a misleading OK — it never renders a green ✓ for a
+control it could not actually verify.
 
 ## Commands
 
 ```sh
-abysslink up [--apply]           # apply SSH hardening (backs up sshd_config first)
-abysslink backup ls              # list backups, including sshd_config
-abysslink doctor                 # verify SSH config
+abysslink up [--apply]           # apply SSH mode (backs up mutated files first)
+abysslink backup ls              # list backups
+abysslink doctor                 # verify SSH state + sec-ssh-* sweep
 ```

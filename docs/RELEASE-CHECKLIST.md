@@ -5,6 +5,18 @@ lists the mandatory review items specific to that version.
 
 ---
 
+## v3.x / v4.0.0 — Status
+
+The v3.0.0–v3.0.2 releases were gated by the automated CI release gates (lint, test,
+security scans, repro-check, claims-check) rather than a hand-written checklist section
+here. The **v4.0.0 checklist is pending** — it must be written and completed before
+`git tag v4.0.0`, and must cover the v3/v4 surfaces (metrics/webui bind floors, audit
+chain, push gateways, kill-switch, dead-man switch) plus the release pipeline itself
+(published release with `.bundle` assets; `curl | sh` and Homebrew install verified —
+see LAUNCH.md GATE-LNCH-06).
+
+---
+
 ## v2.0.0 — Self-Hosted Backends & Fleet
 
 ### Legal & License Review

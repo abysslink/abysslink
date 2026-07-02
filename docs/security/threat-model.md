@@ -25,7 +25,7 @@ As of v3.0.0, the threat surface has expanded to include per-backend trust model
 | Network attacker on the same network as the rig | Tailscale WireGuard encryption; services bind to tailnet IP only |
 | Compromised Tailscale auth key | Tailnet Lock — new devices require signing by existing trusted key |
 | SSH brute force | `PasswordAuthentication no`; public-key only; `checkPeriod 12h` |
-| Stale SSH session left open | `ClientAliveInterval` + `ClientAliveCountMax` enforce session termination |
+| Stale SSH session left open | Tailscale SSH ACL `checkPeriod 12h` forces periodic re-authentication (openssh-fallback mode has no equivalent control) |
 | ntfy exposed to internet | Hard enforced: ntfy binds to tailnet IP only; `0.0.0.0` rejected |
 | Disk theft | FileVault (macOS) / LUKS (Linux) required — `doctor` fails if unencrypted |
 | Tailscale Funnel accidentally enabled | Rejected at YAML schema level; cannot be configured |
@@ -51,10 +51,10 @@ As of v3.0.0, the threat surface has expanded to include per-backend trust model
 
 | Threat | Check | Severity |
 |--------|-------|----------|
-| Tailnet Lock disabled | lock_enabled | FATAL |
+| Tailnet Lock disabled | lock_enabled | WARN (exit 1) |
 | ACL policy drift | acl_drift | WARN |
 | Tailscale Funnel accidentally enabled | sec-funnel-schema | FATAL |
-| New device joins without signing | lock_enabled | FATAL |
+| New device joins without signing | lock_enabled | WARN (exit 1) |
 
 ## Backend: Headscale
 
@@ -123,7 +123,7 @@ As of v3.0.0, the threat surface has expanded to include per-backend trust model
 The following defaults are **immutable** without explicit user override:
 
 - SSH `checkPeriod` is 12h; can only be lowered, never raised without `--accept-checkperiod-extension`
-- Tailnet Lock is on by default; rotation secrets printed once, never stored
+- Tailnet Lock is on by default; disablement secrets printed once, never stored
 - ntfy binds to tailnet IP only, never `0.0.0.0`
 - Tailscale Funnel permanently rejected at schema level
 - FileVault / LUKS required; `doctor` fails closed if disk is unencrypted

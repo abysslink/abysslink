@@ -12,12 +12,18 @@ abysslink up --apply
 
 Abysslink orchestrates the full stack required to securely control your development machine from a phone:
 
-- **Tailscale** — mesh VPN, Tailnet Lock, key expiry management
-- **SSH** — hardened `sshd_config`, certificate pinning, `checkPeriod` enforcement
+- **Tailscale** — mesh VPN, Tailnet Lock, key expiry management; self-hosted [Headscale](headscale-ha.md) and NetBird control planes are supported backends too
+- **SSH** — hardened `sshd_config`, device SSH certificates (CA-signed, revocable), `checkPeriod` enforcement
 - **tmux / mosh** — persistent sessions that survive network interruptions
 - **ntfy** — push notifications bound to the tailnet IP only, never the open internet
+- **abysslinkd** — background daemon: watchers, notify socket, tailnet content store + credential pull, session registry, phone approve loop
 - **watch** — filesystem and process event monitoring
 - **claudecode** — Claude Code hook integration for remote AI-assisted coding sessions
+- **Agent safety** — phone approve loop, `arm` kill-switch (shadow mode by default), opt-in dead-man switch, `panic` lockdown
+- **Fleet** — enroll and control multiple rigs from one phone (`--rig` / `--all-rigs`)
+- **Optional modules** — code-server, ttyd, Eternal Terminal, Syncthing, UpSnap, Atuin, sandbox, asciinema
+
+See the [CLI reference](cli-reference.md) and [configuration reference](configuration.md) for the full surface.
 
 ## Why Abysslink?
 
@@ -31,4 +37,4 @@ Setting up a secure remote rig by hand takes hours and leaves footguns everywher
 
 ## Status
 
-Abysslink is pre-1.0. APIs and config schema may change between minor versions. All destructive commands default to `--dry-run`; pass `--apply` to make changes.
+Abysslink ships signed, tagged releases — see the [Releases page](https://github.com/abysslink/abysslink/releases) for the current version. All destructive commands default to `--dry-run`; pass `--apply` to make changes.

@@ -2,10 +2,12 @@
 
 ## Supported Versions
 
+Only the latest minor release line receives security fixes. Upgrade with `abysslink upgrade`.
+
 | Version | Supported          |
 | ------- | ------------------ |
-| v1.x    | :white_check_mark: |
-| < v1.0  | :x:                |
+| Latest minor release line (`v3.x` at time of writing) | :white_check_mark: |
+| Older release lines | :x:                |
 
 ## Reporting a Vulnerability
 
