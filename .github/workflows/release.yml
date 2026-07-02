@@ -69,7 +69,12 @@ jobs:
           path: dist/
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
+        # v4.1.2: cosign v3 dropped the detached .sig/.pem assets in favour of
+        # a .sigstore.json bundle. The older installer (v3.8.2) self-verified
+        # the downloaded cosign binary against cosign-linux-amd64.sig, which
+        # v3.0.6 no longer publishes (404 -> curl exit 22). v4.x verifies via
+        # the .sigstore.json bundle instead.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v3.0.6
 
@@ -112,9 +117,14 @@ jobs:
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: block
+          # tmaproduction.blob.core.windows.net: `gh attestation verify`
+          # downloads the provenance bundle from GitHub's attestations store,
+          # which redirects to this Azure blob host (dropped otherwise).
           allowed-endpoints: >
             api.github.com:443
             objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            tmaproduction.blob.core.windows.net:443
             github.com:443
             fulcio.sigstore.dev:443
             rekor.sigstore.dev:443
