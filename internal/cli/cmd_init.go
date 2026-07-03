@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -824,6 +825,7 @@ type initFormResult struct {
 	enableMosh         bool
 	enableNtfy         bool
 	ntfyPort           int
+	clickURL           string // optional ssh:// deep link a tapped notification opens
 	backendType        string // "tailscale", "headscale", or "netbird"
 	headscaleServerURL string // non-empty only when backendType == "headscale"
 	netbirdServerURL   string // non-empty only when backendType == "netbird"
@@ -845,6 +847,7 @@ func applyInitFormResult(r initFormResult) (*config.Config, error) {
 	cfg.Modules.Ntfy.Enabled = r.enableNtfy
 	cfg.Modules.Ntfy.Port = r.ntfyPort
 	cfg.Modules.Notify.Enabled = r.enableNtfy
+	cfg.Modules.Notify.ClickURL = r.clickURL
 	// Backend type: "tailscale" is the default; "headscale" and "netbird" populate
 	// their respective server sub-struct fields.
 	cfg.Backend.Type = r.backendType
@@ -1080,10 +1083,40 @@ func runInitForm(ctx context.Context, cmd *cobra.Command, autoYes bool) (*config
 			if n, err := strconv.Atoi(strings.TrimSpace(portStr)); err == nil {
 				r.ntfyPort = n
 			}
+			if err := promptClickURL(ctx, &r); err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	return applyInitFormResult(r)
+}
+
+// promptClickURL asks for the optional notification tap-to-open SSH URL,
+// prefilled with a starting point the user edits to their saved terminal-app
+// host. Blank skips it. Extracted from runInitForm to keep that flat (CR-05).
+func promptClickURL(ctx context.Context, r *initFormResult) error {
+	r.clickURL = fmt.Sprintf("ssh://%s@%s", currentUnixUser(), r.hostname)
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewInput().
+			Title("Tap-to-open SSH URL (optional)").
+			Description("Opens when you tap a notification. Set it to match your saved\nTermius/Blink host — usually the full MagicDNS name — so the tap\nconnects with saved creds, e.g. ssh://you@rig.tailnet-name.ts.net.\nClear it to skip.").
+			Value(&r.clickURL).
+			Validate(func(s string) error {
+				s = strings.TrimSpace(s)
+				if s == "" {
+					return nil
+				}
+				if u, err := url.Parse(s); err != nil || u.Scheme == "" {
+					return fmt.Errorf("must be an absolute URL with a scheme (e.g. ssh://you@host) or blank")
+				}
+				return nil
+			}),
+	)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
+		return fmt.Errorf("init: click url: %w", err)
+	}
+	r.clickURL = strings.TrimSpace(r.clickURL)
+	return nil
 }
 
 // currentUnixUser returns the current UNIX login name from the environment.

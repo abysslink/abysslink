@@ -75,3 +75,18 @@ func TestGalleryCommand(t *testing.T) {
 	// In headless / NO_COLOR mode glamour returns raw markdown — check for content.
 	assert.NotEmpty(t, out, "gallery must produce some output (banner or markdown)")
 }
+
+// TestApplyInitFormResult_ClickURL asserts the init wizard's optional
+// tap-to-open URL lands in modules.notify.click_url.
+func TestApplyInitFormResult_ClickURL(t *testing.T) {
+	cfg, err := applyInitFormResult(initFormResult{
+		email: "me@example.com", hostname: "rig", enableNtfy: true, ntfyPort: 2586,
+		clickURL: "ssh://me@rig.tailnet-name.ts.net", backendType: "tailscale",
+	})
+	if err != nil {
+		t.Fatalf("applyInitFormResult: %v", err)
+	}
+	if cfg.Modules.Notify.ClickURL != "ssh://me@rig.tailnet-name.ts.net" {
+		t.Errorf("click_url not wired: got %q", cfg.Modules.Notify.ClickURL)
+	}
+}
