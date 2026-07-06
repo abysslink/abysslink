@@ -46,6 +46,25 @@ human-verified, operator-owned actions — no automated CI can claim them passed
 
 ---
 
+## Release recovery (when a tag's release run fails)
+
+The pipeline is fail-closed: if `sign` or `verify` fails after `build`, the release
+stays a **private draft** and nothing is published. To recover:
+
+1. Fix the root cause **on main**. Re-running the failed run cannot pick up workflow
+   fixes — a tag-push run executes the workflow files at the tagged commit.
+2. Delete the stale draft: `gh release delete <tag> -R abysslink/abysslink`
+   (targets the draft when no published release exists for the tag). goreleaser's
+   `replace_existing_draft: true` also replaces it automatically on re-tag, but
+   deleting keeps the releases list unambiguous.
+3. Either delete + re-push the tag onto the fixed main
+   (`git tag -d <tag> && git push origin :refs/tags/<tag> && git tag -s <tag> && git push origin <tag>`)
+   or simply cut the next patch tag — preferred once a tag was ever public.
+4. Only a sign/verify-glitch (no workflow change needed) may use "Re-run failed
+   jobs", and only within 7 days — the `dist` workflow artifact expires after that.
+5. Package managers (brew tap, AUR) are pushed by `publish-packages` strictly AFTER
+   the publish gate, so a failed run never leaves them pointing at a dead draft.
+
 ## Timing
 
 - Post Tuesday–Thursday, 8–10 AM ET (peak Hacker News and Reddit traffic).

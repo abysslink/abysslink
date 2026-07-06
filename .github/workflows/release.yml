@@ -50,11 +50,15 @@ jobs:
           # release-assets.githubusercontent.com: cosign-installer downloads the
           # cosign binary from a GitHub release (GitHub's release-asset CDN).
           # uploads.github.com: `gh release upload` of the .bundle assets.
+          # raw.githubusercontent.com: cosign-installer v4 with a pinned
+          # cosign-release fetches release-cosign.pub from raw before verifying
+          # the .sigstore.json bundle — blocked egress here kills the install.
           allowed-endpoints: >
             api.github.com:443
             uploads.github.com:443
             objects.githubusercontent.com:443
             release-assets.githubusercontent.com:443
+            raw.githubusercontent.com:443
             github.com:443
             fulcio.sigstore.dev:443
             rekor.sigstore.dev:443
@@ -92,6 +96,10 @@ jobs:
       - name: Upload .bundle files to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout in this job: gh cannot infer the repo from a git
+          # remote, so it must be passed explicitly or the upload errors with
+          # "could not determine base repo".
+          GH_REPO: ${{ github.repository }}
         run: |
           tag="${{ needs.build.outputs.version }}"
           for bundle in dist/*.bundle; do
@@ -117,41 +125,52 @@ jobs:
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: block
-          # tmaproduction.blob.core.windows.net: `gh attestation verify`
-          # downloads the provenance bundle from GitHub's attestations store,
-          # which redirects to this Azure blob host (dropped otherwise).
+          # *.blob.core.windows.net: `gh attestation verify` downloads the
+          # provenance bundle from GitHub's attestations store, which redirects
+          # to an Azure blob host (tmaproduction.blob.core.windows.net at the
+          # v4.0.0 run). The account name is a GitHub-internal detail that can
+          # rotate, so allow the wildcard rather than re-redding the pipeline
+          # on the next rotation (still egress-blocked to Azure blob only).
           allowed-endpoints: >
             api.github.com:443
             objects.githubusercontent.com:443
             release-assets.githubusercontent.com:443
-            tmaproduction.blob.core.windows.net:443
+            *.blob.core.windows.net:443
             github.com:443
             fulcio.sigstore.dev:443
             rekor.sigstore.dev:443
             tuf-repo-cdn.sigstore.dev:443
-
-      - name: Download dist artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: dist
-          path: dist/
 
       - name: Verify provenance for released artifacts
         # gh is pre-installed on ubuntu-latest runners. We verify at least two
         # distinct artifacts (amd64 + arm64) so a provenance gap on either arch
         # fails the gate. --signer-workflow pins trust to release-build.yml; a
         # non-zero exit here blocks publish (fail-closed).
+        #
+        # The artifacts are downloaded from the DRAFT RELEASE itself (not the
+        # workflow artifact): the gate must attest the exact bytes users will
+        # download, so tampering or corruption on goreleaser's release-upload
+        # path also fails the gate. Draft assets are readable with the job's
+        # contents: read token via the API.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           command -v gh >/dev/null 2>&1 || { echo "gh CLI not found — cannot verify provenance (fail-closed)"; exit 1; }
           tag="${{ needs.build.outputs.version }}"
           bare="${tag#v}"
+          mkdir -p release-assets
+          gh release download "${tag}" \
+            --dir release-assets \
+            --pattern "abysslink_${bare}_linux_amd64.tar.gz" \
+            --pattern "abysslink_${bare}_linux_arm64.tar.gz" \
+            --pattern "abysslink_${bare}_darwin_arm64.tar.gz"
           for art in \
-            "dist/abysslink_${bare}_linux_amd64.tar.gz" \
-            "dist/abysslink_${bare}_linux_arm64.tar.gz" \
-            "dist/abysslink_${bare}_darwin_arm64.tar.gz"; do
+            "release-assets/abysslink_${bare}_linux_amd64.tar.gz" \
+            "release-assets/abysslink_${bare}_linux_arm64.tar.gz" \
+            "release-assets/abysslink_${bare}_darwin_arm64.tar.gz"; do
+            [ -s "${art}" ] || { echo "missing release asset: ${art} (fail-closed)"; exit 1; }
             echo "::group::verify ${art}"
             gh attestation verify "${art}" \
               --owner abysslink \
@@ -165,9 +184,10 @@ jobs:
     # SLSA L3 provenance verify gate succeed. This guarantees no published
     # release ever exists without its .bundle and independently-verified
     # provenance, closing the partial-signing availability gap (WR-02):
-    # install.sh hard-fails when the bundle is missing, so a published-but-
-    # unsigned release would be un-installable. Provenance is generated inside
-    # the reusable `build` job; `verify` re-checks it before publish.
+    # install.sh fails closed on a missing bundle for every bundle-signed
+    # release (>= v4.0.1), and verifies the bundle whenever cosign is present.
+    # Provenance is generated inside the reusable `build` job; `verify`
+    # re-checks it before publish.
     needs: [build, sign, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -188,3 +208,106 @@ jobs:
         run: |
           tag="${{ needs.build.outputs.version }}"
           gh release edit "${tag}" --repo "${{ github.repository }}" --draft=false
+
+  publish-packages:
+    name: Publish package managers (brew tap, AUR) after the gate
+    # Package-manager publishing must NEVER run before the publish gate: a
+    # cask or PKGBUILD pushed while the release is still a draft points users
+    # at releases/download URLs that 404 (draft assets are not public), and a
+    # failed sign/verify gate cannot un-push those commits. goreleaser
+    # therefore only GENERATES the cask/PKGBUILD into dist (skip_upload: true
+    # in .goreleaser.yaml) and this job pushes them only AFTER the release is
+    # public. Missing credentials skip gracefully (same contract as before):
+    # the release itself is complete without them (LAUNCH.md §Pre-steps).
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          # aur.archlinux.org:22: the AUR PKGBUILD push over SSH.
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            aur.archlinux.org:22
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Push Homebrew cask to abysslink/homebrew-tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          TAG: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_GITHUB_TOKEN not provisioned — skipping brew tap publish (see LAUNCH.md §Pre-steps)"
+            exit 0
+          fi
+          cask="$(find dist -name 'abysslink.rb' -print -quit)"
+          if [ -z "${cask}" ]; then
+            echo "generated cask not found in dist/ — goreleaser layout changed?" >&2
+            exit 1
+          fi
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/abysslink/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          cp "${cask}" tap/Casks/abysslink.rb
+          cd tap
+          git config user.name goreleaserbot
+          git config user.email hello@abysslink.dev
+          git add Casks/abysslink.rb
+          if git diff --cached --quiet; then
+            echo "cask unchanged — nothing to push"
+            exit 0
+          fi
+          git commit -m "chore: update abysslink cask to ${TAG}"
+          git push origin HEAD:main
+
+      - name: Push PKGBUILD to AUR
+        env:
+          AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          TAG: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_KEY}" ]; then
+            echo "AUR_SSH_PRIVATE_KEY not provisioned — skipping AUR publish (see LAUNCH.md §Pre-steps)"
+            exit 0
+          fi
+          # goreleaser writes dist/aur/<name>.pkgbuild + <name>.srcinfo; the AUR
+          # repo itself wants them as PKGBUILD + .SRCINFO.
+          pkgb="$(find dist -name '*.pkgbuild' -print -quit)"
+          srci="$(find dist -name '*.srcinfo' -print -quit)"
+          if [ -z "${pkgb}" ] || [ -z "${srci}" ]; then
+            echo "generated .pkgbuild/.srcinfo not found in dist/ — goreleaser layout changed?" >&2
+            exit 1
+          fi
+          mkdir -p "${HOME}/.ssh"
+          printf '%s\n' "${AUR_KEY}" > "${HOME}/.ssh/aur"
+          chmod 600 "${HOME}/.ssh/aur"
+          # Pinned AUR host key (https://wiki.archlinux.org/title/AUR_submission_guidelines)
+          # instead of ssh-keyscan TOFU: the egress allowlist pins the endpoint,
+          # this pins the identity.
+          printf '%s\n' \
+            'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' \
+            > "${HOME}/.ssh/aur_known_hosts"
+          export GIT_SSH_COMMAND="ssh -i ${HOME}/.ssh/aur -o UserKnownHostsFile=${HOME}/.ssh/aur_known_hosts -o StrictHostKeyChecking=yes"
+          git clone --depth 1 ssh://aur@aur.archlinux.org/abysslink-bin.git aur-repo
+          cp "${pkgb}" aur-repo/PKGBUILD
+          cp "${srci}" aur-repo/.SRCINFO
+          cd aur-repo
+          git config user.name goreleaserbot
+          git config user.email hello@abysslink.dev
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "PKGBUILD unchanged — nothing to push"
+            exit 0
+          fi
+          git commit -m "chore: update to ${TAG}"
+          git push origin HEAD:master
