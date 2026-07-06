@@ -55,8 +55,9 @@ jobs:
           # toolchain download (same set repro-check.yml uses) — their absence
           # killed the v3.0.1/v3.0.2 releases at "Set up Go" (ECONNREFUSED).
           # uploads.github.com: goreleaser POSTs release assets there (not
-          # api.github.com). aur.archlinux.org:22: the AUR publisher pushes the
-          # PKGBUILD over SSH when AUR_SSH_PRIVATE_KEY is provisioned.
+          # api.github.com). No aur.archlinux.org here: package-manager pushes
+          # happen in release.yml's publish-packages job AFTER the publish
+          # gate; this job only generates the cask/PKGBUILD into dist.
           # raw.githubusercontent.com / get.anchore.io / toolbox-data.anchore.io:
           # the "Install Syft" step (anchore/sbom-action/download-syft) fetches
           # the install script + binary from these (same set grype.yml uses).
@@ -76,7 +77,6 @@ jobs:
             go.dev:443
             dl.google.com:443
             storage.googleapis.com:443
-            aur.archlinux.org:22
             fulcio.sigstore.dev:443
             rekor.sigstore.dev:443
             tuf-repo-cdn.sigstore.dev:443
@@ -103,12 +103,12 @@ jobs:
           args: release --clean --skip=sign
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Optional publishing credentials for the Homebrew tap and AUR.
-          # If the secrets are not provisioned these resolve to "" and
-          # .goreleaser.yaml's skip_upload guards skip those publishers —
-          # the release itself still succeeds (see LAUNCH.md §Pre-steps).
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          # NO tap/AUR credentials here on purpose: .goreleaser.yaml pins
+          # skip_upload: true for homebrew_casks and aurs, so this job only
+          # GENERATES the cask/PKGBUILD into dist/. release.yml's
+          # publish-packages job pushes them AFTER the sign+verify+publish
+          # gates, so package managers can never reference a draft or a
+          # gate-failed release (see LAUNCH.md §Pre-steps).
 
       - name: Extract version tag
         id: meta
@@ -134,4 +134,7 @@ jobs:
         with:
           name: dist
           path: dist/
-          retention-days: 1
+          # 7 days (was 1): a sign/verify-only re-run within the week can
+          # still download dist instead of failing at download-artifact and
+          # forcing a full re-tag.
+          retention-days: 7

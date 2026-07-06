@@ -13,7 +13,7 @@ Get Abysslink running in five minutes on macOS or Linux.
 ## 1. Install
 
 ```sh
-curl -fsSL https://abysslink.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
 ```
 
 The installer downloads the release tarball, verifies its SHA-256 against the signed checksum manifest, verifies the cosign signature bundle when `cosign` is available, and installs both `abysslink` and the `abysslinkd` daemon to `/usr/local/bin/` (when run as root) or `~/.local/bin/` (otherwise).
@@ -22,10 +22,10 @@ Two environment knobs:
 
 ```sh
 # Pin a specific release instead of the latest
-curl -fsSL https://abysslink.dev/install.sh | ABYSSLINK_VERSION=v3.0.2 sh
+curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | ABYSSLINK_VERSION=v3.0.2 sh
 
 # Fail closed when cosign is not installed (instead of warning and continuing)
-curl -fsSL https://abysslink.dev/install.sh | ABYSSLINK_REQUIRE_COSIGN=1 sh
+curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | ABYSSLINK_REQUIRE_COSIGN=1 sh
 ```
 
 Or build from source:

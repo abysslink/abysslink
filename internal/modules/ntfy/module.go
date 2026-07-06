@@ -41,6 +41,9 @@ const (
 	serverConfigPath       = ".config/ntfy/server.yml"
 	dockerServerConfigPath = ".config/ntfy/server-docker.yml"
 	dockerContainerName    = "abysslink-ntfy"
+	// dockerComposeProject groups abysslink's Docker containers under one folder
+	// in the Docker Desktop UI (Docker Desktop groups by this label).
+	dockerComposeProject = "abysslink"
 	// stateDirPath is the auth-file parent directory (relative to $HOME) shared
 	// by the native and Docker paths. The native server.yml points its auth-file
 	// here, so it MUST exist before `ntfy serve` starts.
@@ -157,6 +160,28 @@ func (m *Module) Teardown(ctx context.Context, dryRun bool) ([]string, error) {
 	return []string{"removed " + desc}, nil
 }
 
+// detectDockerIPDrift returns a WARN finding when the running ntfy Docker
+// container's -p binding pins a tailnet IP other than the current one. The
+// binding is fixed at container-creation time, so a Tailscale IP reassignment
+// leaves the container reachable only on a stale address; `abysslink repair
+// --apply` recreates it on the current IP. Returns nil off-darwin, when the
+// container is not running, or when the current IP can't be resolved.
+func (m *Module) detectDockerIPDrift(ctx context.Context) []modules.Finding {
+	if m.plat.OS() != "darwin" || !m.ntfyDockerRunning(ctx) {
+		return nil
+	}
+	ip, err := m.getTailnetIP(ctx)
+	if err != nil || !m.ntfyDockerIPDrift(ctx, ip) {
+		return nil
+	}
+	return []modules.Finding{{
+		Module:   m.Name(),
+		Check:    "docker_ip_drift",
+		Severity: modules.SeverityWarning,
+		Message:  fmt.Sprintf("ntfy Docker container is bound to a stale tailnet IP (current is %s) — run `abysslink repair --apply` to rebind", ip),
+	}}
+}
+
 // ntfyDockerIPDrift returns true when the running container's port binding
 // does not include the current tailnet IP — meaning the IP changed since the
 // container was created and it must be recreated.
@@ -203,6 +228,8 @@ func (m *Module) Detect(ctx context.Context) ([]modules.Finding, error) {
 		return findings, nil
 	}
 	slog.Debug("ntfy available", "docker", m.ntfyDockerRunning(ctx))
+
+	findings = append(findings, m.detectDockerIPDrift(ctx)...)
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -531,27 +558,45 @@ behind-proxy: false
 		return fmt.Errorf("docker pull exited %d: %s", pullRes.ExitCode, strings.TrimSpace(pullRes.Stderr))
 	}
 
-	// Remove any existing container before (re)creating.
-	if _, err := m.runner.Run(ctx, "docker", "rm", "-f", dockerContainerName); err != nil {
-		slog.Warn("ntfy: docker rm cleanup (best-effort)", "err", err)
-	}
+	// Remove our container plus any orphan currently publishing this exact host
+	// IP:port under a different name. The macOS Docker Desktop forwarder can also
+	// hold tailnetIP:port for a moment after `docker rm` with no container
+	// attached — that residual race is ridden out by the run retry below, not
+	// here. (An orphan still bound to a *previous* tailnet IP is harmless — it
+	// does not conflict with binding the current IP — so it is intentionally not
+	// swept; drift on the running container is handled by the up/repair recreate
+	// path and the docker_ip_drift doctor finding.)
+	m.freeHostPort(ctx, tailnetIP, port)
 
 	slog.Info("ntfy: starting Docker container", "name", dockerContainerName, "bind", tailnetIP+":"+port)
-	runRes, err := m.runner.Run(ctx, "docker", "run", "-d",
+	// unless-stopped is a sane default (survives reboots, respects a manual
+	// stop). NOTE: it does NOT by itself fix a tailnet-IP change across a reboot
+	// — like `always`, it re-launches a running container with the port binding
+	// baked in at creation time. Rebinding to a new IP is done by `abysslink up`
+	// / `repair` recreating the container (freeHostPort + recreate), which the
+	// docker_ip_drift doctor finding prompts.
+	runArgs := []string{
+		"run", "-d",
 		"--name", dockerContainerName,
-		"--restart", "always",
+		"--restart", "unless-stopped",
+		// Group under an "abysslink" project in the Docker Desktop UI. Docker
+		// Desktop groups standalone containers by the compose-project label, so
+		// this is purely cosmetic — it does not pull in Compose.
+		"--label", "com.docker.compose.project=" + dockerComposeProject,
+		"--label", "com.docker.compose.service=ntfy",
 		"-p", fmt.Sprintf("%s:%s:80", tailnetIP, port),
-		"-v", cfgPath+":/etc/ntfy/server.yml:ro",
-		"-v", dataDir+":/var/lib/ntfy",
+		"-v", cfgPath + ":/etc/ntfy/server.yml:ro",
+		"-v", dataDir + ":/var/lib/ntfy",
 		dockerImage,
 		"serve",
 		"--config", "/etc/ntfy/server.yml",
-	)
+	}
+	runRes, err := m.dockerRunWithPortRetry(ctx, tailnetIP, port, runArgs)
 	if err != nil {
-		return fmt.Errorf("docker run: %w", err)
+		return err
 	}
 	if runRes.ExitCode != 0 {
-		return fmt.Errorf("docker run exited %d: %s", runRes.ExitCode, strings.TrimSpace(runRes.Stderr))
+		return dockerPortError(tailnetIP, port, runRes.Stderr)
 	}
 
 	if err := m.ensureAdminUserDocker(ctx); err != nil {
@@ -559,6 +604,125 @@ behind-proxy: false
 	}
 
 	return nil
+}
+
+// dockerRunAttempts / portRetryDelay bound how long dockerRunWithPortRetry
+// rides out the macOS Docker Desktop forwarder releasing a stale host binding
+// after the previous container is removed (≈ attempts × delay of grace).
+const (
+	dockerRunAttempts = 4
+	portRetryDelay    = 700 * time.Millisecond
+)
+
+// hostPortHolders returns the IDs of any containers currently publishing
+// hostIP:port on the host. Used to detect a lingering binding before we try to
+// (re)create ours, and to sweep an orphan that would otherwise wedge the port.
+func (m *Module) hostPortHolders(ctx context.Context, hostIP, port string) []string {
+	// `docker ps --filter publish=<port>` narrows to containers exposing the
+	// port; we then confirm the exact host IP from the port map so we never
+	// touch an unrelated container that merely reuses the port number on a
+	// different interface.
+	res, err := m.runner.Run(ctx, "docker", "ps",
+		"--filter", "publish="+port,
+		"--format", "{{.ID}} {{.Ports}}")
+	if err != nil || res.ExitCode != 0 {
+		return nil
+	}
+	// Docker renders a host mapping as "<ip>:<port>-><cport>/<proto>". Match on
+	// the trailing "->" so hostIP:2586 never prefix-matches hostIP:25860 (belt
+	// and suspenders on top of the exact --filter publish= port filter).
+	want := hostIP + ":" + port + "->"
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		id, ports, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if strings.Contains(ports, want) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// freeHostPort removes the abysslink-ntfy container plus any other container
+// currently publishing the exact hostIP:port (an orphan under a different name,
+// or a stale same-IP bind). Best-effort and idempotent. It does NOT wait on the
+// OS-level forwarder — a port held by Docker Desktop's forwarder with no
+// container attached is not visible to `docker ps`; that residual race is
+// handled by the run retry.
+func (m *Module) freeHostPort(ctx context.Context, hostIP, port string) {
+	if _, err := m.runner.Run(ctx, "docker", "rm", "-f", dockerContainerName); err != nil {
+		slog.Warn("ntfy: docker rm cleanup (best-effort)", "err", err)
+	}
+	// Only containers whose port map matches the exact hostIP:port are removed,
+	// so an unrelated user container reusing the port number elsewhere is safe.
+	// A container the user legitimately bound to this exact tailnet IP:port IS a
+	// real conflict and is force-removed (logged) — rare, but note it is not
+	// recoverable via backups (Docker removal is not a file mutation).
+	for _, id := range m.hostPortHolders(ctx, hostIP, port) {
+		slog.Warn("ntfy: removing orphan container holding the tailnet bind",
+			"id", id, "bind", hostIP+":"+port)
+		if _, err := m.runner.Run(ctx, "docker", "rm", "-f", id); err != nil {
+			slog.Warn("ntfy: orphan container rm (best-effort)", "id", id, "err", err)
+		}
+	}
+}
+
+// dockerRunWithPortRetry runs `docker <runArgs>` and, on an "address already in
+// use" / "port is already allocated" failure, retries a few times with a short
+// backoff to ride out the macOS Docker Desktop forwarder releasing the port.
+// Non-port failures return immediately.
+func (m *Module) dockerRunWithPortRetry(ctx context.Context, hostIP, port string, runArgs []string) (shell.Result, error) {
+	var res shell.Result
+	var err error
+	for attempt := 1; attempt <= dockerRunAttempts; attempt++ {
+		res, err = m.runner.Run(ctx, "docker", runArgs...)
+		if err != nil {
+			return res, fmt.Errorf("docker run: %w", err)
+		}
+		if res.ExitCode == 0 || !isPortInUse(res.Stderr) {
+			return res, nil
+		}
+		if attempt == dockerRunAttempts {
+			break
+		}
+		slog.Warn("ntfy: docker run hit a busy port; retrying",
+			"bind", hostIP+":"+port, "attempt", attempt)
+		// A stale container may have re-appeared (restart policy); sweep again.
+		m.freeHostPort(ctx, hostIP, port)
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		case <-time.After(portRetryDelay):
+		}
+	}
+	return res, nil
+}
+
+// isPortInUse reports whether a docker stderr indicates a host port bind
+// conflict (the several phrasings Docker/Docker Desktop use).
+func isPortInUse(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "address already in use") ||
+		strings.Contains(s, "port is already allocated") ||
+		strings.Contains(s, "ports are not available")
+}
+
+// dockerPortError wraps a bind conflict in an actionable message pointing at the
+// tailnet IP:port and the commands to inspect/clear the holder.
+func dockerPortError(hostIP, port, stderr string) error {
+	if isPortInUse(stderr) {
+		return fmt.Errorf(
+			"ntfy: %s:%s is already in use and could not be freed — another process or a stale Docker forwarder holds it. "+
+				"Inspect with `docker ps --filter publish=%s` and `lsof -nP -iTCP:%s -sTCP:LISTEN`, then re-run `abysslink up --apply` (or `abysslink repair --apply`). Docker stderr: %s",
+			hostIP, port, port, port, strings.TrimSpace(stderr))
+	}
+	return fmt.Errorf("docker run exited non-zero: %s", strings.TrimSpace(stderr))
 }
 
 // ensureAdminUserDocker provisions the ntfy admin account inside the Docker

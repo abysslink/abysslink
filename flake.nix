@@ -80,8 +80,8 @@
             nodes.machine = { ... }: {
               # tailscale is required: doctor's core module checks shell out to
               # the `tailscale` binary; without it doctor errors before emitting
-              # any findings and the `grep -q severity` assertion below fails
-              # (the Monday-cron red-gate this fixes).
+              # any findings and the `grep severity` findings-JSON assertion
+              # below fails (the first Monday-cron red-gate fix).
               environment.systemPackages = [
                 self.packages.${system}.abysslink
                 pkgs.tailscale
@@ -96,9 +96,15 @@
               machine.succeed("abysslink up --help | grep -- --apply")
               machine.succeed("abysslink enroll --help | grep -- phone")
               machine.succeed("abysslink daemon --help | grep -- enable")
-              # doctor is read-only + fail-closed (may exit non-zero on an
-              # unencrypted VM disk); assert only that it emits findings JSON.
-              machine.succeed("abysslink --json doctor | grep -q severity")
+              # doctor is read-only + fail-closed: on this pristine VM it exits
+              # 2 BY DESIGN (unencrypted disk gate, no keychain backend), and
+              # the test driver's pipefail would otherwise fail the assertion
+              # even though grep matched — the Monday-cron red-gate this fixes.
+              # `|| true` absorbs doctor's documented exit (and any SIGPIPE);
+              # grep (without -q, so it drains stdin) still fails the check if
+              # no findings JSON is emitted. Do NOT weaken doctor instead: the
+              # fail-closed exit contract is an immutable security default.
+              machine.succeed("(abysslink --json doctor || true) | grep severity >/dev/null")
 
               # Full timed fire-drill harness — INFORMATIONAL (does not gate the
               # check): `up --dry-run` may need a config on a bare box, so its

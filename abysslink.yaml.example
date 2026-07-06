@@ -45,6 +45,11 @@ modules:
   notify:
     enabled: true
     default_topic: rig     # generic notify API + abysslinkd socket
+    # Tapping a notification opens this URL. Set it to an ssh:// deep link that
+    # EXACTLY matches your saved terminal-app host (Termius/Blink/…) so the tap
+    # connects with saved credentials instead of a new connection. Empty = the
+    # daemon composes ssh://<user>@<short-hostname>.
+    # click_url: "ssh://me@rig.tailnet-name.ts.net"
   ntfy:
     enabled: true          # default delivery backend for notify
   watch:

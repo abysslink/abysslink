@@ -95,7 +95,7 @@ if [ ! -x "$BIN" ]; then
     BIN="$(command -v abysslink)"
   else
     say "FATAL: abysslink binary not found at '$BIN' and not on PATH."
-    say "On a fresh VM, install first:  curl -fsSL https://abysslink.dev/install.sh | sh"
+    say "On a fresh VM, install first:  curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh"
     exit 1
   fi
 fi

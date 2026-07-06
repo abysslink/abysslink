@@ -43,6 +43,12 @@ type Action struct {
 	// Empty string means no explain text is shown.
 	Explain    string
 	Reversible bool
+	// RequiresSudo declares that Apply will invoke a privileged (sudo)
+	// subprocess. `up --apply` uses this to force-disable the animated
+	// spinner so the interactive sudo password prompt does not race the
+	// raw-mode TUI for the terminal (garbled input → "incorrect password").
+	// Prefer this over the description-keyword heuristic in the CLI.
+	RequiresSudo bool
 }
 
 // Result summarises what happened during Apply.

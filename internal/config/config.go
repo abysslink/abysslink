@@ -644,6 +644,12 @@ func (m NtfyModule) ListenPort() int {
 type NotifyModule struct {
 	Enabled      bool   `yaml:"enabled"`
 	DefaultTopic string `yaml:"default_topic"`
+	// ClickURL is the URL a notification opens when tapped (ntfy X-Click).
+	// Set it to an ssh:// deep link that EXACTLY matches your saved terminal-app
+	// host so tapping connects with saved credentials instead of a new
+	// connection, e.g. "ssh://me@rig.tailnet-name.ts.net". Empty = the daemon's
+	// composed ssh://<user>@<short-hostname> (or no click on the direct path).
+	ClickURL string `yaml:"click_url"`
 }
 
 // WatchModule configures the watchers run by abysslinkd.
@@ -1265,6 +1271,25 @@ func validateWatchPanes(cfg *Config) error {
 			return fmt.Errorf("config: modules.watch.panes element %q is not a valid pane name — "+
 				"only [a-z0-9] and internal hyphens/dots allowed, no leading dash (A8/NET-03)", pane)
 		}
+	}
+	return validateNotifyClickURL(cfg)
+}
+
+// validateNotifyClickURL checks that modules.notify.click_url, when set, is a
+// parseable absolute URL with a scheme (it becomes the ntfy X-Click header; a
+// malformed value would make the push server reject the notification). No
+// control characters (they cannot ride an HTTP header).
+func validateNotifyClickURL(cfg *Config) error {
+	raw := cfg.Modules.Notify.ClickURL
+	if raw == "" {
+		return nil
+	}
+	if strings.ContainsAny(raw, "\r\n\x00") {
+		return fmt.Errorf("config: modules.notify.click_url must not contain control characters")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		return fmt.Errorf("config: modules.notify.click_url %q must be an absolute URL with a scheme (e.g. ssh://me@rig.tailnet-name.ts.net)", raw)
 	}
 	return nil
 }

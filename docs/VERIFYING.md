@@ -97,7 +97,12 @@ gh attestation verify abysslink_${BARE}_linux_amd64.tar.gz \
 The manifest you verified in Leg 1 is the trust anchor for this check.
 
 ```sh
-grep abysslink_${BARE}_linux_amd64.tar.gz checksums.txt | sha256sum --check
+# The leading space + trailing anchor keep the match to the tarball line
+# itself. An unanchored grep also matches the manifest's .cdx.json/.spdx.json
+# SBOM lines, and sha256sum then exits non-zero with phantom "FAILED open or
+# read" errors for files you never downloaded — on a perfectly healthy
+# release. (macOS ships no sha256sum: use `shasum -a 256 --check`.)
+grep " abysslink_${BARE}_linux_amd64.tar.gz$" checksums.txt | sha256sum --check
 # abysslink_${BARE}_linux_amd64.tar.gz: OK
 ```
 

@@ -27,12 +27,26 @@ lacks the user's interactive `PATH`.
 | Hook event | Command | When written |
 |------------|---------|--------------|
 | `Stop` | `abysslink notify "Claude stopped" "Session ended"` | always |
-| `Notification` | `abysslink notify "Claude needs you" "waiting for input"` | when `notify_on.notification: true` |
+| `Notification` | `abysslink notify --claude-hook` | when `notify_on.notification: true` |
 | `PreToolUse` | `abysslink approve --check --blocking` | only when `gate.enforcing: true` |
 | `PermissionRequest` | `abysslink approve --permission-request` | only when `gate.enforcing: true` |
 
-Notification titles are **generic by design** — no task summary, error text, or
-tool arguments are ever placed in a push payload (opaque-payload invariant).
+The `Notification` hook pipes Claude Code's notification JSON on stdin;
+`notify --claude-hook` reads it, classifies the type, and titles the push
+accordingly so you can tell **what** Claude wants at a glance:
+
+| Claude's message contains | Push title | Priority |
+|---|---|---|
+| `permission` / `approve` / `allow` | **Claude needs approval** | max |
+| `select` / `choose` / `option` (a multiple-choice prompt) | **Claude needs a decision** | high |
+| `waiting` / `input` / `idle` | **Claude needs input** | high |
+| anything else | **Claude** | high |
+
+Claude's **real message** is the push body. Over the default self-hosted
+ntfy/UnifiedPush path this stays on your own server (no third party). The
+experimental direct APNs/FCM legs (off by default) would transit Apple/Google,
+so enable those only if you accept that the notification text leaves the tailnet.
+
 The `PreToolUse` hook blocks tool execution pending phone or TTY approval;
 `PermissionRequest` is a fast non-blocking notification trigger. Both are
 written only when the approve gate is enforcing (it ships in shadow mode).

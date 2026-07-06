@@ -11,7 +11,7 @@
 # one-liner works. Edit scripts/install.sh first, then copy it over the
 # root install.sh.
 #
-# Usage: curl -fsSL https://abysslink.dev/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
 #        ABYSSLINK_VERSION=v0.1.0 sh install.sh
 #
 # Environment:
@@ -120,6 +120,45 @@ try_download() {
     fi
 }
 
+# When a pinned release's tarball 404s, tell the user WHY if we can: the tag
+# may not exist, or the release may still be an unpublished draft (draft
+# assets are not publicly downloadable). Purely advisory — the caller still
+# dies with the download error.
+release_status_hint() {
+    _tag="$1"
+    _tagapi="https://api.github.com/repos/${REPO}/releases/tags/${_tag}"
+    have_cmd curl || return 0
+    _code="$(curl -s -o /dev/null -w '%{http_code}' "${_tagapi}" 2>/dev/null)" || return 0
+    if [ "${_code}" = "404" ]; then
+        printf 'note: release %s was not found on GitHub — it may not exist, or it may\n' "${_tag}" >&2
+        printf '      still be an unpublished draft (draft assets are not downloadable).\n' >&2
+        printf '      Published releases: https://github.com/%s/releases\n' "${REPO}" >&2
+    fi
+}
+
+# Releases from v4.0.1 on are cut through the gated release workflow, which
+# guarantees the cosign bundle is uploaded BEFORE the release is published —
+# so for those versions a missing bundle means a spoofed or tampered download
+# location, and the installer fails closed. Older releases (e.g. v1.0.0)
+# predate bundle signing and keep the warn-and-continue path.
+bundle_required() {
+    _v="$1"                 # bare version, e.g. 4.0.1 or 4.0.1-rc.1
+    _core="${_v%%-*}"       # strip any prerelease suffix
+    _maj="${_core%%.*}"
+    _rest="${_core#*.}"
+    _min="${_rest%%.*}"
+    _pat="${_rest#*.}"
+    # Unparseable version strings fail closed (bundle required).
+    case "${_maj}" in '' | *[!0-9]*) return 0 ;; esac
+    case "${_min}" in '' | *[!0-9]*) return 0 ;; esac
+    case "${_pat}" in '' | *[!0-9]*) return 0 ;; esac
+    [ "${_maj}" -gt 4 ] && return 0
+    [ "${_maj}" -lt 4 ] && return 1
+    [ "${_min}" -gt 0 ] && return 0
+    [ "${_pat}" -ge 1 ] && return 0
+    return 1
+}
+
 # --------------------------------------------------------------------------- #
 # Verify SHA-256 checksum                                                      #
 # --------------------------------------------------------------------------- #
@@ -214,7 +253,10 @@ main() {
     info "installing abysslink ${_version} (${_os}/${_arch})"
 
     info "downloading ${_tarball} …"
-    download "${_base_url}/${_tarball}" "${_tmpdir}/${_tarball}"
+    if ! try_download "${_base_url}/${_tarball}" "${_tmpdir}/${_tarball}"; then
+        release_status_hint "${_version}"
+        die "download failed: ${_base_url}/${_tarball}"
+    fi
 
     info "downloading checksums …"
     download "${_base_url}/${_sums_file}" "${_tmpdir}/${_sums_file}"
@@ -222,11 +264,13 @@ main() {
     verify_checksum "${_tmpdir}/${_tarball}" "${_tmpdir}/${_sums_file}"
 
     # The cosign v3 bundle is published for every release cut through the
-    # signed release workflow. Pre-bundle releases (e.g. v1.0.0) don't carry it,
-    # so fetch it best-effort: when present, verify (fail CLOSED if cosign is
+    # gated release workflow (v4.0.1+), where publish is blocked until the
+    # bundle is uploaded — for those versions a missing bundle is FATAL (fail
+    # closed). Pre-bundle releases (e.g. v1.0.0) don't carry it, so for them
+    # fetch best-effort: when present, verify (fail CLOSED if cosign is
     # installed and verification fails); when absent, warn and continue on the
-    # already-verified SHA-256 checksum — UNLESS ABYSSLINK_REQUIRE_COSIGN=1, in
-    # which case a missing bundle is fatal (fail closed).
+    # already-verified SHA-256 checksum — UNLESS ABYSSLINK_REQUIRE_COSIGN=1,
+    # which makes a missing bundle fatal for any version.
     _bundle_file="${_sums_file}.bundle"
     info "downloading cosign bundle ..."
     if try_download "${_base_url}/${_bundle_file}" "${_tmpdir}/${_bundle_file}"; then
@@ -234,6 +278,9 @@ main() {
             "${_tmpdir}/${_sums_file}" \
             "${_tmpdir}/${_bundle_file}"
     else
+        if bundle_required "${_ver_bare}"; then
+            die "cosign bundle missing for ${_version} — releases from v4.0.1 on always ship one, so this download location cannot be trusted (fail closed)"
+        fi
         if [ "${ABYSSLINK_REQUIRE_COSIGN:-0}" = "1" ]; then
             die "cosign bundle not published for ${_version} (ABYSSLINK_REQUIRE_COSIGN=1) — refusing to install (fail closed)"
         fi

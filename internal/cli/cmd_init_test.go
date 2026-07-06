@@ -75,3 +75,51 @@ func TestGalleryCommand(t *testing.T) {
 	// In headless / NO_COLOR mode glamour returns raw markdown — check for content.
 	assert.NotEmpty(t, out, "gallery must produce some output (banner or markdown)")
 }
+
+// TestApplyInitFormResult_ClickURL asserts the init wizard's optional
+// tap-to-open URL lands in modules.notify.click_url.
+func TestApplyInitFormResult_ClickURL(t *testing.T) {
+	cfg, err := applyInitFormResult(initFormResult{
+		email: "me@example.com", hostname: "rig", enableNtfy: true, ntfyPort: 2586,
+		clickURL: "ssh://me@rig.tailnet-name.ts.net", backendType: "tailscale",
+	})
+	if err != nil {
+		t.Fatalf("applyInitFormResult: %v", err)
+	}
+	if cfg.Modules.Notify.ClickURL != "ssh://me@rig.tailnet-name.ts.net" {
+		t.Errorf("click_url not wired: got %q", cfg.Modules.Notify.ClickURL)
+	}
+}
+
+// TestDefaultClickURLFor asserts each phone SSH app maps to the right tap-to-open
+// link: Prompt gets its prompt-favorite:// deep link (connects to a saved
+// server), Termius/Blink get plain ssh://, and copy-from-app / custom start blank.
+func TestDefaultClickURLFor(t *testing.T) {
+	const user, host = "mo", "rig.tailnet-name.ts.net"
+	cases := map[string]string{
+		"webssh":    "webssh://mo@rig.tailnet-name.ts.net",
+		"prompt":    "prompt-favorite://mo@rig.tailnet-name.ts.net",
+		"termius":   "ssh://mo@rig.tailnet-name.ts.net",
+		"blink":     "ssh://mo@rig.tailnet-name.ts.net",
+		"shellfish": "",
+		"other":     "",
+	}
+	for app, want := range cases {
+		if got := defaultClickURLFor(app, user, host); got != want {
+			t.Errorf("defaultClickURLFor(%q) = %q, want %q", app, got, want)
+		}
+	}
+}
+
+// TestValidateClickURLInput accepts blank and any absolute URL scheme, rejects
+// bare hostnames.
+func TestValidateClickURLInput(t *testing.T) {
+	for _, ok := range []string{"", "  ", "ssh://me@rig.ts.net", "prompt-favorite://me@rig.ts.net"} {
+		if err := validateClickURLInput(ok); err != nil {
+			t.Errorf("validateClickURLInput(%q) should pass, got %v", ok, err)
+		}
+	}
+	if err := validateClickURLInput("rig.ts.net"); err == nil {
+		t.Errorf("validateClickURLInput bare host should fail")
+	}
+}

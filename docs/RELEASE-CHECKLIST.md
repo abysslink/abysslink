@@ -9,11 +9,27 @@ lists the mandatory review items specific to that version.
 
 The v3.0.0–v3.0.2 releases were gated by the automated CI release gates (lint, test,
 security scans, repro-check, claims-check) rather than a hand-written checklist section
-here. The **v4.0.0 checklist is pending** — it must be written and completed before
-`git tag v4.0.0`, and must cover the v3/v4 surfaces (metrics/webui bind floors, audit
-chain, push gateways, kill-switch, dead-man switch) plus the release pipeline itself
-(published release with `.bundle` assets; `curl | sh` and Homebrew install verified —
-see LAUNCH.md GATE-LNCH-06).
+here. v4.0.0 was tagged but its release run failed at the sign/verify gates and was
+never published (fail-closed, by design); its draft is superseded.
+
+## v4.0.1 — Checklist (the actual launch release)
+
+- [ ] Release-pipeline fixes merged to main (PR #55): sign-job repo context +
+      egress, verify gate binds to draft-release bytes (contents: write),
+      package publishing moved behind the publish gate (publish-packages job),
+      `replace_existing_draft`, install.sh fail-closed bundle gate.
+- [ ] Rehearsal tag `v4.0.1-rc.1` runs GREEN end-to-end: published prerelease
+      with `abysslink_4.0.1-rc.1_checksums.txt.bundle` asset (first-ever
+      execution of the sign job's cosign v3 path).
+- [ ] `v4.0.1` tag green: published release, `.bundle` present.
+- [ ] `curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh`
+      installs v4.0.1 and prints `cosign bundle OK` (with cosign installed).
+- [ ] `cosign verify-blob --bundle --offline` per docs/VERIFYING.md Leg 1 passes.
+- [ ] Post-publish docs flip: quickstart/faq version pins → v4.0.1, tap answer
+      updated once the cask lands (operator: tap repo + HOMEBREW_TAP_GITHUB_TOKEN).
+- [ ] Security-surface review deltas since v3.0.2 (metrics/webui bind floors,
+      audit chain, push gateways, kill-switch, dead-man switch) covered by the
+      standing CI gates (claims-check 0 warnings — GATE-LNCH-04 sign-off).
 
 ---
 

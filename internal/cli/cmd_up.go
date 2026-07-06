@@ -26,6 +26,7 @@ import (
 
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/platform"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/abysslink/abysslink/internal/tui"
@@ -184,7 +185,38 @@ func runUpApplyPhase(ctx context.Context, cmd *cobra.Command, p Printer, r *modu
 	if flushErr := flushManualSteps(ctx, cc, p); flushErr != nil {
 		return findings, false, applyErr, fmt.Errorf("up: manual steps: %w", flushErr)
 	}
+
+	// Reload the daemon so it picks up config that it reads only at startup
+	// (e.g. notify.click_url, session_registry, gateway). Best-effort: only when
+	// changes were applied cleanly and the service is already running.
+	if cc.apply && applyErr == nil && len(actions) > 0 {
+		reloadDaemonAfterApply(ctx, p, cc)
+	}
 	return findings, false, applyErr, nil
+}
+
+// reloadDaemonAfterApply restarts abysslinkd when it is currently running, so a
+// converge that changed config takes effect on the daemon side (it reads config
+// only when the dispatcher is built at startup). Best-effort: any failure is a
+// visible warning, never an apply failure. The daemon is restart-safe — the
+// outbox and dead-man registry persist across the bounce.
+func reloadDaemonAfterApply(ctx context.Context, p Printer, cc *cmdContext) {
+	deps, err := buildDeps(ctx, cc)
+	if err != nil {
+		return
+	}
+	if svc, _ := deps.Platform.ServiceStatus(ctx, daemonLabel); svc != platform.ServiceRunning {
+		return // not running → nothing to reload; a later `daemon start` picks up config
+	}
+	if err := deps.Platform.ServiceStop(ctx, daemonLabel); err != nil {
+		printerInfo(p, "  "+styleMuted.Render("note: could not reload abysslinkd (stop): "+err.Error()))
+		return
+	}
+	if err := deps.Platform.ServiceStart(ctx, daemonLabel); err != nil {
+		printerInfo(p, "  "+styleMuted.Render("note: abysslinkd stopped but failed to restart — run `abysslink daemon start --apply`: "+err.Error()))
+		return
+	}
+	printerInfo(p, "  "+styleMuted.Render("reloaded abysslinkd to apply config changes"))
 }
 
 // printUpHeader renders the `abysslink up` header box: a preview-only warning
@@ -602,12 +634,20 @@ func sudoActionsFromActions(actions []modules.Action) []string {
 
 	var result []string
 	for _, a := range actions {
-		for _, kw := range sudoKeywords {
-			if strings.Contains(strings.ToLower(a.Description), kw) ||
-				strings.Contains(strings.ToLower(a.Module), kw) {
-				result = append(result, fmt.Sprintf("%-18s %s", a.Module, styleMuted.Render(a.Description)))
-				break
+		// Explicit flag first (the reliable path); fall back to the description
+		// keyword heuristic for modules that don't set RequiresSudo yet.
+		matched := a.RequiresSudo
+		if !matched {
+			for _, kw := range sudoKeywords {
+				if strings.Contains(strings.ToLower(a.Description), kw) ||
+					strings.Contains(strings.ToLower(a.Module), kw) {
+					matched = true
+					break
+				}
 			}
+		}
+		if matched {
+			result = append(result, fmt.Sprintf("%-18s %s", a.Module, styleMuted.Render(a.Description)))
 		}
 	}
 	return result

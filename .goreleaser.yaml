@@ -169,10 +169,12 @@ nfpms:
 
 # NOTE: The abysslink/homebrew-tap GitHub repo and the HOMEBREW_TAP_GITHUB_TOKEN secret
 # must be provisioned by an operator before tagging a release (see LAUNCH.md §Pre-steps).
-# skip_upload prevents publishing on snapshot builds AND when the tap token is
-# absent/empty (index .Env never errors on an unset var), so a release can
-# succeed before the tap is provisioned — cask publishing lights up
-# automatically once the secret exists.
+# skip_upload is PINNED true: goreleaser runs inside the build job, BEFORE the
+# sign/verify/publish gates, and a cask pushed while the release is still a
+# draft points at releases/download URLs that 404 — permanently if a gate
+# fails. goreleaser therefore only renders the cask into dist/; the
+# publish-packages job in release.yml pushes it to the tap AFTER the release
+# is public (and skips gracefully while the token is unprovisioned).
 homebrew_casks:
   - name: abysslink
     ids:
@@ -215,12 +217,13 @@ homebrew_casks:
     commit_author:
       name: goreleaserbot
       email: hello@abysslink.dev
-    skip_upload: '{{ or .IsSnapshot (eq (index .Env "HOMEBREW_TAP_GITHUB_TOKEN") "") }}'
+    skip_upload: true
 
 # NOTE: The AUR abysslink-bin package and AUR_SSH_PRIVATE_KEY secret must be provisioned
 # by an operator before tagging a release (see LAUNCH.md §Pre-steps).
-# Same graceful-skip contract as homebrew_casks above: missing/empty key ⇒
-# skip_upload, release still succeeds.
+# Same gate contract as homebrew_casks above: skip_upload PINNED true, the
+# PKGBUILD/.SRCINFO are only rendered into dist/ here and pushed by
+# release.yml's publish-packages job after the publish gate.
 aurs:
   - name: abysslink-bin
     ids:
@@ -250,7 +253,7 @@ aurs:
     commit_author:
       name: goreleaserbot
       email: hello@abysslink.dev
-    skip_upload: '{{ or .IsSnapshot (eq (index .Env "AUR_SSH_PRIVATE_KEY") "") }}'
+    skip_upload: true
 
 changelog:
   sort: asc
@@ -267,6 +270,12 @@ release:
     owner: abysslink
     name: abysslink
   draft: true
+  # A failed sign/verify gate strands a draft; without this, re-tagging would
+  # create a SECOND draft with the same title (GetReleaseByTag never returns
+  # drafts) and the gh-by-tag fallbacks in sign/publish could race the stale
+  # one. Replacing the prior draft makes tag re-push a safe, documented
+  # recovery path (LAUNCH.md §Release recovery).
+  replace_existing_draft: true
   prerelease: auto
   name_template: "Abysslink {{.Tag}}"
   footer: |
@@ -290,13 +299,17 @@ release:
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
       checksums.txt
 
-    # Verify your binary's SHA-256 against the signed manifest
-    grep abysslink_${VERSION#v}_linux_amd64.tar.gz checksums.txt | sha256sum --check
+    # Verify your binary's SHA-256 against the signed manifest.
+    # The trailing space+anchor keeps the match to the tarball line itself —
+    # an unanchored grep also matches the .cdx.json/.spdx.json SBOM lines,
+    # which you haven't downloaded, and sha256sum then reports phantom
+    # failures. (macOS: use `shasum -a 256 --check`.)
+    grep " abysslink_${VERSION#v}_linux_amd64.tar.gz$" checksums.txt | sha256sum --check
     ```
 
     One-liner installer (runs all of the above automatically):
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
     ```
 
     Self-update from an installed binary:

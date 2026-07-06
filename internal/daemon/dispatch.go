@@ -122,6 +122,23 @@ type dispatcher struct {
 // wakeSentCount reports the number of successfully delivered v2 wakes.
 func (d *dispatcher) wakeSentCount() uint64 { return d.wakeSent.Load() }
 
+// clickURLValue returns the current default click URL under d.mu — it may be
+// upgraded from the short-hostname default to the full MagicDNS name after
+// construction (resolveDispatchClickURL), so reads take the lock.
+func (d *dispatcher) clickURLValue() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.clickURL
+}
+
+// setClickURL replaces the default click URL. Called once at startup when the
+// MagicDNS name resolves; guarded by d.mu against concurrent clickURLValue reads.
+func (d *dispatcher) setClickURL(u string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.clickURL = u
+}
+
 // newDispatcher returns a dispatcher delivering via n. cfg may be nil (tests,
 // degraded startup); the compiled-in defaults then apply.
 func newDispatcher(n Notifier, cfg *config.Config) *dispatcher {
@@ -130,10 +147,17 @@ func newDispatcher(n Notifier, cfg *config.Config) *dispatcher {
 		cooldown = time.Duration(cfg.SessionRegistry.CooldownSecs) * time.Second
 	}
 	host := notifyv2.ShortHostname()
+	// An operator-set click_url (an ssh:// deep link matching their saved
+	// terminal-app host) overrides the composed short-hostname link so tapping
+	// a notification connects with saved credentials instead of a new session.
+	clickURL := composeClickURL(host)
+	if cfg != nil && cfg.Modules.Notify.ClickURL != "" {
+		clickURL = cfg.Modules.Notify.ClickURL
+	}
 	return &dispatcher{
 		notifier:    n,
 		now:         time.Now,
-		clickURL:    composeClickURL(host),
+		clickURL:    clickURL,
 		hostname:    host,
 		cooldownDur: cooldown,
 		retryBase:   retryBaseDefault,
@@ -249,7 +273,7 @@ func (d *dispatcher) dispatch(ctx context.Context, msg notifyv2.Message, origin 
 
 	// (4) Render: the click URL defaults to the server-side ssh:// deep link.
 	if opts.Click == "" {
-		opts.Click = d.clickURL
+		opts.Click = d.clickURLValue()
 	}
 	note := notifyv2.Render(msg, opts)
 
