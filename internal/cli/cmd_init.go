@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/browser"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/flow"
@@ -1092,31 +1093,138 @@ func runInitForm(ctx context.Context, cmd *cobra.Command, autoYes bool) (*config
 	return applyInitFormResult(r)
 }
 
-// promptClickURL asks for the optional notification tap-to-open SSH URL,
-// prefilled with a starting point the user edits to their saved terminal-app
-// host. Blank skips it. Extracted from runInitForm to keep that flat (CR-05).
+// promptClickURL sets up the "tap a notification → jump onto this machine"
+// link. It first asks which SSH app lives on the user's phone, because each app
+// opens a saved connection differently: Prompt jumps straight in via a
+// prompt-favorite:// link, most others use a plain ssh:// link, and Secure
+// ShellFish needs a link copied out of the app. The chosen app decides the
+// prefilled value; the user can still edit or clear it. Extracted from
+// runInitForm to keep that flat (CR-05).
 func promptClickURL(ctx context.Context, r *initFormResult) error {
-	r.clickURL = fmt.Sprintf("ssh://%s@%s", currentUnixUser(), r.hostname)
+	host := magicDNSHost(ctx, r.backendType, r.hostname)
+	unixUser := currentUnixUser()
+
+	app := "webssh"
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Which SSH app is on your phone?").
+			Description("When a wake notification arrives, tapping it can drop you\nstraight onto this machine. Pick your app so the tap just works.").
+			Options(
+				huh.NewOption("WebSSH — free, one tap connects (recommended)", "webssh"),
+				huh.NewOption("Prompt — one tap connects, paid app", "prompt"),
+				huh.NewOption("Termius — opens a connection screen, then you tap Connect", "termius"),
+				huh.NewOption("Blink Shell", "blink"),
+				huh.NewOption("Secure ShellFish — paste a link copied from the app", "shellfish"),
+				huh.NewOption("Other / I'll paste my own link", "other"),
+				huh.NewOption("None — a tap shouldn't open anything", "none"),
+			).
+			Value(&app),
+	)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
+		return fmt.Errorf("init: click app: %w", err)
+	}
+
+	if app == "none" {
+		r.clickURL = ""
+		return nil
+	}
+
+	r.clickURL = defaultClickURLFor(app, unixUser, host)
 	if err := huh.NewForm(huh.NewGroup(
 		huh.NewInput().
-			Title("Tap-to-open SSH URL (optional)").
-			Description("Opens when you tap a notification. Set it to match your saved\nTermius/Blink host — usually the full MagicDNS name — so the tap\nconnects with saved creds, e.g. ssh://you@rig.tailnet-name.ts.net.\nClear it to skip.").
+			Title("Tap-to-open link (optional)").
+			Description(clickURLHelp(app)).
 			Value(&r.clickURL).
-			Validate(func(s string) error {
-				s = strings.TrimSpace(s)
-				if s == "" {
-					return nil
-				}
-				if u, err := url.Parse(s); err != nil || u.Scheme == "" {
-					return fmt.Errorf("must be an absolute URL with a scheme (e.g. ssh://you@host) or blank")
-				}
-				return nil
-			}),
+			Validate(validateClickURLInput),
 	)).WithTheme(ui.AbyssTheme()).RunWithContext(ctx); err != nil {
 		return fmt.Errorf("init: click url: %w", err)
 	}
 	r.clickURL = strings.TrimSpace(r.clickURL)
 	return nil
+}
+
+// defaultClickURLFor prefills the tap-to-open link for the chosen phone SSH app.
+// Prompt gets its prompt-favorite:// deep link (matches a saved connection by
+// name, then by address — so it connects even when the saved server is named
+// differently). Termius/Blink get a plain ssh:// link. Secure ShellFish and
+// "other" start blank because that link is copied out of the app, not composed.
+func defaultClickURLFor(app, unixUser, host string) string {
+	switch app {
+	case "prompt":
+		return fmt.Sprintf("prompt-favorite://%s@%s", unixUser, host)
+	case "webssh":
+		// WebSSH registers both ssh:// and its own webssh://. Use the dedicated
+		// scheme so the tap always routes to WebSSH — a plain ssh:// link is
+		// grabbed by whichever ssh-scheme app iOS picked (e.g. Prompt) when more
+		// than one is installed.
+		return fmt.Sprintf("webssh://%s@%s", unixUser, host)
+	case "termius", "blink":
+		return fmt.Sprintf("ssh://%s@%s", unixUser, host)
+	default: // shellfish, other
+		return ""
+	}
+}
+
+// clickURLHelp returns a short, non-technical hint for the tap-to-open input,
+// tailored to the chosen app.
+func clickURLHelp(app string) string {
+	switch app {
+	case "webssh":
+		return "Tapping a notification opens WebSSH and connects to this machine\nin one tap. Because your link uses Tailscale, sign-in is automatic —\nno password to type. Clear the field to skip."
+	case "prompt":
+		return "Tapping a notification opens Prompt and connects to this machine\ninstantly. It finds your saved connection by address, so this works\neven if you named it something else. Clear the field to skip."
+	case "termius":
+		return "Tapping a notification opens Termius on a connection screen for\nthis machine — tap Connect to finish. Clear the field to skip."
+	case "blink":
+		return "Tapping a notification opens Blink and starts connecting to this\nmachine. Clear the field to skip."
+	case "shellfish":
+		return "In Secure ShellFish, open your saved server, choose Share\nConfiguration, and paste that link here. Clear the field to skip."
+	default:
+		return "Paste the link your SSH app uses to open a saved connection.\nClear the field to skip."
+	}
+}
+
+// validateClickURLInput accepts a blank value (skip) or any absolute URL with a
+// scheme (ssh://, prompt-favorite://, an app-copied link, etc.).
+func validateClickURLInput(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	if u, err := url.Parse(s); err != nil || u.Scheme == "" {
+		return fmt.Errorf("must be a full link with a scheme (e.g. ssh://you@host) or blank")
+	}
+	return nil
+}
+
+// magicDNSHost returns the node's full MagicDNS name (e.g.
+// "rig.tailnet-name.ts.net", or the Headscale/NetBird equivalent) so a tapped
+// notification connects to the saved remote host, not the bare LAN hostname —
+// which Termius/Blink can't route off the local network. It resolves through the
+// backend Client (backend-agnostic), preferring the node's reported FQDN, then
+// hostname + MagicDNS suffix. Falls back to the bare hostname when the backend
+// is unavailable (daemon down or not yet authenticated) or MagicDNS is off.
+func magicDNSHost(ctx context.Context, backendType, hostname string) string {
+	cli, err := backend.New(&config.Config{Backend: config.Backend{Type: backendType}}, newRunner())
+	if err != nil || cli == nil {
+		return hostname
+	}
+	st, err := cli.Status(ctx)
+	if err != nil || st == nil {
+		return hostname
+	}
+	if st.Self != nil {
+		if dns := strings.TrimSuffix(st.Self.DNSName, "."); dns != "" {
+			return dns
+		}
+	}
+	suffix := st.MagicDNSSuffix
+	if suffix == "" && st.CurrentTailnet != nil {
+		suffix = st.CurrentTailnet.MagicDNSSuffix
+	}
+	if suffix != "" && hostname != "" {
+		return hostname + "." + suffix
+	}
+	return hostname
 }
 
 // currentUnixUser returns the current UNIX login name from the environment.

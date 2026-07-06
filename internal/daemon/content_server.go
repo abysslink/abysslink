@@ -262,6 +262,36 @@ func (s *Server) hostResolverOrDefault() tailnetHostResolver {
 	return backendHostResolver{cfg: s.cfg, runner: s.runner}
 }
 
+// resolveDispatchClickURL upgrades the dispatcher's default notification tap URL
+// from the short hostname (set at construction) to the node's full MagicDNS name
+// (e.g. ssh://me@rig.tail1234.ts.net) so a tapped notification routes off the
+// local network. No-op when the operator pinned modules.notify.click_url — that
+// value already won in newDispatcher — or when the MagicDNS name is unavailable
+// (backend down, MagicDNS off): the short-hostname default then stands.
+func (s *Server) resolveDispatchClickURL(ctx context.Context) {
+	if s.cfg != nil && s.cfg.Modules.Notify.ClickURL != "" {
+		return
+	}
+	host, err := s.hostResolverOrDefault().Hostname(ctx)
+	if err != nil {
+		slog.Warn("daemon: MagicDNS hostname unavailable; notification tap URL keeps the short hostname", "err", err)
+		return
+	}
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	// Accept whatever fully-qualified name the backend reports: Tailscale
+	// (*.ts.net), Headscale (admin base_domain), NetBird (its DNS domain) each
+	// yield a different suffix, so gate on "qualified and routable" — a dot,
+	// no whitespace, and not just the bare short hostname — rather than a
+	// Tailscale-specific suffix. No cert SAN is involved (this is an ssh:// deep
+	// link, not the HTTPS content host), so no *.ts.net constraint applies.
+	if host == "" || host == s.hostname || !strings.Contains(host, ".") || strings.ContainsAny(host, " \t\r\n") {
+		return
+	}
+	if u := composeClickURL(host); u != "" {
+		s.dispatch.setClickURL(u)
+	}
+}
+
 func (s *Server) resolveContentAdvertiseHost(ctx context.Context, bindIP string, resolver tailnetHostResolver) string {
 	if resolver == nil {
 		return bindIP

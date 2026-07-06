@@ -421,6 +421,9 @@ func (s *Server) Run(ctx context.Context) error {
 	s.startWatchers(ctx)
 	// v2 dispatch retry loop (D-28); exits on ctx cancellation.
 	go s.dispatch.run(ctx)
+	// Upgrade the notification tap URL from the short hostname to the full
+	// MagicDNS name once the backend resolves it (async: probes the backend).
+	go s.resolveDispatchClickURL(ctx)
 	// Tailnet-only HTTPS content listener (BACK-06). Launched async because
 	// the bind resolution probes the backend; every failure path disables the
 	// listener (fail closed) while this socket keeps serving.
