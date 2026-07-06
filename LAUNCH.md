@@ -1,6 +1,6 @@
 # Abysslink Launch Runbook
 
-This runbook documents the blocking gates and all post copy for the v4.0.0 public
+This runbook documents the blocking gates and all post copy for the v4.0.1 public
 launch. Complete the blocking gates in order before executing any post template.
 
 ---
@@ -11,8 +11,11 @@ All four gates must pass before executing the §Post Templates section. These ar
 human-verified, operator-owned actions — no automated CI can claim them passed.
 
 - [ ] **GATE-LNCH-02** (operator): Fresh macOS + Ubuntu VMs — run the quickstart end-to-end
-      as an outside user, time it from `brew install abysslink` to `abysslink up --apply`
-      success. **Must complete in < 10 minutes.** Record result and tester name below.
+      as an outside user. macOS leg: time it from `brew install abysslink` to
+      `abysslink up --apply` success. Ubuntu leg: start from the curl installer
+      (`curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh`)
+      — the tap ships a CASK, and casks are macOS-first; do not promise brew on Linux.
+      **Must complete in < 10 minutes.** Record result and tester name below.
 
       Automated harness: `scripts/quickstart-firedrill.sh` times + asserts each step against
       the 600s budget.
@@ -76,7 +79,9 @@ stays a **private draft** and nothing is published. To recover:
 
 ## Operator Pre-Steps (before first release tag)
 
-Complete these one-time setup actions before running `git tag v4.0.0`:
+Complete these one-time setup actions before running `git tag v4.0.1`
+(v4.0.0 was tagged but its release run failed at the sign/verify gates and was
+never published; v4.0.1 is the launch release):
 
 1. Create `abysslink/homebrew-tap` as a public GitHub repo (empty, no README required).
    goreleaser will write the cask `.rb` to it on release.
@@ -143,7 +148,8 @@ One static Go binary, macOS + Linux. Apache-2.0. Built end-to-end with Claude Co
 actions/attest-build-provenance, cosign keyless signing, dual SBOM (SPDX + CycloneDX),
 Grype + OpenVEX. No telemetry.
 
-Quickstart: brew tap abysslink/homebrew-tap && brew install abysslink && abysslink up
+Quickstart (macOS): brew tap abysslink/tap && brew install abysslink && abysslink up
+Quickstart (Linux): curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
 Kill-switch demo: abysslink arm -- claude
 Who sees what (push paths): docs/who-sees-what.md
 ```

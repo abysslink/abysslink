@@ -58,7 +58,7 @@ No. The `claudecode` module is one opt-in consumer of the generic notification s
 ### How do I update Abysslink?
 
 ```sh
-curl -fsSL https://abysslink.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
 ```
 
 The installer always fetches the latest release by default. Pin a version with `ABYSSLINK_VERSION=v3.0.2`.

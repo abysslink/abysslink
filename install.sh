@@ -11,7 +11,7 @@
 # one-liner works. Edit scripts/install.sh first, then copy it over the
 # root install.sh.
 #
-# Usage: curl -fsSL https://abysslink.dev/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
 #        ABYSSLINK_VERSION=v0.1.0 sh install.sh
 #
 # Environment:

@@ -94,4 +94,10 @@ jobs:
           for pattern in linux_amd64.tar.gz linux_arm64.tar.gz darwin_arm64.tar.gz darwin_amd64.tar.gz; do
             compgen -G "dist/*${pattern}" > /dev/null || { echo "missing artifact: ${pattern}"; exit 1; }
           done
+          # publish-packages (release.yml) locates these by find — prove the
+          # exact lookups on every PR so a goreleaser layout/naming change
+          # cannot first surface AFTER a release is public.
+          [ -n "$(find dist -name 'abysslink.rb' -print -quit)" ] || { echo "missing generated homebrew cask"; exit 1; }
+          [ -n "$(find dist -name '*.pkgbuild' -print -quit)" ]   || { echo "missing generated AUR PKGBUILD"; exit 1; }
+          [ -n "$(find dist -name '*.srcinfo' -print -quit)" ]    || { echo "missing generated AUR .SRCINFO"; exit 1; }
           echo "dry-run OK: all release artifacts built"

@@ -80,8 +80,8 @@
             nodes.machine = { ... }: {
               # tailscale is required: doctor's core module checks shell out to
               # the `tailscale` binary; without it doctor errors before emitting
-              # any findings and the `grep -q severity` assertion below fails
-              # (the Monday-cron red-gate this fixes).
+              # any findings and the `grep severity` findings-JSON assertion
+              # below fails (the first Monday-cron red-gate fix).
               environment.systemPackages = [
                 self.packages.${system}.abysslink
                 pkgs.tailscale

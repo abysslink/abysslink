@@ -309,7 +309,7 @@ release:
 
     One-liner installer (runs all of the above automatically):
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
     ```
 
     Self-update from an installed binary:

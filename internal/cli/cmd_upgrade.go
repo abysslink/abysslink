@@ -127,7 +127,7 @@ Exit codes with --check:
 				printerInfo(p, "")
 				printerInfo(p, "Run "+styleCode.Render("abysslink upgrade --apply")+" to self-update.")
 				printerInfo(p, "Or use a trusted install path:")
-				printerInfo(p, "  • "+styleCode.Render("curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | bash"))
+				printerInfo(p, "  • "+styleCode.Render("curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh"))
 				printerInfo(p, "  • your package manager (brew / apt / dnf)")
 				return nil
 			}

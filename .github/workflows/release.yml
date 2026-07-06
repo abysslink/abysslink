@@ -50,9 +50,10 @@ jobs:
           # release-assets.githubusercontent.com: cosign-installer downloads the
           # cosign binary from a GitHub release (GitHub's release-asset CDN).
           # uploads.github.com: `gh release upload` of the .bundle assets.
-          # raw.githubusercontent.com: cosign-installer v4 with a pinned
-          # cosign-release fetches release-cosign.pub from raw before verifying
-          # the .sigstore.json bundle — blocked egress here kills the install.
+          # raw.githubusercontent.com: cosign-installer v4 fetches
+          # release-cosign.pub from raw when the pinned cosign-release differs
+          # from the installer's bootstrap version (equal today, so unused —
+          # kept so a routine installer bump cannot silently re-red the job).
           allowed-endpoints: >
             api.github.com:443
             uploads.github.com:443
@@ -118,7 +119,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read       # read release assets via the API
+      # write, not read: GitHub only exposes DRAFT releases (and their assets)
+      # to tokens with push access — gh's draft-by-tag fallback finds nothing
+      # under contents: read and the gate would fail with "release not found"
+      # on every tag. The job itself never writes.
+      contents: write
       attestations: read   # gh attestation verify fetches the provenance bundle
     steps:
       - name: Harden runner
@@ -150,8 +155,8 @@ jobs:
         # The artifacts are downloaded from the DRAFT RELEASE itself (not the
         # workflow artifact): the gate must attest the exact bytes users will
         # download, so tampering or corruption on goreleaser's release-upload
-        # path also fails the gate. Draft assets are readable with the job's
-        # contents: read token via the API.
+        # path also fails the gate. The released checksums manifest is also
+        # cross-checked against the released tarballs.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -163,15 +168,20 @@ jobs:
           mkdir -p release-assets
           gh release download "${tag}" \
             --dir release-assets \
+            --pattern "abysslink_${bare}_checksums.txt" \
             --pattern "abysslink_${bare}_linux_amd64.tar.gz" \
             --pattern "abysslink_${bare}_linux_arm64.tar.gz" \
             --pattern "abysslink_${bare}_darwin_arm64.tar.gz"
+          cd release-assets
           for art in \
-            "release-assets/abysslink_${bare}_linux_amd64.tar.gz" \
-            "release-assets/abysslink_${bare}_linux_arm64.tar.gz" \
-            "release-assets/abysslink_${bare}_darwin_arm64.tar.gz"; do
+            "abysslink_${bare}_linux_amd64.tar.gz" \
+            "abysslink_${bare}_linux_arm64.tar.gz" \
+            "abysslink_${bare}_darwin_arm64.tar.gz"; do
             [ -s "${art}" ] || { echo "missing release asset: ${art} (fail-closed)"; exit 1; }
             echo "::group::verify ${art}"
+            # Released tarball must match the released checksums manifest …
+            grep " ${art}\$" "abysslink_${bare}_checksums.txt" | sha256sum --check
+            # … and carry valid SLSA L3 provenance from the pinned workflow.
             gh attestation verify "${art}" \
               --owner abysslink \
               --signer-workflow abysslink/abysslink/.github/workflows/release-build.yml
