@@ -143,8 +143,24 @@ type SignedAudit struct {
 	mu      sync.Mutex
 
 	keyMu sync.Mutex
-	key   []byte // cached HMAC key; nil until fetched or generated
+	// key caches the HMAC key in mlock'd, zeroized-on-free memory (MEM-02).
+	// Defense-in-depth only: the key already transits as a plain keychain
+	// string, so this narrows — not closes — the in-memory exposure window.
+	key   *secrets.SecureBytes
 	epoch uint32 // key epoch of the cached key; 0 until fetched (ROT-01)
+}
+
+// setKeyLocked replaces the cached key+epoch, destroying any prior SecureBytes
+// so the old key material is zeroized. It caches a COPY: the caller keeps its
+// own working slice for the immediate signing/anchoring operation (which would
+// otherwise be zeroized, since NewSecureBytes wipes its input). Caller MUST
+// hold a.keyMu.
+func (a *SignedAudit) setKeyLocked(key []byte, epoch uint32) {
+	if a.key != nil {
+		a.key.Destroy()
+	}
+	a.key = secrets.NewSecureBytes(append([]byte(nil), key...))
+	a.epoch = epoch
 }
 
 // NewSigned returns a SignedAudit. The keychain is probed READ-ONLY: if the
@@ -171,8 +187,7 @@ func NewSigned(logPath string, kc KeychainStore) (*SignedAudit, error) {
 	key, err := fetchHMACKeyEpoch(ctx, kc, epoch)
 	switch {
 	case err == nil:
-		sa.key = key
-		sa.epoch = epoch
+		sa.setKeyLocked(key, epoch)
 	case errors.Is(err, secrets.ErrNotFound):
 		// Lazy creation: generated on the first mutating Append (ensureKeyLocked)
 		// — epoch 1 only; a rotated pointer with a missing key fails closed there.
@@ -192,7 +207,7 @@ func (a *SignedAudit) LogPath() string { return a.logPath }
 func (a *SignedAudit) hmacKey(ctx context.Context) ([]byte, uint32, error) {
 	a.keyMu.Lock()
 	if a.key != nil {
-		k, e := a.key, a.epoch
+		k, e := a.key.Bytes(), a.epoch
 		a.keyMu.Unlock()
 		return k, e, nil
 	}
@@ -206,8 +221,7 @@ func (a *SignedAudit) hmacKey(ctx context.Context) ([]byte, uint32, error) {
 		return nil, 0, err
 	}
 	a.keyMu.Lock()
-	a.key = key
-	a.epoch = epoch
+	a.setKeyLocked(key, epoch)
 	a.keyMu.Unlock()
 	return key, epoch, nil
 }
@@ -246,8 +260,7 @@ func (a *SignedAudit) ensureKeyLocked(ctx context.Context) ([]byte, uint32, erro
 		return nil, 0, fmt.Errorf("audit: store hmac key: %w", serr)
 	}
 	a.keyMu.Lock()
-	a.key = fresh
-	a.epoch = firstEpoch
+	a.setKeyLocked(fresh, firstEpoch)
 	a.keyMu.Unlock()
 	return fresh, firstEpoch, nil
 }

@@ -147,8 +147,7 @@ func (a *SignedAudit) RotateHMACKey(ctx context.Context) (RotateResult, error) {
 
 	// Refresh the in-memory cache to the new epoch.
 	a.keyMu.Lock()
-	a.key = fresh
-	a.epoch = newEpoch
+	a.setKeyLocked(fresh, newEpoch)
 	a.keyMu.Unlock()
 
 	// (4) Re-anchor under the new key (ROT-02). Counter semantics unchanged:
@@ -200,8 +199,7 @@ func (a *SignedAudit) completeRotationLocked(ctx context.Context, oldEpoch, newE
 		return RotateResult{}, fmt.Errorf("audit: pointer advance failed: %w", perr)
 	}
 	a.keyMu.Lock()
-	a.key = newKey
-	a.epoch = newEpoch
+	a.setKeyLocked(newKey, newEpoch)
 	a.keyMu.Unlock()
 	if aerr := writeAnchorWithKey(ctx, a.logPath, newKey, newEpoch); aerr != nil {
 		return RotateResult{}, fmt.Errorf("audit: post-rotation anchor write failed: %w", aerr)

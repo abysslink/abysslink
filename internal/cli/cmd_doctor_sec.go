@@ -32,6 +32,7 @@ import (
 	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -406,6 +407,22 @@ func secAuditEpochCheck(ctx context.Context, cc *cmdContext) modules.Finding {
 		Message: fmt.Sprintf("audit HMAC key epoch %d; no rotation in progress", st.PointerEpoch)}
 }
 
+// secMlockCheck reports whether this process can lock secret memory (MEM-02).
+// It is defense-in-depth posture, not a hard requirement: an unlocked fallback
+// still zeroizes on free, so a memlock-constrained host (common in containers,
+// where RLIMIT_MEMLOCK is tiny) is a WARN with the remediation, never FATAL.
+// Kept out of atRiskTightenedChecks: the at-risk profile must not fail closed
+// on a kernel limit the operator may be unable to raise.
+func secMlockCheck() modules.Finding {
+	const check = "sec-mlock"
+	if secrets.MlockAvailable() {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "secret memory can be locked (mlock available) — in-memory keys are held in mlock'd, zeroized-on-free buffers"}
+	}
+	return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+		Message: "cannot lock secret memory (RLIMIT_MEMLOCK too low or unsupported) — in-memory keys fall back to unlocked, zeroized-on-free buffers; raise `ulimit -l` (or the container's --ulimit memlock) to restore the mlock defense-in-depth"}
+}
+
 func secAuditLogPermsCheck() modules.Finding {
 	logPath, err := secAuditLogPath()
 	if err != nil {
@@ -628,7 +645,7 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 // SECTION 3 — aggregator
 // ---------------------------------------------------------------------------
 
-// secDoctorFindings runs all 19 sec-* checks in a stable order and returns the
+// secDoctorFindings runs all 20 sec-*  checks in a stable order and returns the
 // findings. The 3 alias checks read from the pre-computed metFindings /
 // webuiFindings / auditFindings slices so the underlying Phase-17/18/19 checks
 // run exactly once (RESEARCH Pitfall 3). The 6 SSH checks degrade gracefully —
@@ -647,7 +664,7 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, pentest bool,
 	metFindings, webuiFindings, auditFindings []modules.Finding,
 	supplyFindings ...[]modules.Finding) []modules.Finding {
-	findings := make([]modules.Finding, 0, 19)
+	findings := make([]modules.Finding, 0, 20)
 
 	// SSH checks (6) — guarded so a parse failure never crashes the doctor run.
 	findings = append(findings, safeSSHCheck("sec-ssh-permitroot", func() modules.Finding { return secSSHPermitRootCheck(ctx, cc.runner, pentest) }))
@@ -674,6 +691,9 @@ func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, p
 
 	// Audit HMAC key-epoch health (1) — ROT-03.
 	findings = append(findings, secAuditEpochCheck(ctx, cc))
+
+	// Secure-memory (mlock) posture (1) — MEM-02.
+	findings = append(findings, secMlockCheck())
 
 	// Supply-chain aliases (2). Reuse the caller's pre-computed supply findings
 	// when provided so the cosign bundle check (a network download) runs exactly
