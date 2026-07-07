@@ -185,86 +185,114 @@ func walkChain(ctx context.Context, rawLines [][]byte, entries []Entry, keys *ep
 		}
 		chainStarted = true
 
-		expectedPrev := genesisMarker
-		if i > 0 {
-			sum := sha256.Sum256(rawLines[i-1])
-			expectedPrev = hex.EncodeToString(sum[:])
+		if bad, ok := walkChainEntry(ctx, rawLines, entries, i, keys, hasKeys, expectedEpoch, &result); !ok {
+			return bad
 		}
-		if e.PrevHash != expectedPrev {
-			return VerifyResult{OK: false, At: i, Reason: "prev_hash mismatch"}
-		}
-
-		// V2 (CVE-2023-31439): the declared epoch must equal the epoch in
-		// force at this chain position. A mismatch is a reseal attempt (or a
-		// stripped/duplicated epoch field), never accepted.
-		if declared := effectiveEpoch(e); declared != expectedEpoch {
-			return VerifyResult{OK: false, At: i, Reason: fmt.Sprintf(
-				"key_epoch %d does not match chain-position epoch %d (reseal attempt)", declared, expectedEpoch)}
-		}
-
-		isMarker := e.Op == opRotate
-		var markerTarget uint32
-		if isMarker {
-			markerTarget = rotationTargetEpoch(e.Target)
-			if markerTarget == 0 {
-				return VerifyResult{OK: false, At: i, Reason: "malformed rotation marker target"}
-			}
-			// V3 (CVE-2023-31438): epochs are continuous — exactly +1.
-			if markerTarget != expectedEpoch+1 {
-				return VerifyResult{OK: false, At: i, Reason: fmt.Sprintf(
-					"rotation marker skips from epoch %d to %d (continuity violation)", expectedEpoch, markerTarget)}
-			}
-		}
-
-		if e.Sig == "" {
-			result.SigsSkipped++
-		} else if !hasKeys {
-			// Keychain unavailable: skip the HMAC check but record it was not
-			// authenticated so callers can warn the operator.
-			result.SigsSkipped++
-		} else {
-			key, missing, kerr := keys.fetch(ctx, expectedEpoch)
-			if kerr != nil {
-				// Keychain broke mid-walk: surface as indeterminate, fail closed.
-				return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
-					"keychain unavailable fetching epoch %d key: %v", expectedEpoch, kerr)}
-			}
-			if missing {
-				// V6: the chain references an epoch the keychain cannot verify.
-				// Unverifiable, fail closed — but NOT a tamper verdict.
-				return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
-					"epoch %d key missing from keychain (unverifiable range)", expectedEpoch)}
-			}
-			if !verifyEntrySig(key, e, expectedEpoch) {
-				return VerifyResult{OK: false, At: i, Reason: "sig mismatch"}
-			}
-			result.SigsVerified++
-		}
-
-		if isMarker {
-			if hasKeys {
-				// V4 (custody binding): the marker's Hash must fingerprint the
-				// keychain's key for the NEW epoch.
-				newKey, missing, kerr := keys.fetch(ctx, markerTarget)
-				if kerr != nil {
-					return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
-						"keychain unavailable fetching epoch %d key: %v", markerTarget, kerr)}
-				}
-				if missing {
-					return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
-						"epoch %d key missing from keychain (rotation marker unverifiable)", markerTarget)}
-				}
-				sum := sha256.Sum256(newKey)
-				if e.Hash != hex.EncodeToString(sum[:]) {
-					return VerifyResult{OK: false, At: i, Reason: fmt.Sprintf(
-						"rotation marker key fingerprint mismatch for epoch %d", markerTarget)}
-				}
-			}
-			expectedEpoch = markerTarget
+		if e.Op == opRotate {
+			// Continuity is already validated in walkChainEntry; adopt the new epoch.
+			expectedEpoch = rotationTargetEpoch(e.Target)
 		}
 		result.lastEpoch = expectedEpoch
 	}
 	return result
+}
+
+// walkChainEntry validates one chained entry at index i against expectedEpoch,
+// updating result's sig counters. It returns (bad, false) with the failure
+// verdict on any violation, or (VerifyResult{}, true) to continue. Split out of
+// walkChain to keep each below the cyclomatic-complexity gate; the per-entry
+// rules (prev_hash link, V2 epoch-position, V3 continuity, HMAC, V4 custody,
+// V6 indeterminacy) are documented inline.
+func walkChainEntry(ctx context.Context, rawLines [][]byte, entries []Entry, i int, keys *epochKeys, hasKeys bool, expectedEpoch uint32, result *VerifyResult) (VerifyResult, bool) {
+	e := entries[i]
+
+	expectedPrev := genesisMarker
+	if i > 0 {
+		sum := sha256.Sum256(rawLines[i-1])
+		expectedPrev = hex.EncodeToString(sum[:])
+	}
+	if e.PrevHash != expectedPrev {
+		return VerifyResult{OK: false, At: i, Reason: "prev_hash mismatch"}, false
+	}
+
+	// V2 (CVE-2023-31439): the declared epoch must equal the epoch in force at
+	// this chain position. A mismatch is a reseal attempt (or a
+	// stripped/duplicated epoch field), never accepted.
+	if declared := effectiveEpoch(e); declared != expectedEpoch {
+		return VerifyResult{OK: false, At: i, Reason: fmt.Sprintf(
+			"key_epoch %d does not match chain-position epoch %d (reseal attempt)", declared, expectedEpoch)}, false
+	}
+
+	if e.Op == opRotate {
+		// V3 (CVE-2023-31438): epochs are continuous — exactly +1.
+		markerTarget := rotationTargetEpoch(e.Target)
+		if markerTarget == 0 {
+			return VerifyResult{OK: false, At: i, Reason: "malformed rotation marker target"}, false
+		}
+		if markerTarget != expectedEpoch+1 {
+			return VerifyResult{OK: false, At: i, Reason: fmt.Sprintf(
+				"rotation marker skips from epoch %d to %d (continuity violation)", expectedEpoch, markerTarget)}, false
+		}
+	}
+
+	if bad, ok := walkVerifyEntrySig(ctx, e, i, keys, hasKeys, expectedEpoch, result); !ok {
+		return bad, false
+	}
+
+	if e.Op == opRotate && hasKeys {
+		if bad, ok := walkVerifyMarkerCustody(ctx, e, i, keys, rotationTargetEpoch(e.Target)); !ok {
+			return bad, false
+		}
+	}
+	return VerifyResult{}, true
+}
+
+// walkVerifyEntrySig performs the per-entry HMAC check under the entry's epoch,
+// counting verified/skipped sigs and returning the fail-closed verdict on a
+// keychain error (indeterminate), a missing epoch key (V6 indeterminate), or a
+// sig mismatch (tamper).
+func walkVerifyEntrySig(ctx context.Context, e Entry, i int, keys *epochKeys, hasKeys bool, epoch uint32, result *VerifyResult) (VerifyResult, bool) {
+	if e.Sig == "" || !hasKeys {
+		result.SigsSkipped++
+		return VerifyResult{}, true
+	}
+	key, missing, kerr := keys.fetch(ctx, epoch)
+	if kerr != nil {
+		return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
+			"keychain unavailable fetching epoch %d key: %v", epoch, kerr)}, false
+	}
+	if missing {
+		// V6: the chain references an epoch the keychain cannot verify.
+		// Unverifiable, fail closed — but NOT a tamper verdict.
+		return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
+			"epoch %d key missing from keychain (unverifiable range)", epoch)}, false
+	}
+	if !verifyEntrySig(key, e, epoch) {
+		return VerifyResult{OK: false, At: i, Reason: "sig mismatch"}, false
+	}
+	result.SigsVerified++
+	return VerifyResult{}, true
+}
+
+// walkVerifyMarkerCustody enforces V4: a rotation marker's Hash must be the
+// SHA-256 fingerprint of the keychain's key for the NEW epoch (TUF-style
+// custody binding). A missing new-epoch key is indeterminate, not tamper.
+func walkVerifyMarkerCustody(ctx context.Context, e Entry, i int, keys *epochKeys, markerTarget uint32) (VerifyResult, bool) {
+	newKey, missing, kerr := keys.fetch(ctx, markerTarget)
+	if kerr != nil {
+		return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
+			"keychain unavailable fetching epoch %d key: %v", markerTarget, kerr)}, false
+	}
+	if missing {
+		return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
+			"epoch %d key missing from keychain (rotation marker unverifiable)", markerTarget)}, false
+	}
+	sum := sha256.Sum256(newKey)
+	if e.Hash != hex.EncodeToString(sum[:]) {
+		return VerifyResult{OK: false, At: i, Reason: fmt.Sprintf(
+			"rotation marker key fingerprint mismatch for epoch %d", markerTarget)}, false
+	}
+	return VerifyResult{}, true
 }
 
 // verifyEntrySig reconstructs the EXACT SignInput that Append signed (CR-03):

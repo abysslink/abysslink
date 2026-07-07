@@ -212,3 +212,36 @@ func (ek *epochKeys) fetch(ctx context.Context, epoch uint32) (key []byte, missi
 	ek.keys[epoch] = k
 	return k, false, nil
 }
+
+// EpochStatus reports the audit chain's rotation health for the doctor
+// sec-audit-epoch check (ROT-03). It is read-only and never mutates keychain
+// or log state.
+type EpochStatus struct {
+	PointerEpoch uint32 // current epoch recorded in the keychain
+	TailEpoch    uint32 // epoch in force at the chain tail
+	Incomplete   bool   // tail is ahead of the pointer (half-finished rotation)
+}
+
+// ReadEpochStatus resolves the keychain epoch pointer and the chain-tail epoch
+// so the doctor can report rotation health. A nil keychain or a definitively
+// absent pointer both read as epoch 1 (pre-rotation). Non-absence keychain
+// failures propagate (CORE-02).
+func ReadEpochStatus(ctx context.Context, logPath string, kc KeychainStore) (EpochStatus, error) {
+	pointer := uint32(firstEpoch)
+	if kc != nil {
+		p, err := readEpochPointer(ctx, kc)
+		if err != nil {
+			return EpochStatus{}, err
+		}
+		pointer = p
+	}
+	tail, err := tailEpoch(logPath)
+	if err != nil {
+		return EpochStatus{}, err
+	}
+	return EpochStatus{
+		PointerEpoch: pointer,
+		TailEpoch:    tail,
+		Incomplete:   tail > pointer,
+	}, nil
+}

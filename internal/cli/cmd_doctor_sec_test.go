@@ -345,7 +345,7 @@ func TestSecBinarySignedAlias_ReusesPrecomputedSupplyFindings(t *testing.T) {
 	}}
 
 	findings := secDoctorFindings(ctx, cc, deps, false, nil, nil, nil, supply)
-	require.Len(t, findings, 18, "supply alias must keep the 18-check roster")
+	require.Len(t, findings, 19, "supply alias must keep the 19-check roster")
 	var got *modules.Finding
 	for i := range findings {
 		if findings[i].Check == "sec-binary-signed" {
@@ -413,7 +413,7 @@ func TestSecDoctorFindings(t *testing.T) {
 
 	findings := secDoctorFindings(ctx, cc, deps, false, metFindings, webuiFindings, auditFindings)
 
-	require.Len(t, findings, 18, "secDoctorFindings must return exactly 18 findings")
+	require.Len(t, findings, 19, "secDoctorFindings must return exactly 19 findings")
 
 	want := map[string]bool{
 		"sec-ssh-permitroot": true, "sec-ssh-x11forwarding": true, "sec-ssh-agentforwarding": true,
@@ -422,6 +422,7 @@ func TestSecDoctorFindings(t *testing.T) {
 		"sec-daemon-socket-perms": true, "sec-listener-bind": true, "sec-funnel-schema": true,
 		"sec-disk-encryption": true, "sec-binary-signed": true, "sec-upgrade-verified": true,
 		"sec-metrics-bind": true, "sec-webui-bind": true, "sec-audit-anchor-age": true,
+		"sec-audit-epoch": true,
 	}
 	got := map[string]bool{}
 	for _, f := range findings {

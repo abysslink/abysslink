@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/browser"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/fleet"
@@ -39,8 +40,84 @@ func newRotateCmd() *cobra.Command {
 		Use:   "rotate",
 		Short: "Rotate secrets stored in the OS keychain (dry-run by default)",
 	}
-	rotate.AddCommand(newRotateAnthropicCmd(), newRotateNtfyCmd())
+	rotate.AddCommand(newRotateAnthropicCmd(), newRotateNtfyCmd(), newRotateAuditHMACCmd())
 	return rotate
+}
+
+// newRotateAuditHMACCmd rotates the audit-chain HMAC key to a fresh epoch
+// (ROT-02). Dry-run by default; --apply performs the rotation. The key
+// material is never printed — only the new key's SHA-256 fingerprint — because
+// the HMAC key never leaves the machine, so printing it would be pure downside
+// while the fingerprint fully serves the audit-trail intent.
+func newRotateAuditHMACCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "audit-hmac",
+		Short: "Rotate the tamper-evident audit log's HMAC key to a new epoch",
+		Long: `Rotate the audit chain's HMAC signing key to a new key epoch.
+
+Pre-rotation history stays verifiable: the old key is retained in the keychain
+and an in-chain rotation marker (signed by the old key) records the hand-off.
+Only new entries are signed under the new key. Verification selects the key by
+epoch, so a rotated chain still verifies end to end.
+
+Dry-run by default — re-run with --apply to rotate.`,
+		Example: `  # Preview the rotation (dry-run)
+  abysslink rotate audit-hmac
+
+  # Rotate the audit HMAC key
+  abysslink rotate audit-hmac --apply`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			cc, err := loadCmdContext(cmd)
+			if err != nil {
+				return err
+			}
+			p := newPrinter(cmd)
+			commandHeader(p, "rotate audit-hmac", styleMuted.Render("rotate the audit HMAC key to a new epoch"))
+			return runRotateAuditHMAC(ctx, cc, p)
+		},
+	}
+}
+
+func runRotateAuditHMAC(ctx context.Context, cc *cmdContext, p Printer) error {
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		return fmt.Errorf("rotate audit-hmac: %w", err)
+	}
+	kc := auditKeychain(ctx, cc)
+	if kc == nil {
+		return fmt.Errorf("rotate audit-hmac: no keychain backend available — cannot rotate the audit key")
+	}
+
+	if cc.dryRun {
+		preview, perr := audit.RotatePreview(ctx, logPath, kc)
+		if perr != nil {
+			return fmt.Errorf("rotate audit-hmac: %w", perr)
+		}
+		if preview.Resumed {
+			printerInfo(p, fmt.Sprintf("[plan] a previous rotation to epoch %d did not finish; --apply will COMPLETE it (advance the pointer, re-anchor).", preview.NewEpoch))
+			return nil
+		}
+		printerInfo(p, fmt.Sprintf("[plan] rotate the audit HMAC key from epoch %d to epoch %d: generate a new key, append an in-chain rotation marker signed by the old key, retain the old key, and re-anchor. Re-run with --apply.", preview.OldEpoch, preview.NewEpoch))
+		return nil
+	}
+
+	sa, saErr := cmdSignedAudit(ctx, cc)
+	if saErr != nil {
+		return fmt.Errorf("rotate audit-hmac: %w", saErr)
+	}
+	res, rerr := sa.RotateHMACKey(ctx)
+	if rerr != nil {
+		return fmt.Errorf("rotate audit-hmac: %w", rerr)
+	}
+	if res.Resumed {
+		printerInfo(p, styleSuccess.Render(fmt.Sprintf("Completed a half-finished rotation to epoch %d.", res.NewEpoch)))
+	} else {
+		printerInfo(p, styleSuccess.Render(fmt.Sprintf("Rotated the audit HMAC key: epoch %d → %d.", res.OldEpoch, res.NewEpoch)))
+	}
+	printerInfo(p, styleMuted.Render("New key fingerprint (SHA-256): ")+styleCode.Render(res.NewKeyFingerprint))
+	printerInfo(p, styleMuted.Render("The previous key is retained so pre-rotation history stays verifiable; verify with `abysslink audit verify`."))
+	return nil
 }
 
 func newRotateAnthropicCmd() *cobra.Command {

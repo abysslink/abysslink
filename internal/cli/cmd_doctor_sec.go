@@ -372,6 +372,40 @@ func secAuditLogExistsCheckPath(logPath string) modules.Finding {
 		Message: "audit log present at " + logPath}
 }
 
+// secAuditEpochCheck reports the audit HMAC key-epoch health (ROT-03): the
+// current epoch, and — critically — whether a rotation is stuck half-finished
+// (the in-chain marker was recorded but the keychain pointer was never
+// advanced, the documented rotation crash window). A half-finished rotation
+// makes every subsequent append fail closed, so it is surfaced as WARN and
+// escalated to FATAL by --profile at-risk (atRiskTightenedChecks) with the
+// exact recovery command. A keychain that is simply unavailable is not this
+// check's job (audit-keychain covers that) — it degrades to OK here.
+func secAuditEpochCheck(ctx context.Context, cc *cmdContext) modules.Finding {
+	const check = "sec-audit-epoch"
+	logPath, err := secAuditLogPath()
+	if err != nil {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "cannot determine audit log path — sec-audit-log-exists covers this"}
+	}
+	kc := auditKeychain(ctx, cc)
+	if kc == nil {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "keychain unavailable — audit-keychain covers this; epoch health not evaluated"}
+	}
+	st, serr := audit.ReadEpochStatus(ctx, logPath, kc)
+	if serr != nil {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: "could not read audit key-epoch status: " + serr.Error()}
+	}
+	if st.Incomplete {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: fmt.Sprintf("audit key rotation is incomplete: chain is at epoch %d but the keychain pointer is %d — appends fail closed until you run `abysslink rotate audit-hmac --apply`",
+				st.TailEpoch, st.PointerEpoch)}
+	}
+	return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+		Message: fmt.Sprintf("audit HMAC key epoch %d; no rotation in progress", st.PointerEpoch)}
+}
+
 func secAuditLogPermsCheck() modules.Finding {
 	logPath, err := secAuditLogPath()
 	if err != nil {
@@ -594,7 +628,7 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 // SECTION 3 — aggregator
 // ---------------------------------------------------------------------------
 
-// secDoctorFindings runs all 18 sec-* checks in a stable order and returns the
+// secDoctorFindings runs all 19 sec-* checks in a stable order and returns the
 // findings. The 3 alias checks read from the pre-computed metFindings /
 // webuiFindings / auditFindings slices so the underlying Phase-17/18/19 checks
 // run exactly once (RESEARCH Pitfall 3). The 6 SSH checks degrade gracefully —
@@ -613,7 +647,7 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, pentest bool,
 	metFindings, webuiFindings, auditFindings []modules.Finding,
 	supplyFindings ...[]modules.Finding) []modules.Finding {
-	findings := make([]modules.Finding, 0, 18)
+	findings := make([]modules.Finding, 0, 19)
 
 	// SSH checks (6) — guarded so a parse failure never crashes the doctor run.
 	findings = append(findings, safeSSHCheck("sec-ssh-permitroot", func() modules.Finding { return secSSHPermitRootCheck(ctx, cc.runner, pentest) }))
@@ -637,6 +671,9 @@ func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, p
 		secFunnelSchemaCheck(cc.cfg),
 		secDiskEncryptionCheck(ctx, deps.Platform),
 	)
+
+	// Audit HMAC key-epoch health (1) — ROT-03.
+	findings = append(findings, secAuditEpochCheck(ctx, cc))
 
 	// Supply-chain aliases (2). Reuse the caller's pre-computed supply findings
 	// when provided so the cosign bundle check (a network download) runs exactly

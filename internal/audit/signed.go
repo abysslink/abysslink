@@ -735,22 +735,6 @@ func stageSrcForWrite(src, dst string) (*os.File, [32]byte, error) {
 	return tmpFile, diffHash, nil
 }
 
-// fetchHMACKey fetches and hex-decodes the stored HMAC key. It is a
-// package-private FUNCTION (not a method) so WriteAnchor and Verify can read
-// the key WITHOUT constructing a *SignedAudit — and without any risk of
-// triggering key generation, which only ever happens in ensureKeyLocked.
-func fetchHMACKey(ctx context.Context, kc KeychainStore) ([]byte, error) {
-	hexKey, err := kc.Get(ctx, hmacKeyService, hmacKeyAccount)
-	if err != nil {
-		return nil, fmt.Errorf("audit: fetch hmac key: %w", err)
-	}
-	key, err := hex.DecodeString(hexKey)
-	if err != nil {
-		return nil, fmt.Errorf("audit: decode hmac key: %w", err)
-	}
-	return key, nil
-}
-
 // computeSig returns the hex-encoded HMAC-SHA256 of in under key (epoch-1
 // legacy framing). Kept for existing tests; production paths use
 // computeSigEpoch.
