@@ -50,6 +50,9 @@ jobs:
           # release-assets.githubusercontent.com: cosign-installer downloads the
           # cosign binary from a GitHub release (GitHub's release-asset CDN).
           # uploads.github.com: `gh release upload` of the .bundle assets.
+          # timestamp.sigstore.dev: cosign v3 `sign-blob --bundle` embeds an
+          # RFC 3161 timestamp in the bundle and POSTs to Sigstore's TSA —
+          # blocked egress here failed the v4.0.1-rc.1 sign job.
           # raw.githubusercontent.com: cosign-installer v4 fetches
           # release-cosign.pub from raw when the pinned cosign-release differs
           # from the installer's bootstrap version (equal today, so unused —
@@ -64,6 +67,7 @@ jobs:
             fulcio.sigstore.dev:443
             rekor.sigstore.dev:443
             oauth2.sigstore.dev:443
+            timestamp.sigstore.dev:443
             token.actions.githubusercontent.com:443
             tuf-repo-cdn.sigstore.dev:443
 
