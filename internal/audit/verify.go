@@ -21,12 +21,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"time"
-
-	"github.com/abysslink/abysslink/internal/secrets"
 )
 
 // VerifyResult reports the outcome of a chain walk. OK is true only when every
@@ -53,6 +50,18 @@ type VerifyResult struct {
 	CounterStatus      string // "verified" | "unknown" | "mismatch" | "" (pre-AUD-02 log)
 	SigsVerified       int
 	SigsSkipped        int
+	// Indeterminate marks a fail-closed-but-not-tamper verdict (ROT): an epoch
+	// key the chain legitimately references is missing from the keychain, so a
+	// range is UNVERIFIABLE. Distinct from tampering (CloudTrail-style
+	// valid/invalid/not-found separation): callers must refuse a VALID verdict
+	// (OK=false) but must not report TAMPERED — cmd_audit maps this to exit 1,
+	// not 2.
+	Indeterminate bool
+
+	// lastEpoch is the key epoch in force at the end of the walk (chain tail).
+	// Package-internal: Verify's boundary-truncation check (V5) compares it to
+	// the keychain epoch pointer.
+	lastEpoch uint32
 }
 
 // Verify walks the full log and the anchor. It is a read-only path and holds no
@@ -72,34 +81,71 @@ func Verify(ctx context.Context, logPath string, kc KeychainStore) (VerifyResult
 		return VerifyResult{}, err
 	}
 
-	// CR-02: only fetch the HMAC key when a keychain is actually present.
-	// fetchHMACKey calls kc.Get, which panics on a nil interface.
+	// CR-02: only fetch HMAC keys when a keychain is actually present.
 	//
 	// R2: a definitively-absent key (ErrNotFound) is NOT an error — it is the
 	// legitimate "no chain was ever signed" state (key creation is lazy since
 	// R2-12). It degrades to key == nil, exactly like a nil keychain. Any other
 	// fetch failure (keychain locked, dbus down) still hard-errors.
+	//
+	// ROT-01: keys are per-epoch; the walk resolves them lazily by CHAIN
+	// POSITION through this cache. "key" below is the CURRENT (pointer) epoch's
+	// key — the "has any signing ever happened" signal the anchor logic uses.
+	keys := newEpochKeys(kc)
 	var key []byte
+	var pointerEpoch uint32 = firstEpoch
 	if kc != nil {
-		key, err = fetchHMACKey(ctx, kc)
+		pointerEpoch, err = readEpochPointer(ctx, kc)
 		if err != nil {
-			if !errors.Is(err, secrets.ErrNotFound) {
-				return VerifyResult{}, err
+			return VerifyResult{}, err
+		}
+		var missing bool
+		key, missing, err = keys.fetch(ctx, pointerEpoch)
+		if err != nil {
+			return VerifyResult{}, err
+		}
+		if missing {
+			// Epoch 1 + no key = the legitimate "no chain was ever signed"
+			// state (lazy creation, R2-12). A ROTATED pointer with a missing
+			// key is nothing of the sort: a rotation completed and its key
+			// vanished from the keychain. Unverifiable — fail closed, but
+			// lexically distinct from tampering (V6).
+			if pointerEpoch > firstEpoch {
+				return VerifyResult{
+					OK: false, At: -1, Indeterminate: true,
+					Reason: fmt.Sprintf("keychain records epoch %d but its key is missing (unverifiable)", pointerEpoch),
+				}, nil
 			}
 			key = nil
 		}
 	}
 
-	result := walkChain(rawLines, entries, key)
+	result := walkChain(ctx, rawLines, entries, keys, key != nil)
 	if !result.OK {
 		return result, nil
 	}
+
+	// V5 (CVE-2023-31438 boundary truncation): the keychain pointer cannot be
+	// AHEAD of the chain. If a rotation was completed (pointer advanced) but
+	// the log ends before its rotation marker, the tail was cut at the epoch
+	// boundary — a truncation the per-entry checks alone cannot see.
+	if kc != nil && key != nil && pointerEpoch > result.lastEpoch {
+		result.OK = false
+		result.TruncationDetected = true
+		result.Reason = fmt.Sprintf(
+			"log ends at key epoch %d but keychain records epoch %d (truncation at rotation boundary)",
+			result.lastEpoch, pointerEpoch)
+		return result, nil
+	}
+
 	return verifyAnchor(ctx, logPath, rawLines, entries, key, kc, result)
 }
 
-// walkChain validates each entry's prev_hash link and (when key != nil) HMAC
-// signature, returning the first failure or an OK result with sig counts. A nil
-// key skips HMAC checks (documented fail-open-chain-walk; CR-02).
+// walkChain validates each entry's prev_hash link and (when keys are
+// available) HMAC signature, returning the first failure or an OK result with
+// sig counts. hasKeys=false skips HMAC checks (documented
+// fail-open-chain-walk; CR-02) while still enforcing every STRUCTURAL epoch
+// rule below.
 //
 // CR-01 (iteration 2): the legacy "empty prev_hash → skip link+sig" allowance is
 // honoured ONLY for a CONTIGUOUS HEAD PREFIX of genuinely-unsigned v1/v2 entries.
@@ -110,9 +156,22 @@ func Verify(ctx context.Context, logPath string, kc KeychainStore) (VerifyResult
 // blanking prev_hash+sig on the tail to rewrite op/target/dry_run/hash undetected)
 // and is REJECTED as CHAIN BROKEN. Without this, the unprotected tail entry could
 // be silently downgraded to "legacy", defeating CR-03's expanded HMAC.
-func walkChain(rawLines [][]byte, entries []Entry, key []byte) VerifyResult {
-	result := VerifyResult{OK: true, At: -1}
+//
+// ROT-01 epoch rules (journald FSS CVE-2023-31438/31439 lessons):
+//   - the epoch in force is established by CHAIN POSITION, starting at 1; a
+//     sig-valid rotation marker is the ONLY legal transition and increments it
+//     by EXACTLY 1 (continuity);
+//   - every entry's declared key_epoch must equal the epoch in force at its
+//     position — an entry may never select its own verification key (RFC 8725);
+//   - the marker's Hash must be the SHA-256 fingerprint of the keychain key for
+//     the new epoch (TUF-style custody binding);
+//   - an epoch key the chain legitimately references but the keychain lacks is
+//     INDETERMINATE (unverifiable range, fail closed) — lexically distinct from
+//     tampering.
+func walkChain(ctx context.Context, rawLines [][]byte, entries []Entry, keys *epochKeys, hasKeys bool) VerifyResult {
+	result := VerifyResult{OK: true, At: -1, lastEpoch: firstEpoch}
 	chainStarted := false
+	expectedEpoch := uint32(firstEpoch)
 	for i, e := range entries {
 		if e.PrevHash == "" {
 			if chainStarted || e.Sig != "" {
@@ -135,20 +194,75 @@ func walkChain(rawLines [][]byte, entries []Entry, key []byte) VerifyResult {
 			return VerifyResult{OK: false, At: i, Reason: "prev_hash mismatch"}
 		}
 
+		// V2 (CVE-2023-31439): the declared epoch must equal the epoch in
+		// force at this chain position. A mismatch is a reseal attempt (or a
+		// stripped/duplicated epoch field), never accepted.
+		if declared := effectiveEpoch(e); declared != expectedEpoch {
+			return VerifyResult{OK: false, At: i, Reason: fmt.Sprintf(
+				"key_epoch %d does not match chain-position epoch %d (reseal attempt)", declared, expectedEpoch)}
+		}
+
+		isMarker := e.Op == opRotate
+		var markerTarget uint32
+		if isMarker {
+			markerTarget = rotationTargetEpoch(e.Target)
+			if markerTarget == 0 {
+				return VerifyResult{OK: false, At: i, Reason: "malformed rotation marker target"}
+			}
+			// V3 (CVE-2023-31438): epochs are continuous — exactly +1.
+			if markerTarget != expectedEpoch+1 {
+				return VerifyResult{OK: false, At: i, Reason: fmt.Sprintf(
+					"rotation marker skips from epoch %d to %d (continuity violation)", expectedEpoch, markerTarget)}
+			}
+		}
+
 		if e.Sig == "" {
 			result.SigsSkipped++
-			continue
-		}
-		if key == nil {
+		} else if !hasKeys {
 			// Keychain unavailable: skip the HMAC check but record it was not
 			// authenticated so callers can warn the operator.
 			result.SigsSkipped++
-			continue
+		} else {
+			key, missing, kerr := keys.fetch(ctx, expectedEpoch)
+			if kerr != nil {
+				// Keychain broke mid-walk: surface as indeterminate, fail closed.
+				return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
+					"keychain unavailable fetching epoch %d key: %v", expectedEpoch, kerr)}
+			}
+			if missing {
+				// V6: the chain references an epoch the keychain cannot verify.
+				// Unverifiable, fail closed — but NOT a tamper verdict.
+				return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
+					"epoch %d key missing from keychain (unverifiable range)", expectedEpoch)}
+			}
+			if !verifyEntrySig(key, e, expectedEpoch) {
+				return VerifyResult{OK: false, At: i, Reason: "sig mismatch"}
+			}
+			result.SigsVerified++
 		}
-		if !verifyEntrySig(key, e) {
-			return VerifyResult{OK: false, At: i, Reason: "sig mismatch"}
+
+		if isMarker {
+			if hasKeys {
+				// V4 (custody binding): the marker's Hash must fingerprint the
+				// keychain's key for the NEW epoch.
+				newKey, missing, kerr := keys.fetch(ctx, markerTarget)
+				if kerr != nil {
+					return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
+						"keychain unavailable fetching epoch %d key: %v", markerTarget, kerr)}
+				}
+				if missing {
+					return VerifyResult{OK: false, At: i, Indeterminate: true, Reason: fmt.Sprintf(
+						"epoch %d key missing from keychain (rotation marker unverifiable)", markerTarget)}
+				}
+				sum := sha256.Sum256(newKey)
+				if e.Hash != hex.EncodeToString(sum[:]) {
+					return VerifyResult{OK: false, At: i, Reason: fmt.Sprintf(
+						"rotation marker key fingerprint mismatch for epoch %d", markerTarget)}
+				}
+			}
+			expectedEpoch = markerTarget
 		}
-		result.SigsVerified++
+		result.lastEpoch = expectedEpoch
 	}
 	return result
 }
@@ -158,7 +272,7 @@ func walkChain(rawLines [][]byte, entries []Entry, key []byte) VerifyResult {
 // hex-decoding the stored hash. Append stores Hash = hex(in.DiffHash[:]) and
 // Time as RFC3339; using the hex string or a different time precision would
 // never match the signed digest.
-func verifyEntrySig(key []byte, e Entry) bool {
+func verifyEntrySig(key []byte, e Entry, epoch uint32) bool {
 	in := SignInput{
 		Title:    e.Op,
 		Target:   e.Target,
@@ -171,7 +285,7 @@ func verifyEntrySig(key []byte, e Entry) bool {
 		return false
 	}
 	copy(in.DiffHash[:], raw)
-	return verifyHMAC(key, in, e.Sig)
+	return verifyHMACEpoch(key, in, e.Sig, epoch)
 }
 
 // verifyAnchor validates the external anchor (CR-01, WR-01) and the AUD-02

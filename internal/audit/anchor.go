@@ -42,6 +42,10 @@ type Anchor struct {
 	LastHash   string `json:"last_hash"` // hex(sha256(last raw JSONL line)), "" for empty log
 	Time       string `json:"time"`      // RFC3339 UTC
 	HMAC       string `json:"hmac"`      // hex HMAC-SHA256 over anchorSignBytes
+	// KeyEpoch is the key epoch whose key signed this anchor (ROT-01). Zero /
+	// absent means epoch 1 (every pre-rotation anchor). For epoch >= 2 the
+	// value is covered by the anchor HMAC (anchorSignBytes).
+	KeyEpoch uint32 `json:"key_epoch,omitempty"`
 }
 
 // anchorPath returns the canonical anchor path beside logPath.
@@ -89,9 +93,15 @@ func scanLogCountAndLast(logPath string) (count int64, last []byte, err error) {
 }
 
 // anchorSignBytes is the canonical, deterministic serialisation the anchor HMAC
-// covers: entry_count + 0x00 + last_hash + 0x00 + time.
+// covers: entry_count + 0x00 + last_hash + 0x00 + time, plus + 0x00 + key_epoch
+// for epoch >= 2 (append-only evolution: pre-rotation anchors keep the exact
+// legacy bytes, so existing anchors verify unchanged).
 func anchorSignBytes(a Anchor) []byte {
-	return []byte(fmt.Sprintf("%d\x00%s\x00%s", a.EntryCount, a.LastHash, a.Time))
+	b := []byte(fmt.Sprintf("%d\x00%s\x00%s", a.EntryCount, a.LastHash, a.Time))
+	if a.KeyEpoch > firstEpoch {
+		b = append(b, []byte(fmt.Sprintf("\x00%d", a.KeyEpoch))...)
+	}
+	return b
 }
 
 // WriteAnchorLocked acquires the cross-process append flock around WriteAnchor
@@ -111,7 +121,11 @@ func WriteAnchorLocked(ctx context.Context, logPath string, kc KeychainStore) er
 	// signed entry exists there is no key — and nothing to anchor — so the
 	// standalone refresh is a silent no-op rather than an hourly error. Any
 	// OTHER key-fetch failure (keychain locked/unavailable) still propagates.
-	if _, kerr := fetchHMACKey(ctx, kc); kerr != nil {
+	epoch, eerr := readEpochPointer(ctx, kc)
+	if eerr != nil {
+		return eerr
+	}
+	if _, kerr := fetchHMACKeyEpoch(ctx, kc, epoch); kerr != nil {
 		if errors.Is(kerr, secrets.ErrNotFound) {
 			return nil
 		}
@@ -133,16 +147,20 @@ func WriteAnchorLocked(ctx context.Context, logPath string, kc KeychainStore) er
 // MUST use WriteAnchorLocked instead so the single-pass log read is consistent
 // with concurrent cross-process appends.
 func WriteAnchor(ctx context.Context, logPath string, kc KeychainStore) error {
-	key, err := fetchHMACKey(ctx, kc)
+	epoch, eerr := readEpochPointer(ctx, kc)
+	if eerr != nil {
+		return eerr
+	}
+	key, err := fetchHMACKeyEpoch(ctx, kc, epoch)
 	if err != nil {
 		return err
 	}
-	return writeAnchorWithKey(ctx, logPath, key)
+	return writeAnchorWithKey(ctx, logPath, key, epoch)
 }
 
 // writeAnchorWithKey is WriteAnchor with the HMAC key supplied by the caller
 // (SignedAudit's in-memory cache). Locking contract is identical to WriteAnchor.
-func writeAnchorWithKey(_ context.Context, logPath string, key []byte) error {
+func writeAnchorWithKey(_ context.Context, logPath string, key []byte, epoch uint32) error {
 	// WR-06: read the log in a SINGLE pass so EntryCount and LastHash describe the
 	// SAME log state. The previous two-read form (ReadLog + readLastNonEmptyLine)
 	// could observe a concurrent append between the reads and emit an anchor whose
@@ -165,6 +183,10 @@ func writeAnchorWithKey(_ context.Context, logPath string, key []byte) error {
 		EntryCount: count,
 		LastHash:   lastHash,
 		Time:       time.Now().UTC().Format(time.RFC3339),
+	}
+	if epoch > firstEpoch {
+		// Pre-rotation anchors keep the exact legacy shape and signing bytes.
+		a.KeyEpoch = epoch
 	}
 	mac := hmac.New(sha256.New, key)
 	mac.Write(anchorSignBytes(a))
@@ -288,7 +310,13 @@ func VerifyAnchor(logPath string, kc KeychainStore) (bool, error) {
 	if a == nil {
 		return true, nil
 	}
-	key, err := fetchHMACKey(context.Background(), kc)
+	// The anchor's own (HMAC-covered) epoch selects the verification key; a
+	// forged epoch simply fails the HMAC check below. Missing epoch = 1.
+	anchorEpoch := a.KeyEpoch
+	if anchorEpoch < firstEpoch {
+		anchorEpoch = firstEpoch
+	}
+	key, err := fetchHMACKeyEpoch(context.Background(), kc, anchorEpoch)
 	if err != nil {
 		return false, err
 	}
