@@ -22,7 +22,7 @@ Two environment knobs:
 
 ```sh
 # Pin a specific release instead of the latest
-curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | ABYSSLINK_VERSION=v3.0.2 sh
+curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | ABYSSLINK_VERSION=v4.0.1 sh
 
 # Fail closed when cosign is not installed (instead of warning and continuing)
 curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | ABYSSLINK_REQUIRE_COSIGN=1 sh
@@ -41,10 +41,12 @@ go install github.com/abysslink/abysslink/cmd/abysslinkd@latest   # daemon — w
 > `abysslink upgrade --check` and `abysslink verify` won't work on them.
 > Use the installer or a release tarball for signed, upgradable binaries.
 
-> Package-manager installs (`brew install abysslink/tap/abysslink`, `apt`, `dnf`)
-> are **planned** but not yet published. Use the installer or `go install` for now.
-> Check for newer releases any time with `abysslink upgrade --check`
-> (exits `3` when a newer release is available — handy for scripts).
+> Prefer a package manager? Every release from v4.0.1 on attaches `.deb` and `.rpm`
+> assets on the [releases page](https://github.com/abysslink/abysslink/releases).
+> The Homebrew tap (`brew tap abysslink/tap`, macOS) is live and receives the cask
+> automatically with new releases once publishing credentials finish rolling out —
+> until then use the installer above. Check for newer releases any time with
+> `abysslink upgrade --check` (exits `3` when a newer release is available).
 
 ## 1b. The `abysslinkd` daemon
 
