@@ -105,7 +105,9 @@ func TestVerifyJSON(t *testing.T) {
 }
 
 // TestVerifyCosignBundleArgs asserts the v3 bundle args are passed to cosign:
-// --bundle and --offline (not the v2 --certificate/--signature pair).
+// --bundle (not the v2 --certificate/--signature pair). --offline is
+// deliberately absent — it is deprecated in cosign v3 and cannot deliver
+// air-gapped verification for the new bundle format (see verifyCosignBundle).
 func TestVerifyCosignBundleArgs(t *testing.T) {
 	runner := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 0}})
 	err := verifyCosignBundle(context.Background(), runner, "checksums.txt", "checksums.txt.bundle")
@@ -115,7 +117,7 @@ func TestVerifyCosignBundleArgs(t *testing.T) {
 	require.Len(t, calls, 1)
 	assert.Equal(t, "cosign", calls[0].Name)
 	assert.Contains(t, calls[0].Args, "--bundle")
-	assert.Contains(t, calls[0].Args, "--offline")
+	assert.NotContains(t, calls[0].Args, "--offline")
 	assert.NotContains(t, calls[0].Args, "--certificate")
 	assert.NotContains(t, calls[0].Args, "--signature")
 }
@@ -170,7 +172,7 @@ func TestUpgradeVerifyCosignBlobV3(t *testing.T) {
 	calls := runner.RecordedCalls()
 	require.Len(t, calls, 1)
 	assert.Contains(t, calls[0].Args, "--bundle")
-	assert.Contains(t, calls[0].Args, "--offline")
+	assert.NotContains(t, calls[0].Args, "--offline")
 }
 
 // TestVerifyBundleOverrideSkipsBinaryCheck covers W9: in --bundle (offline/

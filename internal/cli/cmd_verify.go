@@ -84,14 +84,19 @@ func verifyGHAttestation(ctx context.Context, runner shell.Runner, target, signe
 }
 
 // verifyCosignBundle verifies a cosign v3 bundle file against a target artifact.
-// Uses --offline so Rekor transparency-log lookup is not required (Pitfall 14
-// mitigation: verification must work air-gapped and never depend on a network
-// service that could fail open). All exec goes through shell.Runner per the
-// CLAUDE.md hard rule — never os/exec directly.
+// The old --offline flag is intentionally NOT passed: cosign v3's new bundle
+// format requires the Sigstore TUF trusted root, which cosign fetches over the
+// network — so --offline is both deprecated AND cannot deliver true air-gapped
+// verification for these bundles (it fails identically with or without the flag
+// when offline). Verification therefore consults the Sigstore trust root online;
+// this runs on the same code path that just downloaded the release, so a network
+// dependency here is acceptable. Fail-closed is preserved: a bad signature or an
+// unreachable trust root both make cosign exit non-zero. (A future --trusted-root
+// bundle could restore genuine air-gapped verification.) All exec goes through
+// shell.Runner per the CLAUDE.md hard rule — never os/exec directly.
 func verifyCosignBundle(ctx context.Context, runner shell.Runner, target, bundleFile string) error {
 	res, err := runner.Run(ctx, "cosign", "verify-blob",
 		"--bundle", bundleFile,
-		"--offline",
 		"--certificate-identity-regexp", upgradeIdentityRegexp,
 		"--certificate-oidc-issuer", upgradeOIDCIssuer,
 		target,

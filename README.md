@@ -222,10 +222,9 @@ VERSION=vX.Y.Z   # the release you downloaded — use the latest from the Releas
 curl -fsSL "https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt"        -o checksums.txt
 curl -fsSL "https://github.com/abysslink/abysslink/releases/download/${VERSION}/abysslink_${VERSION#v}_checksums.txt.bundle" -o checksums.txt.bundle
 
-# Verify the cosign signature (offline — the bundle embeds the cert chain + Rekor proof)
+# Verify the cosign signature (needs internet: cosign v3 fetches the Sigstore trust root)
 cosign verify-blob \
   --bundle checksums.txt.bundle \
-  --offline \
   --certificate-identity-regexp '^https://github\.com/abysslink/abysslink/\.github/workflows/release\.yml@refs/tags/.*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt

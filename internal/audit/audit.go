@@ -39,6 +39,11 @@ type Entry struct {
 	DryRun   bool      `json:"dry_run"`
 	PrevHash string    `json:"prev_hash,omitempty"` // genesis or hex(sha256(prior raw JSONL line))
 	Sig      string    `json:"sig,omitempty"`       // hex HMAC-SHA256 of the signing input
+	// KeyEpoch is the HMAC key epoch that signed this entry (ROT-01). Zero /
+	// absent means epoch 1 — every pre-rotation entry. For epoch >= 2 the value
+	// is also covered by the HMAC input (signBytesEpoch), so it cannot be
+	// stripped or altered without breaking the signature.
+	KeyEpoch uint32 `json:"key_epoch,omitempty"`
 }
 
 // Audit writes append-only audit-log entries and is the sole authorised path
@@ -136,7 +141,7 @@ func (a *Audit) appendLocked(op, target string, content []byte, dryRun bool) err
 	// A signed chain is active: sign exactly like SignedAudit when possible.
 	ctx := context.Background()
 	if sa := a.signedDelegate(ctx); sa != nil {
-		if _, kerr := sa.hmacKey(ctx); kerr == nil {
+		if _, _, kerr := sa.hmacKey(ctx); kerr == nil {
 			return sa.appendAndRefreshLocked(ctx, SignInput{Title: op, DiffHash: sum}, target, dryRun)
 		}
 		// Key unreachable (absent or keychain unavailable). NEVER generate a key

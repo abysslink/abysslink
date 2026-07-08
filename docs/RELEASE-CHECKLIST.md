@@ -24,7 +24,7 @@ never published (fail-closed, by design); its draft is superseded.
 - [ ] `v4.0.1` tag green: published release, `.bundle` present.
 - [ ] `curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh`
       installs v4.0.1 and prints `cosign bundle OK` (with cosign installed).
-- [ ] `cosign verify-blob --bundle --offline` per docs/VERIFYING.md Leg 1 passes.
+- [ ] `cosign verify-blob --bundle` per docs/VERIFYING.md Leg 1 passes (needs internet for the Sigstore trust root).
 - [ ] Post-publish docs flip: quickstart/faq version pins → v4.0.1, tap answer
       updated once the cask lands (operator: tap repo + HOMEBREW_TAP_GITHUB_TOKEN).
 - [ ] Security-surface review deltas since v3.0.2 (metrics/webui bind floors,

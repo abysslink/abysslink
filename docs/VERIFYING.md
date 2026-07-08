@@ -61,8 +61,11 @@ BASE=https://github.com/abysslink/abysslink/releases/download/${VERSION}
 
 ### Leg 1 — cosign signature on the checksum manifest
 
-The cosign v3 `.bundle` embeds the certificate chain and the Rekor proof, so
-verification works **offline**.
+The cosign v3 `.bundle` embeds the certificate chain and the Rekor proof.
+cosign v3 verifies it against the Sigstore trust root, which it fetches from the
+Sigstore TUF repository over the network (so this leg needs internet access; the
+old `--offline` flag is deprecated and does not change this for the new bundle
+format).
 
 ```sh
 curl -fsSL ${BASE}/abysslink_${BARE}_checksums.txt        -o checksums.txt
@@ -70,7 +73,6 @@ curl -fsSL ${BASE}/abysslink_${BARE}_checksums.txt.bundle -o checksums.txt.bundl
 
 cosign verify-blob \
   --bundle checksums.txt.bundle \
-  --offline \
   --certificate-identity-regexp "^https://github\.com/abysslink/abysslink/\.github/workflows/release\.yml@refs/tags/.*$" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   checksums.txt

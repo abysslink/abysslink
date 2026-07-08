@@ -545,6 +545,9 @@ var atRiskTightenedChecks = map[string]bool{
 	"tailscale-statedir": true,
 	"openssh-version":    true,
 	"openssh-pqkex":      true,
+	// ROT-03: a half-finished audit HMAC rotation wedges all appends closed;
+	// at-risk escalates the WARN to FATAL.
+	"sec-audit-epoch": true,
 }
 
 // deadmanRequiredCheck is the check ID for the at-risk FATAL finding emitted

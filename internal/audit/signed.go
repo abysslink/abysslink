@@ -143,7 +143,24 @@ type SignedAudit struct {
 	mu      sync.Mutex
 
 	keyMu sync.Mutex
-	key   []byte // cached HMAC key; nil until fetched or generated
+	// key caches the HMAC key in mlock'd, zeroized-on-free memory (MEM-02).
+	// Defense-in-depth only: the key already transits as a plain keychain
+	// string, so this narrows — not closes — the in-memory exposure window.
+	key   *secrets.SecureBytes
+	epoch uint32 // key epoch of the cached key; 0 until fetched (ROT-01)
+}
+
+// setKeyLocked replaces the cached key+epoch, destroying any prior SecureBytes
+// so the old key material is zeroized. It caches a COPY: the caller keeps its
+// own working slice for the immediate signing/anchoring operation (which would
+// otherwise be zeroized, since NewSecureBytes wipes its input). Caller MUST
+// hold a.keyMu.
+func (a *SignedAudit) setKeyLocked(key []byte, epoch uint32) {
+	if a.key != nil {
+		a.key.Destroy()
+	}
+	a.key = secrets.NewSecureBytes(append([]byte(nil), key...))
+	a.epoch = epoch
 }
 
 // NewSigned returns a SignedAudit. The keychain is probed READ-ONLY: if the
@@ -162,12 +179,18 @@ type SignedAudit struct {
 // tamper-evident chain.
 func NewSigned(logPath string, kc KeychainStore) (*SignedAudit, error) {
 	sa := &SignedAudit{logPath: logPath, kc: kc}
-	key, err := fetchHMACKey(context.Background(), kc)
+	ctx := context.Background()
+	epoch, eerr := readEpochPointer(ctx, kc)
+	if eerr != nil {
+		return nil, fmt.Errorf("audit: keychain unavailable, refusing to (re)generate hmac key (fail closed): %w", eerr)
+	}
+	key, err := fetchHMACKeyEpoch(ctx, kc, epoch)
 	switch {
 	case err == nil:
-		sa.key = key
+		sa.setKeyLocked(key, epoch)
 	case errors.Is(err, secrets.ErrNotFound):
-		// Lazy creation: generated on the first mutating Append (ensureKeyLocked).
+		// Lazy creation: generated on the first mutating Append (ensureKeyLocked)
+		// — epoch 1 only; a rotated pointer with a missing key fails closed there.
 	default:
 		return nil, fmt.Errorf("audit: keychain unavailable, refusing to (re)generate hmac key (fail closed): %w", err)
 	}
@@ -177,24 +200,30 @@ func NewSigned(logPath string, kc KeychainStore) (*SignedAudit, error) {
 // LogPath returns the path this SignedAudit appends to.
 func (a *SignedAudit) LogPath() string { return a.logPath }
 
-// hmacKey returns the cached HMAC key, fetching (and caching) it from the
-// keychain on first use. It NEVER generates a key — see ensureKeyLocked.
-func (a *SignedAudit) hmacKey(ctx context.Context) ([]byte, error) {
+// hmacKey returns the cached HMAC key and its epoch, fetching (and caching)
+// them from the keychain on first use. It NEVER generates a key — see
+// ensureKeyLocked. The key and epoch are cached together: entries must always
+// be stamped with the epoch of the key that actually signed them.
+func (a *SignedAudit) hmacKey(ctx context.Context) ([]byte, uint32, error) {
 	a.keyMu.Lock()
 	if a.key != nil {
-		k := a.key
+		k, e := a.key.Bytes(), a.epoch
 		a.keyMu.Unlock()
-		return k, nil
+		return k, e, nil
 	}
 	a.keyMu.Unlock()
-	key, err := fetchHMACKey(ctx, a.kc)
+	epoch, eerr := readEpochPointer(ctx, a.kc)
+	if eerr != nil {
+		return nil, 0, eerr
+	}
+	key, err := fetchHMACKeyEpoch(ctx, a.kc, epoch)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	a.keyMu.Lock()
-	a.key = key
+	a.setKeyLocked(key, epoch)
 	a.keyMu.Unlock()
-	return key, nil
+	return key, epoch, nil
 }
 
 // ensureKeyLocked returns the HMAC key, generating and storing a fresh one when
@@ -205,25 +234,35 @@ func (a *SignedAudit) hmacKey(ctx context.Context) ([]byte, error) {
 // processes cannot both see ErrNotFound and overwrite each other's key —
 // which would make entries signed under the lost key permanently unverifiable
 // (R2-W5).
-func (a *SignedAudit) ensureKeyLocked(ctx context.Context) ([]byte, error) {
-	key, err := a.hmacKey(ctx)
+func (a *SignedAudit) ensureKeyLocked(ctx context.Context) ([]byte, uint32, error) {
+	key, epoch, err := a.hmacKey(ctx)
 	if err == nil {
-		return key, nil
+		return key, epoch, nil
 	}
 	if !errors.Is(err, secrets.ErrNotFound) {
-		return nil, fmt.Errorf("audit: keychain unavailable, refusing to (re)generate hmac key (fail closed): %w", err)
+		return nil, 0, fmt.Errorf("audit: keychain unavailable, refusing to (re)generate hmac key (fail closed): %w", err)
+	}
+	// First-run generation applies to epoch 1 ONLY. A rotated chain (pointer
+	// epoch >= 2) whose key is missing means the keychain lost a rotation key;
+	// generating a replacement would permanently fork verification (CORE-04).
+	ep, eerr := readEpochPointer(ctx, a.kc)
+	if eerr != nil {
+		return nil, 0, fmt.Errorf("audit: keychain unavailable, refusing to (re)generate hmac key (fail closed): %w", eerr)
+	}
+	if ep != firstEpoch {
+		return nil, 0, fmt.Errorf("audit: hmac key for epoch %d missing from keychain; refusing to generate a replacement (fail closed)", ep)
 	}
 	fresh := make([]byte, hmacKeyBytes)
 	if _, rerr := io.ReadFull(rand.Reader, fresh); rerr != nil {
-		return nil, fmt.Errorf("audit: generate hmac key: %w", rerr)
+		return nil, 0, fmt.Errorf("audit: generate hmac key: %w", rerr)
 	}
 	if serr := a.kc.Set(ctx, hmacKeyService, hmacKeyAccount, hex.EncodeToString(fresh)); serr != nil {
-		return nil, fmt.Errorf("audit: store hmac key: %w", serr)
+		return nil, 0, fmt.Errorf("audit: store hmac key: %w", serr)
 	}
 	a.keyMu.Lock()
-	a.key = fresh
+	a.setKeyLocked(fresh, firstEpoch)
 	a.keyMu.Unlock()
-	return fresh, nil
+	return fresh, firstEpoch, nil
 }
 
 // WriteFile is the signed-path equivalent of *Audit.WriteFile and satisfies the
@@ -342,7 +381,7 @@ func (a *SignedAudit) Update(_ context.Context, path string, perm os.FileMode, c
 // atomically writes content to path.
 func (a *SignedAudit) writeFileLocked(ctx context.Context, path string, content []byte, perm os.FileMode) error {
 	// R2-W5/R2-12: the key is fetched (or lazily generated) under the flock.
-	key, kerr := a.ensureKeyLocked(ctx)
+	key, keyEpoch, kerr := a.ensureKeyLocked(ctx)
 	if kerr != nil {
 		return kerr
 	}
@@ -386,7 +425,7 @@ func (a *SignedAudit) writeFileLocked(ctx context.Context, path string, content 
 	// physical effect (the documented append-before-write window), but never a
 	// "counter behind entries" state that audit-count-vs-anchor reads as a false
 	// truncation alarm.
-	if aerr := writeAnchorWithKey(ctx, a.logPath, key); aerr != nil {
+	if aerr := writeAnchorWithKey(ctx, a.logPath, key, keyEpoch); aerr != nil {
 		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
 	}
 	if cerr := addCounter(ctx, a.kc, entryCount); cerr != nil {
@@ -411,9 +450,21 @@ func (a *SignedAudit) writeFileLocked(ctx context.Context, path string, content 
 // MUST be called with the flock already acquired by the caller (and a.mu held
 // on SignedAudit's own paths). Does not refresh anchor or counter.
 func (a *SignedAudit) appendNoRefresh(ctx context.Context, in SignInput, target string, dryRun bool) error {
-	key, err := a.hmacKey(ctx)
+	key, epoch, err := a.hmacKey(ctx)
 	if err != nil {
 		return err
+	}
+	// ROT half-rotation guard: if the chain tail already speaks a NEWER epoch
+	// than this writer's key (rotation marker appended, epoch pointer not yet
+	// advanced — the documented crash window), appending under the old epoch
+	// would contradict the chain and read as tampering. Fail closed with the
+	// recovery instruction instead.
+	tail, terr := tailEpoch(a.logPath)
+	if terr != nil {
+		return terr
+	}
+	if tail > epoch {
+		return fmt.Errorf("audit: chain is at key epoch %d but keychain pointer is %d — rotation incomplete; run `abysslink rotate audit-hmac --apply` to complete it", tail, epoch)
 	}
 	prevHash, err := computePrevHash(a.logPath)
 	if err != nil {
@@ -436,7 +487,13 @@ func (a *SignedAudit) appendNoRefresh(ctx context.Context, in SignInput, target 
 		Hash:     hex.EncodeToString(in.DiffHash[:]),
 		DryRun:   dryRun,
 		PrevHash: prevHash,
-		Sig:      computeSig(key, in),
+		Sig:      computeSigEpoch(key, in, epoch),
+	}
+	if epoch > firstEpoch {
+		// Epoch 1 entries keep the exact pre-rotation JSON shape (field
+		// omitted); the declared epoch for >=2 is MAC-covered via
+		// signBytesEpoch, so stripping it breaks the signature.
+		entry.KeyEpoch = epoch
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
@@ -458,14 +515,14 @@ func (a *SignedAudit) appendAndRefreshLocked(ctx context.Context, in SignInput, 
 	if err := a.appendNoRefresh(ctx, in, target, dryRun); err != nil {
 		return err
 	}
-	key, err := a.hmacKey(ctx)
+	key, keyEpoch, err := a.hmacKey(ctx)
 	if err != nil {
 		return err
 	}
 	// AUD-02: anchor refreshed on EVERY append (not cadenced), under the SAME
 	// flock as the append (WR-06) so EntryCount/LastHash describe a log state no
 	// concurrent appender can change between the two reads inside WriteAnchor.
-	if aerr := writeAnchorWithKey(ctx, a.logPath, key); aerr != nil {
+	if aerr := writeAnchorWithKey(ctx, a.logPath, key, keyEpoch); aerr != nil {
 		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
 	}
 	// AUD-02: keychain counter incremented after successful anchor write.
@@ -598,7 +655,7 @@ func (a *SignedAudit) WriteFilePath(ctx context.Context, src, dst string, perm o
 	}
 	defer unlock()
 
-	key, kerr := a.ensureKeyLocked(ctx)
+	key, keyEpoch, kerr := a.ensureKeyLocked(ctx)
 	if kerr != nil {
 		return kerr
 	}
@@ -635,7 +692,7 @@ func (a *SignedAudit) WriteFilePath(ctx context.Context, src, dst string, perm o
 	}
 	entryCount++
 
-	if aerr := writeAnchorWithKey(ctx, a.logPath, key); aerr != nil {
+	if aerr := writeAnchorWithKey(ctx, a.logPath, key, keyEpoch); aerr != nil {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmp)
 		return fmt.Errorf("audit: anchor write failed (mutation aborted): %w", aerr)
@@ -691,26 +748,20 @@ func stageSrcForWrite(src, dst string) (*os.File, [32]byte, error) {
 	return tmpFile, diffHash, nil
 }
 
-// fetchHMACKey fetches and hex-decodes the stored HMAC key. It is a
-// package-private FUNCTION (not a method) so WriteAnchor and Verify can read
-// the key WITHOUT constructing a *SignedAudit — and without any risk of
-// triggering key generation, which only ever happens in ensureKeyLocked.
-func fetchHMACKey(ctx context.Context, kc KeychainStore) ([]byte, error) {
-	hexKey, err := kc.Get(ctx, hmacKeyService, hmacKeyAccount)
-	if err != nil {
-		return nil, fmt.Errorf("audit: fetch hmac key: %w", err)
-	}
-	key, err := hex.DecodeString(hexKey)
-	if err != nil {
-		return nil, fmt.Errorf("audit: decode hmac key: %w", err)
-	}
-	return key, nil
+// computeSig returns the hex-encoded HMAC-SHA256 of in under key (epoch-1
+// legacy framing). Kept for existing tests; production paths use
+// computeSigEpoch.
+func computeSig(key []byte, in SignInput) string {
+	return computeSigEpoch(key, in, firstEpoch)
 }
 
-// computeSig returns the hex-encoded HMAC-SHA256 of in under key.
-func computeSig(key []byte, in SignInput) string {
+// computeSigEpoch returns the hex-encoded HMAC-SHA256 of in under key using
+// the epoch-aware framing (ROT-01): epoch 1 = byte-identical legacy framing,
+// epoch >= 2 appends the epoch as a fixed-width big-endian uint32 so the
+// declared epoch is covered by the MAC.
+func computeSigEpoch(key []byte, in SignInput, epoch uint32) string {
 	mac := hmac.New(sha256.New, key)
-	mac.Write(signBytes(in))
+	mac.Write(signBytesEpoch(in, epoch))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -718,12 +769,17 @@ func computeSig(key []byte, in SignInput) string {
 // any malformed input — wrong key, bad hex, truncated sig, or empty sig. It uses
 // hmac.Equal to avoid a timing side-channel (never bytes.Equal).
 func verifyHMAC(key []byte, in SignInput, sigHex string) bool {
+	return verifyHMACEpoch(key, in, sigHex, firstEpoch)
+}
+
+// verifyHMACEpoch is the epoch-aware constant-time HMAC check (ROT-01).
+func verifyHMACEpoch(key []byte, in SignInput, sigHex string, epoch uint32) bool {
 	gotBytes, err := hex.DecodeString(sigHex)
 	if err != nil || len(gotBytes) != sha256.Size {
 		return false
 	}
 	mac := hmac.New(sha256.New, key)
-	mac.Write(signBytes(in))
+	mac.Write(signBytesEpoch(in, epoch))
 	return hmac.Equal(mac.Sum(nil), gotBytes)
 }
 
@@ -807,7 +863,7 @@ func (a *SignedAudit) Append(ctx context.Context, in SignInput, target string, d
 	}
 	defer unlock()
 
-	if _, kerr := a.ensureKeyLocked(ctx); kerr != nil {
+	if _, _, kerr := a.ensureKeyLocked(ctx); kerr != nil {
 		return kerr
 	}
 	return a.appendAndRefreshLocked(ctx, in, target, dryRun)

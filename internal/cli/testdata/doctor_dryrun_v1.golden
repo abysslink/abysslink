@@ -103,6 +103,8 @@
     ✓  sec-listener-bind
     ✓  sec-funnel-schema
     ✕  FATAL  sec-disk-encryption  disk is NOT encrypted — enable FileVault (macOS) / LUKS (Linux) before remote access
+    ⚠  WARN  sec-audit-epoch  could not read audit key-epoch status: audit: read epoch pointer: secrets(darwin): keychain unavailable: security find-generic-password exited 1 (service=abysslink account=audit-hmac-epoch): 
+    ✓  sec-mlock
     ⚠  WARN  sec-binary-signed  dev build — no release bundle available to verify
     ⚠  WARN  sec-upgrade-verified  no SLSA provenance URL embedded (dev build or pre-v3 release)
     ✓  sec-metrics-bind
