@@ -196,9 +196,13 @@ verify_cosign_bundle() {
     _bundle="$2"
     if have_cmd cosign; then
         info "verifying cosign v3 bundle signature ..."
+        # No --offline: it is deprecated in cosign v3 and cannot deliver
+        # air-gapped verification for the new bundle format (cosign fetches the
+        # Sigstore TUF trusted root over the network either way). The installer
+        # is already online, so this is fine, and it stays fail-closed — a bad
+        # signature or an unreachable trust root both make cosign exit non-zero.
         cosign verify-blob \
             --bundle "${_bundle}" \
-            --offline \
             --certificate-identity-regexp "^https://github\.com/${REPO}/\.github/workflows/release\.yml@refs/tags/.*$" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${_artifact}" || die "cosign bundle verification FAILED — refusing to install (Pitfall 14: fail closed)"

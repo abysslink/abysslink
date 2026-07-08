@@ -345,7 +345,8 @@ func verifyUpgradeArtifact(ctx context.Context, runner shell.Runner, checksums, 
 // verifyCosignBlob verifies the cosign v3 keyless signature on target using the
 // provided .bundle file from the release. The bundle embeds the signature and
 // signing certificate, so no separate .sig/.pem files are needed. It delegates
-// to verifyCosignBundle, which runs cosign in --offline mode (no Rekor lookup).
+// to verifyCosignBundle, which verifies against the Sigstore trust root (cosign
+// v3's new bundle format fetches the TUF trusted root over the network).
 func verifyCosignBlob(ctx context.Context, runner shell.Runner, target, bundleFile string) error {
 	return verifyCosignBundle(ctx, runner, target, bundleFile)
 }
