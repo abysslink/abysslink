@@ -103,6 +103,13 @@ jobs:
           args: release --clean --skip=sign
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pin goreleaser's notion of "the tag being released" to the ref that
+          # triggered this run. Without it goreleaser derives the tag from git
+          # (describe/points-at), which is AMBIGUOUS when several tags point at
+          # the same commit — the v4.0.1 run picked v4.0.1-rc.2 (tagged on the
+          # same merge commit minutes earlier), rebuilt rc.2, and died with 422
+          # already_exists re-uploading to the existing rc.2 release.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
           # NO tap/AUR credentials here on purpose: .goreleaser.yaml pins
           # skip_upload: true for homebrew_casks and aurs, so this job only
           # GENERATES the cask/PKGBUILD into dist/. release.yml's

@@ -61,7 +61,7 @@ No. The `claudecode` module is one opt-in consumer of the generic notification s
 curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
 ```
 
-The installer always fetches the latest release by default. Pin a version with `ABYSSLINK_VERSION=v3.0.2`.
+The installer always fetches the latest release by default. Pin a version with `ABYSSLINK_VERSION=v4.0.1`.
 
 ### How are releases signed?
 
@@ -69,4 +69,4 @@ Releases are signed with [cosign](https://docs.sigstore.dev/cosign/overview/) us
 
 ### Is there a Homebrew tap?
 
-Not yet. The release pipeline is wired for `abysslink/tap`, but the tap is not published. Use the install script or `go install` for now (see the [Quickstart](../quickstart.md)).
+The tap repo ([`abysslink/homebrew-tap`](https://github.com/abysslink/homebrew-tap)) is live. The release pipeline pushes the cask to it automatically after each published release once publishing credentials finish rolling out; until the cask lands, use the install script or the `.deb`/`.rpm` release assets (see the [Quickstart](../quickstart.md)).
