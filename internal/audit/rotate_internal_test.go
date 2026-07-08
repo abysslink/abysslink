@@ -334,3 +334,38 @@ func (a *SignedAudit) appendNoRefreshForTest(ctx context.Context, in SignInput, 
 	}()
 	return a.appendNoRefresh(ctx, in, target, dryRun)
 }
+
+// TestVerify_ForgedUnsignedAppendNotBenign proves the tamper-evidence
+// tightening: a filesystem-only attacker who appends an UNSIGNED, hash-chain-
+// linked entry beyond the keychain counter is no longer reported with the
+// benign "append-before-write window" wording. The verdict stays fail-closed
+// (CounterStatus never "verified"), and the excess-unsigned reason is distinct
+// from a genuine signed crash-window lag.
+func TestVerify_ForgedUnsignedAppendNotBenign(t *testing.T) {
+	_, logPath, kc := rotTestRig(t, 1, 3) // 3 signed epoch-1 entries, counter=3
+	ctx := context.Background()
+
+	// Craft a forged unsigned entry chained onto the real tail (prev_hash is a
+	// keyless SHA-256 — no key needed), then append it to the log by hand.
+	lines := readLines(t, logPath)
+	sum := sha256.Sum256([]byte(lines[len(lines)-1]))
+	forged := Entry{
+		Time:     time.Now().UTC(),
+		Op:       "delete",
+		Target:   "/etc/evil-forged",
+		Hash:     hex.EncodeToString(sha256.New().Sum(nil)),
+		PrevHash: hex.EncodeToString(sum[:]),
+		// Sig deliberately omitted; KeyEpoch omitted (effective epoch 1).
+	}
+	b, err := json.Marshal(forged)
+	require.NoError(t, err)
+	writeLines(t, logPath, append(lines, string(b)))
+
+	res, err := Verify(ctx, logPath, kc)
+	require.NoError(t, err)
+	// Never a clean pass: the counter cannot confirm the forged tail.
+	require.NotEqual(t, "verified", res.CounterStatus)
+	// The message must NOT claim the benign crash window.
+	require.NotContains(t, res.Reason, "append-before-write window")
+	require.Contains(t, res.Reason, "unsigned")
+}

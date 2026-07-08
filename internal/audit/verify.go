@@ -407,20 +407,53 @@ func verifyCounter(ctx context.Context, kc KeychainStore, entries []Entry, resul
 		result.Reason = fmt.Sprintf(
 			"keychain counter %d > log entries %d (tail-truncation)", n, entryCount)
 	case n < entryCount:
-		// Counter LAGS the log: more signed entries exist on disk than the counter
-		// recorded. Every entry was HMAC-chain-verified by the walk above, so these
-		// are legitimately-signed appends the counter never caught up to — the
-		// documented append-before-write crash window (a process death between the
-		// JSONL append and the keychain counter bump). A log-only attacker cannot
-		// forge additional chain-valid entries, so this is NEVER truncation. Degrade
-		// to UNKNOWN (honest tri-state), never a false "mismatch" tamper alarm.
+		// Counter LAGS the log: more entries exist on disk than the counter
+		// recorded. The benign cause is the append-before-write crash window —
+		// a process death between the signed JSONL append and the keychain
+		// counter bump. In THAT case every excess entry (index >= n) is a fully
+		// HMAC-SIGNED append the counter never caught up to; a log-only attacker
+		// cannot forge one because they lack the key.
+		//
+		// But a filesystem-only attacker CAN append an UNSIGNED, hash-chain-linked
+		// entry (prev_hash is a keyless SHA-256): the walk skips its HMAC check
+		// (Sig=="") and it lands beyond the counter. That is NOT the benign
+		// signed-crash window, and reporting it as one would mask an injected
+		// record as a lagging counter. So gate the benign message on the excess
+		// being fully signed; an unsigned excess entry is surfaced distinctly.
+		// Either way CounterStatus stays "unknown" (never coerced to PASS — the
+		// counter genuinely can't confirm the tail), so a legitimate
+		// keychain-was-down append is not falsely alarmed as tampering, while a
+		// forgery no longer hides behind the crash-window wording.
 		result.CounterStatus = "unknown"
-		result.Reason = fmt.Sprintf(
-			"keychain counter %d < log entries %d (append-before-write window; counter lagging)", n, entryCount)
+		if excessHasUnsigned(entries, n) {
+			result.Reason = fmt.Sprintf(
+				"keychain counter %d < log entries %d and the excess includes unsigned entries — a keychain-unavailable append or an injected record (unverifiable, not confirmed benign)", n, entryCount)
+		} else {
+			result.Reason = fmt.Sprintf(
+				"keychain counter %d < log entries %d (append-before-write window; counter lagging)", n, entryCount)
+		}
 	default:
 		result.CounterStatus = "verified"
 	}
 	return result
+}
+
+// excessHasUnsigned reports whether any entry at or beyond index n (the entries
+// the keychain counter never recorded) is chained-but-unsigned (PrevHash set,
+// Sig empty). Such an entry is not the benign signed append-before-write crash
+// window — it is either a keychain-unavailable append or a filesystem-only
+// forgery, and must not be reported as a benign counter lag. n is the counter
+// value (number of counted entries), so entries[n:] is the uncounted excess.
+func excessHasUnsigned(entries []Entry, n int64) bool {
+	if n < 0 {
+		n = 0
+	}
+	for i := int(n); i < len(entries); i++ {
+		if entries[i].PrevHash != "" && entries[i].Sig == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // scanRawAndEntries reads the log, returning the raw JSONL lines (without
