@@ -548,6 +548,9 @@ var atRiskTightenedChecks = map[string]bool{
 	// ROT-03: a half-finished audit HMAC rotation wedges all appends closed;
 	// at-risk escalates the WARN to FATAL.
 	"sec-audit-epoch": true,
+	// E4.1: an at-risk operator must have the quorum gate ENFORCING — shadow
+	// evaluation or a disabled quorum escalates from WARN to FATAL.
+	"sec-quorum-enabled": true,
 }
 
 // deadmanRequiredCheck is the check ID for the at-risk FATAL finding emitted
