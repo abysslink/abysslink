@@ -38,14 +38,16 @@ import (
 )
 
 // newAuditCmd builds the `abysslink audit` command tree: verify, tail, ls,
-// export. All output flows through the Printer abstraction so tests can capture
-// it and --json produces ANSI-free structured output.
+// export, evidence, verify-evidence. All output flows through the Printer
+// abstraction so tests can capture it and --json produces ANSI-free structured
+// output.
 func newAuditCmd() *cobra.Command {
 	a := &cobra.Command{
 		Use:   "audit",
 		Short: "Inspect and verify the tamper-evident audit log",
 	}
-	a.AddCommand(newAuditVerifyCmd(), newAuditTailCmd(), newAuditLsCmd(), newAuditExportCmd())
+	a.AddCommand(newAuditVerifyCmd(), newAuditTailCmd(), newAuditLsCmd(), newAuditExportCmd(),
+		newAuditEvidenceCmd(), newAuditVerifyEvidenceCmd())
 	return a
 }
 

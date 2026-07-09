@@ -48,6 +48,7 @@ nav:
   - Operations:
     - Troubleshooting: operations/troubleshooting.md
     - FAQ: operations/faq.md
+    - Audit evidence: operations/audit-evidence.md
     - "Headscale HA": headscale-ha.md
     - "NetBird SCIM": netbird-scim.md
     - "Fleet Notify Verification": fleet-notify-verification.md

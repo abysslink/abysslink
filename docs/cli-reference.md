@@ -55,6 +55,8 @@ Persistent flags on the root command, available to every subcommand:
 | `audit verify` | `--pentest`, `--fix`, `--format json` | Verify the chain; `--pentest` runs the full `sec-*` suite, `--fix` applies safe permission fixes. |
 | `audit tail` | `--n <count>` (`20`) | Show the most recent audit entries. |
 | `audit ls\|export` | — | List every entry / export as raw JSONL. |
+| `audit evidence` | `--out <file>`, `--since <ts>`, `--until <ts>` | Build a signed, externally-verifiable evidence bundle (`.alevidence`) — hash-chained entries + a human-readable report + an ed25519-signed manifest attesting the chain-verification result. For SOC 2 auditors / compliance platforms. Read-only. Prints the signing-key fingerprint to pin out-of-band. |
+| `audit verify-evidence <file>` | `--expect-key <sha256>` | Verify a bundle's signature + content hashes (exit 0 valid, 2 invalid). Prints the signing-key fingerprint; `--expect-key` fails closed on a fingerprint mismatch. |
 | `upgrade` | `--check`, `--apply`, `--force` | Self-update with cosign + SLSA verification; `--check` only reports, exiting `3` when a newer release is available. `--force` allows a downgrade when the installed build is newer than the latest release. |
 | `verify` | `--json`, `--bundle <path>`, `--version <v>` | Verify the installed binary's cosign signature and provenance. |
 | `version` | `--provenance`, `--json` | Print version (and SLSA provenance / cosign bundle URLs). |
