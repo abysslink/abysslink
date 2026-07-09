@@ -1,0 +1,138 @@
+ABYSSLINK
++------------------------------------------------------+
+|  abysslink gallery  theme preview                    |
++------------------------------------------------------+
+
+
+────────────────────────────────────────────────────
+Palette
+
+  ██  ColorAccent — brand cyan
+  ██  ColorSelection — brand violet
+  ██  ColorMuted — brand steel
+  ██  ColorSuccess — semantic green
+  ██  ColorWarn — semantic yellow
+  ██  ColorFatal — semantic red
+  ██  ColorInfo — semantic blue
+  ██  ColorSecurity — security cyan
+  ██  ColorMutedSemantic — muted grey
+  ██  ColorFg — primary foreground
+  ██  ColorDim — code-block background
+
+────────────────────────────────────────────────────
+Status & semantic styles
+
+  styleTitle — branded section title
+  styleSuccess — converged
+  styleWarn — advisory
+  styleFatal — failed closed
+  styleInfo — info marker
+  styleMuted — secondary text
+  styleBold — emphasis
+   abysslink up --apply   (styleCode — copy/run snippet, T-003)
+
+  ● ok   ⚠ warn   ✕ fatal   ✓ done   → change   ◌ busy   ○ disabled
+
+  reachable   degraded   unreachable   paused   (statusCellStyle)
+
+────────────────────────────────────────────────────
+Boxes & rules
+
++------------------------------------------------------+
+|                                                      |
+|  Next step                                           |
+|                                                      |
+|  Run   abysslink up --apply   to converge.           |
+|                                                      |
++------------------------------------------------------+
+
++------------------------------------------------------+
+|  status panel sample — see abysslink status          |
++------------------------------------------------------+
+
+  ────────────────────────  (ruleN(24) — fixed-width rule)
+
+────────────────────────────────────────────────────
+TUI components
+
+Abysslink Setup — Stage 3 of 5
+v v o . .
+Stage 3/5: Converge
+
++------------------------------------------------------+
+|  * INFO — Sample info note                           |
+|  Informational body line.                            |
++------------------------------------------------------+
++------------------------------------------------------+
+|  ! WARN — Sample warning note                        |
+|  Advisory body line.                                 |
++------------------------------------------------------+
++------------------------------------------------------+
+|  * SECURITY — Sample security note                   |
+|  Security callout body line.                         |
++------------------------------------------------------+
++------------------------------------------------------+
+|  x DANGER — Sample danger note                       |
+|  Destructive-action body line.                       |
++------------------------------------------------------+
++------------------------------------------------------+
+|  * INFO — --dry-run is the default; nothing mutates  |
+|  without --apply                                     |
+|  Every destructive command requires --apply to       |
+|  execute.                                            |
+|  Without --apply you see a plan only — no changes    |
+|  are made.                                           |
++------------------------------------------------------+
++------------------------------------------------------+
+|  Tailnet Lock disablement secret (SAMPLE)            |
+|    1. s3cr3t-EXAMPLE-0000-NOT-A-REAL-SECRET          |
+|                                                      |
+|  This will NOT be shown again — copy to your         |
+|  password manager AND print one on paper.            |
++------------------------------------------------------+
+
+────────────────────────────────────────────────────
+Progress & module rows
+
+  [1/3]  ✓  tailscale         done
+  [2/3]  ⚠  ntfy              version below floor
+  [3/3]  ⚠  mosh              not installed
+
+  ✓  tailscale         up to date
+  →  ntfy              1 change: install ntfy
+  [2/3]  ssh             ✓  done
+
+  [3/7]  (PlainBar — non-animated progress)
+  ◌  checking daemon...  (PlainStatus — non-animated spinner)
+  ⠋  installing mosh...  (static spinner frame — animated on a colour TTY)
+  ────────────────────────────────────────────────────
+  ✓  System converged  ·  1 applied  ·  0 errors  ·  1.5s
+
+────────────────────────────────────────────────────
+Markdown
+
+# Gallery
+
+**Abyss theme preview** — `abysslink gallery`
+
+## Headings are cyan
+
+### Inline code and links
+
+Run `abysslink doctor` — see [the design doc](https://github.com/abysslink/abysslink) for details.
+
+*Emphasis is violet*
+
+- list item one
+- list item two
+
+```go
+func main() { fmt.Println("hello") }
+```
+
+> Blockquotes are muted steel
+
+This is a theme preview. No changes were made.
+
+↑/↓ navigate  •  space toggle  •  enter select  •  esc back  •  ctrl+c quit
+This is a theme preview. No changes were made.
