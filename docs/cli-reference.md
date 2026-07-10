@@ -50,6 +50,7 @@ Persistent flags on the root command, available to every subcommand:
 | `lock init\|status\|sign\|rotate` | — | Manage Tailnet Lock. |
 | `rotate anthropic-key\|ntfy-creds` | — | Rotate a secret stored in the OS keychain (needs `--apply`). |
 | `logs` | `--since <dur>` (`24h`), `--module <s>` | Show the audit log, filtered by age and module. |
+| `diary` | `--date <YYYY-MM-DD>` (default today) | Read-only daily digest of the audit chain: counts per category (actions, approvals/denies, kill-switch, deadman, rotations, config mutations, backups) + notable events + agent-run cast paths. `--json` is byte-stable. |
 | `backup ls\|verify` | — | List / verify backups of changed files. |
 | `backup restore <path>` | `--original`, `--accept-unverified-backup` | Restore a file (by its path) from its most recent backup; `--original` restores the earliest (pre-abysslink) backup. |
 | `audit verify` | `--pentest`, `--fix`, `--format json` | Verify the chain; `--pentest` runs the full `sec-*` suite, `--fix` applies safe permission fixes. |
