@@ -210,6 +210,10 @@ func TestStatusParity(t *testing.T) {
 var volatileDoctorChecks = []string{
 	"ntfy_health", "ntfy-loopback", "met-disabled-listener",
 	"claude_dir_exists", "stop_hook_configured", "notification_hook_configured", "settings_json_exists",
+	// Phase-38 host-posture checks (BKLG-01/04): their severity depends on live
+	// tailscaled lock state / `defaults` / `systemsetup`, so they are host-coupled
+	// and normalized out of the styling golden.
+	"sec-tailnet-lock", "sec-autologin", "sec-remote-login",
 }
 
 // normalizeDoctorParity removes the network-coupled finding lines (and any fix:

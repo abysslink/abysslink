@@ -429,7 +429,15 @@ func hasLUKSType(devs []luksDevice) bool {
 }
 
 // diskEncryptionStatus queries the OS for actual disk encryption state.
-// Returns "encrypted", "unencrypted", or "unknown".
+// Returns "encrypted", "unencrypted", "encrypting", or "unknown".
+//
+// The darwin parse ORDER is load-bearing and fails closed (BKLG-02): real macOS
+// prints "FileVault is On. Encryption in progress …" mid-encryption, which starts
+// with "FileVault is On". The in-progress/deferred/decryption substrings are
+// therefore matched BEFORE the "On" prefix so mid-encryption renders as
+// "encrypting" (a warning state), never "encrypted"; unrecognized output fails
+// closed to "unknown". Mirrors platform/darwin DiskEncryptionStatus (DRY debt:
+// three copies of this literal parse are documented in the phase design).
 func diskEncryptionStatus(ctx context.Context, r shell.Runner) string {
 	switch runtime.GOOS {
 	case "darwin":
@@ -437,10 +445,19 @@ func diskEncryptionStatus(ctx context.Context, r shell.Runner) string {
 		if err != nil || res.ExitCode != 0 {
 			return "unknown"
 		}
-		if strings.HasPrefix(strings.TrimSpace(res.Stdout), "FileVault is On") {
+		out := strings.TrimSpace(res.Stdout)
+		switch {
+		case strings.HasPrefix(out, "FileVault is Off"):
+			return "unencrypted"
+		case strings.Contains(out, "Encryption in progress"),
+			strings.Contains(out, "Deferred enablement appears to be active"),
+			strings.Contains(out, "Decryption in progress"):
+			return "encrypting"
+		case strings.HasPrefix(out, "FileVault is On"):
 			return "encrypted"
+		default:
+			return "unknown"
 		}
-		return "unencrypted"
 	case "linux":
 		// Use -J -o NAME,TYPE (no MOUNTPOINT) to match platform/linux and avoid
 		// false positives from device names or mount paths containing "crypt".

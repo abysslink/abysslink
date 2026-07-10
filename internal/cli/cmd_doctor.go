@@ -548,6 +548,13 @@ var atRiskTightenedChecks = map[string]bool{
 	// ROT-03: a half-finished audit HMAC rotation wedges all appends closed;
 	// at-risk escalates the WARN to FATAL.
 	"sec-audit-epoch": true,
+	// Phase-38 host-posture footguns (BKLG-01/04): WARN by default so a normal
+	// doctor does not hard-fail on a machine that has not yet enabled lock /
+	// disabled auto-login / disabled public Remote Login; at-risk escalates each
+	// to FATAL.
+	"sec-tailnet-lock": true,
+	"sec-autologin":    true,
+	"sec-remote-login": true,
 }
 
 // deadmanRequiredCheck is the check ID for the at-risk FATAL finding emitted
@@ -949,6 +956,10 @@ func findingFix(check string) string {
 		// Tailnet Lock.
 		"lock_enabled": "tailscale lock init   (then abysslink up --apply)",
 		"lock_status":  "ensure tailscale is running: brew services restart tailscale",
+		// Phase-38 host-posture footguns (BKLG-01/04).
+		"sec-tailnet-lock": "tailscale lock init --confirm --gen-disablements 2 tlpub:<YOUR_LAPTOP_TLPUB>  (then abysslink up --apply)",
+		"sec-autologin":    "System Settings → Users & Groups → turn OFF Automatic login",
+		"sec-remote-login": "System Settings → General → Sharing → turn OFF Remote Login (use Tailscale SSH)",
 		// Claude Code hooks.
 		"stop_hook_configured":         "abysslink up --apply",
 		"notification_hook_configured": "abysslink up --apply",
