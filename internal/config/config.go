@@ -114,6 +114,86 @@ type Config struct {
 	// fires the deadman lockdown after IntervalHours of silence. Zero IntervalHours
 	// resolves to the locked 24h default at runtime.
 	Deadman DeadmanConfig `yaml:"deadman"`
+
+	// HardwareKeys holds the Phase 37 hardware-backed SSH key settings
+	// (HWK-01..04). OPT-IN and ships OFF: hardware keys are an advanced
+	// feature; the zero value changes nothing for existing users.
+	HardwareKeys HardwareKeysConfig `yaml:"hardware_keys"`
+}
+
+// HardwareKeysConfig holds Phase 37 hardware-backed SSH key settings.
+// OPT-IN, ships disabled (the zero value is off — KnownFields-safe: a config
+// without the stanza decodes to disabled).
+//
+// There is deliberately NO no_touch_required / protection-weakening field:
+// presence-weakening options are excluded at the schema level via
+// KnownFields(true) — the same mechanism that rejects `funnel`.
+type HardwareKeysConfig struct {
+	// Enabled gates the feature. Ships false (opt-in).
+	Enabled bool `yaml:"enabled"`
+	// Provider is "secure-enclave" (macOS SEP) or "fido2" (external
+	// authenticator). Required when Enabled.
+	Provider string `yaml:"provider,omitempty"`
+	// KeyType is the fido2 key type: "ed25519-sk" (default) or "ecdsa-sk"
+	// (explicit opt-down for old U2F-only firmware). The allowlist exists at
+	// BOTH the config and provider layers; the enclave is always P-256
+	// (ecdsa-sk) and rejects ed25519-sk at validation.
+	KeyType string `yaml:"key_type,omitempty"`
+	// KeyPath is the sk HANDLE path (not secret material); empty resolves to
+	// ~/.ssh/abysslink_id_sk.
+	KeyPath string `yaml:"key_path,omitempty"`
+	// FIDO2ProviderPath is the sk-api middleware dylib for external tokens on
+	// macOS (Homebrew openssh / a built libsk-libfido2.dylib). Unused on Linux.
+	FIDO2ProviderPath string `yaml:"fido2_provider_path,omitempty"`
+	// Application is the FIDO2 -O application value; empty resolves to
+	// "ssh:abysslink". Must begin "ssh:" when set.
+	Application string `yaml:"application,omitempty"`
+	// Resident requests a resident (discoverable) FIDO2 credential.
+	Resident bool `yaml:"resident,omitempty"`
+}
+
+// HardwareKeysDefaultApplication is the default FIDO2 -O application value.
+const HardwareKeysDefaultApplication = "ssh:abysslink"
+
+// HardwareKeysDefaultKeyType is the default fido2 key type.
+const HardwareKeysDefaultKeyType = "ed25519-sk"
+
+// HardwareKeysEnclaveKeyType is the ONLY key type the Secure Enclave can mint
+// (the SK interface is P-256 only).
+const HardwareKeysEnclaveKeyType = "ecdsa-sk"
+
+// ResolvedKeyType returns the effective key type, PROVIDER-AWARE: an empty
+// KeyType resolves to "ecdsa-sk" for the secure-enclave provider (the enclave
+// is P-256 only — the fido2 default ed25519-sk is impossible there and the
+// provider refuses it fail-closed, which would make the default enclave
+// config a guaranteed dead path) and to "ed25519-sk" otherwise. It is the
+// single default-application point so the CLI and providers agree.
+func (h HardwareKeysConfig) ResolvedKeyType() string {
+	if h.KeyType == "" {
+		if h.Provider == "secure-enclave" {
+			return HardwareKeysEnclaveKeyType
+		}
+		return HardwareKeysDefaultKeyType
+	}
+	return h.KeyType
+}
+
+// ResolvedApplication returns the effective FIDO2 application
+// ("" -> "ssh:abysslink").
+func (h HardwareKeysConfig) ResolvedApplication() string {
+	if h.Application == "" {
+		return HardwareKeysDefaultApplication
+	}
+	return h.Application
+}
+
+// ResolvedKeyPath returns the effective handle path
+// ("" -> <home>/.ssh/abysslink_id_sk).
+func (h HardwareKeysConfig) ResolvedKeyPath(home string) string {
+	if h.KeyPath == "" {
+		return filepath.Join(home, ".ssh", "abysslink_id_sk")
+	}
+	return h.KeyPath
 }
 
 // DeadmanConfig holds Phase 32 dead-man switch settings (SUPL-06).
@@ -1011,6 +1091,7 @@ func Validate(cfg *Config) error {
 		validateApproval,
 		validateBudget,
 		validateDeadman,
+		ValidateHardwareKeys,
 		validateMobileGrantPorts,
 	} {
 		if err := validate(cfg); err != nil {
@@ -1385,6 +1466,40 @@ func validateMobileGrantPorts(cfg *Config) error {
 		return fmt.Errorf("config: content_store.port %d is not yet supported — the mobile→laptop tailnet ACL grant only opens tcp/%d for the content store, "+
 			"so a custom port would be silently blocked on the phone; keep the default %d (0 or unset also means %d)",
 			p, DefaultContentStorePort, DefaultContentStorePort, DefaultContentStorePort)
+	}
+	return nil
+}
+
+// ValidateHardwareKeys checks the Phase 37 hardware_keys stanza (HWK-01..04).
+// Fail-closed at load: an enabled stanza must name a provider; the provider
+// and key-type enums are allowlists (a typo like "ed25519" must never reach a
+// provider); the impossible enclave+ed25519-sk combination is rejected (the
+// Secure Enclave is P-256 only); and a custom application must carry the
+// "ssh:" prefix OpenSSH itself requires. A disabled stanza is never
+// constrained (stale values are harmless).
+func ValidateHardwareKeys(cfg *Config) error {
+	h := cfg.HardwareKeys
+	switch h.Provider {
+	case "", "secure-enclave", "fido2":
+	default:
+		return fmt.Errorf("config: hardware_keys.provider %q must be secure-enclave or fido2", h.Provider)
+	}
+	switch h.KeyType {
+	case "", "ed25519-sk", "ecdsa-sk":
+	default:
+		return fmt.Errorf("config: hardware_keys.key_type %q must be ed25519-sk or ecdsa-sk (hardware sk types only — a software key type is never accepted)", h.KeyType)
+	}
+	if h.Provider == "secure-enclave" && h.KeyType == "ed25519-sk" {
+		return fmt.Errorf("config: hardware_keys.key_type ed25519-sk is impossible on the Secure Enclave (P-256 only) — remove key_type or use ecdsa-sk")
+	}
+	if h.Application != "" && !strings.HasPrefix(h.Application, "ssh:") {
+		return fmt.Errorf("config: hardware_keys.application %q must begin with \"ssh:\"", h.Application)
+	}
+	if !h.Enabled {
+		return nil
+	}
+	if h.Provider == "" {
+		return fmt.Errorf("config: hardware_keys.enabled requires hardware_keys.provider (secure-enclave or fido2)")
 	}
 	return nil
 }
