@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
@@ -141,6 +143,8 @@ func newUpCmd() *cobra.Command {
 		"Allow ssh_check_period to exceed the 12h re-auth default")
 	cmd.Flags().Bool("accept-no-sshcheck", false,
 		"Acknowledge SSHCheck degradation on NetBird backend (persisted to abysslink.yaml — only required once)")
+	cmd.Flags().Bool("accept-lock-disabled", false,
+		"Proceed with `up --apply` even though Tailnet Lock is not enabled (NOT recommended; this choice is audited)")
 	return cmd
 }
 
@@ -697,7 +701,98 @@ func applyTimeGates(cmd *cobra.Command, p Printer, cc *cmdContext, findings []mo
 			return err
 		}
 	}
+	// Gate 4: Tailnet Lock must be enabled (fail-closed), keyed off LIVE lock
+	// state — never config. The only bypass is the explicit, audited
+	// --accept-lock-disabled flag; an UNKNOWN status is non-overridable (BKLG-01).
+	acceptLockDisabled, _ := cmd.Flags().GetBool("accept-lock-disabled")
+	if err := lockGate(cmd.Context(), p, cc, acceptLockDisabled); err != nil {
+		return err
+	}
 	return nil
+}
+
+// lockGate is the fail-closed Tailnet Lock hard gate (BKLG-01). It probes the
+// LIVE tailnet lock state directly (`tailscale lock status --json`, via the
+// injected shell.Runner) — never config, and never the config backend
+// capability — so neither a `tailnet.lock.enabled=false` intent nor a
+// `backend.type: headscale/netbird` intent can bypass it (LOCK-BACKEND-01).
+//
+// Rationale for probing the tailscale client directly rather than routing
+// through cc.backend(): the tailscale module is unconditionally in allModules
+// and always drives the real bring-up (`tailscale up` / `tailscale set --ssh`)
+// regardless of backend.type. The gate must therefore key off the same live
+// tailscale lock state that governs that bring-up. A non-Locker backend adapter
+// (Headscale / NetBird) must NOT make the gate "not applicable" while the
+// tailscale client is still what brings SSH online.
+//
+// Decision table:
+//   - Status query fails (exec error / non-zero exit / unparseable JSON — all
+//     collapsed into err by LockClient.Status) ⇒ UNKNOWN ⇒ refuse, NON-overridable.
+//     --accept-lock-disabled does NOT bypass an undeterminable state (same posture
+//     as disk-encryption UNKNOWN, D-05); the user must get tailscale reachable
+//     first. Gate 1 already ensured the socket is up, so a genuinely unqueryable
+//     lock state is a real fault, not a routine skip.
+//   - Enabled == true ⇒ pass.
+//   - Enabled == false and !acceptLockDisabled ⇒ refuse (fail-closed).
+//   - Enabled == false and acceptLockDisabled ⇒ proceed AND audit the consent.
+func lockGate(ctx context.Context, p Printer, cc *cmdContext, acceptLockDisabled bool) error {
+	st, err := backend.LiveTailnetLockStatus(ctx, cc.runner)
+	if err != nil {
+		// UNKNOWN: fail-closed and NON-overridable (the flag cannot bypass this).
+		printerError(p, "  ✗  could not determine Tailnet Lock status")
+		return fmt.Errorf("up: refusing to apply — could not determine Tailnet Lock status (%v); "+
+			"ensure `tailscale` is running and logged in, then retry; this state cannot be overridden", err)
+	}
+	if st.Enabled {
+		return nil
+	}
+	// Lock is OFF on the live tailnet.
+	if !acceptLockDisabled {
+		printLockDisabledBlock(p)
+		return fmt.Errorf("up: refusing to apply — Tailnet Lock is not enabled (fail-closed); " +
+			"enable it with `tailscale lock init`, or re-run with --accept-lock-disabled (audited) to proceed without it")
+	}
+	// Override exercised: proceed AND audit the consent (best-effort).
+	slog.Warn("up: --accept-lock-disabled set — applying although Tailnet Lock is not enabled; " +
+		"a compromised coordination server could inject a rogue node that still passes ACLs")
+	auditLockOverrideConsent()
+	return nil
+}
+
+// auditLockOverrideConsent appends a non-file security-decision entry recording
+// that the operator consented to proceed without Tailnet Lock (mirrors the
+// panic/wol pattern). content == nil ⇒ only op + target + hash-of-empty are
+// chained; no secret, no body, ever. Best-effort: a write hiccup is logged, not
+// fatal — the security decision is already made, and failing the whole `up` on an
+// audit-log write hiccup would be a worse posture.
+func auditLockOverrideConsent() {
+	logPath, err := audit.DefaultLogPath()
+	if err != nil {
+		slog.Warn("up: could not resolve audit log path for lock-override consent", "err", err)
+		return
+	}
+	if err := audit.New(logPath).Append("lock-override-consent", "tailnet-lock", nil, false); err != nil {
+		slog.Warn("up: failed to append lock-override consent to audit log (best-effort)", "err", err)
+	}
+}
+
+// printLockDisabledBlock renders the actionable fail-closed message shown when
+// Tailnet Lock is off and the override flag was not passed (BKLG-01). The
+// remediation string is informational only (never parsed).
+func printLockDisabledBlock(p Printer) {
+	printerError(p, "  ✗  Tailnet Lock is NOT enabled on this tailnet.")
+	printerInfo(p, "     Tailnet Lock is on by default — it is the only defense against a compromised Tailscale")
+	printerInfo(p, "     coordination server injecting a rogue device that still passes your ACLs.")
+	printerInfo(p, "")
+	printerInfo(p, "     Enable it (recommended):")
+	printerInfo(p, "       tailscale lock init --confirm --gen-disablements 2 tlpub:<YOUR_LAPTOP_TLPUB>")
+	printerInfo(p, "       (copy the disablement secrets ONCE — they are never shown again; store one in your")
+	printerInfo(p, "        password manager and one on paper)")
+	printerInfo(p, "     Then re-run:  abysslink up --apply")
+	printerInfo(p, "")
+	printerInfo(p, "     To proceed WITHOUT Tailnet Lock (NOT recommended), re-run with:")
+	printerInfo(p, "       abysslink up --apply --accept-lock-disabled")
+	printerInfo(p, "     (this choice is recorded in the audit log)")
 }
 
 // requireTailscaleDaemon ensures tailscaled is running before apply.

@@ -102,7 +102,7 @@
     ✓  sec-daemon-socket-perms
     ✓  sec-listener-bind
     ✓  sec-funnel-schema
-    ✕  FATAL  sec-disk-encryption  disk is NOT encrypted — enable FileVault (macOS) / LUKS (Linux) before remote access
+    ✕  FATAL  sec-disk-encryption  disk-encryption state is UNKNOWN: fdesetup status exited 1:  — verify FileVault/LUKS manually; `up --apply` will refuse until the state is determinable
     ⚠  WARN  sec-audit-epoch  could not read audit key-epoch status: audit: read epoch pointer: secrets(darwin): keychain unavailable: security find-generic-password exited 1 (service=abysslink account=audit-hmac-epoch): 
     ✓  sec-mlock
     ⚠  WARN  sec-binary-signed  dev build — no release bundle available to verify
