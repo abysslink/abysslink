@@ -154,6 +154,65 @@ func TestGated_MockRunnerScriptedReplay(t *testing.T) {
 	assert.True(t, mock.Done())
 }
 
+// TestGated_ProductionCompositionKeepsDirRunner is the P37-01 regression: the
+// PRODUCTION composition root (internal/cli newRunner = gate.New over
+// *shell.ExecRunner) must satisfy the optional shell.DirRunner capability.
+// Before the RunInteractiveDir passthrough existed, the decorator silently
+// stripped the capability off ExecRunner and the Secure Enclave enrollment
+// (`ssh-keygen -K`, HWK-01) was structurally unreachable in the shipped
+// binary — while MockRunner-based tests stayed green because MockRunner
+// implements RunInteractiveDir directly. Constructing ExecRunner executes
+// nothing; no live call is made.
+func TestGated_ProductionCompositionKeepsDirRunner(t *testing.T) {
+	var r shell.Runner = New(&shell.ExecRunner{}, WithLogger(discardLogger()))
+	_, ok := r.(shell.DirRunner)
+	require.True(t, ok, "gate.New(&shell.ExecRunner{}) must keep the shell.DirRunner capability — the enclave enroll path type-asserts it")
+}
+
+// TestGated_RunInteractiveDirDelegates: shadow mode delegates the working
+// directory and argv verbatim to the inner DirRunner and records the exec.
+func TestGated_RunInteractiveDirDelegates(t *testing.T) {
+	mock := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 0}})
+	g := New(mock, WithLogger(discardLogger()))
+
+	require.NoError(t, g.RunInteractiveDir(context.Background(), "/work/dir", "ssh-keygen", "-K"))
+
+	recorded := mock.RecordedCalls()
+	require.Len(t, recorded, 1)
+	assert.Equal(t, "ssh-keygen", recorded[0].Name)
+	assert.Equal(t, []string{"-K"}, recorded[0].Args)
+	assert.Equal(t, "/work/dir", recorded[0].Dir, "the requested working directory must reach the inner runner untouched")
+	assert.True(t, recorded[0].IsInteractive)
+	assert.Equal(t, uint64(1), g.Count(), "RunInteractiveDir must be recorded like every other exec")
+}
+
+// TestGated_RunInteractiveDirInnerWithoutCapability: an inner runner without
+// shell.DirRunner is refused with an error (fail closed) — the gate never
+// works around the missing capability by chdir'ing or running in an
+// uncontrolled CWD.
+func TestGated_RunInteractiveDirInnerWithoutCapability(t *testing.T) {
+	inner := &fakeInner{} // fakeInner deliberately has no RunInteractiveDir
+	g := New(inner, WithLogger(discardLogger()))
+
+	err := g.RunInteractiveDir(context.Background(), t.TempDir(), "ssh-keygen", "-K")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DirRunner")
+	assert.Empty(t, inner.seen(), "no inner method may run when the capability is missing")
+}
+
+// TestGated_RunInteractiveDirEnforcingNoToken: enforcing mode applies the same
+// approval gate to RunInteractiveDir as to every other Run method — the new
+// passthrough must not become an enforcement bypass.
+func TestGated_RunInteractiveDirEnforcingNoToken(t *testing.T) {
+	mock := shell.NewMockRunner()
+	g := New(mock, WithLogger(discardLogger()), WithEnforcing(approve.NewRegistry(nil)))
+
+	err := g.RunInteractiveDir(context.Background(), "/work/dir", "ssh-keygen", "-K")
+	require.ErrorIs(t, err, ErrApprovalRequired)
+	assert.Empty(t, mock.RecordedCalls(), "inner must NOT be called when the approval token is missing")
+	assert.Equal(t, uint64(1), g.Count(), "counter still incremented on enforcing refusal")
+}
+
 // TestGated_CounterPerMethod: one call per Runner method increments the
 // atomic counter to exactly 5 — the /status seam proof.
 func TestGated_CounterPerMethod(t *testing.T) {

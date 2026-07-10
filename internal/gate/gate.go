@@ -132,6 +132,12 @@ func approvalTokenFromCtx(ctx context.Context) (*approve.ApprovalToken, bool) {
 
 var _ shell.Runner = (*Gated)(nil)
 
+// The decorator must never strip the optional working-directory capability
+// off the production composition root (gate.New(&shell.ExecRunner{})): the
+// hardware-key enclave enrollment (`ssh-keygen -K`, HWK-01) type-asserts
+// shell.DirRunner and refuses fail-closed without it.
+var _ shell.DirRunner = (*Gated)(nil)
+
 // Option configures a Gated at construction time.
 type Option func(*Gated)
 
@@ -142,8 +148,9 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 // WithEnforcing flips the Gated decorator from observe-only to enforcing mode.
-// In enforcing mode, every Run/RunWithStdin/RunInteractive/RunWithEnv/RunStream
-// call checks for an ApprovalToken in ctx and refuses execs that lack one.
+// In enforcing mode, every Run/RunWithStdin/RunInteractive/RunInteractiveDir/
+// RunWithEnv/RunStream call checks for an ApprovalToken in ctx and refuses
+// execs that lack one.
 // When a token is present the closure hash is re-verified (APPR-01 TOCTOU
 // structurally closed).
 //
@@ -356,6 +363,26 @@ func (g *Gated) RunInteractive(ctx context.Context, name string, args ...string)
 		return err
 	}
 	return g.inner.RunInteractive(ctx, name, args...)
+}
+
+// RunInteractiveDir records the exec, enforces the gate, then delegates to the
+// inner runner's shell.DirRunner capability (the optional working-directory
+// interface `ssh-keygen -K` needs — HWK-01). The passthrough exists because a
+// decorator without it silently STRIPS the capability off shell.ExecRunner,
+// making the enclave enrollment structurally unreachable in the shipped
+// binary. An inner runner that does not implement shell.DirRunner is refused
+// with an error (fail closed — never worked around by chdir'ing the parent
+// process), mirroring RunArmed's inner type assertion.
+func (g *Gated) RunInteractiveDir(ctx context.Context, dir, name string, args ...string) error {
+	g.record("RunInteractiveDir", name, args)
+	if err := g.checkEnforcing(ctx, name, args); err != nil {
+		return err
+	}
+	dr, ok := g.inner.(shell.DirRunner)
+	if !ok {
+		return fmt.Errorf("gate: inner runner %T does not implement DirRunner — cannot run in a controlled working directory", g.inner)
+	}
+	return dr.RunInteractiveDir(ctx, dir, name, args...)
 }
 
 // RunWithEnv records the exec, enforces the gate, then delegates. Env values
