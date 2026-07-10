@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"time\":\"2026-01-01T00:00:00Z\",\"op\":\"write\",\"target\":\"/x\",\"hash\":\"deadbeef\",\"prev_hash\":\"deadbeef\",\"sig\":\"00\",\"key_epoch\":1}")
