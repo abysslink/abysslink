@@ -90,6 +90,26 @@ docker start abysslink-ntfy                 # macOS (Docker container)
 
 Or re-run `abysslink up --apply` to install and start ntfy.
 
+### `sec-audit-epoch: WARN — audit key rotation is incomplete … appends fail closed`
+
+A previous `abysslink rotate audit-hmac` recorded the in-chain rotation marker but did not advance the keychain key-epoch pointer (the documented rotation crash window). Until it is completed, every new audit append **fails closed**. Complete the half-finished rotation:
+
+```sh
+abysslink rotate audit-hmac --apply
+```
+
+The command detects the interrupted state and finishes it (advances the pointer, re-anchors). Then confirm with `abysslink audit verify`.
+
+### `sec-mlock: WARN — cannot lock secret memory (RLIMIT_MEMLOCK too low)`
+
+This is a defense-in-depth posture warning, never fatal — in-memory secrets still fall back to unlocked, zeroized-on-free buffers. To restore the mlock protection, raise the locked-memory limit:
+
+```sh
+ulimit -l unlimited                 # current shell (or a specific KB value)
+```
+
+In a container, pass `--ulimit memlock=-1` (Docker) or the equivalent. On systemd services, set `LimitMEMLOCK=infinity` in the unit. The `at-risk` profile does **not** escalate this to FATAL, since the operator may be unable to raise a host kernel limit.
+
 ## Connection issues
 
 ### SSH connection refused

@@ -9,7 +9,7 @@ Persistent flags on the root command, available to every subcommand:
 | Flag | Default | Description |
 |---|---|---|
 | `--config <path>` | `~/.config/abysslink/abysslink.yaml` | Path to the config file (`XDG_CONFIG_HOME` honoured). An explicitly passed path that does not exist is a hard error. |
-| `--dry-run` | `true` | Show planned changes without applying. |
+| `--dry-run` | `false` | Show planned changes without applying. The flag itself defaults to `false` (as `--help` reports), but dry-run is nonetheless the effective **default mode**: when neither `--dry-run` nor `--apply` is passed, commands plan only. |
 | `--apply` | `false` | Execute planned changes. |
 | `--yes` | `false` | Skip interactive confirmations. |
 | `--json` | `false` | Machine-readable JSON output. |
@@ -38,7 +38,7 @@ Persistent flags on the root command, available to every subcommand:
 
 | Command | Local flags | Description |
 |---|---|---|
-| `notify [title] [body]` | `--stdin`, `--priority <min\|low\|default\|high\|max>` (`urgent` = `max`), `--tag <s>`, `--topic <s>`, `--kind <needs_input\|command_done\|approval_request\|watch_fired\|agent_stopped>`, `--pane <%N>` | Send a push; `notify -- <cmd>` wraps a command and pushes on exit. `--kind`/`--pane` force a session-typed v2 notification (pane autodetected from `$TMUX_PANE`). |
+| `notify [title] [body]` | `--stdin`, `--claude-hook`, `--priority <min\|low\|default\|high\|max>` (`urgent` = `max`), `--tag <s>`, `--topic <s>`, `--kind <needs_input\|command_done\|approval_request\|watch_fired\|agent_stopped>`, `--pane <%N>` | Send a push; `notify -- <cmd>` wraps a command and pushes on exit. `--kind`/`--pane` force a session-typed v2 notification (pane autodetected from `$TMUX_PANE`). `--claude-hook` reads a Claude Code Notification hook payload from stdin, derives a typed title (approval/decision/input), and uses Claude's real message as the body. |
 | `approve` | `--check [--blocking]`, `--permission-request` | Claude Code hook executor for the phone approve loop (invoked by hooks configured by `up --apply`, not directly by users). `--check` blocks until the phone/TTY approves (exit `0`) or denies (exit `2`); `--blocking` applies the full `approval.timeout_seconds` deadline. `--permission-request` writes allow JSON to stdout immediately. |
 | `arm -- <cmd> [args...]` | `--apply` (execute working-tree rollback on exit) | Arm an agent run with the apoptosis kill-switch: git snapshot, flight recorder, wall-clock/loop budgets. Shadow mode (notify only) by default; enable the SIGSTOP→kill ladder with `budget.ladder: true`. |
 | `deadman enable\|heartbeat\|status` | `enable`: `--interval-hours <n>` (`0` = 24h default, floor 1h) | Opt-in dead-man switch: daemon-hosted no-contact timer that fires a lockdown (disarm agents, revoke autonomy, audit) after N hours of operator silence; `heartbeat` resets the deadline (`enable` needs `--apply`). |
@@ -48,7 +48,7 @@ Persistent flags on the root command, available to every subcommand:
 | `watch list` | — | List configured watchers. |
 | `acl pull\|push\|validate\|diff` | — | Manage the tailnet ACL (HuJSON round-trip). |
 | `lock init\|status\|sign\|rotate` | — | Manage Tailnet Lock. |
-| `rotate anthropic-key\|ntfy-creds` | — | Rotate a secret stored in the OS keychain (needs `--apply`). |
+| `rotate anthropic-key\|ntfy-creds\|audit-hmac` | — | `anthropic-key` / `ntfy-creds` rotate a secret stored in the OS keychain. `audit-hmac` rotates the tamper-evident audit log's HMAC signing key to a new key epoch — the old key is retained (and an in-chain rotation marker signed by it is appended) so pre-rotation history stays verifiable; only the new key's SHA-256 fingerprint is printed. All dry-run by default (need `--apply`). |
 | `logs` | `--since <dur>` (`24h`), `--module <s>` | Show the audit log, filtered by age and module. |
 | `backup ls\|verify` | — | List / verify backups of changed files. |
 | `backup restore <path>` | `--original`, `--accept-unverified-backup` | Restore a file (by its path) from its most recent backup; `--original` restores the earliest (pre-abysslink) backup. |

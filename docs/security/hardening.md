@@ -91,3 +91,24 @@ All file mutations go through `internal/audit`, which writes:
 2. An audit log entry (`~/.local/state/abysslink/audit.log`) with timestamp, operation, target path, and diff hash
 
 Secrets are never written to the audit log.
+
+The audit log is a hash-chained, HMAC-signed chain (verify it with `abysslink audit verify`). For an externally verifiable, ed25519-signed export you can hand to an auditor, see [Audit evidence bundles](../operations/audit-evidence.md).
+
+### Audit HMAC key rotation
+
+The HMAC signing key lives in the OS keychain and can be rotated to a fresh **key epoch**:
+
+```sh
+abysslink rotate audit-hmac            # preview (dry-run)
+abysslink rotate audit-hmac --apply    # rotate
+```
+
+The rotation is designed so pre-rotation history stays verifiable:
+
+- The **old key is retained** in the keychain and an in-chain **rotation marker** (signed by the old key) records the hand-off.
+- Only entries appended after the rotation are signed under the new key. Verification selects the key by epoch, so a rotated chain still verifies end to end.
+- The command never prints the key material (the HMAC key never leaves the machine) — only the new key's **SHA-256 fingerprint**.
+
+The key never leaves the machine, so it also never leaves in-memory unprotected: in-memory secrets are held in mlock'd, zeroized-on-free buffers (`SecureBytes`, MEM-01/02). The `sec-mlock` doctor check reports whether memory locking is available on the host (defense-in-depth; the unlocked fallback still zeroizes on free).
+
+If a rotation is interrupted after the in-chain marker is written but before the keychain pointer advances, subsequent appends **fail closed** and the `sec-audit-epoch` doctor check warns. Re-run `abysslink rotate audit-hmac --apply` to complete the half-finished rotation — see [Troubleshooting](../operations/troubleshooting.md#abysslink-doctor-failures).
