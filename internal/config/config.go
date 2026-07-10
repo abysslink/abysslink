@@ -28,7 +28,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/approve"
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/quorum"
 	"gopkg.in/yaml.v3"
 )
 
@@ -114,6 +116,94 @@ type Config struct {
 	// fires the deadman lockdown after IntervalHours of silence. Zero IntervalHours
 	// resolves to the locked 24h default at runtime.
 	Deadman DeadmanConfig `yaml:"deadman"`
+
+	// Quorum holds the E4.1 quorum-sensing action-gate configuration.
+	// Evaluation + shadow audit default ON; enforcement rides Gate.Enforcing
+	// (the single D-04 arm switch). Every knob is tighten-only.
+	Quorum QuorumConfig `yaml:"quorum"`
+}
+
+// QuorumConfig holds the E4.1 quorum action-gate settings. Every field is
+// TIGHTEN-ONLY: lists are ADD-ONLY unions with compiled defaults (no
+// remove/override syntax exists), numerics looser than the shipped defaults
+// are config LOAD ERRORS (rejected, never clamped), and tier overrides are
+// RAISE-only.
+//
+// Deliberately-absent keys (schema-level rejection via KnownFields(true) —
+// the Funnel pattern): quorum.floor, quorum.disable_floor,
+// quorum.remove_patterns, quorum.dry_run_first (always on when enabled),
+// quorum.verifier_timeout, and quorum.enforcing (gate.enforcing is the only
+// arm switch). Any of these keys in YAML is a fatal decode error because no
+// struct field carries them.
+type QuorumConfig struct {
+	// Enabled gates quorum evaluation (and shadow auditing). Ships true:
+	// evaluation is observe-only until gate.enforcing arms the gate. Setting
+	// false with an enforcing gate falls back to approval-for-EVERY-exec —
+	// strictly tighter, so disabling quorum can never loosen the gate.
+	Enabled bool `yaml:"enabled"`
+	// ProtectedPaths are ADD-ONLY extra protected filesystem scopes,
+	// union-merged with the compiled defaults (~/.ssh, /etc, the audit-log
+	// dir, the abysslink config dir, keychain paths, tailscale state dirs).
+	ProtectedPaths []string `yaml:"protected_paths,omitempty"`
+	// ProtectedBranches are ADD-ONLY extra protected git branches,
+	// union-merged with the compiled defaults (main, master).
+	ProtectedBranches []string `yaml:"protected_branches,omitempty"`
+	// ExtraPatterns are ADD-ONLY extra syntactic (V1) substring patterns;
+	// matches are forced to tier >= Sensitive.
+	ExtraPatterns []string `yaml:"extra_patterns,omitempty"`
+	// CanaryPaths are ADD-ONLY extra canary tripwire markers; any argv token
+	// containing one is an instant DENY plus alert.
+	CanaryPaths []string `yaml:"canary_paths,omitempty"`
+	// SpendThresholdUSD: 0 means the shipped default (50 USD). Only values
+	// in (0, 50] are accepted — raising the threshold is a load error.
+	SpendThresholdUSD float64 `yaml:"spend_threshold_usd,omitempty"`
+	// RateMaxOps: 0 means the shipped default (10 destructive ops per
+	// window). Only values in (0, 10] are accepted.
+	RateMaxOps int `yaml:"rate_max_ops,omitempty"`
+	// RateWindowSeconds: 0 means the shipped default (300s). Only values
+	// >= 300 are accepted (a LONGER window is tighter).
+	RateWindowSeconds int `yaml:"rate_window_seconds,omitempty"`
+	// TierOverrides is a RAISE-only per-rule-code tier map, e.g.
+	// {force-push: critical}. Lowering a shipped tier or naming an unknown
+	// rule code is a load error (validated against quorum.ShippedRuleTiers).
+	TierOverrides map[string]string `yaml:"tier_overrides,omitempty"`
+}
+
+// EngineConfig maps the YAML stanza to the quorum engine configuration.
+// enforcing is cfg.Gate.Enforcing (audit labeling: enforcing vs shadow).
+// It assumes Validate has already run (tier names parse; raise-only holds).
+func (q QuorumConfig) EngineConfig(enforcing bool) quorum.Config {
+	overrides := make(map[string]approve.TierLevel, len(q.TierOverrides))
+	for code, name := range q.TierOverrides {
+		if t, err := parseTierName(name); err == nil {
+			overrides[code] = t
+		}
+	}
+	return quorum.Config{
+		Enforcing:         enforcing,
+		ProtectedPaths:    q.ProtectedPaths,
+		ProtectedBranches: q.ProtectedBranches,
+		ExtraPatterns:     q.ExtraPatterns,
+		CanaryMarkers:     q.CanaryPaths,
+		SpendThresholdUSD: q.SpendThresholdUSD,
+		RateMaxOps:        q.RateMaxOps,
+		RateWindowSeconds: q.RateWindowSeconds,
+		TierOverrides:     overrides,
+	}
+}
+
+// parseTierName maps a YAML tier name to approve.TierLevel.
+func parseTierName(name string) (approve.TierLevel, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "benign":
+		return approve.TierBenign, nil
+	case "sensitive":
+		return approve.TierSensitive, nil
+	case "critical":
+		return approve.TierCritical, nil
+	default:
+		return approve.TierBenign, fmt.Errorf("unknown tier %q (want sensitive or critical)", name)
+	}
 }
 
 // DeadmanConfig holds Phase 32 dead-man switch settings (SUPL-06).
@@ -848,6 +938,16 @@ func Defaults() *Config {
 		Deadman: DeadmanConfig{
 			Enabled: false,
 		},
+		// Quorum defaults (E4.1):
+		//   Enabled=true — evaluation + shadow audit are DEFAULT-ON for the
+		//   curated irreversible-pattern set; enforcement still rides
+		//   gate.enforcing (the single D-04 arm switch), so the default-on
+		//   quorum never blocks anything until the operator arms the gate.
+		//   All lists empty (compiled defaults apply); all numerics zero
+		//   (compiled defaults apply; validateQuorum rejects loosening).
+		Quorum: QuorumConfig{
+			Enabled: true,
+		},
 	}
 }
 
@@ -1012,6 +1112,7 @@ func Validate(cfg *Config) error {
 		validateBudget,
 		validateDeadman,
 		validateMobileGrantPorts,
+		validateQuorum,
 	} {
 		if err := validate(cfg); err != nil {
 			return err
@@ -1406,4 +1507,87 @@ func validateDeadman(cfg *Config) error {
 			d.IntervalHours, DeadmanIntervalFloorHours, DeadmanDefaultIntervalHours)
 	}
 	return nil
+}
+
+// validateQuorum enforces the E4.1 tighten-only quorum config contract:
+// zero numerics mean "use the compiled default" (accepted); non-zero values
+// LOOSER than the shipped defaults are load errors with a one-line rationale
+// (rejected, never clamped — the validateApproval house style); tier
+// overrides are raise-only against quorum.ShippedRuleTiers; list entries
+// must be non-empty. There is no field — and therefore no validation branch —
+// that can remove or disable the compiled deny-floor.
+func validateQuorum(cfg *Config) error {
+	q := cfg.Quorum
+	if s := q.SpendThresholdUSD; s != 0 && (s < 0 || s > quorum.DefaultSpendThresholdUSD) {
+		return fmt.Errorf("config: quorum.spend_threshold_usd %v must be in (0, %v] — "+
+			"raising the spend threshold above the shipped default would loosen the gate; 0 means the default",
+			s, quorum.DefaultSpendThresholdUSD)
+	}
+	if r := q.RateMaxOps; r != 0 && (r < 0 || r > quorum.DefaultRateMaxOps) {
+		return fmt.Errorf("config: quorum.rate_max_ops %d must be in (0, %d] — "+
+			"allowing more destructive ops per window than the shipped default would loosen the gate; 0 means the default",
+			r, quorum.DefaultRateMaxOps)
+	}
+	if w := q.RateWindowSeconds; w != 0 && w < quorum.DefaultRateWindowSeconds {
+		return fmt.Errorf("config: quorum.rate_window_seconds %d must be >= %d — "+
+			"a shorter window forgets destructive ops sooner and loosens the gate; 0 means the default",
+			w, quorum.DefaultRateWindowSeconds)
+	}
+	if w := q.RateWindowSeconds; w > quorum.MaxRateWindowSeconds {
+		return fmt.Errorf("config: quorum.rate_window_seconds %d exceeds the maximum %d — "+
+			"a larger window overflows the internal duration and would silently DISABLE the "+
+			"destructive-op rate cap; 0 means the default",
+			w, quorum.MaxRateWindowSeconds)
+	}
+	for listName, list := range map[string][]string{
+		"protected_paths":    q.ProtectedPaths,
+		"protected_branches": q.ProtectedBranches,
+		"extra_patterns":     q.ExtraPatterns,
+		"canary_paths":       q.CanaryPaths,
+	} {
+		for _, entry := range list {
+			if strings.TrimSpace(entry) == "" {
+				return fmt.Errorf("config: quorum.%s contains an empty entry — "+
+					"an empty pattern would match everything or nothing; remove it", listName)
+			}
+		}
+	}
+	return validateQuorumTierOverrides(q)
+}
+
+// validateQuorumTierOverrides enforces the RAISE-only tier-override contract
+// against the shipped rule registry (quorum.ShippedRuleTiers): unknown codes,
+// unknown tier names, and tier LOWERING are all load errors (D-08).
+func validateQuorumTierOverrides(q QuorumConfig) error {
+	shipped := quorum.ShippedRuleTiers()
+	for code, name := range q.TierOverrides {
+		shippedTier, known := shipped[code]
+		if !known {
+			return fmt.Errorf("config: quorum.tier_overrides names unknown rule code %q — "+
+				"a typo here would silently protect nothing; see docs/configuration.md for the code list", code)
+		}
+		t, err := parseTierName(name)
+		if err != nil {
+			return fmt.Errorf("config: quorum.tier_overrides[%s]: %w", code, err)
+		}
+		if t < shippedTier {
+			return fmt.Errorf("config: quorum.tier_overrides[%s] = %q would LOWER the shipped tier (%s) — "+
+				"tier overrides are raise-only (D-08)", code, name, tierNameOf(shippedTier))
+		}
+	}
+	return nil
+}
+
+// tierNameOf renders an approve.TierLevel for config error messages.
+func tierNameOf(t approve.TierLevel) string {
+	switch t {
+	case approve.TierBenign:
+		return "benign"
+	case approve.TierSensitive:
+		return "sensitive"
+	case approve.TierCritical:
+		return "critical"
+	default:
+		return fmt.Sprintf("tier(%d)", int(t))
+	}
 }
