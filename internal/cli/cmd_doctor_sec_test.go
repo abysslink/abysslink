@@ -19,6 +19,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/config"
@@ -28,6 +29,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// phase37SecCheckCount is the number of Phase 37 additions to the sec roster:
+// sec-hwkey-kind plus one sec-attest-* per boot-state probe of this GOOS
+// (darwin: sip+secureboot; linux: secureboot+tpm; other: platform).
+func phase37SecCheckCount() int {
+	switch runtime.GOOS {
+	case "darwin", "linux":
+		return 3
+	default:
+		return 2
+	}
+}
 
 // writeSSHDConfig writes a minimal sshd_config fixture and returns its path.
 func writeSSHDConfig(t *testing.T, body string) string {
@@ -345,7 +358,7 @@ func TestSecBinarySignedAlias_ReusesPrecomputedSupplyFindings(t *testing.T) {
 	}}
 
 	findings := secDoctorFindings(ctx, cc, deps, false, nil, nil, nil, supply)
-	require.Len(t, findings, 20, "supply alias must keep the 20-check roster")
+	require.Len(t, findings, 20+phase37SecCheckCount(), "supply alias must keep the full sec roster")
 	var got *modules.Finding
 	for i := range findings {
 		if findings[i].Check == "sec-binary-signed" {
@@ -413,7 +426,8 @@ func TestSecDoctorFindings(t *testing.T) {
 
 	findings := secDoctorFindings(ctx, cc, deps, false, metFindings, webuiFindings, auditFindings)
 
-	require.Len(t, findings, 20, "secDoctorFindings must return exactly 20 findings")
+	require.Len(t, findings, 20+phase37SecCheckCount(),
+		"secDoctorFindings must return exactly the legacy 20 findings plus the Phase 37 additions")
 
 	want := map[string]bool{
 		"sec-ssh-permitroot": true, "sec-ssh-x11forwarding": true, "sec-ssh-agentforwarding": true,
@@ -423,6 +437,19 @@ func TestSecDoctorFindings(t *testing.T) {
 		"sec-disk-encryption": true, "sec-binary-signed": true, "sec-upgrade-verified": true,
 		"sec-metrics-bind": true, "sec-webui-bind": true, "sec-audit-anchor-age": true,
 		"sec-audit-epoch": true, "sec-mlock": true,
+		// Phase 37 (HWK-03): always present, appended at the end.
+		"sec-hwkey-kind": true,
+	}
+	// Phase 37 (ATT-02): one sec-attest-* per probe of the current GOOS.
+	switch runtime.GOOS {
+	case "darwin":
+		want["sec-attest-sip"] = true
+		want["sec-attest-secureboot"] = true
+	case "linux":
+		want["sec-attest-secureboot"] = true
+		want["sec-attest-tpm"] = true
+	default:
+		want["sec-attest-platform"] = true
 	}
 	got := map[string]bool{}
 	for _, f := range findings {

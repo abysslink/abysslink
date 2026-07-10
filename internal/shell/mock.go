@@ -28,7 +28,8 @@ type Call struct {
 	Args          []string
 	Stdin         string            // captured stdin content from RunWithStdin (empty for Run calls)
 	Env           map[string]string // extra env vars passed via RunWithEnv
-	IsInteractive bool              // true when the call was made via RunInteractive
+	IsInteractive bool              // true when the call was made via RunInteractive or RunInteractiveDir
+	Dir           string            // working directory recorded by RunInteractiveDir (empty otherwise)
 	Result        Result
 	Err           error
 }
@@ -124,6 +125,31 @@ func (m *MockRunner) RunInteractive(_ context.Context, name string, args ...stri
 	m.calls[m.idx].Name = name
 	m.calls[m.idx].Args = args
 	m.calls[m.idx].IsInteractive = true
+	m.idx++
+	if c.Err != nil {
+		return c.Err
+	}
+	if c.Result.ExitCode != 0 {
+		return fmt.Errorf("shell: interactive command %q exited with code %d", name, c.Result.ExitCode)
+	}
+	return nil
+}
+
+// RunInteractiveDir behaves exactly like RunInteractive but additionally
+// records the working directory the caller requested, satisfying the optional
+// shell.DirRunner capability so hardware-key tests can assert both the argv and
+// the controlled CWD of an `ssh-keygen -K` invocation.
+func (m *MockRunner) RunInteractiveDir(_ context.Context, dir, name string, args ...string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.idx >= len(m.calls) {
+		return fmt.Errorf("shell: unexpected call %d (RunInteractiveDir): %s %v", m.idx, name, args)
+	}
+	c := m.calls[m.idx]
+	m.calls[m.idx].Name = name
+	m.calls[m.idx].Args = args
+	m.calls[m.idx].IsInteractive = true
+	m.calls[m.idx].Dir = dir
 	m.idx++
 	if c.Err != nil {
 		return c.Err
