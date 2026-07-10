@@ -31,6 +31,7 @@ import (
 	"sync/atomic"
 
 	"github.com/abysslink/abysslink/internal/approve"
+	"github.com/abysslink/abysslink/internal/quorum"
 	"github.com/abysslink/abysslink/internal/shell"
 )
 
@@ -43,6 +44,45 @@ var ErrClosureHashMismatch = errors.New("gate: closure hash mismatch — exec re
 // ErrApprovalRequired is returned by enforcing-mode Run methods when no
 // ApprovalToken is present in ctx and the exec requires approval (APPR-05).
 var ErrApprovalRequired = errors.New("gate: approval token required in enforcing mode")
+
+// ErrQuorumDenied is returned by enforcing-mode Run methods when the quorum
+// engine's decision is DENY — a stage-0 deny-floor hit, a canary tripwire, or
+// a single-verifier veto. There is NO approval path: a valid ApprovalToken in
+// ctx does not bypass it (E4.1 lattice rows 0a–0c and 1).
+var ErrQuorumDenied = errors.New("gate: quorum denied — exec refused, no approval path")
+
+// QuorumPolicy is the per-action policy the enforcing gate consults before
+// honoring any approval token (E4.1). *quorum.Engine satisfies it. Evaluate's
+// error return refuses the exec (row 7: canceled context / budget exceeded —
+// fail closed); RecordExec feeds the V3 behavior history on every pass.
+type QuorumPolicy interface {
+	Evaluate(ctx context.Context, name string, args []string) (quorum.Decision, error)
+	RecordExec(name string, args []string)
+}
+
+// ApprovalRequiredError is the tier-carrying escalation error returned when a
+// quorum evaluation demands human approval. It satisfies
+// errors.Is(err, ErrApprovalRequired) so existing callers keep working; new
+// callers read Tier (and Decision for the dissent-first prompt content) to
+// open the approve request at the demanded tier.
+type ApprovalRequiredError struct {
+	// Tier is the quorum-computed approval tier. approve.Tier() can still
+	// only RAISE it (CriticalPatterns + extra_critical) — escalate-only
+	// composes.
+	Tier approve.TierLevel
+	// Decision is the full quorum decision (vote vector, matched codes).
+	Decision quorum.Decision
+}
+
+// Error implements error. It names codes and tiers only — never raw argv.
+func (e *ApprovalRequiredError) Error() string {
+	return fmt.Sprintf("gate: approval required (tier %d): %s", int(e.Tier), e.Decision.Title())
+}
+
+// Is makes errors.Is(err, ErrApprovalRequired) true for this typed error.
+func (e *ApprovalRequiredError) Is(target error) bool {
+	return target == ErrApprovalRequired
+}
 
 // maxScriptContentBytes caps the args[0]-as-script content read folded into
 // the D-39 closure hash. Larger files are silently excluded so observe mode
@@ -63,6 +103,7 @@ type Gated struct {
 	count     atomic.Uint64
 	enforcing bool              // when true, Run checks ctx for ApprovalToken and re-verifies closure hash; default false per D-04
 	registry  *approve.Registry // daemon-side approve registry client; only meaningful when enforcing==true; never set on the daemon-internal runner (D-40 structural bypass)
+	quorum    QuorumPolicy      // E4.1 quorum engine; nil keeps pre-quorum behavior (enforcing = every exec requires approval; shadow = observe only)
 
 	// mu protects observer. SetObserver is called once at arm time;
 	// record() reads it on every exec. A mutex shard is the simplest
@@ -118,6 +159,23 @@ func WithEnforcing(registry *approve.Registry) Option {
 	}
 }
 
+// WithQuorum wires the E4.1 quorum engine into the gate. With an enforcing
+// gate, every gated exec is evaluated through the quorum lattice BEFORE any
+// approval token is honored: a DENY (floor/tripwire/veto) refuses the exec
+// with ErrQuorumDenied even when a valid token is present; an ESCALATE
+// returns *ApprovalRequiredError carrying the demanded tier; a unanimous
+// confident ALLOW proceeds audit-only. With a non-enforcing (shadow) gate the
+// evaluation runs asynchronously and never blocks or fails the exec — the
+// decision is still audited (day-one calibration corpus).
+//
+// The D-40 invariant is unchanged: the daemon-internal runner is plain
+// New(inner) — no quorum, no enforcement. RunArmed/RunArmedMinimal remain
+// exempt (D-01a/KILL-03): armed long-running agent spawns are covered by the
+// budget watcher, not the quorum.
+func WithQuorum(p QuorumPolicy) Option {
+	return func(g *Gated) { g.quorum = p }
+}
+
 // New returns a Gated decorator around inner. The decorator is observe-only
 // (shadow mode) unless WithEnforcing is supplied. Shadow mode never blocks,
 // retries, mutates, or wraps — Phase 30 added enforcing mode for user-facing
@@ -155,12 +213,33 @@ func (g *Gated) requiresApproval(_ string, _ []string) bool {
 
 // checkEnforcing performs the enforcing-mode gate check for the named exec.
 // It is called after record() so the counter is always incremented first.
-// Returns nil when the exec is allowed to proceed; returns ErrApprovalRequired
+// Returns nil when the exec is allowed to proceed; returns ErrQuorumDenied,
+// *ApprovalRequiredError (errors.Is ErrApprovalRequired), ErrApprovalRequired,
 // or ErrClosureHashMismatch when the exec must be refused.
+//
+// E4.1 order — floor and veto PRECEDE token honor:
+//
+//  1. quorum.Evaluate (stage-0 floor first, then the verifier lattice)
+//  2. DENY → ErrQuorumDenied, even with a valid ApprovalToken present
+//  3. token present: hash mismatch → ErrClosureHashMismatch (D-02/APPR-01);
+//     token.Tier < decision.Tier → re-escalate (token insufficient);
+//     else proceed
+//  4. no token: ALLOW → proceed (audit-only); ESCALATE → ApprovalRequiredError
+//
+// Re-evaluation on the token retry is deliberate: the decision always uses
+// current world state (V4) and current history (V3) — an approval token can
+// never launder a world that changed (extends the existing TOCTOU closure).
 func (g *Gated) checkEnforcing(ctx context.Context, name string, args []string) error {
 	if !g.enforcing {
+		g.shadowEvaluate(ctx, name, args)
 		return nil
 	}
+	if g.quorum != nil {
+		return g.checkQuorum(ctx, name, args)
+	}
+	// Legacy fallback (quorum disabled with an enforcing gate): every exec
+	// requires approval — strictly TIGHTER than quorum, so disabling quorum
+	// can never loosen the gate (row 16).
 	tok, hasTok := approvalTokenFromCtx(ctx)
 	if hasTok {
 		// Re-verify closure hash (TOCTOU closure per D-02/APPR-01).
@@ -182,6 +261,71 @@ func (g *Gated) checkEnforcing(ctx context.Context, name string, args []string) 
 	}
 	// Exec does not require approval in enforcing mode — pass through.
 	return nil
+}
+
+// checkQuorum is the E4.1 enforcing-mode path. Any evaluation error refuses
+// the exec (row 7 — fail closed: there is no code path where an error or
+// timeout yields ALLOW).
+func (g *Gated) checkQuorum(ctx context.Context, name string, args []string) error {
+	decision, err := g.quorum.Evaluate(ctx, name, args)
+	if err != nil {
+		return fmt.Errorf("gate: quorum evaluation failed — exec refused (fail closed): %w", err)
+	}
+	if decision.Outcome == quorum.OutcomeDeny {
+		slog.Warn("gate: quorum denied exec",
+			"binary", decision.Binary,
+			"floor_rule", decision.FloorRule,
+			"veto_verifier", decision.VetoVerifier,
+			"closure8", decision.Closure8,
+		)
+		why := decision.FloorRule
+		if why == "" {
+			why = "veto by " + decision.VetoVerifier
+		}
+		return fmt.Errorf("%w (%s)", ErrQuorumDenied, why)
+	}
+	tok, hasTok := approvalTokenFromCtx(ctx)
+	if hasTok {
+		// Re-verify closure hash (TOCTOU closure per D-02/APPR-01) — unchanged.
+		current := closureHash(name, args)
+		if current != tok.ClosureHash {
+			slog.Warn("gate: closure hash mismatch — exec refused (TOCTOU)",
+				"approved_prefix", hex.EncodeToString(tok.ClosureHash[:8]),
+				"current_prefix", hex.EncodeToString(current[:8]),
+			)
+			return ErrClosureHashMismatch
+		}
+		if decision.Outcome == quorum.OutcomeEscalate && tok.Tier < decision.Tier {
+			// Row 9: the token's tier is insufficient for the computed
+			// escalation — re-escalate at the demanded tier.
+			return &ApprovalRequiredError{Tier: decision.Tier, Decision: decision}
+		}
+		g.quorum.RecordExec(name, args)
+		return nil
+	}
+	if decision.Outcome == quorum.OutcomeAllow {
+		// Row 6: unanimous confident ALLOW — proceed, audit-only.
+		g.quorum.RecordExec(name, args)
+		return nil
+	}
+	// ESCALATE without a token: rows 2–5.
+	return &ApprovalRequiredError{Tier: decision.Tier, Decision: decision}
+}
+
+// shadowEvaluate runs the quorum evaluation for a non-enforcing gate: the
+// exec always proceeds; the evaluation runs asynchronously (recovered, never
+// blocks or fails the exec — T-27-17) and audits a shadow decision.
+// RecordExec runs synchronously (cheap ring append) so V3 history stays warm.
+func (g *Gated) shadowEvaluate(ctx context.Context, name string, args []string) {
+	if g.quorum == nil {
+		return
+	}
+	g.quorum.RecordExec(name, args)
+	evalCtx := context.WithoutCancel(ctx)
+	go func() {
+		defer func() { _ = recover() }()
+		_, _ = g.quorum.Evaluate(evalCtx, name, args)
+	}()
 }
 
 // Run records the exec, enforces the approval gate when in enforcing mode,

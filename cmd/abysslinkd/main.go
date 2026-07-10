@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,6 +50,7 @@ import (
 	"github.com/abysslink/abysslink/internal/notifyv2"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/push"
+	"github.com/abysslink/abysslink/internal/quorum"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/session"
 	"github.com/abysslink/abysslink/internal/shell"
@@ -195,6 +197,18 @@ func main() {
 		gateOpts = append(gateOpts, gate.WithEnforcing(approveReg))
 		slog.Warn("abysslinkd: gate enforcing mode ENABLED — all module execs require an ApprovalToken in ctx (Phase 31 token-threading path incomplete; use with caution)")
 	}
+	// E4.1 quorum engine: evaluation + shadow audit are default-ON
+	// (cfg.Quorum.Enabled); enforcement rides cfg.Gate.Enforcing — the single
+	// D-04 arm switch. Disabling quorum with an enforcing gate falls back to
+	// approval-for-every-exec (strictly tighter). The engine's V4 probes run
+	// on the PLAIN base runner (never the gated one — probing through an
+	// enforcing gate would recurse into the quorum itself; D-40 shape).
+	alerts := &lateAlerter{}
+	if cfg.Quorum.Enabled {
+		gateOpts = append(gateOpts, gate.WithQuorum(buildQuorumEngine(cfg, base, alerts)))
+	} else if cfg.Gate.Enforcing {
+		slog.Warn("abysslinkd: quorum disabled with an enforcing gate — EVERY exec requires approval (pre-quorum behavior, strictly tighter)")
+	}
 	gated := gate.New(base, gateOpts...)
 
 	kc, kerr := secrets.NewStore(ctx, gated)
@@ -221,6 +235,10 @@ func main() {
 	}
 
 	nm := notify.New(notifymod.Deps{Cfg: cfg, Runner: gated, Keychain: kc, Platform: plat, Backend: bc})
+	// Late-bind the quorum floor/tripwire alert channel to the notify module
+	// (the module needs the gated runner, which needs the quorum engine, which
+	// needs an alert sink — the atomic late bind breaks the construction cycle).
+	alerts.set(nm)
 	// D-40: the daemon's internal watchers/probes (and the session registry in
 	// plan 27-07) use the ungated base runner so the Phase 30 enforcing gate can
 	// never deadlock the daemon on its own plumbing. The bypass is structural —
@@ -337,6 +355,55 @@ func main() {
 		slog.Error("abysslinkd: exited with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// lateAlerter is the quorum alert sink, late-bound to the notify module. The
+// quorum engine must exist before the gated runner, the gated runner before
+// the notify module, and the notify module is the alert transport — an atomic
+// pointer breaks the cycle. Alerts fired before the bind (only possible for
+// execs during daemon bootstrap) degrade to the quorum slog record.
+type lateAlerter struct{ m atomic.Pointer[notify.Module] }
+
+// set binds the notify module. Called once during composition.
+func (l *lateAlerter) set(m *notify.Module) { l.m.Store(m) }
+
+// alert dispatches a floor-deny/tripwire alert notification. HYGIENE: title
+// and body are built by the quorum engine and never carry raw argv.
+func (l *lateAlerter) alert(ctx context.Context, title, body string) {
+	m := l.m.Load()
+	if m == nil {
+		slog.Warn("abysslinkd: quorum alert before notify module bind (logged only)", "title", title)
+		return
+	}
+	if err := m.SendDirect(ctx, title, body); err != nil {
+		slog.Warn("abysslinkd: quorum alert delivery failed", "err", err)
+	}
+}
+
+// buildQuorumEngine constructs the E4.1 quorum engine from config. The audit
+// appender is the chain-aware audit.New writer (it self-wires the platform
+// keychain when reachable and falls back to chained-unsigned entries); an
+// unresolvable audit-log path degrades to the slog mirror only, with a loud
+// warning — the decision path itself never depends on the audit sink.
+func buildQuorumEngine(cfg *config.Config, base shell.Runner, alerts *lateAlerter) *quorum.Engine {
+	opts := []quorum.Option{
+		quorum.WithRunner(base),
+		quorum.WithClosureHashFunc(gate.ClosureHashOf),
+		quorum.WithAlertFunc(alerts.alert),
+	}
+	if logPath, err := audit.DefaultLogPath(); err == nil {
+		opts = append(opts, quorum.WithAuditAppender(audit.New(logPath)))
+	} else {
+		slog.Warn("abysslinkd: audit log path unavailable — quorum decisions logged via slog only", "err", err)
+	}
+	// NOTE: no SpendFunc is wired yet — the budget watcher exposes no
+	// daemon-resident USD spend signal today, so the V3 spend-threshold rule
+	// stays inert (nil ⇒ inert by design). Wire quorum.WithSpendFunc here
+	// when a spend source exists.
+	engine := quorum.New(cfg.Quorum.EngineConfig(cfg.Gate.Enforcing), opts...)
+	slog.Info("abysslinkd: quorum action gate active",
+		"mode", map[bool]string{true: "enforcing", false: "shadow"}[cfg.Gate.Enforcing])
+	return engine
 }
 
 // startDeadmanTimer launches the daemon-hosted dead-man no-contact timer when

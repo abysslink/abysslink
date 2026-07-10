@@ -1,6 +1,6 @@
 # Agent Safety
 
-Abysslink v4 ships four layers of agent containment: a phone approve loop for gating tool executions, an apoptosis kill-switch for runaway agents, a dead-man switch for operator absence, and one-tap panic. All of them ship in their safest *and least intrusive* configuration: the approve gate and the kill-switch ladder are **off (shadow / observe-only) by default** and are enabled explicitly in `abysslink.yaml`.
+Abysslink v4 ships five layers of agent containment: a phone approve loop for gating tool executions, a quorum-sensing action gate that decides *which* executions need that approval, an apoptosis kill-switch for runaway agents, a dead-man switch for operator absence, and one-tap panic. All of them ship in their safest *and least intrusive* configuration: the approve gate and the kill-switch ladder are **off (shadow / observe-only) by default** and are enabled explicitly in `abysslink.yaml`.
 
 > **Honest severity:** these are safety nets, not guarantees. The approve loop gates agents that honor their hook contract (Claude Code hooks today); the kill-switch signals the armed process group. An agent running as your user that ignores hooks, escapes its process group, or has already exfiltrated credentials is outside their reach. For hard confinement, use OS-level sandboxing — these tools reduce blast radius and buy you reaction time.
 
@@ -29,6 +29,41 @@ How a blocked action resolves (Claude Code wiring; `abysslink up --apply` writes
 **It never auto-approves.** Every failure path resolves to deny: timeout after `approval.timeout_seconds`, daemon unreachable (5s dial timeout), headless with no phone answer — all exit 2. `approval_request` notifications are exempt from the notification cooldown and the per-device wake ceiling, so an approval is never silently dropped by rate limiting.
 
 Requests carry a tier. Claude tool execs are *sensitive* (any approver: phone or TTY). Actions matching the built-in critical patterns (`panic-revoke`, `kill-switch-disarm`, `destructive-apply`) — plus anything you add via `approval.extra_critical` — are *critical* and **TTY-only** in v4; the phone cannot approve them. `extra_critical` can only tighten, never loosen.
+
+## The quorum action gate
+
+With an enforcing gate, *every* exec needs approval — safe but noisy. The quorum gate is the per-action policy that decides which execs are benign (proceed, audit-only), which need a human (escalate to the approve loop), and which are un-askable (deny outright). It ships **enabled** for evaluation and shadow auditing; enforcement rides `gate.enforcing` — the same single arm switch as the approve loop.
+
+**Why a lattice, not a vote.** Knight–Leveson (1986) and its 2026 coding-agent replication showed that *agreement* among similar checkers is exactly the wrong-consensus trap: correlated checkers fail together. So the quorum never votes to allow. It combines four deterministic verifiers — independent in *input signal* — through a monotone security lattice `DENY > ESCALATE > ALLOW` using the meet (most-restrictive-wins):
+
+| Verifier | Input signal | Catches | Fails on |
+|---|---|---|---|
+| V1 syntactic | raw argv token stream only | `rm -rf` (split flags too), force-push, `mkfs`/`dd`, `DROP TABLE`, pipe-to-shell, decode-and-exec | novel obfuscation |
+| V2 policy | parsed intent + protected paths/branches policy | writes into `~/.ssh`, `/etc`, the audit-log dir, config/keychain/tailscale state; protected-branch force-push; `..`/glob/homoglyph ambiguity | parser gaps |
+| V3 behavior | time + in-memory exec history only | destructive-op rate windows, global exec velocity, apply-without-prior-dry-run, spend threshold¹ | cold history (fails closed) |
+| V4 reversibility | filesystem + VCS world state (read-only `git` probes) | deleting files with no undo (dirty tree, unpushed commits, no VCS) | stale cache / nonexistent targets |
+
+¹ The spend-threshold rule is **not yet active** in the shipped daemon: no daemon-resident USD spend source is wired (`quorum.WithSpendFunc` is unset), so the rule is inert until one exists. Lowering `spend_threshold_usd` has no runtime effect today.
+
+Rules, not models: **no LLM and no network call participate in the decision path** (enforced by source-invariant tests). The four verdict vectors are checked in CI for pairwise non-identity across a frozen adversarial corpus — independence is measured, not assumed.
+
+How outcomes combine:
+
+- **One DENY is a veto.** No combination of ALLOW votes can override it — ALLOW requires the *absence* of any DENY plus unanimous *confident* ALLOW.
+- **Everything short of that escalates** to the existing phone/TTY approve loop at the demanded tier (sensitive: phone or TTY; critical: TTY-only in v4). A verifier error, timeout, panic, abstention, or low-confidence ALLOW escalates — never allows. Two or more verifier failures escalate at the critical tier.
+- **A compiled-in deny-floor runs before the lattice and before any approval token**: Tailscale Funnel invocation, FileVault/LUKS disable, audit-log destruction, Tailnet-Lock disable, ntfy `0.0.0.0` bind, and canary tripwires deny without asking — a valid approval token does not bypass them, and no YAML key exists to remove or disable them (the Funnel-omission pattern). Unanimous garbage consensus on a floor action still denies.
+- **Approval tokens are re-checked**: the closure hash is re-verified at exec time (TOCTOU), the token's tier must cover the computed tier, and the retry re-evaluates against *current* world state — a token can never launder a world that changed.
+- **Unanswered escalations deny.** The approve loop's fail-closed timeout semantics are inherited unchanged: headless timeout denies, TTY timeout falls back to a terminal prompt, nothing auto-approves.
+
+What the human sees on escalation is **dissent-first**: the notification leads with the strongest objection (e.g. `V4 reversibility: ESCALATE(critical) no-undo — unpushed commits · V1 syntactic: … · V2 policy: ALLOW · V3 behavior: ALLOW`) so the tiebreak reviews the objection, never a consensus summary. Titles and bodies carry rule codes, the binary basename, and protected-prefix *labels* — never raw argv, environment values, full paths, or capability URLs.
+
+Every decision — enforcing *and* shadow — is appended to the hash-chained audit log as a full vote vector (`quorum-decision`, hash-only content), so a silently degrading always-ALLOW verifier is detectable from the log. Shadow mode is the day-one calibration corpus. Tripwire hits additionally append `quorum-tripwire` and fire an alert notification.
+
+Configuration is **tighten-only** (see [configuration.md](configuration.md#quorum)): add-only protected paths/branches/patterns/canaries, lower-only spend threshold, raise-only tier overrides. Any loosening below the shipped defaults is a config *load error*. Disabling quorum under an enforcing gate falls back to approval-for-every-exec — strictly tighter, so the fallback can never loosen the gate.
+
+Dry-run the policy anytime with `abysslink quorum eval -- <cmd>` (read-only; never executes), and verify the machinery with the `sec-quorum-*` doctor checks: a binary whose deny-floor no longer denies, whose adversarial self-test allows, or whose tripwires are disarmed is a FATAL doctor finding.
+
+**Documented exemption (D-01a / KILL-03):** the quorum covers every exec that passes gate enforcement (`Run`, `RunWithStdin`, `RunInteractive`, `RunWithEnv`, `RunStream`). Armed long-running agent spawns (`RunArmed`/`RunArmedMinimal`, i.e. `abysslink arm`) are deliberately outside it — they are covered by the budget watcher below, which owns the whole process lifetime rather than a single exec event. The daemon's internal plumbing runner remains ungated (D-40).
 
 ## `abysslink arm` — the apoptosis kill-switch
 
@@ -120,4 +155,4 @@ Every mutation of the device store goes through the audit chain (backup + hash-o
 
 - [Push notifications](push-notifications.md) — the opaque-wake payload rule and how approval buttons reach your phone.
 - [Threat model](security/threat-model.md) and [Who sees what](who-sees-what.md).
-- [Configuration reference](configuration.md) — the `gate`, `approval`, `budget`, and `deadman` keys.
+- [Configuration reference](configuration.md) — the `gate`, `approval`, `quorum`, `budget`, and `deadman` keys.
