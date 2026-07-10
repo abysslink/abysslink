@@ -154,6 +154,11 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	// checks run exactly once — no second artifact download, W8).
 	findings = append(findings, secDoctorFindings(ctx, cc, deps, false, metFinds, webuiFinds, auditFinds, supplyFinds)...)
 
+	// E4.1 quorum action-gate posture (sec-quorum-*): four deterministic,
+	// hermetic checks (embedded fixtures, no live host probes) appended right
+	// after the sec family so they group under the same module heading.
+	findings = append(findings, quorumDoctorFindings(ctx, cc.cfg)...)
+
 	// Phase 21 optional-module posture.
 	findings = append(findings, mod3DoctorFindings(ctx, cc.cfg, cc.runner)...)
 

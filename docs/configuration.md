@@ -145,6 +145,26 @@ Push-gateway legs. APNs and FCM are **experimental** and disabled by default; Un
 | `timeout_seconds` | int | `120` | Phone approve window; valid 10–3600. |
 | `extra_critical` | list | `[]` | Extra action-name substrings forced to the critical tier — add-only, may only tighten. |
 
+## `quorum`
+
+The quorum-sensing action gate (see [agent-safety.md](agent-safety.md#the-quorum-action-gate)). Evaluation and shadow auditing are **on by default**; enforcement rides `gate.enforcing` — quorum has no arm switch of its own. **Every knob is tighten-only**: lists are add-only unions with the compiled defaults (no remove/override syntax exists), numeric values looser than the shipped defaults are a config *load error* (rejected, never clamped), and tier overrides are raise-only.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `true` | Evaluation + shadow audit. `false` with an enforcing gate falls back to approval-for-**every**-exec (strictly tighter). |
+| `protected_paths` | list | `[]` | Add-only extra protected filesystem scopes, unioned with the compiled defaults (`~/.ssh`, `/etc`, the audit-log dir, the abysslink config dir, keychain paths, tailscale state dirs). |
+| `protected_branches` | list | `[]` | Add-only extra protected git branches, unioned with the compiled `main`, `master`. |
+| `extra_patterns` | list | `[]` | Add-only extra syntactic patterns (substring match); matches are forced to tier ≥ sensitive. |
+| `canary_paths` | list | `[]` | Add-only extra canary tripwire markers; any argv token containing one is an instant deny + alert. |
+| `spend_threshold_usd` | float | `0` = 50 | Only values in (0, 50] accepted — raising above the shipped default is a load error. **Not yet active:** the shipped daemon wires no spend source, so the V3 spend-threshold rule is inert until one is (`quorum.WithSpendFunc`); lowering this knob has no effect today. |
+| `rate_max_ops` | int | `0` = 10 | Destructive ops per window; only (0, 10] accepted. |
+| `rate_window_seconds` | int | `0` = 300 | Only values ≥ 300 accepted (a longer window is tighter), capped at ~100 years so the internal duration cannot overflow and silently disable the rate cap. |
+| `tier_overrides` | map | `{}` | Raise-only per-rule-code tier map, e.g. `{force-push: critical}`. Lowering a shipped tier or naming an unknown rule code is a load error. |
+
+Overridable rule codes: `force-push`, `force-push-protected`, `drop-table`, `shred`, `recursive-chmod-system`, `rm-recursive-force`, `git-reset-hard`, `git-clean-force`, `git-checkout-dot`, `rsync-delete`, `find-delete`, `kubectl-delete`, `terraform-destroy`, `pipe-to-shell`, `decode-and-exec`, `extra-pattern`, `protected-path-write`, `ambiguous-scope`, `non-ascii-path`, `parse-gap`, `rate-window`, `velocity`, `dry-run-first`, `spend-threshold`, `no-undo`, `no-undo-protected`.
+
+Deliberately-absent keys (their presence in YAML is a fatal decode error — the Funnel pattern): `quorum.floor`, `quorum.disable_floor`, `quorum.remove_patterns`, `quorum.dry_run_first`, `quorum.verifier_timeout`, `quorum.enforcing`. The compiled deny-floor (Funnel invocation, disk-encryption disable, audit-log destruction, Tailnet-Lock disable, ntfy all-interface bind — `0.0.0.0`, empty host, or `::`/`[::]`, canary tripwires) cannot be removed or disabled from configuration. The floor and V1 are evaluated against the **effective** command, so a floor/catastrophe action cloaked behind a privilege/exec wrapper (`sudo`, `env`, `timeout`, …) or a shell interpreter `-c` payload is judged on what it actually runs, not on `argv[0]`.
+
 ## `budget`
 
 Kill-switch thresholds used by `abysslink arm`. Shadow mode by default — the SIGSTOP→kill ladder is opt-in via `ladder: true`. Numeric knobs use `0` = compiled-in default.
