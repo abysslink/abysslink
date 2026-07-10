@@ -126,3 +126,12 @@ func TestMockProviderContract(t *testing.T) {
 	m.ProviderKind = KindSecureEnclave
 	assert.Equal(t, KindSecureEnclave, m.Kind())
 }
+
+// TestEnclaveHandlePrefix pins the resident-key handle filename prefix that
+// `ssh-keygen -K` produces for Secure Enclave keys. enclave_darwin.go globs on
+// it, so it is only referenced from darwin-tagged code; this untagged pin keeps
+// the literal both linted-live on non-darwin builds and guarded against an
+// accidental edit (literals.go is the single home for the package's literals).
+func TestEnclaveHandlePrefix(t *testing.T) {
+	assert.Equal(t, "id_ecdsa_sk_rk", enclaveHandlePrefix)
+}

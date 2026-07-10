@@ -371,3 +371,40 @@ func TestProbeTPM_FailClosed(t *testing.T) {
 		assert.Equal(t, StateWarn, res.State)
 	})
 }
+
+// TestProbeSecureBootDarwin exercises the macOS secure-boot combiner (and,
+// transitively, worstState) through the MockRunner so it runs on EVERY GOOS.
+// The darwin-tagged TestCollect_Darwin covers the same path only on darwin,
+// which left probeSecureBootDarwin + worstState flagged unused by the linter on
+// the Linux CI runner — mirror the untagged probeSecureBootLinux tests above so
+// the darwin combiner is linted-live and parse-tested on all platforms.
+func TestProbeSecureBootDarwin(t *testing.T) {
+	ctx := context.Background()
+	const iBridgeFull = `{"SPiBridgeDataType":[{"ibridge_secure_boot":"Full Security","ibridge_sb_sip":"Enabled","ibridge_sb_ssv":"Enabled"}]}`
+
+	t.Run("both_ok_is_ok", func(t *testing.T) {
+		r := shell.NewMockRunner(
+			shell.Call{Result: shell.Result{Stdout: "Authenticated Root status: enabled\n", ExitCode: 0}},
+			shell.Call{Result: shell.Result{Stdout: iBridgeFull, ExitCode: 0}},
+		)
+		res := New(r).probeSecureBootDarwin(ctx)
+		assert.Equal(t, "secureboot", res.Probe)
+		assert.Equal(t, StateOK, res.State)
+	})
+	t.Run("worst_wins_authroot_disabled_is_fail", func(t *testing.T) {
+		r := shell.NewMockRunner(
+			shell.Call{Result: shell.Result{Stdout: "Authenticated Root status: disabled\n", ExitCode: 0}}, // FAIL
+			shell.Call{Result: shell.Result{Stdout: iBridgeFull, ExitCode: 0}},                             // OK
+		)
+		res := New(r).probeSecureBootDarwin(ctx)
+		assert.Equal(t, StateFail, res.State, "worstState: FAIL beats OK")
+	})
+	t.Run("both_tools_missing_is_warn", func(t *testing.T) {
+		r := shell.NewMockRunner(
+			shell.Call{Err: assert.AnError},
+			shell.Call{Err: assert.AnError},
+		)
+		res := New(r).probeSecureBootDarwin(ctx)
+		assert.Equal(t, StateWarn, res.State, "missing tools never yield green")
+	})
+}
