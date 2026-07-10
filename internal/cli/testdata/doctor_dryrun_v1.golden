@@ -111,6 +111,10 @@
     ✓  sec-webui-bind
     ⚠  WARN  sec-audit-anchor-age  No audit anchor found — run `abysslink up --apply` or start the daemon to create one
     ✓  sec-hwkey-kind
+    ⚠  WARN  sec-quorum-enabled  quorum evaluating in shadow only (gate.enforcing=false) — decisions are audited but nothing is blocked
+    ✓  sec-quorum-floor
+    ✓  sec-quorum-selftest
+    ✓  sec-quorum-tripwire
   ────────────────────────────────────────────────────
   cli
     ⚠  WARN  ntfy-version  ntfy-version: could not probe version ("ntfy" --version exited 1) — version is unknown; upgrade to >= 2.21 (CVE-2026-39087, CVSS 9.8) to be safe

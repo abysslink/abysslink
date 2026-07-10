@@ -556,6 +556,9 @@ var atRiskTightenedChecks = map[string]bool{
 	"sec-attest-sip":        true,
 	"sec-attest-secureboot": true,
 	"sec-attest-tpm":        true,
+	// E4.1: an at-risk operator must have the quorum gate ENFORCING — shadow
+	// evaluation or a disabled quorum escalates from WARN to FATAL.
+	"sec-quorum-enabled": true,
 }
 
 // deadmanRequiredCheck is the check ID for the at-risk FATAL finding emitted

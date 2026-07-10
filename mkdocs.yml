@@ -27,6 +27,7 @@ nav:
     - mosh: modules/mosh.md
     - ntfy: modules/ntfy.md
     - watch: modules/watch.md
+    - quorum: modules/quorum.md
     - claudecode: modules/claudecode.md
     - code-server: modules/codeserver.md
     - ttyd: modules/ttyd.md
