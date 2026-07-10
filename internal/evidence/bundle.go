@@ -74,7 +74,12 @@ type TimeRange struct {
 // outcome — the part an external auditor cannot compute themselves (it needs the
 // HMAC key). Signed, so the attestation is bound to the evidence key.
 type ChainResult struct {
-	Verified      bool   `json:"verified"` // OK && !truncation && !indeterminate
+	// Verified is the headline attestation. It is true only when the audit chain
+	// is clean by EXACTLY the CLI's clean-result rule (cmd_audit.go): OK, no
+	// truncation, not indeterminate, AND a clean counter. A counter status of
+	// "unknown" or "mismatch" is NOT a pass (D-04: "unknown" must NEVER be coerced
+	// to PASS) — see chainVerified.
+	Verified      bool   `json:"verified"`
 	EntryCount    int    `json:"entry_count"`
 	SigsVerified  int    `json:"sigs_verified"`
 	SigsSkipped   int    `json:"sigs_skipped"`
@@ -109,6 +114,21 @@ type CreateOptions struct {
 	Now              time.Time
 }
 
+// chainVerified reports whether an audit-chain VerifyResult is clean enough to
+// attest a headline VALID verdict in the signed manifest and the human report.
+// It MUST be exactly as strict as the CLI's clean-result rule (cmd_audit.go): a
+// counter status of "unknown" or "mismatch" is NOT a pass (AUD-02 D-04 —
+// "unknown" must NEVER be coerced to PASS, and audit verify exits non-zero on
+// it). Only a "verified" counter — or the genuine pre-AUD-02 legacy "" (no
+// counter was ever written, so no legacy log regresses) — may read VALID.
+// Without this guard a filesystem-only attacker who appends an unsigned,
+// hash-chain-linked tail entry (which audit.Verify flags CounterStatus="unknown"
+// with an "injected record" reason) would still be attested as VALID.
+func chainVerified(vr audit.VerifyResult) bool {
+	return vr.OK && !vr.TruncationDetected && !vr.Indeterminate &&
+		vr.CounterStatus != "unknown" && vr.CounterStatus != "mismatch"
+}
+
 // Create builds a signed evidence bundle from the audit log at opts.LogPath and
 // writes the `.alevidence` tar.gz to out. It runs audit.Verify to attest the
 // chain result, renders a human-readable report, pins content hashes in the
@@ -120,29 +140,50 @@ func Create(ctx context.Context, kc KeychainStore, opts CreateOptions, out io.Wr
 		return Manifest{}, fmt.Errorf("evidence: keychain does not satisfy audit.KeychainStore")
 	}
 
-	// (1) Attest the chain (needs the HMAC key — this is the operator's vouch).
-	vr, verr := audit.Verify(ctx, opts.LogPath, akc)
-	if verr != nil {
-		return Manifest{}, fmt.Errorf("evidence: verify audit chain: %w", verr)
-	}
-	epoch, eerr := audit.ReadEpochStatus(ctx, opts.LogPath, akc)
-	if eerr != nil {
-		return Manifest{}, fmt.Errorf("evidence: read key epoch: %w", eerr)
+	// (1) Attest the chain, read the raw chain bytes, and count entries — ALL
+	// under the audit append flock (PC8-EV-2). audit.Verify, ReadEpochStatus and
+	// ReadLog each read the log independently and take no flock themselves, so
+	// without a lock a concurrent signed append between them could make the
+	// attested Chain.Verified/EntryCount describe a different snapshot than the
+	// audit.jsonl bytes we pin (Contents.AuditLogSHA256) and bundle. Holding the
+	// same flock a writer serializes appends under freezes the log, anchor and
+	// counter for the span, so the attestation and the pinned/bundled content
+	// describe one atomic snapshot. These reads never re-acquire the flock, so
+	// this is not re-entrant.
+	var (
+		vr         audit.VerifyResult
+		epoch      audit.EpochStatus
+		entries    []audit.Entry
+		auditJSONL []byte
+	)
+	if lerr := audit.WithAppendLock(ctx, opts.LogPath, func() error {
+		var verr error
+		if vr, verr = audit.Verify(ctx, opts.LogPath, akc); verr != nil {
+			return fmt.Errorf("verify audit chain: %w", verr)
+		}
+		var eerr error
+		if epoch, eerr = audit.ReadEpochStatus(ctx, opts.LogPath, akc); eerr != nil {
+			return fmt.Errorf("read key epoch: %w", eerr)
+		}
+		var rerr error
+		if entries, rerr = audit.ReadLog(opts.LogPath); rerr != nil {
+			return fmt.Errorf("read audit log: %w", rerr)
+		}
+		raw, ferr := os.ReadFile(opts.LogPath) //nolint:gosec // app-controlled audit path
+		switch {
+		case ferr == nil:
+			auditJSONL = raw
+		case os.IsNotExist(ferr):
+			auditJSONL = nil // empty log → empty bundle, still valid
+		default:
+			return fmt.Errorf("read audit log file: %w", ferr)
+		}
+		return nil
+	}); lerr != nil {
+		return Manifest{}, fmt.Errorf("evidence: %w", lerr)
 	}
 
-	// (2) Raw chain bytes + a filtered, human-readable report over the window.
-	entries, rerr := audit.ReadLog(opts.LogPath)
-	if rerr != nil {
-		return Manifest{}, fmt.Errorf("evidence: read audit log: %w", rerr)
-	}
-	auditJSONL, err := os.ReadFile(opts.LogPath) //nolint:gosec // app-controlled audit path
-	if err != nil {
-		if os.IsNotExist(err) {
-			auditJSONL = nil // empty log → empty bundle, still valid
-		} else {
-			return Manifest{}, fmt.Errorf("evidence: read audit log file: %w", err)
-		}
-	}
+	// (2) A filtered, human-readable report over the window (from the snapshot).
 	report := renderReport(opts, vr, epoch, entries)
 
 	// (3) Signing key (lazy-created).
@@ -158,7 +199,7 @@ func Create(ctx context.Context, kc KeychainStore, opts CreateOptions, out io.Wr
 		Rig:           RigIdentity{Hostname: opts.Hostname, AbysslinkVersion: opts.AbysslinkVersion},
 		Range:         TimeRange{Since: opts.Since, Until: opts.Until},
 		Chain: ChainResult{
-			Verified:      vr.OK && !vr.TruncationDetected && !vr.Indeterminate,
+			Verified:      chainVerified(vr),
 			EntryCount:    len(entries),
 			SigsVerified:  vr.SigsVerified,
 			SigsSkipped:   vr.SigsSkipped,
@@ -231,8 +272,23 @@ func writeTarGz(w io.Writer, files map[string][]byte) error {
 	return nil
 }
 
+// bundleMembers is the EXACT, closed set of file names a valid bundle may
+// contain. readTarGz rejects any other name and any duplicate so the signed
+// manifest transitively commits to the full file set: manifest.json is the
+// signed bytes, manifest.sig is the signature over it, and the other two are
+// hash-pinned in Contents — an attacker can therefore neither smuggle in an
+// extra unsigned file nor shadow a member with a duplicate (last-wins) copy
+// without failing verification (PC8-EV-3).
+var bundleMembers = map[string]bool{
+	fileManifest:  true,
+	fileSignature: true,
+	fileAuditLog:  true,
+	fileReport:    true,
+}
+
 // readTarGz reads all bundle files into a name→bytes map (bounded to guard
-// against a decompression bomb).
+// against a decompression bomb). It fails closed on any member name outside the
+// closed bundle set and on any duplicate member (PC8-EV-3).
 func readTarGz(r io.Reader) (map[string][]byte, error) {
 	const maxTotal = 512 << 20 // 512 MiB across the whole bundle
 	gz, err := gzip.NewReader(r)
@@ -250,6 +306,12 @@ func readTarGz(r io.Reader) (map[string][]byte, error) {
 		}
 		if terr != nil {
 			return nil, fmt.Errorf("evidence: read tar: %w", terr)
+		}
+		if !bundleMembers[hdr.Name] {
+			return nil, fmt.Errorf("evidence: unexpected bundle member %q (bundle carries only the signed file set)", hdr.Name)
+		}
+		if _, dup := out[hdr.Name]; dup {
+			return nil, fmt.Errorf("evidence: duplicate bundle member %q", hdr.Name)
 		}
 		total += hdr.Size
 		if total > maxTotal {

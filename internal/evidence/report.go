@@ -34,8 +34,13 @@ func renderReport(opts CreateOptions, vr audit.VerifyResult, epoch audit.EpochSt
 	fmt.Fprintf(&b, "# Abysslink audit evidence — %s\n\n", opts.Hostname)
 	fmt.Fprintf(&b, "Generated %s by abysslink %s.\n\n", opts.Now.UTC().Format(time.RFC3339), opts.AbysslinkVersion)
 
+	// Same clean-result rule as the signed manifest (chainVerified): a counter
+	// status of "unknown"/"mismatch" is NOT a pass, so report.md's headline can
+	// never read VALID for a chain audit.Verify itself flags as unverifiable
+	// (PC8-1). Otherwise the human report would contradict the CLI's exit-1
+	// treatment of an "unknown" counter.
 	verdict := "VALID"
-	if !vr.OK || vr.TruncationDetected || vr.Indeterminate {
+	if !chainVerified(vr) {
 		verdict = "NOT VALID"
 	}
 	b.WriteString("## Chain integrity\n\n")

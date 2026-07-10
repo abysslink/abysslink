@@ -89,7 +89,11 @@ func cmdSignedAudit(ctx context.Context, cc *cmdContext) (*audit.SignedAudit, er
 // runAuditVerify walks the chain and anchor at logPath. It returns nil (exit 0)
 // on a clean chain and an *exitError{code:2} on any gap, fork, HMAC mismatch, or
 // detected truncation — emitting the exact "CHAIN BROKEN at entry N" string on
-// stderr (T-17-09: exit 2 is reserved for genuine chain breaks).
+// stderr (T-17-09: exit 2 is reserved for genuine chain breaks). It returns
+// *exitError{code:1} for a fail-closed-but-NOT-tamper posture: an INDETERMINATE
+// verdict (a retained epoch key missing from the keychain), an unauthenticated
+// walk (keychain unavailable), or an "unknown" truncation counter — none of
+// which are reported as tampering (AUD-02 D-04 / ROT V6).
 func runAuditVerify(ctx context.Context, p Printer, logPath string, kc audit.KeychainStore) error {
 	// WR-02: never let an operator mistake an unverified walk for a real
 	// integrity check. When the keychain is unavailable, HMAC signatures (and
@@ -103,6 +107,17 @@ func runAuditVerify(ctx context.Context, p Printer, logPath string, kc audit.Key
 	if err != nil {
 		// Parse/IO errors are generic failures (exit 1), never exit 2 (T-17-09).
 		return fmt.Errorf("audit verify: %w", err)
+	}
+
+	// AUD-02 / ROT V6: an INDETERMINATE verdict (OK=false, At=-1) is
+	// fail-closed-but-NOT-tamper — a retained epoch key the chain legitimately
+	// references is missing from the keychain, so a range is UNVERIFIABLE. The
+	// VerifyResult contract (verify.go) requires callers to refuse a VALID verdict
+	// yet NOT report TAMPERED: map it to exit 1 with non-tamper wording, never the
+	// exit-2 "CHAIN BROKEN at entry -1" the generic !OK handler would emit.
+	if result.Indeterminate {
+		printerError(p, fmt.Sprintf("UNVERIFIABLE (indeterminate): %s", result.Reason))
+		return &exitError{code: exitCodeError}
 	}
 
 	if !result.OK {
