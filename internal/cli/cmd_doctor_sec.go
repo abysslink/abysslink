@@ -27,10 +27,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/abysslink/abysslink/internal/attest"
 	"github.com/abysslink/abysslink/internal/audit"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/hwkey"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/secrets"
@@ -841,6 +843,117 @@ func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, p
 		secAuditAnchorAgeAlias(auditFindings),
 	)
 
+	// Phase 37 (appended at the END — stable order preserved): hardware-key
+	// kind (HWK-03) + local boot-state attestation (ATT-02).
+	findings = append(findings, secHwkeyKindCheck(ctx, cc))
+	findings = append(findings, secAttestChecks(ctx, cc)...)
+
+	return findings
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 4 — Phase 37: hardware-key kind + boot-state attestation (HWK-03 /
+// ATT-02)
+// ---------------------------------------------------------------------------
+
+// newAttestProber is a seam over attest.New so parity/doctor tests can pin a
+// deterministic prober (e.g. an empty EFIVarsDir fixture) instead of reading
+// the host's real efivarfs. Same pattern as fetchDaemonStatus / statusNow.
+var newAttestProber = func(r shell.Runner) *attest.Prober { return attest.New(r) } //nolint:gochecknoglobals // test seam, mirrors fetchDaemonStatus
+
+// hwkeyKindFor classifies the ACTIVE ssh key kind for status + doctor
+// (HWK-03), fail-closed. Returns ("", "") when hardware_keys is disabled.
+// Otherwise: "hardware:<provider>" ONLY when the on-disk pub parses as an sk
+// token AND the provider Verify (ssh-keygen -l cross-check) confirms it;
+// "software" when the configured key is VERIFIABLY non-sk (silent-downgrade
+// signal); "unknown" for anything missing or unverifiable — a parse miss
+// never renders as hardware OR silently as software.
+func hwkeyKindFor(ctx context.Context, runner shell.Runner, cfg *config.Config) (string, string) {
+	if cfg == nil || !cfg.HardwareKeys.Enabled {
+		return "", ""
+	}
+	hk := cfg.HardwareKeys
+	home, err := os.UserHomeDir()
+	if err != nil && hk.KeyPath == "" {
+		return "unknown", "cannot resolve the key path (home directory unknown)"
+	}
+	pubPath := hk.ResolvedKeyPath(home) + ".pub"
+	data, err := os.ReadFile(pubPath) //nolint:gosec // G304: pubPath is the operator-configured public key path
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "unknown", fmt.Sprintf("hardware key not yet enrolled (%s missing) — run `abysslink enroll hardware-key`", pubPath)
+		}
+		return "unknown", fmt.Sprintf("cannot read %s: %v", pubPath, err)
+	}
+	// Classify the first NON-empty line — the same parse the providers'
+	// Verify uses. Classifying the literal first line would let a leading
+	// blank line degrade the software-key FATAL to an "unverifiable" WARN,
+	// dodging the HWK-03 silent-downgrade detector (finding P37-03).
+	info, cErr := hwkey.ClassifyPublicKeyLine(hwkey.FirstNonEmptyLine(string(data)))
+	if cErr != nil {
+		return "unknown", fmt.Sprintf("public key %s is unverifiable: %v", pubPath, cErr)
+	}
+	if !info.Hardware {
+		return "software", fmt.Sprintf("configured key %s is a verifiably SOFTWARE key (%s), not sk-backed", pubPath, info.TypeToken)
+	}
+	prov, pErr := hwkey.NewProvider(hwkey.Kind(hk.Provider), runner, hwkey.Options{FIDO2ProviderPath: hk.FIDO2ProviderPath})
+	if pErr != nil {
+		return "unknown", fmt.Sprintf("hardware-key provider %q unavailable: %v", hk.Provider, pErr)
+	}
+	verified, vErr := prov.Verify(ctx, pubPath)
+	if vErr != nil {
+		return "unknown", fmt.Sprintf("cannot verify %s is sk-backed: %v", pubPath, vErr)
+	}
+	return "hardware:" + hk.Provider, fmt.Sprintf("sk-backed key verified (%s %s)", verified.TypeToken, verified.Fingerprint)
+}
+
+// secHwkeyKindCheck surfaces the active key kind as a sec-* finding (HWK-03).
+// Disabled is OK (opt-in); a Verify-confirmed sk-backed key is OK; a missing
+// or unverifiable key is WARN; a VERIFIABLY software key under an enabled
+// hardware_keys stanza is FATAL in ALL profiles — the silent-downgrade case
+// HWK-03 demands be loud (precedent: secDiskEncryptionCheck UNKNOWN=FATAL).
+func secHwkeyKindCheck(ctx context.Context, cc *cmdContext) modules.Finding {
+	const check = "sec-hwkey-kind"
+	if cc.cfg == nil || !cc.cfg.HardwareKeys.Enabled {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "hardware keys: disabled (opt-in)"}
+	}
+	kind, reason := hwkeyKindFor(ctx, cc.runner, cc.cfg)
+	switch {
+	case strings.HasPrefix(kind, "hardware:"):
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: kind + ": " + reason}
+	case kind == "software":
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
+			Message: "hardware_keys is enabled but the active key is a SOFTWARE key — silent downgrade detected: " + reason}
+	default:
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: reason}
+	}
+}
+
+// secAttestChecks maps the local boot-state probe results to sec-attest-*
+// findings (ATT-02). Severity contract: StateOK is OK; StateWarn AND
+// StateFail are WARN in the default profile (these are NEW checks over
+// pre-existing installs; the probe Detail distinguishes "verified disabled"
+// from "cannot verify" so red is actionable) — `--profile at-risk` tightens
+// them to FATAL via atRiskTightenedChecks. A missing tool or parse miss is
+// never OK (fail-closed tri-state).
+func secAttestChecks(ctx context.Context, cc *cmdContext) []modules.Finding {
+	results := newAttestProber(cc.runner).Collect(ctx)
+	findings := make([]modules.Finding, 0, len(results))
+	for _, r := range results {
+		sev := modules.SeverityWarning
+		if r.State == attest.StateOK {
+			sev = modules.SeverityOK
+		}
+		findings = append(findings, modules.Finding{
+			Module:   "sec",
+			Check:    "sec-attest-" + r.Probe,
+			Severity: sev,
+			Message:  r.Detail,
+		})
+	}
 	return findings
 }
 

@@ -42,6 +42,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/attest"
 	"github.com/abysslink/abysslink/internal/modules/notify"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/require"
@@ -122,6 +123,31 @@ func setupStylesParityEnv(t *testing.T) {
 	origNow := statusNow
 	statusNow = func() time.Time { return fixedStatusTime }
 	t.Cleanup(func() { statusNow = origNow })
+
+	// Pin the Phase 37 status seams: v1.yaml carries no hardware_keys stanza
+	// (KeyKind omitted) and the boot-state summary is forced to the honest
+	// indeterminate value so the golden never depends on the host's SIP /
+	// Secure Boot posture.
+	origKeyKind := collectKeyKind
+	collectKeyKind = func(_ context.Context, _ *cmdContext) string { return "" }
+	t.Cleanup(func() { collectKeyKind = origKeyKind })
+
+	origAttestation := collectAttestation
+	collectAttestation = func(_ context.Context, _ *cmdContext) string { return "unverified" }
+	t.Cleanup(func() { collectAttestation = origAttestation })
+
+	// Point the doctor's attest prober at an empty efivars fixture so the
+	// linux secureboot probe (if this ever runs off-darwin) cannot read the
+	// host's real efivarfs; on darwin the probes go through noopRunner anyway.
+	origProber := newAttestProber
+	emptyEFI := filepath.Join(t.TempDir(), "efi", "efivars")
+	newAttestProber = func(r shell.Runner) *attest.Prober {
+		p := attest.New(r)
+		p.EFIVarsDir = emptyEFI
+		p.LookPath = func(string) bool { return false }
+		return p
+	}
+	t.Cleanup(func() { newAttestProber = origProber })
 }
 
 // captureOrAssertGolden is the shared capture-on-first-run / assert-on-subsequent-run
@@ -214,6 +240,11 @@ var volatileDoctorChecks = []string{
 	// tailscaled lock state / `defaults` / `systemsetup`, so they are host-coupled
 	// and normalized out of the styling golden.
 	"sec-tailnet-lock", "sec-autologin", "sec-remote-login",
+	// Phase 37 boot-state attestation: presence/severity depends on the host
+	// hardware posture, not the styled output under test (the probes are
+	// pinned through newAttestProber + noopRunner, but the IDs stay listed so
+	// the golden can never flake on a seam drift).
+	"sec-attest-sip", "sec-attest-secureboot", "sec-attest-tpm",
 }
 
 // normalizeDoctorParity removes the network-coupled finding lines (and any fix:

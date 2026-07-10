@@ -19,6 +19,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/abysslink/abysslink/internal/backend"
@@ -29,6 +30,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// phase37SecCheckCount is the number of Phase 37 additions to the sec roster:
+// sec-hwkey-kind plus one sec-attest-* per boot-state probe of this GOOS
+// (darwin: sip+secureboot; linux: secureboot+tpm; other: platform).
+func phase37SecCheckCount() int {
+	switch runtime.GOOS {
+	case "darwin", "linux":
+		return 3
+	default:
+		return 2
+	}
+}
 
 // writeSSHDConfig writes a minimal sshd_config fixture and returns its path.
 func writeSSHDConfig(t *testing.T, body string) string {
@@ -444,7 +457,7 @@ func TestSecBinarySignedAlias_ReusesPrecomputedSupplyFindings(t *testing.T) {
 	}}
 
 	findings := secDoctorFindings(ctx, cc, deps, false, nil, nil, nil, supply)
-	require.Len(t, findings, 23, "supply alias must keep the 23-check roster")
+	require.Len(t, findings, 23+phase37SecCheckCount(), "supply alias must keep the full sec roster (20 base + 3 Phase-38 + Phase-37)")
 	var got *modules.Finding
 	for i := range findings {
 		if findings[i].Check == "sec-binary-signed" {
@@ -512,7 +525,8 @@ func TestSecDoctorFindings(t *testing.T) {
 
 	findings := secDoctorFindings(ctx, cc, deps, false, metFindings, webuiFindings, auditFindings)
 
-	require.Len(t, findings, 23, "secDoctorFindings must return exactly 23 findings")
+	require.Len(t, findings, 23+phase37SecCheckCount(),
+		"secDoctorFindings must return the legacy 20 findings plus the 3 Phase-38 host-posture checks plus the Phase 37 additions")
 
 	want := map[string]bool{
 		"sec-ssh-permitroot": true, "sec-ssh-x11forwarding": true, "sec-ssh-agentforwarding": true,
@@ -524,6 +538,19 @@ func TestSecDoctorFindings(t *testing.T) {
 		"sec-audit-epoch": true, "sec-mlock": true,
 		// Phase-38 host-posture footguns (BKLG-01/04).
 		"sec-tailnet-lock": true, "sec-autologin": true, "sec-remote-login": true,
+		// Phase 37 (HWK-03): always present, appended at the end.
+		"sec-hwkey-kind": true,
+	}
+	// Phase 37 (ATT-02): one sec-attest-* per probe of the current GOOS.
+	switch runtime.GOOS {
+	case "darwin":
+		want["sec-attest-sip"] = true
+		want["sec-attest-secureboot"] = true
+	case "linux":
+		want["sec-attest-secureboot"] = true
+		want["sec-attest-tpm"] = true
+	default:
+		want["sec-attest-platform"] = true
 	}
 	got := map[string]bool{}
 	for _, f := range findings {
@@ -535,16 +562,20 @@ func TestSecDoctorFindings(t *testing.T) {
 	}
 }
 
-// TestSecRoster_Has23Checks pins the full 23-check roster AND the stable order:
-// the three Phase-38 host-posture checks are inserted directly after
-// sec-disk-encryption, before sec-audit-epoch (BKLG-04).
-func TestSecRoster_Has23Checks(t *testing.T) {
+// TestSecRoster_StableOrder pins the 23-check base+Phase-38 roster prefix AND
+// its stable order: the three Phase-38 host-posture checks are inserted directly
+// after sec-disk-encryption, before sec-audit-epoch (BKLG-04). The Phase-37
+// additions (sec-hwkey-kind + one sec-attest-* per GOOS probe) are appended
+// after this prefix and are asserted by count, not position, since they are
+// platform-dependent.
+func TestSecRoster_StableOrder(t *testing.T) {
 	ctx := context.Background()
 	cc := &cmdContext{cfg: config.Defaults(), runner: shell.NewMockRunner()}
 	deps := modules.Deps{Platform: fakeDiskPlatform{state: platform.DiskEncrypted}}
 
 	findings := secDoctorFindings(ctx, cc, deps, false, nil, nil, nil)
-	require.Len(t, findings, 23, "roster must be exactly 23 checks")
+	require.Len(t, findings, 23+phase37SecCheckCount(),
+		"roster must be the 23 base + Phase-38 checks plus the Phase-37 additions")
 
 	order := make([]string, len(findings))
 	for i, f := range findings {
@@ -558,5 +589,5 @@ func TestSecRoster_Has23Checks(t *testing.T) {
 		"sec-tailnet-lock", "sec-autologin", "sec-remote-login",
 		"sec-audit-epoch", "sec-mlock", "sec-binary-signed", "sec-upgrade-verified",
 		"sec-metrics-bind", "sec-webui-bind", "sec-audit-anchor-age",
-	}, order, "sec roster order must be stable with the three new checks after sec-disk-encryption")
+	}, order[:23], "sec roster order must be stable with the three Phase-38 checks after sec-disk-encryption (Phase-37 checks append after this prefix)")
 }
