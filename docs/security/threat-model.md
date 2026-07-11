@@ -110,6 +110,23 @@ As of v3.0.0, the threat surface has expanded to include per-backend trust model
 | Audit log permissions | sec-audit-log-perms | FATAL (mode ≠ 0600) |
 | Config file world-readable | sec-no-world-readable-config | FATAL |
 
+## v4 New Surfaces
+
+The security sweep (`abysslink doctor`, or the full suite via `abysslink audit verify --pentest`) also runs these `sec-*` checks:
+
+| Surface | Check | Severity |
+|---------|-------|----------|
+| Audit log missing / unreadable | sec-audit-log-exists | FATAL |
+| Audit HMAC key-epoch health — a half-finished `rotate audit-hmac` (chain epoch ahead of the keychain pointer) makes appends fail closed | sec-audit-epoch | WARN (FATAL under `--profile at-risk`) |
+| Secret-memory locking (mlock / SecureBytes, MEM-02) — defense-in-depth; the unlocked fallback still zeroizes on free | sec-mlock | WARN (never FATAL — a kernel `RLIMIT_MEMLOCK` the operator can't raise must not fail closed) |
+| Disk encryption (FileVault / LUKS) off | sec-disk-encryption | FATAL (always — off or mid-encryption fails closed in every profile) |
+| Listener bound to a non-tailnet / wildcard address | sec-listener-bind | FATAL |
+| Daemon control-socket permissions | sec-daemon-socket-perms | FATAL |
+| Installed binary cosign signature | sec-binary-signed | WARN |
+| Self-update SLSA provenance verified | sec-upgrade-verified | WARN |
+
+`sec-mlock` and `sec-audit-epoch` remediation is covered in [Troubleshooting](../operations/troubleshooting.md#abysslink-doctor-failures); the audit-key rotation model behind `sec-audit-epoch` is described in [Hardening → Audit HMAC key rotation](hardening.md#audit-hmac-key-rotation).
+
 ## Out of Scope
 
 | Threat | Reason deferred |

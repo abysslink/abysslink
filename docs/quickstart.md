@@ -183,3 +183,4 @@ Then connect from an SSH client:
 - Read the [module docs](modules/tailscale.md) to understand what each component configures
 - Review the [threat model](security/threat-model.md)
 - Set up [Claude Code hooks](modules/claudecode.md) to get notifications when Claude finishes a task
+- Learn the ongoing-operations commands in the [CLI reference](cli-reference.md): `abysslink audit verify`, `abysslink audit evidence` (signed evidence bundle) / `audit verify-evidence`, and secret rotation (`abysslink rotate ntfy-creds | anthropic-key | audit-hmac`, all `--apply` to execute). Audit-key rotation is covered in [Hardening → Audit HMAC key rotation](security/hardening.md#audit-hmac-key-rotation).

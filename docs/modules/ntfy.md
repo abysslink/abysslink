@@ -74,6 +74,7 @@ tailnet.
 | `config_exists` — `~/.config/ntfy/server.yml` present | warning (`doctor` exits 1) |
 | `listen_address` — config binds a wildcard (`0.0.0.0`, `[::]`, `:PORT`) | **fatal** (`doctor` exits 2); skipped in Docker mode, where the `-p` flag enforces the tailnet binding |
 | `reachable` — ntfy answers `GET /v1/health` on `<tailnet-ip>:<port>` | warning; catches the Docker-Desktop-for-Mac trap where the container runs but the port never publishes |
+| `docker_ip_drift` — running ntfy Docker container is bound to a stale tailnet IP (macOS Docker mode) | warning; the container's `-p` binding is fixed at creation time, so a Tailscale IP reassignment leaves it reachable only on the old address — run `abysslink repair --apply` to rebind. Emitted only on macOS when the container is running and the current tailnet IP resolves |
 
 ## Commands
 

@@ -56,7 +56,7 @@ Only the latest minor release line receives security fixes. Upgrade with `abyssl
 
 | Version | Supported |
 |---|---|
-| Latest minor release line (`v3.x` at time of writing) | ✅ |
+| Latest minor release line (`v4.x` at time of writing) | ✅ |
 | Older release lines | ❌ |
 
 ## CI security gates

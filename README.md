@@ -134,7 +134,7 @@ If you want zero setup and don't mind your code in a vendor cloud: use Anthropic
 ### Networking & access
 
 - **Mesh VPN, no public exposure** — runs over WireGuard via [Tailscale](https://tailscale.com) by default, with **self-hosted [Headscale](https://github.com/juanfont/headscale) and [NetBird](https://netbird.io) control planes** as first-class alternatives (`abysslink server …`). Your traffic is end-to-end encrypted and never traverses a vendor relay.
-- **Tagged, least-privilege ACLs** — Abysslink writes a minimal policy: `tag:mobile → tag:laptop` over SSH + the mosh UDP range only. The phone can reach the laptop; the laptop cannot reach back; nothing else in the tailnet can reach either. ACLs round-trip as HuJSON (`abysslink acl diff/push`) so comments survive.
+- **Tagged, least-privilege ACLs** — Abysslink writes a minimal policy: `tag:mobile → tag:laptop` over SSH (tcp/22), the self-hosted ntfy push port (tcp/2586), the tailnet content store / one-scan credential pull (tcp/2587), and the mosh UDP range (60000–61000) — nothing else. The phone can reach the laptop; the laptop cannot reach back; nothing else in the tailnet can reach either. ACLs round-trip as HuJSON (`abysslink acl diff/push`) so comments survive.
 - **Tailnet Lock by default** — every device that joins must be cryptographically signed by a trusted key. An attacker who compromises your VPN account *still* cannot silently add a rogue node. Disablement secrets are printed **once** to stdout and never written to disk.
 - **Hardened SSH** — Tailscale SSH with a 12-hour re-check period (`checkPeriod`) that can be lowered but never silently raised. OpenSSH fallback for the self-hosted backends.
 
@@ -327,6 +327,9 @@ abysslink enable claudecode --apply       # opt in: AI-agent hooks → notify (w
 ```bash
 abysslink logs                            # tail the audit log (filter by age/module)
 abysslink audit verify                    # verify the tamper-evident chain
+abysslink audit evidence --out ev.alevidence            # signed, externally-verifiable evidence bundle (SOC 2)
+abysslink audit verify-evidence ev.alevidence           # verify a bundle's signature + hashes
+abysslink rotate audit-hmac --apply       # rotate the audit-log HMAC signing key to a new epoch
 abysslink backup ls                       # list every file Abysslink changed
 abysslink backup restore /etc/ssh/sshd_config --apply   # undo a change to a file
 ```
@@ -338,6 +341,7 @@ abysslink acl diff                        # preview ACL changes (HuJSON)
 abysslink acl push --apply                # converge the tailnet policy
 abysslink lock status                     # Tailnet Lock state
 abysslink rotate ntfy-creds --apply       # rotate the ntfy admin password + keychain
+abysslink rotate anthropic-key --apply    # store & verify a new Anthropic API key (read off argv)
 ```
 
 ### Self-hosted control plane (advanced)
@@ -383,7 +387,7 @@ Abysslink reads `~/.config/abysslink/abysslink.yaml` (override with `--config`, 
 | `tailnet.lock.enabled` | bool | `true` | Require cryptographic device authorization (Tailnet Lock). |
 | `tailnet.lock.disablement_secrets` | int | `2` | Number of disablement secrets to generate (printed once). |
 | `mobile.tag` | string | `mobile` | ACL tag granted to the phone. |
-| `mobile.ports` | list | `[tcp/22, udp/60000-61000]` | Ports the phone may reach on the rig. |
+| `mobile.ports` | list | `[tcp/22, tcp/2586, tcp/2587, udp/60000-61000]` | Informational list of the ports the phone may reach on the rig; the authoritative grant is the fixed ACL set — editing this field does not change the tailnet ACL. |
 | `mobile.ssh_check_period` | duration | `12h` | SSH re-check window; lowerable, never silently raised. |
 | `modules.ntfy.enabled` | bool | `true` | Self-hosted push server (tailnet-IP bind only). |
 | `modules.ntfy.port` | int | `2586` | ntfy listen port. |
@@ -575,7 +579,7 @@ make conformance        # behavioural conformance suite against a built binary
 - [x] Push gateway with sovereign UnifiedPush path (direct APNs/FCM legs experimental, off by default)
 - [ ] Hosted documentation site
 - [x] Secure memory (best-effort `mlock`/zeroize, defense-in-depth) & audit HMAC-key rotation (versioned epochs)
-- [ ] Hardware-backed keys (Secure Enclave / FIDO2, opt-in)
+- [x] Hardware-backed keys (Secure Enclave / FIDO2, opt-in)
 - [ ] Windows (WSL) tier-2 support
 
 ---

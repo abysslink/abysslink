@@ -26,8 +26,8 @@ Abysslink reads `~/.config/abysslink/abysslink.yaml` (override with `--config`, 
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `tag` | string | `mobile` | ACL tag granted to the phone. |
-| `ports` | list | `[tcp/22, udp/60000-61000]` | Ports the phone may reach. |
-| `ssh_check_period` | duration | `12h` | Lowerable; never silently raised. |
+| `ports` | list | `[tcp/22, tcp/2586, tcp/2587, udp/60000-61000]` | **Informational only** — documents the ports the phone may reach (SSH, ntfy, content store, mosh). The authoritative tailnet ACL grant is a fixed set in `internal/tailscale/acl.go`; editing this field does **not** change the ACL. |
+| `ssh_check_period` | duration | `12h` | Lowerable freely (validated range `1m`–`168h`). Raising it above `12h` is not silent: `abysslink up --apply` refuses the widened Tailscale-SSH `checkPeriod` unless you pass `--accept-checkperiod-extension`. |
 
 ## `modules`
 
@@ -38,7 +38,7 @@ Abysslink reads `~/.config/abysslink/abysslink.yaml` (override with `--config`, 
 | `mosh.enabled` | bool | `true` | |
 | `notify.enabled` / `notify.default_topic` | bool / string | `true` / `rig` | |
 | `notify.click_url` | string | `""` | URL a notification opens on tap (ntfy `X-Click`). Set to an `ssh://` deep link matching your saved terminal-app host (e.g. `ssh://me@rig.tailnet-name.ts.net`) so tapping connects with saved creds instead of a new connection. Empty → daemon composes `ssh://<user>@<short-hostname>`. |
-| `ntfy.enabled` / `ntfy.port` | bool / int | `true` / `2586` | Binds to the tailnet IP only. |
+| `ntfy.enabled` / `ntfy.port` | bool / int | `true` / `2586` | Binds to the tailnet IP only. `port` is currently **fixed at 2586** — the mobile→laptop ACL grant only opens tcp/2586, so a non-default value is rejected at config load (fail-closed) rather than silently ACL-blocking the phone. |
 | `watch.enabled` / `watch.panes` | bool / list | `true` / `[main]` | Plus `files:` and `http:` watchers — see below. |
 | `code_server`, `ttyd`, `eternal_terminal`, `syncthing`, `upsnap`, `atuin`, `sandbox`, `asciinema` | bool | `false` | Optional modules (`enabled: true`). |
 
@@ -98,7 +98,7 @@ Tailnet-only HTTPS store served by `abysslinkd`: token-keyed, TTL'd notification
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `enabled` | bool | `true` | On by default; `false` disables the listener and the one-scan pull. |
-| `port` | int | `2587` | TLS listen port (`0`/unset → `2587`). |
+| `port` | int | `2587` | TLS listen port (`0`/unset → `2587`). Currently **fixed at 2587** — the mobile→laptop ACL grant only opens tcp/2587, so a non-default value is rejected at config load (fail-closed) rather than silently ACL-blocking the phone. |
 | `ttl_seconds` | int | `600` | Content-token lifetime; clamped to `[30, 3600]` (out of range is rejected). |
 | `enroll_ttl_seconds` | int | `300` | First-contact bootstrap-token lifetime; clamped to `[30, 900]`. Independent of `ttl_seconds`. |
 | `bind_addr` | string | tailnet IP | Literal tailnet IP only; never `0.0.0.0`/`::`. Must equal the resolved tailnet IP. |
