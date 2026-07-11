@@ -167,15 +167,45 @@ func (p *Platform) IsOnSystemPath(_ context.Context, name string) (bool, error) 
 }
 
 // DiskEncryptionStatus reports FileVault status via fdesetup.
+//
+// The parse ORDER is load-bearing and fails closed (BKLG-02). Real macOS prints
+// "FileVault is On. Encryption in progress: Percent completed = NN.N" during
+// initial encryption — which STARTS WITH "FileVault is On". A thin
+// HasPrefix("FileVault is On") therefore fails OPEN, reporting DiskEncrypted
+// while plaintext blocks still exist on disk. The in-progress/deferred/decryption
+// substrings are matched BEFORE the "On" prefix so mid-encryption maps to
+// DiskEncrypting (not-safe), and any unrecognized output maps to DiskUnknown —
+// never DiskEncrypted.
+//
+// The three in-progress literals are lifted verbatim from the hardening detector
+// (internal/modules/hardening/detect_darwin.go) and are tagged ASSUMED (MEDIUM
+// confidence) — confirm against real hardware. A parse miss fails closed.
 func (p *Platform) DiskEncryptionStatus(ctx context.Context) (platform.DiskState, error) {
 	result, err := p.runner.Run(ctx, "fdesetup", "status")
 	if err != nil {
 		return platform.DiskUnknown, fmt.Errorf("fdesetup status: %w", err)
 	}
-	if strings.HasPrefix(strings.TrimSpace(result.Stdout), "FileVault is On") {
-		return platform.DiskEncrypted, nil
+	// Non-zero exit is a fault, not "unencrypted": fail closed to UNKNOWN.
+	if !result.Ok() {
+		return platform.DiskUnknown, fmt.Errorf("fdesetup status exited %d: %s",
+			result.ExitCode, strings.TrimSpace(result.Stderr))
 	}
-	return platform.DiskUnencrypted, nil
+	out := strings.TrimSpace(result.Stdout)
+	switch {
+	case strings.HasPrefix(out, "FileVault is Off"):
+		return platform.DiskUnencrypted, nil
+	// In-progress states (ASSUMED literals) MUST be checked before the "On"
+	// prefix — "FileVault is On. Encryption in progress …" starts with "On".
+	case strings.Contains(out, "Encryption in progress"),
+		strings.Contains(out, "Deferred enablement appears to be active"),
+		strings.Contains(out, "Decryption in progress"):
+		return platform.DiskEncrypting, nil
+	case strings.HasPrefix(out, "FileVault is On"):
+		return platform.DiskEncrypted, nil
+	default:
+		// Unrecognized output fails closed to UNKNOWN, never DiskEncrypted.
+		return platform.DiskUnknown, fmt.Errorf("fdesetup status: unrecognized output: %q", out)
+	}
 }
 
 // Firewall returns the macOS firewall controller.

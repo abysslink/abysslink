@@ -62,6 +62,32 @@ func TestDoctorProfileAtRisk_TightensWarnToFatal(t *testing.T) {
 		"an enabled dead-man switch must not add a deadman-required FATAL")
 }
 
+// TestAtRisk_TightensNewChecks asserts the three Phase-38 host-posture checks
+// (sec-tailnet-lock / sec-autologin / sec-remote-login) are WARN by default and
+// tighten to FATAL under --profile at-risk, while an OK finding on the same check
+// stays OK (BKLG-01/04).
+func TestAtRisk_TightensNewChecks(t *testing.T) {
+	in := []modules.Finding{
+		{Module: "sec", Check: "sec-tailnet-lock", Severity: modules.SeverityWarning, Message: "lock off"},
+		{Module: "sec", Check: "sec-autologin", Severity: modules.SeverityWarning, Message: "auto-login on"},
+		{Module: "sec", Check: "sec-remote-login", Severity: modules.SeverityWarning, Message: "remote login on"},
+		// An OK on a tightened check must stay OK (only WARN tightens).
+		{Module: "sec", Check: "sec-remote-login", Severity: modules.SeverityOK, Message: "off"},
+	}
+	cfg := config.Defaults()
+	cfg.Deadman.Enabled = true // isolate: no deadman-required FATAL
+
+	out := tightenAtRiskProfile(in, cfg)
+
+	for _, check := range []string{"sec-tailnet-lock", "sec-autologin", "sec-remote-login"} {
+		require.True(t, atRiskTightenedChecks[check], "%s must be in atRiskTightenedChecks", check)
+	}
+	assert.Equal(t, modules.SeverityFatal, out[0].Severity, "sec-tailnet-lock WARN must tighten to FATAL")
+	assert.Equal(t, modules.SeverityFatal, out[1].Severity, "sec-autologin WARN must tighten to FATAL")
+	assert.Equal(t, modules.SeverityFatal, out[2].Severity, "sec-remote-login WARN must tighten to FATAL")
+	assert.Equal(t, modules.SeverityOK, out[3].Severity, "an OK sec-remote-login must stay OK")
+}
+
 // TestDoctorProfileAtRisk_RequiresDeadman asserts the at-risk profile adds a
 // FATAL deadman-required finding when the switch is OFF, and not when it is ON.
 func TestDoctorProfileAtRisk_RequiresDeadman(t *testing.T) {
