@@ -27,6 +27,7 @@ nav:
     - mosh: modules/mosh.md
     - ntfy: modules/ntfy.md
     - watch: modules/watch.md
+    - quorum: modules/quorum.md
     - claudecode: modules/claudecode.md
     - code-server: modules/codeserver.md
     - ttyd: modules/ttyd.md
@@ -41,6 +42,7 @@ nav:
     - "Security Policy": security.md
     - Threat Model: security/threat-model.md
     - Hardening: security/hardening.md
+    - "Hardware Keys": security/hardware-keys.md
     - "Agent Safety": agent-safety.md
     - "Claims Audit": claims-audit.md
     - "Who Sees What": who-sees-what.md

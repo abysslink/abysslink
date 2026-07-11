@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abysslink/abysslink/internal/attest"
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
@@ -55,6 +56,18 @@ type statusReport struct {
 	Ntfy         string `json:"ntfy"`
 	DiskEncrypt  string `json:"disk_encrypt"`
 	Timestamp    string `json:"timestamp"`
+
+	// KeyKind is the ACTIVE ssh key kind when hardware_keys is enabled
+	// (HWK-03): "hardware:secure-enclave" | "hardware:fido2" (ONLY after
+	// hwkey.Verify confirms the on-disk pub is sk-backed), "software" (enabled
+	// but the configured key is verifiably NOT sk-backed — misconfig), or
+	// "unknown" (enabled, key missing or unverifiable — a parse miss can never
+	// render as hardware). Omitted entirely when hardware_keys is disabled, so
+	// old JSON consumers are unaffected.
+	KeyKind string `json:"key_kind,omitempty"`
+	// Attestation is the local boot-state summary (ATT-02):
+	// "verified" | "unverified" | "weakened" (attest.Summarize).
+	Attestation string `json:"attestation,omitempty"`
 
 	// BACK-07: notification wake/ack counters from the daemon (nil = unknown).
 	WakeSent    *uint64 `json:"wake_sent,omitempty"`
@@ -97,6 +110,25 @@ type statusDaemonExtras struct {
 // making the golden byte-stable (the panel writes time.Now().UTC() otherwise).
 // Restore in t.Cleanup — same pattern as fetchDaemonStatus / newRunner seams.
 var statusNow = func() time.Time { return time.Now() } //nolint:gochecknoglobals // test seam, mirrors fetchDaemonStatus
+
+// collectKeyKind computes the statusReport.KeyKind value (HWK-03). Package
+// var so parity tests can pin a deterministic value (same pattern as
+// fetchDaemonStatus / statusNow). The default implementation is fail-closed:
+// "hardware:<provider>" ONLY after the on-disk pub parses as an sk token AND
+// the provider's Verify (ssh-keygen -l cross-check) confirms it; a verifiably
+// non-sk key is "software"; anything missing/unparseable is "unknown" — never
+// hardware. Returns "" (field omitted) when hardware_keys is disabled.
+var collectKeyKind = func(ctx context.Context, cc *cmdContext) string { //nolint:gochecknoglobals // test seam, mirrors fetchDaemonStatus
+	kind, _ := hwkeyKindFor(ctx, cc.runner, cc.cfg)
+	return kind
+}
+
+// collectAttestation computes the statusReport.Attestation value (ATT-02) via
+// the local-only boot-state prober. Package var so parity tests can pin a
+// deterministic value.
+var collectAttestation = func(ctx context.Context, cc *cmdContext) string { //nolint:gochecknoglobals // test seam, mirrors fetchDaemonStatus
+	return attest.Summarize(newAttestProber(cc.runner).Collect(ctx))
+}
 
 // fetchDaemonStatus GETs /status from the local abysslinkd over its Unix
 // socket and decodes the BACK-07/DEVC-04 fields. A package var so tests can
@@ -282,6 +314,10 @@ func newStatusCmd() *cobra.Command {
 				TailnetLock:  lockStatus,
 				Ntfy:         ntfyStatus,
 				DiskEncrypt:  diskEncrypt,
+				// HWK-03 / ATT-02: active key kind (omitted when hardware_keys
+				// is disabled) and the local boot-state attestation summary.
+				KeyKind:     collectKeyKind(ctx, cc),
+				Attestation: collectAttestation(ctx, cc),
 				// RFC3339 UTC — the same format the fleet fan-out rows use, so
 				// JSON consumers parse exactly one timestamp format (U5).
 				Timestamp: now.UTC().Format(time.RFC3339),
@@ -429,7 +465,15 @@ func hasLUKSType(devs []luksDevice) bool {
 }
 
 // diskEncryptionStatus queries the OS for actual disk encryption state.
-// Returns "encrypted", "unencrypted", or "unknown".
+// Returns "encrypted", "unencrypted", "encrypting", or "unknown".
+//
+// The darwin parse ORDER is load-bearing and fails closed (BKLG-02): real macOS
+// prints "FileVault is On. Encryption in progress …" mid-encryption, which starts
+// with "FileVault is On". The in-progress/deferred/decryption substrings are
+// therefore matched BEFORE the "On" prefix so mid-encryption renders as
+// "encrypting" (a warning state), never "encrypted"; unrecognized output fails
+// closed to "unknown". Mirrors platform/darwin DiskEncryptionStatus (DRY debt:
+// three copies of this literal parse are documented in the phase design).
 func diskEncryptionStatus(ctx context.Context, r shell.Runner) string {
 	switch runtime.GOOS {
 	case "darwin":
@@ -437,10 +481,19 @@ func diskEncryptionStatus(ctx context.Context, r shell.Runner) string {
 		if err != nil || res.ExitCode != 0 {
 			return "unknown"
 		}
-		if strings.HasPrefix(strings.TrimSpace(res.Stdout), "FileVault is On") {
+		out := strings.TrimSpace(res.Stdout)
+		switch {
+		case strings.HasPrefix(out, "FileVault is Off"):
+			return "unencrypted"
+		case strings.Contains(out, "Encryption in progress"),
+			strings.Contains(out, "Deferred enablement appears to be active"),
+			strings.Contains(out, "Decryption in progress"):
+			return "encrypting"
+		case strings.HasPrefix(out, "FileVault is On"):
 			return "encrypted"
+		default:
+			return "unknown"
 		}
-		return "unencrypted"
 	case "linux":
 		// Use -J -o NAME,TYPE (no MOUNTPOINT) to match platform/linux and avoid
 		// false positives from device names or mount paths containing "crypt".
@@ -487,13 +540,39 @@ func statusRow(label, value string, state statusRowState) string {
 	return fmt.Sprintf("  %s  %s  %s", icon, lbl, styleBold.Render(value))
 }
 
-// statusRowStateFor maps a status value to its row state. "disabled" is a
-// deliberate user choice and renders neutral, never as a red failure (U4).
+// statusRowStateFor maps a LEGACY status value to its row state. "disabled"
+// is a deliberate user choice and renders neutral, never as a red failure
+// (U4). Everything unrecognized — including "unknown", which the Tailscale
+// row emits on a failed daemon query and the Disk Encryption row emits when
+// fdesetup/lsblk is missing or unparseable — falls to rowBad: evidence
+// suppression must stay a loud red ✕ (an existing default is never weakened;
+// CLAIMS-AUDIT C-25, secDiskEncryptionCheck UNKNOWN=FATAL precedent). The
+// Phase 37 Key Kind / Attestation rows use statusKeyRowStateFor, NOT this
+// mapper.
 func statusRowStateFor(s string) statusRowState {
 	switch s {
 	case "running", "enabled", "encrypted":
 		return rowOK
 	case "disabled":
+		return rowNeutral
+	default:
+		return rowBad
+	}
+}
+
+// statusKeyRowStateFor maps the Phase 37 Key Kind (HWK-03) / Attestation
+// (ATT-02) vocabulary to a row state. It is deliberately a SEPARATE mapper:
+// for these NEW rows "unverified"/"unknown" mean indeterminate-but-honest
+// (neutral) — but folding that vocabulary into the shared statusRowStateFor
+// would silently soften the pre-existing Tailscale / Disk Encryption
+// "unknown" from red to neutral (adversarial finding P37-02). A
+// Verify-confirmed hardware kind and a fully verified boot state are green;
+// "weakened"/"software" and anything unrecognized are red (fail closed).
+func statusKeyRowStateFor(s string) statusRowState {
+	switch s {
+	case "verified", "hardware:secure-enclave", "hardware:fido2":
+		return rowOK
+	case "unverified", "unknown":
 		return rowNeutral
 	default:
 		return rowBad
@@ -515,16 +594,26 @@ func printStatusPanel(p Printer, rep statusReport) {
 		hostnameLabel += "  " + styleMuted.Render("("+strings.Join(parts, " · ")+")")
 	}
 
-	var sb strings.Builder
-	sb.WriteString(styleTitle.Render("Abysslink Status"))
-	sb.WriteString("\n\n")
-	for _, row := range []string{
+	rows := []string{
 		statusRow("Tailscale", hostnameLabel, statusRowStateFor(rep.Tailscale)),
 		statusRow("Tailscale SSH", rep.TailscaleSSH, statusRowStateFor(rep.TailscaleSSH)),
 		statusRow("Tailnet Lock", rep.TailnetLock, statusRowStateFor(rep.TailnetLock)),
 		statusRow("ntfy", rep.Ntfy, statusRowStateFor(rep.Ntfy)),
 		statusRow("Disk Encryption", rep.DiskEncrypt, statusRowStateFor(rep.DiskEncrypt)),
-	} {
+	}
+	// Key Kind renders only when hardware_keys is enabled (KeyKind non-empty);
+	// the Attestation row always renders (ATT-02). Both use the dedicated
+	// Phase 37 mapper so their neutral "unknown"/"unverified" vocabulary can
+	// never soften the legacy rows above.
+	if rep.KeyKind != "" {
+		rows = append(rows, statusRow("Key Kind", rep.KeyKind, statusKeyRowStateFor(rep.KeyKind)))
+	}
+	rows = append(rows, statusRow("Attestation", rep.Attestation, statusKeyRowStateFor(rep.Attestation)))
+
+	var sb strings.Builder
+	sb.WriteString(styleTitle.Render("Abysslink Status"))
+	sb.WriteString("\n\n")
+	for _, row := range rows {
 		sb.WriteString(row)
 		sb.WriteString("\n")
 	}

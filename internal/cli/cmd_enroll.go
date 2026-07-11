@@ -37,6 +37,7 @@ import (
 	"github.com/abysslink/abysslink/internal/daemon"
 	"github.com/abysslink/abysslink/internal/device"
 	"github.com/abysslink/abysslink/internal/fleet"
+	"github.com/abysslink/abysslink/internal/hwkey"
 	"github.com/abysslink/abysslink/internal/qr"
 	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/tui"
@@ -82,6 +83,21 @@ type enrollRigOpts struct {
 	backendType   string         // backend type string (empty = "tailscale")
 	stdout        io.Writer      // optional: capture stdout (nil = os.Stdout)
 	printer       Printer        // optional: Printer for all output (CLI-17); nil = human printer over stdout
+	// keyKind is the SSH key kind chosen for this rig (HWK-04):
+	// "software" (or "" — the default, zero behavior change), "secure-enclave",
+	// or "fido2". A hardware kind ONLY writes the hardware_keys config stanza
+	// and prints the deferred operator step — enrollRig NEVER execs
+	// sc_auth/ssh-keygen sk paths itself (the live interactive keygen is the
+	// separate `abysslink enroll hardware-key --apply` command).
+	keyKind string
+}
+
+// enrollKeyKinds is the --key-kind allowlist (HWK-04).
+var enrollKeyKinds = []string{"software", "secure-enclave", "fido2"}
+
+// isHardwareKeyKind reports whether kind selects a hardware provider.
+func isHardwareKeyKind(kind string) bool {
+	return kind == string(hwkey.KindSecureEnclave) || kind == string(hwkey.KindFIDO2)
 }
 
 // aclGrant mirrors the subset of tailscale/acl.go aclGrant used for rig-to-rig detection.
@@ -271,6 +287,9 @@ func enrollRigDeriveTopic(opts enrollRigOpts, cfg *config.Config) (string, error
 // enrollRigWriteConfig appends the RigConfig and persists via config.Write (audit).
 // Refuses re-enrollment of an existing rig name (CR-02: silent duplicate creation
 // causes mr-key-uniqueness FATAL and silently destroys the existing HMAC key).
+// When a hardware key kind was chosen (HWK-04) it ALSO persists the
+// hardware_keys stanza (enabled + provider) in the same audited write and
+// prints the deferred operator step — never running the interactive keygen.
 func enrollRigWriteConfig(opts enrollRigOpts, cfg *config.Config, topic string, p Printer) error {
 	// Defense in depth: the duplicate-name guard already ran at the TOP of
 	// enrollRig (before key generation — CR-02); re-assert here so a future
@@ -301,17 +320,38 @@ func enrollRigWriteConfig(opts enrollRigOpts, cfg *config.Config, topic string, 
 		Backend:   backendType,
 	}
 
+	hardwareKind := isHardwareKeyKind(opts.keyKind)
 	if opts.apply {
 		cfg.Rigs = append(cfg.Rigs, rig)
+		if hardwareKind {
+			cfg.HardwareKeys.Enabled = true
+			cfg.HardwareKeys.Provider = opts.keyKind
+		}
 		if err := config.Write(opts.cfgPath, cfg); err != nil {
 			return fmt.Errorf("enroll rig: write config: %w", err)
 		}
 		printerInfo(p, fmt.Sprintf("Enrolled rig %q (topic=%s, backend=%s)", opts.name, topic, backendType))
+		if hardwareKind {
+			printEnrollHardwareKeyDeferredStep(p, opts.keyKind)
+		}
 	} else {
 		printerInfo(p, fmt.Sprintf("[dry-run] Would enroll rig %q (topic=%s, backend=%s, hostname=%s)",
 			opts.name, topic, backendType, hostname))
+		if hardwareKind {
+			printerInfo(p, fmt.Sprintf("[dry-run] Would enable hardware_keys (provider=%s) and defer the interactive key enrollment to `abysslink enroll hardware-key --apply`", opts.keyKind))
+		}
 	}
 	return nil
+}
+
+// printEnrollHardwareKeyDeferredStep prints the HWK-04 deferred operator
+// step: the hardware key itself is minted by a separate, explicitly
+// interactive command (authenticator touch / PIN) — never inside enroll rig.
+func printEnrollHardwareKeyDeferredStep(p Printer, kind string) {
+	printerInfo(p, "")
+	printerInfo(p, fmt.Sprintf("Hardware keys enabled (provider=%s).", kind))
+	printerInfo(p, "Hardware key enrollment is interactive (authenticator touch / PIN). Run:")
+	printerInfo(p, "  "+styleCode.Render("abysslink enroll hardware-key --apply"))
 }
 
 // enforceRigToRigACLDeny implements the absence-of-grant discipline for Tailscale/Headscale:
@@ -460,6 +500,11 @@ func newEnrollCmd() *cobra.Command {
 				cfgPath = defaultConfigPath()
 			}
 
+			keyKind, kkErr := resolveEnrollKeyKind(ctx, cmd, cc)
+			if kkErr != nil {
+				return kkErr
+			}
+
 			return enrollRig(ctx, enrollRigOpts{
 				name:        args[0],
 				cfgPath:     cfgPath,
@@ -470,12 +515,38 @@ func newEnrollCmd() *cobra.Command {
 				backendType: cc.cfg.Backend.Type,
 				stdout:      cmd.OutOrStdout(),
 				printer:     p, // CLI-17: --json gets structured records, not raw prose
+				keyKind:     keyKind,
 			})
 		},
 	}
+	rigCmd.Flags().String("key-kind", "software",
+		"SSH key kind for this rig: software (default), secure-enclave, or fido2 — a hardware kind writes the hardware_keys stanza and defers the interactive key enrollment to `abysslink enroll hardware-key --apply`")
 
-	enroll.AddCommand(newEnrollPhoneCmd(), rigCmd)
+	enroll.AddCommand(newEnrollPhoneCmd(), rigCmd, newEnrollHardwareKeyCmd())
 	return enroll
+}
+
+// resolveEnrollKeyKind resolves the --key-kind value for `enroll rig`
+// (HWK-04). Explicit flag wins; when the flag is UNSET and the session is
+// interactive (term.go gate: not --yes, not --json, stdin a TTY) a tui.Select
+// offers the three kinds; non-interactive without the flag silently stays
+// "software" (never prompts, never errors — the option is opt-in). The value
+// is allowlist-validated either way.
+func resolveEnrollKeyKind(ctx context.Context, cmd *cobra.Command, cc *cmdContext) (string, error) {
+	keyKind, _ := cmd.Flags().GetString("key-kind")
+	if !cmd.Flags().Changed("key-kind") && interactive(cc.yes, cc.jsonOut) {
+		choice, err := tui.Select(ctx, "SSH key kind for this rig", enrollKeyKinds, cc.yes)
+		if err != nil {
+			return "", fmt.Errorf("enroll rig: key kind selection: %w", err)
+		}
+		keyKind = choice
+	}
+	switch keyKind {
+	case "", "software", string(hwkey.KindSecureEnclave), string(hwkey.KindFIDO2):
+		return keyKind, nil
+	default:
+		return "", fmt.Errorf("enroll rig: invalid --key-kind %q (must be software, secure-enclave, or fido2)", keyKind)
+	}
 }
 
 func newEnrollPhoneCmd() *cobra.Command {

@@ -63,7 +63,12 @@ type DiskState string
 const (
 	DiskEncrypted   DiskState = "encrypted"
 	DiskUnencrypted DiskState = "unencrypted"
-	DiskUnknown     DiskState = "unknown"
+	// DiskEncrypting means encryption/decryption is in progress or deferred —
+	// the disk is NOT yet fully protected (plaintext blocks may still exist), so
+	// it must be treated as not-safe for gating (BKLG-02). macOS-only; Linux has
+	// no lsblk-visible partial-online-encryption state.
+	DiskEncrypting DiskState = "encrypting"
+	DiskUnknown    DiskState = "unknown"
 )
 
 // KeepAwakeMode controls system sleep prevention.
