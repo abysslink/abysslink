@@ -93,6 +93,38 @@ func TestAuditVerify_Broken(t *testing.T) {
 	assert.Contains(t, out.String(), "CHAIN BROKEN at entry 2")
 }
 
+// PC8-2 / ROT V6: an INDETERMINATE verdict (a retained epoch key genuinely
+// missing from the keychain) is fail-closed-but-NOT-tamper. cmd_audit must map
+// it to exit 1 with non-tamper wording, never the exit-2 "CHAIN BROKEN at entry
+// -1" the generic !OK handler would emit for a real tamper.
+func TestAuditVerify_IndeterminateIsNotTamper(t *testing.T) {
+	logPath, kc := newSignedLog(t, 3)
+	ctx := context.Background()
+	sa, err := audit.NewSigned(logPath, kc)
+	require.NoError(t, err)
+	// Rotate to epoch 2 and append an entry under the new epoch so the chain
+	// legitimately references it.
+	_, err = sa.RotateHMACKey(ctx)
+	require.NoError(t, err)
+	var dh [32]byte
+	dh[0] = 42
+	require.NoError(t, sa.Append(ctx, audit.SignInput{Title: "write", DiffHash: dh}, "/tmp/y", false))
+
+	// The retained epoch-2 (pointer) key vanishes from the keychain (e.g. a
+	// keychain migration / a rotated key not yet restored) — its account is
+	// hmacKeyAccount("audit-hmac") + "-e2".
+	require.NoError(t, kc.Delete(ctx, "abysslink", "audit-hmac-e2"))
+
+	var out bytes.Buffer
+	p := NewHumanPrinterTo(&out, &out)
+	err = runAuditVerify(ctx, p, logPath, kc)
+	var ee *exitError
+	require.True(t, errors.As(err, &ee), "expected exitError, got %v", err)
+	assert.Equal(t, exitCodeError, ee.ExitCode(), "indeterminate must be exit 1, not exit 2")
+	assert.Contains(t, out.String(), "UNVERIFIABLE (indeterminate)")
+	assert.NotContains(t, out.String(), "CHAIN BROKEN")
+}
+
 func TestAuditTail_LastN(t *testing.T) {
 	logPath, _ := newSignedLog(t, 5)
 	entries, err := audit.ReadLog(logPath)
