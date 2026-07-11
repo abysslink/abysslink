@@ -34,7 +34,7 @@ LDFLAGS    := -s -w \
   -X $(MODULE)/internal/cli.commit=$(COMMIT) \
   -X $(MODULE)/internal/cli.buildDate=$(BUILD_DATE)
 
-.PHONY: build test lint cover release install clean conformance security-audit repro-check
+.PHONY: build test bench lint cover release install clean conformance security-audit repro-check
 .PHONY: check-webui-isolation check-webui-build-tags check-htmx-sri vendor-htmx security-gosec check-install-sync dev-setup
 .PHONY: vex-suppression-proof
 
@@ -147,6 +147,16 @@ vendor-htmx:
 	  https://unpkg.com/htmx.org@2.0.10/dist/htmx.min.js \
 	  -o internal/modules/webui/assets/htmx.min.js
 	@echo "Downloaded htmx 2.0.10 — run 'make check-htmx-sri' to verify SRI"
+
+## bench: run the P-C2 performance-budget benchmarks (audit / evidence / config
+## hot paths) and print ns/op + allocs. MEASUREMENT ONLY — no regression gate;
+## the captured baseline + soft budget live in docs/testing/perf-budget.md.
+## BENCHTIME is a fixed iteration count (default 100x) so the append benchmark's
+## log stays small (its cost grows with log size) and runs are bounded/repeatable.
+BENCHTIME  ?= 100x
+BENCH_PKGS := ./internal/audit/... ./internal/evidence/... ./internal/config/...
+bench:
+	$(GO) test -bench=. -benchmem -run=^$$ -benchtime=$(BENCHTIME) $(BENCH_PKGS)
 
 ## cover: run tests with coverage report
 cover:

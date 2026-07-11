@@ -27,9 +27,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/abysslink/abysslink/internal/attest"
 	"github.com/abysslink/abysslink/internal/audit"
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/hwkey"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
 	"github.com/abysslink/abysslink/internal/secrets"
@@ -590,9 +593,112 @@ func secDiskEncryptionCheck(ctx context.Context, plat platform.Platform) modules
 	case platform.DiskUnencrypted:
 		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
 			Message: "disk is NOT encrypted — enable FileVault (macOS) / LUKS (Linux) before remote access"}
+	case platform.DiskEncrypting:
+		// Mid-encryption (or decryption/deferred): plaintext blocks may still
+		// exist on disk, so this is NOT-safe and is gated like unencrypted (BKLG-02).
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
+			Message: "disk encryption is IN PROGRESS — not yet fully protected; wait for FileVault to " +
+				"finish (fdesetup status) before enabling remote access (fail-closed)"}
 	default: // DiskUnknown
 		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
 			Message: "disk-encryption state is UNKNOWN — could not be determined; verify FileVault (macOS) / LUKS (Linux) manually; `up --apply` refuses this state even with --force-unsafe (D-05)"}
+	}
+}
+
+// secTailnetLockCheck surfaces the Tailnet Lock posture in doctor (BKLG-01 /
+// BKLG-04). It queries LIVE state via the backend Locker (which goes through
+// shell.Runner) rather than config, so a `tailnet.lock.enabled=false` intent
+// cannot mask an off tailnet. Default severity is WARN (mirrors the lock module's
+// WARN so a normal doctor does not hard-fail on a machine that simply hasn't
+// enabled lock yet); `--profile at-risk` tightens it to FATAL via
+// atRiskTightenedChecks. An undeterminable status is WARN "could not determine" —
+// it never silently passes as OK. A backend without Tailnet Lock support
+// (Headscale / NetBird) reports OK not-applicable — the feature cannot exist there.
+func secTailnetLockCheck(ctx context.Context, b backend.Client) modules.Finding {
+	const check = "sec-tailnet-lock"
+	if b == nil {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: "could not determine Tailnet Lock status — backend unavailable"}
+	}
+	lc, ok := b.(backend.Locker)
+	if !ok {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "Tailnet Lock not applicable on this backend"}
+	}
+	st, err := lc.LockStatus(ctx)
+	if err != nil {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: "could not determine Tailnet Lock status (" + err.Error() +
+				") — ensure tailscale is running and logged in"}
+	}
+	if st.Enabled {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "Tailnet Lock is enabled"}
+	}
+	return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+		Message: "Tailnet Lock is NOT enabled — the only defense against a compromised coordination " +
+			"server injecting a rogue device that still passes your ACLs; enable with `tailscale lock init`"}
+}
+
+// secAutoLoginCheck surfaces macOS automatic-login posture (guide §3.4, BKLG-04).
+// Auto-login directly undermines the FileVault/keychain-at-rest model this phase
+// hardens, so it must be OFF. Detection (ASSUMED, MEDIUM): `defaults read
+// /Library/Preferences/com.apple.loginwindow autoLoginUser` prints a username when
+// auto-login is ON and exits non-zero (key absent) when OFF. Default WARN when ON
+// or undeterminable; FATAL under `--profile at-risk`. Non-darwin returns OK
+// "not applicable" (Linux doctor output unchanged).
+func secAutoLoginCheck(ctx context.Context, runner shell.Runner, osName string) modules.Finding {
+	const check = "sec-autologin"
+	if osName != "darwin" {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "auto-login check not applicable on " + osName}
+	}
+	res, err := runner.Run(ctx, "defaults", "read",
+		"/Library/Preferences/com.apple.loginwindow", "autoLoginUser")
+	if err != nil {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: "could not determine auto-login status: " + err.Error()}
+	}
+	// Non-zero exit (key absent) or empty output ⇒ auto-login is OFF (good). We do
+	// not echo the username value into the finding (kept out of doctor output).
+	if !res.Ok() || strings.TrimSpace(res.Stdout) == "" {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "automatic login is disabled"}
+	}
+	return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+		Message: "automatic login is ENABLED — it undermines FileVault/keychain-at-rest protection; " +
+			"turn OFF Automatic login in System Settings → Users & Groups"}
+}
+
+// secRemoteLoginCheck surfaces the public macOS sshd (Remote Login) posture (guide
+// §2.3, BKLG-04). Abysslink exposes SSH via Tailscale SSH only; the public sshd
+// Remote Login toggle must be OFF. Detection (ASSUMED, MEDIUM): `systemsetup
+// -getremotelogin` prints "Remote Login: On" / "Remote Login: Off". Default WARN
+// when ON or undeterminable; FATAL under `--profile at-risk`. Non-darwin returns
+// OK "not applicable".
+func secRemoteLoginCheck(ctx context.Context, runner shell.Runner, osName string) modules.Finding {
+	const check = "sec-remote-login"
+	if osName != "darwin" {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "Remote Login check not applicable on " + osName}
+	}
+	res, err := runner.Run(ctx, "systemsetup", "-getremotelogin")
+	if err != nil {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: "could not determine Remote Login status: " + err.Error()}
+	}
+	out := strings.TrimSpace(res.Stdout)
+	switch {
+	case strings.Contains(out, "Remote Login: Off"):
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "public sshd (Remote Login) is disabled — SSH is exposed via Tailscale SSH only"}
+	case strings.Contains(out, "Remote Login: On"):
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: "public sshd (Remote Login) is ENABLED — expose SSH via Tailscale only; " +
+				"turn OFF Remote Login in System Settings → General → Sharing"}
+	default:
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: "could not determine Remote Login status (unrecognized systemsetup output)"}
 	}
 }
 
@@ -645,7 +751,7 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 // SECTION 3 — aggregator
 // ---------------------------------------------------------------------------
 
-// secDoctorFindings runs all 20 sec-*  checks in a stable order and returns the
+// secDoctorFindings runs all 23 sec-*  checks in a stable order and returns the
 // findings. The 3 alias checks read from the pre-computed metFindings /
 // webuiFindings / auditFindings slices so the underlying Phase-17/18/19 checks
 // run exactly once (RESEARCH Pitfall 3). The 6 SSH checks degrade gracefully —
@@ -664,7 +770,7 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, pentest bool,
 	metFindings, webuiFindings, auditFindings []modules.Finding,
 	supplyFindings ...[]modules.Finding) []modules.Finding {
-	findings := make([]modules.Finding, 0, 20)
+	findings := make([]modules.Finding, 0, 23)
 
 	// SSH checks (6) — guarded so a parse failure never crashes the doctor run.
 	findings = append(findings, safeSSHCheck("sec-ssh-permitroot", func() modules.Finding { return secSSHPermitRootCheck(ctx, cc.runner, pentest) }))
@@ -687,6 +793,25 @@ func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, p
 		secListenerBindCheck(cc.cfg),
 		secFunnelSchemaCheck(cc.cfg),
 		secDiskEncryptionCheck(ctx, deps.Platform),
+	)
+
+	// Host-posture footguns (3) — BKLG-01/04. WARN by default, FATAL under
+	// --profile at-risk. Inserted right after sec-disk-encryption in a stable slot.
+	// osName is read nil-safely: deps.Platform may be a bare modules.Deps{} on the
+	// audit-fix path where buildDeps failed. The backend Locker query goes through
+	// shell.Runner; a nil backend (construction failed) degrades to WARN.
+	osName := ""
+	if deps.Platform != nil {
+		osName = deps.Platform.OS()
+	}
+	var lockBackend backend.Client
+	if b, bErr := cc.backend(); bErr == nil {
+		lockBackend = b
+	}
+	findings = append(findings,
+		secTailnetLockCheck(ctx, lockBackend),
+		secAutoLoginCheck(ctx, cc.runner, osName),
+		secRemoteLoginCheck(ctx, cc.runner, osName),
 	)
 
 	// Audit HMAC key-epoch health (1) — ROT-03.
@@ -718,6 +843,117 @@ func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, p
 		secAuditAnchorAgeAlias(auditFindings),
 	)
 
+	// Phase 37 (appended at the END — stable order preserved): hardware-key
+	// kind (HWK-03) + local boot-state attestation (ATT-02).
+	findings = append(findings, secHwkeyKindCheck(ctx, cc))
+	findings = append(findings, secAttestChecks(ctx, cc)...)
+
+	return findings
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 4 — Phase 37: hardware-key kind + boot-state attestation (HWK-03 /
+// ATT-02)
+// ---------------------------------------------------------------------------
+
+// newAttestProber is a seam over attest.New so parity/doctor tests can pin a
+// deterministic prober (e.g. an empty EFIVarsDir fixture) instead of reading
+// the host's real efivarfs. Same pattern as fetchDaemonStatus / statusNow.
+var newAttestProber = func(r shell.Runner) *attest.Prober { return attest.New(r) } //nolint:gochecknoglobals // test seam, mirrors fetchDaemonStatus
+
+// hwkeyKindFor classifies the ACTIVE ssh key kind for status + doctor
+// (HWK-03), fail-closed. Returns ("", "") when hardware_keys is disabled.
+// Otherwise: "hardware:<provider>" ONLY when the on-disk pub parses as an sk
+// token AND the provider Verify (ssh-keygen -l cross-check) confirms it;
+// "software" when the configured key is VERIFIABLY non-sk (silent-downgrade
+// signal); "unknown" for anything missing or unverifiable — a parse miss
+// never renders as hardware OR silently as software.
+func hwkeyKindFor(ctx context.Context, runner shell.Runner, cfg *config.Config) (string, string) {
+	if cfg == nil || !cfg.HardwareKeys.Enabled {
+		return "", ""
+	}
+	hk := cfg.HardwareKeys
+	home, err := os.UserHomeDir()
+	if err != nil && hk.KeyPath == "" {
+		return "unknown", "cannot resolve the key path (home directory unknown)"
+	}
+	pubPath := hk.ResolvedKeyPath(home) + ".pub"
+	data, err := os.ReadFile(pubPath) //nolint:gosec // G304: pubPath is the operator-configured public key path
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "unknown", fmt.Sprintf("hardware key not yet enrolled (%s missing) — run `abysslink enroll hardware-key`", pubPath)
+		}
+		return "unknown", fmt.Sprintf("cannot read %s: %v", pubPath, err)
+	}
+	// Classify the first NON-empty line — the same parse the providers'
+	// Verify uses. Classifying the literal first line would let a leading
+	// blank line degrade the software-key FATAL to an "unverifiable" WARN,
+	// dodging the HWK-03 silent-downgrade detector (finding P37-03).
+	info, cErr := hwkey.ClassifyPublicKeyLine(hwkey.FirstNonEmptyLine(string(data)))
+	if cErr != nil {
+		return "unknown", fmt.Sprintf("public key %s is unverifiable: %v", pubPath, cErr)
+	}
+	if !info.Hardware {
+		return "software", fmt.Sprintf("configured key %s is a verifiably SOFTWARE key (%s), not sk-backed", pubPath, info.TypeToken)
+	}
+	prov, pErr := hwkey.NewProvider(hwkey.Kind(hk.Provider), runner, hwkey.Options{FIDO2ProviderPath: hk.FIDO2ProviderPath})
+	if pErr != nil {
+		return "unknown", fmt.Sprintf("hardware-key provider %q unavailable: %v", hk.Provider, pErr)
+	}
+	verified, vErr := prov.Verify(ctx, pubPath)
+	if vErr != nil {
+		return "unknown", fmt.Sprintf("cannot verify %s is sk-backed: %v", pubPath, vErr)
+	}
+	return "hardware:" + hk.Provider, fmt.Sprintf("sk-backed key verified (%s %s)", verified.TypeToken, verified.Fingerprint)
+}
+
+// secHwkeyKindCheck surfaces the active key kind as a sec-* finding (HWK-03).
+// Disabled is OK (opt-in); a Verify-confirmed sk-backed key is OK; a missing
+// or unverifiable key is WARN; a VERIFIABLY software key under an enabled
+// hardware_keys stanza is FATAL in ALL profiles — the silent-downgrade case
+// HWK-03 demands be loud (precedent: secDiskEncryptionCheck UNKNOWN=FATAL).
+func secHwkeyKindCheck(ctx context.Context, cc *cmdContext) modules.Finding {
+	const check = "sec-hwkey-kind"
+	if cc.cfg == nil || !cc.cfg.HardwareKeys.Enabled {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "hardware keys: disabled (opt-in)"}
+	}
+	kind, reason := hwkeyKindFor(ctx, cc.runner, cc.cfg)
+	switch {
+	case strings.HasPrefix(kind, "hardware:"):
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: kind + ": " + reason}
+	case kind == "software":
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
+			Message: "hardware_keys is enabled but the active key is a SOFTWARE key — silent downgrade detected: " + reason}
+	default:
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: reason}
+	}
+}
+
+// secAttestChecks maps the local boot-state probe results to sec-attest-*
+// findings (ATT-02). Severity contract: StateOK is OK; StateWarn AND
+// StateFail are WARN in the default profile (these are NEW checks over
+// pre-existing installs; the probe Detail distinguishes "verified disabled"
+// from "cannot verify" so red is actionable) — `--profile at-risk` tightens
+// them to FATAL via atRiskTightenedChecks. A missing tool or parse miss is
+// never OK (fail-closed tri-state).
+func secAttestChecks(ctx context.Context, cc *cmdContext) []modules.Finding {
+	results := newAttestProber(cc.runner).Collect(ctx)
+	findings := make([]modules.Finding, 0, len(results))
+	for _, r := range results {
+		sev := modules.SeverityWarning
+		if r.State == attest.StateOK {
+			sev = modules.SeverityOK
+		}
+		findings = append(findings, modules.Finding{
+			Module:   "sec",
+			Check:    "sec-attest-" + r.Probe,
+			Severity: sev,
+			Message:  r.Detail,
+		})
+	}
 	return findings
 }
 
