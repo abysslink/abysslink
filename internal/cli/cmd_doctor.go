@@ -548,6 +548,24 @@ var atRiskTightenedChecks = map[string]bool{
 	// ROT-03: a half-finished audit HMAC rotation wedges all appends closed;
 	// at-risk escalates the WARN to FATAL.
 	"sec-audit-epoch": true,
+	// Phase-38 host-posture footguns (BKLG-01/04): WARN by default so a normal
+	// doctor does not hard-fail on a machine that has not yet enabled lock /
+	// disabled auto-login / disabled public Remote Login; at-risk escalates each
+	// to FATAL.
+	"sec-tailnet-lock": true,
+	"sec-autologin":    true,
+	"sec-remote-login": true,
+	// Phase 37 (HWK-03 / ATT-02): the at-risk profile tightens the
+	// hardware-key WARN cases (missing/unverifiable) and every boot-state
+	// attestation WARN (indeterminate OR verified-weakened) to FATAL. The
+	// sec-hwkey-kind software-key case is already FATAL in every profile.
+	"sec-hwkey-kind":        true,
+	"sec-attest-sip":        true,
+	"sec-attest-secureboot": true,
+	"sec-attest-tpm":        true,
+	// E4.1: an at-risk operator must have the quorum gate ENFORCING — shadow
+	// evaluation or a disabled quorum escalates from WARN to FATAL.
+	"sec-quorum-enabled": true,
 }
 
 // deadmanRequiredCheck is the check ID for the at-risk FATAL finding emitted
@@ -949,6 +967,10 @@ func findingFix(check string) string {
 		// Tailnet Lock.
 		"lock_enabled": "tailscale lock init   (then abysslink up --apply)",
 		"lock_status":  "ensure tailscale is running: brew services restart tailscale",
+		// Phase-38 host-posture footguns (BKLG-01/04).
+		"sec-tailnet-lock": "tailscale lock init --confirm --gen-disablements 2 tlpub:<YOUR_LAPTOP_TLPUB>  (then abysslink up --apply)",
+		"sec-autologin":    "System Settings → Users & Groups → turn OFF Automatic login",
+		"sec-remote-login": "System Settings → General → Sharing → turn OFF Remote Login (use Tailscale SSH)",
 		// Claude Code hooks.
 		"stop_hook_configured":         "abysslink up --apply",
 		"notification_hook_configured": "abysslink up --apply",
@@ -1010,6 +1032,11 @@ func findingFix(check string) string {
 		"nb-lock":            "", // permanent WARN — Tailnet Lock (TKA) is not available on NetBird; no fix possible
 		// Dead-man switch (SUPL-06) — required under --profile at-risk.
 		"deadman-required": "abysslink deadman enable --apply",
+		// Hardware keys + boot-state attestation (Phase 37, HWK-03 / ATT-02).
+		"sec-hwkey-kind":        "abysslink enroll hardware-key --apply  (interactive: authenticator touch / PIN); or set hardware_keys.enabled: false in abysslink.yaml",
+		"sec-attest-sip":        "reboot into recoveryOS and run: csrutil enable",
+		"sec-attest-secureboot": "macOS: restore Full Security in recoveryOS (Startup Security Utility)  |  Linux: enable Secure Boot in firmware setup and exit Setup Mode",
+		"sec-attest-tpm":        "install tpm2-tools and ensure /dev/tpmrm0 is readable (usermod -aG tss $USER), then re-run abysslink doctor",
 		// Fleet isolation checks (mr-* checks).
 		"mr-rig-isolation":   "abysslink enroll rig <name> --apply  (re-pushes the rig-to-rig ACL deny)",
 		"mr-topic-isolation": "Give each rig a unique ntfy_topic in abysslink.yaml",

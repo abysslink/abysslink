@@ -24,7 +24,7 @@ import (
 )
 
 func newRepairCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "repair",
 		Short: "Auto-fix failures detected by doctor",
 		Example: `  # Preview what repair would fix (dry-run — no changes)
@@ -83,7 +83,12 @@ func newRepairCmd() *cobra.Command {
 				return nil
 			}
 
-			repairErrs := runModuleRepairs(ctx, p, mods, needsRepair, cc.dryRun, cc.jsonOut)
+			repairErrs, gateErr := runRepairApply(ctx, cmd, p, cc, mods, needsRepair, findings)
+			if gateErr != nil {
+				// A fail-closed apply gate refused (e.g. Tailnet Lock off) — return
+				// immediately (exit 2). No module Repair ran, so nothing to flush.
+				return gateErr
+			}
 
 			// F-59: replay manual steps deferred during Repair (e.g. acl manual
 			// mode) after all repairs ran — even when some modules failed, the
@@ -99,6 +104,42 @@ func newRepairCmd() *cobra.Command {
 			return nil
 		},
 	}
+	// Repair re-runs module bring-up — including the tailscale/ssh modules whose
+	// Repair == Apply shells `tailscale up` / `tailscale set --ssh` — so the
+	// --apply path is subject to the SAME fail-closed apply gates as `up`. Expose
+	// the same audited override flags so a legitimately lock-off / at-risk rig can
+	// still be repaired with explicit, recorded consent (LOCK-REPAIR-01).
+	cmd.Flags().Bool("force-unsafe", false,
+		"Override fail-closed safety checks such as disk encryption (DANGEROUS)")
+	cmd.Flags().Bool("accept-checkperiod-extension", false,
+		"Allow ssh_check_period to exceed the 12h re-auth default")
+	cmd.Flags().Bool("accept-lock-disabled", false,
+		"Proceed with `repair --apply` even though Tailnet Lock is not enabled (NOT recommended; this choice is audited)")
+	return cmd
+}
+
+// runRepairApply runs the fail-closed apply-time gates and then the per-module
+// repairs. On the --apply path (`!cc.dryRun`) it runs the SAME gates as `up`
+// (tailscaled reachability, the 12h checkPeriod ceiling, disk encryption, and
+// the LIVE Tailnet Lock hard gate) BEFORE any module Repair executes — repair
+// re-runs the tailscale/ssh module bring-up (`tailscale set --ssh`), so it must
+// not re-establish phone→laptop remote access on a lock-off tailnet without the
+// explicit, audited --accept-lock-disabled override (LOCK-REPAIR-01 / BKLG-01).
+// The gates read LIVE state (never config), so a `backend.type: headscale`
+// intent cannot make them skippable. In dry-run mode the gates are skipped —
+// dry-run mutates nothing, so there is nothing to gate.
+//
+// Returns the per-module repair errors and, separately, a fatal gate error to
+// surface immediately (exit 2) without attempting any repair.
+func runRepairApply(ctx context.Context, cmd *cobra.Command, p Printer, cc *cmdContext, mods []modules.Module, needsRepair map[string]bool, findings []modules.Finding) (repairErrs []error, gateErr error) {
+	if !cc.dryRun {
+		if err := applyTimeGates(cmd, p, cc, findings); err != nil {
+			// Fail-closed gates are the documented "2 — Fatal" exit class (W2); a
+			// plain error would otherwise map to exit 1.
+			return nil, &exitError{code: exitCodeFatal, err: err}
+		}
+	}
+	return runModuleRepairs(ctx, p, mods, needsRepair, cc.dryRun, cc.jsonOut), nil
 }
 
 // runModuleRepairs calls Repair on each module flagged in needsRepair, printing

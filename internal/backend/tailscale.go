@@ -154,6 +154,27 @@ func (a *tailscaleAdapter) Down(ctx context.Context) error {
 	return a.local.Down(ctx)
 }
 
+// LiveTailnetLockStatus probes the LIVE Tailnet Lock state by shelling the
+// tailscale CLI directly (`tailscale lock status --json`), independent of the
+// configured backend.type. abysslink's bring-up always drives the tailscale
+// client (`tailscale up` / `tailscale set --ssh`) regardless of backend.type, so
+// security gates that must fail closed on a lock-off tailnet key off THIS live
+// probe rather than the config-typed Client's Locker capability — a non-Locker
+// backend adapter (Headscale / NetBird) must not make such a gate skippable
+// while the tailscale client is still what brings SSH online (LOCK-BACKEND-01 /
+// BKLG-01). A non-nil error means the state could not be determined (UNKNOWN).
+//
+// It lives in internal/backend because the depguard architecture rule forbids
+// importing the concrete internal/tailscale package outside this package; CLI
+// gates call this helper instead of constructing a LockClient themselves.
+func LiveTailnetLockStatus(ctx context.Context, runner shell.Runner) (*LockStatus, error) {
+	ls, err := tailscale.NewLockClient(runner).Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &LockStatus{Enabled: ls.Enabled}, nil
+}
+
 // ── Locker sub-interface ───────────────────────────────────────────────────
 
 // LockStatus delegates to the wrapped LockClient.Status.
