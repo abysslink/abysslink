@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://abysslink.github.io/abysslink/schemas/alevidence-v1.schema.json",
+  "title": "Abysslink evidence-bundle manifest (v1)",
+  "description": "JSON Schema for manifest.json, the signed head of an .alevidence bundle produced by `abysslink audit evidence` (and the object emitted by `abysslink audit evidence --json`). This is the ingest contract the future Teams/aggregation plane consumes. The manifest is an OPERATOR ATTESTATION signed with the rig's ed25519 evidence key: it states, over a signed byte range, the audit-chain verification outcome the operator's abysslink computed (which requires the secret HMAC key an external auditor does not hold). A valid signature over an unexpected `signing.key_fingerprint` is still internally valid — the out-of-band fingerprint pin is the trust anchor. This schema mirrors internal/evidence.Manifest exactly; drift is a bug (see internal/evidence/schema_test.go).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "alevidence_v",
+    "generated_at",
+    "rig",
+    "range",
+    "chain",
+    "contents",
+    "signing"
+  ],
+  "properties": {
+    "alevidence_v": {
+      "type": "integer",
+      "const": 1,
+      "description": "Bundle format version. Bumped only for append-only-incompatible manifest changes; a new major version ships as a new alevidence-vN.schema.json."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the bundle was produced, RFC3339 in UTC (e.g. 2026-07-09T12:00:00Z)."
+    },
+    "rig": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Identifies the machine the evidence came from.",
+      "required": ["hostname", "abysslink_version"],
+      "properties": {
+        "hostname": {
+          "type": "string",
+          "description": "Short hostname of the rig."
+        },
+        "abysslink_version": {
+          "type": "string",
+          "description": "Version of the abysslink binary that produced the bundle."
+        }
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The [since, until] window the bundle covers. Both bounds are optional; an absent bound means an open end (full history on that side).",
+      "properties": {
+        "since": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Only include actions at/after this RFC3339 UTC time. Omitted when open-ended."
+        },
+        "until": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Only include actions at/before this RFC3339 UTC time. Omitted when open-ended."
+        }
+      }
+    },
+    "chain": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The operator's abysslink attesting the audit-chain verification outcome — the part an external auditor cannot recompute without the secret HMAC key. Signed, so the attestation is bound to the evidence key.",
+      "required": [
+        "verified",
+        "entry_count",
+        "sigs_verified",
+        "sigs_skipped",
+        "key_epoch",
+        "counter_status",
+        "truncation_detected"
+      ],
+      "properties": {
+        "verified": {
+          "type": "boolean",
+          "description": "True only when the chain verified OK AND no truncation was detected AND the result is not indeterminate."
+        },
+        "entry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of audit entries in the bundled audit.jsonl."
+        },
+        "sigs_verified": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of entries whose per-entry HMAC signature verified."
+        },
+        "sigs_skipped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of entries whose signature could not be checked (e.g. pre-signing legacy entries)."
+        },
+        "key_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "The audit key epoch at generation time (uint32)."
+        },
+        "counter_status": {
+          "type": "string",
+          "enum": ["verified", "unknown", "mismatch", ""],
+          "description": "AUD-02 keychain monotonic-counter check (honest tri-state, never coerced to PASS): 'verified' counter matches entry count; 'unknown' counter unavailable/degraded; 'mismatch' counter exceeds entries (genuine tail truncation); '' a pre-AUD-02 log with no counter."
+        },
+        "truncation_detected": {
+          "type": "boolean",
+          "description": "True when tail truncation of the audit log was detected."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Human-readable explanation when the chain did not fully verify. Omitted on a clean result."
+        }
+      }
+    },
+    "contents": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Pins the SHA-256 of every other file in the bundle; the signature over this manifest transitively covers those files.",
+      "required": ["audit_jsonl_sha256", "report_md_sha256"],
+      "properties": {
+        "audit_jsonl_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 of the bundled audit.jsonl."
+        },
+        "report_md_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 of the bundled report.md."
+        }
+      }
+    },
+    "signing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Describes the ed25519 key that signed the manifest. The verifier checks the signature with public_key; the auditor pins key_fingerprint out-of-band (SSH-host-key trust model).",
+      "required": ["algo", "public_key", "key_fingerprint"],
+      "properties": {
+        "algo": {
+          "type": "string",
+          "const": "ed25519",
+          "description": "Signature algorithm; only ed25519 is defined for v1."
+        },
+        "public_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{43}=$",
+          "description": "Standard base64 of the 32-byte ed25519 public key (44 chars)."
+        },
+        "key_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 of the ed25519 public key — the value the operator states out-of-band and the auditor pins with `--expect-key`."
+        }
+      }
+    }
+  }
+}

@@ -578,8 +578,8 @@ make conformance        # behavioural conformance suite against a built binary
 - [x] Agent safety: `arm` kill-switch, phone approve loop, dead-man switch
 - [x] Push gateway with sovereign UnifiedPush path (direct APNs/FCM legs experimental, off by default)
 - [ ] Hosted documentation site
-- [x] Secure memory & audit HMAC-key rotation
-- [ ] Hardware-backed keys (Secure Enclave / FIDO2, opt-in)
+- [x] Secure memory (best-effort `mlock`/zeroize, defense-in-depth) & audit HMAC-key rotation (versioned epochs)
+- [x] Hardware-backed keys (Secure Enclave / FIDO2, opt-in)
 - [ ] Windows (WSL) tier-2 support
 
 ---
