@@ -61,6 +61,17 @@ func Verify(r io.Reader) (VerifyResult, error) {
 		return VerifyResult{Valid: false, Reason: "manifest is not valid JSON: " + uerr.Error()}, nil
 	}
 
+	// Forward-compat gate (PC8-EV-1): refuse a bundle whose schema version this
+	// verifier does not understand rather than silently interpreting signed
+	// fields it may not know. FormatVersion is a signed field — an attacker
+	// cannot alter it without breaking the signature — and a genuine future
+	// (append-only-incompatible) bundle is explicitly rejected here instead of
+	// being reported VALID by a verifier that cannot interpret its contract.
+	if m.FormatVersion != formatVersion {
+		return VerifyResult{Valid: false, Manifest: m, Reason: fmt.Sprintf(
+			"unsupported bundle format version %d (this build understands %d)", m.FormatVersion, formatVersion)}, nil
+	}
+
 	if m.Signing.Algo != "ed25519" {
 		return VerifyResult{Valid: false, Manifest: m, Reason: "unsupported signature algorithm " + m.Signing.Algo}, nil
 	}
