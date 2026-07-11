@@ -20,7 +20,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26.5"
           cache: true
@@ -66,7 +66,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -96,7 +96,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -115,7 +115,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26.5"
           cache: true
@@ -151,7 +151,7 @@ jobs:
       pull-requests: write   # required for comment-summary-in-pr to post the summary
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -170,4 +170,15 @@ jobs:
         with:
           fail-on-severity: moderate
           deny-licenses: AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later, GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later
+          # The charmbracelet/x submodules ship no per-submodule LICENSE — the
+          # MIT license lives at the monorepo root (github.com/charmbracelet/x,
+          # verified MIT © Charmbracelet, Inc.), which the detector cannot
+          # resolve, so it reports them as "unknown license". Allow-list the
+          # known-MIT packages so the warning stops masking a real finding.
+          allow-dependencies-licenses: >-
+            pkg:golang/github.com/charmbracelet/x/ansi,
+            pkg:golang/github.com/charmbracelet/x/term,
+            pkg:golang/github.com/charmbracelet/x/cellbuf,
+            pkg:golang/github.com/charmbracelet/x/exp/slice,
+            pkg:golang/github.com/charmbracelet/x/exp/strings
           comment-summary-in-pr: always
