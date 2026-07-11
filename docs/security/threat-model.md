@@ -124,8 +124,17 @@ The security sweep (`abysslink doctor`, or the full suite via `abysslink audit v
 | Daemon control-socket permissions | sec-daemon-socket-perms | FATAL |
 | Installed binary cosign signature | sec-binary-signed | WARN |
 | Self-update SLSA provenance verified | sec-upgrade-verified | WARN |
+| Duress decoy enabled but inert (no keychain-stored decoy credential) | sec-duress | FATAL (inert) / WARN if the keychain cannot be reached to confirm (FATAL under `--profile at-risk`) |
 
 `sec-mlock` and `sec-audit-epoch` remediation is covered in [Troubleshooting](../operations/troubleshooting.md#abysslink-doctor-failures); the audit-key rotation model behind `sec-audit-epoch` is described in [Hardening → Audit HMAC key rotation](hardening.md#audit-hmac-key-rotation).
+
+## Duress decoy — what it defends, and what it deliberately does not
+
+The duress decoy (opt-in, ships OFF) defends against **casual coercion**: the shoulder-glance, the border-guard or checkpoint officer who hands you your unlocked laptop and says "show me," the roommate who grabs the terminal. In that moment you enter the **decoy** credential instead of your real one. Two things happen at once: you are shown a **benign, plausible rig view** (a quiet machine with no fleet and no live sessions), and — the part that makes it real rather than cosmetic — your actual session is **degraded for real** through the same kill-switch the dead-man lockdown uses: armed agents are frozen and killed, and a persisted lockdown latch is set so nothing silently re-arms behind the decoy. The honest value is measured in **seconds to minutes**: it buys you the time and the cover story to hand over a device that looks empty while your real capability is already being torn down.
+
+**It is NOT plausible deniability against a forensic adversary, and we do not pretend otherwise.** Your `abysslink.yaml` carries a `duress:` stanza, so anyone who images the disk learns the feature exists and is configured; `strings`, the audit log, the state dir, and backups can establish that a real fleet was present. This is the same lesson VeraCrypt hidden volumes keep teaching: the cryptography can be sound and the deniability still collapses on **behavior and system traces**. A determined examiner with the disk and time **will** find the real configuration. We claim nothing against that adversary — **full-disk encryption (FileVault / LUKS, enforced fail-closed by `abysslink doctor`) is the real at-rest control**, not the decoy. Concretely, two traces are left on activation and are out of scope by design: the persisted lockdown latch and audit entry carry a duress-specific reason (`session-degraded`), so a forensic reader can tell a duress activation from a routine dead-man timeout; and if a real fleet was armed, the decoy unlock spends a little longer tearing it down than a real idle unlock, so an adversary timing the command (not the *screen* — the benign view renders with the same latency, and the degradation runs silently) could infer that activity occurred. Neither is defended against: the threat model is the person glancing at your screen, not the lab with your disk and a stopwatch.
+
+**We deliberately refuse to build a destructive duress-wipe.** For casual coercion a wipe is the wrong trade on three counts: it is **security theater** (a wiped device under coercion is itself loud evidence of intent, and the forensic adversary defeats it anyway), a **self-DoS** (a mistyped or shoulder-surfed decoy credential irreversibly destroys your own working state with no undo), and **detectable** (a blank or shutting-down device mid-inspection is exactly the tell a coercer notices). So there is, **by design and by test** (`internal/duress/nowipe_test.go`), **no code path in the duress feature that deletes or overwrites real data.** The decoy is pure read-substitution plus a real, **reversible** kill-switch degradation.
 
 ## Out of Scope
 
@@ -145,6 +154,7 @@ The following defaults are **immutable** without explicit user override:
 - Tailscale Funnel permanently rejected at schema level
 - FileVault / LUKS required; `doctor` fails closed if disk is unencrypted
 - All destructive commands default to `--dry-run`; `--apply` required
+- The duress decoy is non-destructive: no destructive duress-wipe exists, and duress credentials live only as keychain digests, never in config
 
 ## Reporting Security Issues
 

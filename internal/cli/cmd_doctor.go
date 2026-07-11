@@ -566,6 +566,11 @@ var atRiskTightenedChecks = map[string]bool{
 	// E4.1: an at-risk operator must have the quorum gate ENFORCING — shadow
 	// evaluation or a disabled quorum escalates from WARN to FATAL.
 	"sec-quorum-enabled": true,
+	// Phase 39 (DUR-01..03 / POL-02): an at-risk operator who enabled duress
+	// must be able to CONFIRM the decoy credential is live — a keychain that
+	// cannot be reached to verify it escalates from WARN to FATAL. (The inert
+	// cases are already FATAL in every profile.)
+	"sec-duress": true,
 }
 
 // deadmanRequiredCheck is the check ID for the at-risk FATAL finding emitted
@@ -971,6 +976,8 @@ func findingFix(check string) string {
 		"sec-tailnet-lock": "tailscale lock init --confirm --gen-disablements 2 tlpub:<YOUR_LAPTOP_TLPUB>  (then abysslink up --apply)",
 		"sec-autologin":    "System Settings → Users & Groups → turn OFF Automatic login",
 		"sec-remote-login": "System Settings → General → Sharing → turn OFF Remote Login (use Tailscale SSH)",
+		// Phase 39 (DUR-01..03): an inert decoy is a false sense of safety.
+		"sec-duress": "printf 'real-pass\\ndecoy-pass\\n' | abysslink duress enable --apply  (enrols the decoy credential in the keychain)",
 		// Claude Code hooks.
 		"stop_hook_configured":         "abysslink up --apply",
 		"notification_hook_configured": "abysslink up --apply",

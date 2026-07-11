@@ -24,12 +24,70 @@ import (
 
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
+	"github.com/abysslink/abysslink/internal/duress"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
+	"github.com/abysslink/abysslink/internal/secrets"
 	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestSecDuressCheck covers the duress-decoy posture check (DUR-01..03 / POL-02):
+// disabled is OK; an enabled-but-inert decoy is FATAL in every profile; a
+// correctly-enrolled decoy is OK; an unreachable keychain is WARN (tightened to
+// FATAL under --profile at-risk via atRiskTightenedChecks).
+func TestSecDuressCheck(t *testing.T) {
+	ctx := context.Background()
+
+	newCfg := func(enabled bool, source string) *config.Config {
+		c := config.Defaults()
+		c.Duress.Enabled = enabled
+		c.Duress.SecretSource = source
+		return c
+	}
+
+	t.Run("disabled_is_ok", func(t *testing.T) {
+		cc := &cmdContext{cfg: newCfg(false, "")}
+		f := secDuressCheck(ctx, cc, modules.Deps{})
+		assert.Equal(t, "sec-duress", f.Check)
+		assert.Equal(t, modules.SeverityOK, f.Severity)
+	})
+
+	t.Run("enabled_non_keychain_source_is_fatal", func(t *testing.T) {
+		cc := &cmdContext{cfg: newCfg(true, "none")}
+		f := secDuressCheck(ctx, cc, modules.Deps{Keychain: secrets.NewMockStore()})
+		assert.Equal(t, modules.SeverityFatal, f.Severity)
+	})
+
+	t.Run("enabled_no_credential_stored_is_fatal", func(t *testing.T) {
+		cc := &cmdContext{cfg: newCfg(true, "keychain")}
+		f := secDuressCheck(ctx, cc, modules.Deps{Keychain: secrets.NewMockStore()})
+		assert.Equal(t, modules.SeverityFatal, f.Severity, "an enabled but un-enrolled decoy is INERT")
+	})
+
+	t.Run("enabled_keychain_unavailable_is_warn", func(t *testing.T) {
+		cc := &cmdContext{cfg: newCfg(true, "keychain")}
+		f := secDuressCheck(ctx, cc, modules.Deps{Keychain: nil})
+		assert.Equal(t, modules.SeverityWarning, f.Severity)
+	})
+
+	t.Run("enabled_and_enrolled_is_ok", func(t *testing.T) {
+		store := secrets.NewMockStore()
+		digest, err := duress.HashCredential("decoy-pass")
+		require.NoError(t, err)
+		require.NoError(t, store.Set(ctx, duress.KeychainService, duress.DecoyAccount, digest))
+		cc := &cmdContext{cfg: newCfg(true, "keychain")}
+		f := secDuressCheck(ctx, cc, modules.Deps{Keychain: store})
+		assert.Equal(t, modules.SeverityOK, f.Severity)
+	})
+
+	t.Run("nil_cfg_is_safe", func(t *testing.T) {
+		cc := &cmdContext{cfg: nil}
+		f := secDuressCheck(ctx, cc, modules.Deps{})
+		assert.Equal(t, modules.SeverityOK, f.Severity)
+	})
+}
 
 // phase37SecCheckCount is the number of Phase 37 additions to the sec roster:
 // sec-hwkey-kind plus one sec-attest-* per boot-state probe of this GOOS
@@ -457,7 +515,7 @@ func TestSecBinarySignedAlias_ReusesPrecomputedSupplyFindings(t *testing.T) {
 	}}
 
 	findings := secDoctorFindings(ctx, cc, deps, false, nil, nil, nil, supply)
-	require.Len(t, findings, 23+phase37SecCheckCount(), "supply alias must keep the full sec roster (20 base + 3 Phase-38 + Phase-37)")
+	require.Len(t, findings, 24+phase37SecCheckCount(), "supply alias must keep the full sec roster (20 base + 3 Phase-38 + Phase-37)")
 	var got *modules.Finding
 	for i := range findings {
 		if findings[i].Check == "sec-binary-signed" {
@@ -525,7 +583,7 @@ func TestSecDoctorFindings(t *testing.T) {
 
 	findings := secDoctorFindings(ctx, cc, deps, false, metFindings, webuiFindings, auditFindings)
 
-	require.Len(t, findings, 23+phase37SecCheckCount(),
+	require.Len(t, findings, 24+phase37SecCheckCount(),
 		"secDoctorFindings must return the legacy 20 findings plus the 3 Phase-38 host-posture checks plus the Phase 37 additions")
 
 	want := map[string]bool{
@@ -540,6 +598,8 @@ func TestSecDoctorFindings(t *testing.T) {
 		"sec-tailnet-lock": true, "sec-autologin": true, "sec-remote-login": true,
 		// Phase 37 (HWK-03): always present, appended at the end.
 		"sec-hwkey-kind": true,
+		// Phase 39 (DUR-01..03): duress-decoy posture, appended at the very end.
+		"sec-duress": true,
 	}
 	// Phase 37 (ATT-02): one sec-attest-* per probe of the current GOOS.
 	switch runtime.GOOS {
@@ -574,7 +634,7 @@ func TestSecRoster_StableOrder(t *testing.T) {
 	deps := modules.Deps{Platform: fakeDiskPlatform{state: platform.DiskEncrypted}}
 
 	findings := secDoctorFindings(ctx, cc, deps, false, nil, nil, nil)
-	require.Len(t, findings, 23+phase37SecCheckCount(),
+	require.Len(t, findings, 24+phase37SecCheckCount(),
 		"roster must be the 23 base + Phase-38 checks plus the Phase-37 additions")
 
 	order := make([]string, len(findings))
