@@ -170,4 +170,15 @@ jobs:
         with:
           fail-on-severity: moderate
           deny-licenses: AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later, GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later
+          # The charmbracelet/x submodules ship no per-submodule LICENSE — the
+          # MIT license lives at the monorepo root (github.com/charmbracelet/x,
+          # verified MIT © Charmbracelet, Inc.), which the detector cannot
+          # resolve, so it reports them as "unknown license". Allow-list the
+          # known-MIT packages so the warning stops masking a real finding.
+          allow-dependencies-licenses: >-
+            pkg:golang/github.com/charmbracelet/x/ansi,
+            pkg:golang/github.com/charmbracelet/x/term,
+            pkg:golang/github.com/charmbracelet/x/cellbuf,
+            pkg:golang/github.com/charmbracelet/x/exp/slice,
+            pkg:golang/github.com/charmbracelet/x/exp/strings
           comment-summary-in-pr: always
