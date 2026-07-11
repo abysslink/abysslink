@@ -19,10 +19,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
+	"github.com/abysslink/abysslink/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -135,6 +139,153 @@ func TestUpDiskEncryption_KnownOffAllowsForceUnsafe(t *testing.T) {
 func TestUpDiskEncryption_NoBlockers(t *testing.T) {
 	assert.NoError(t, diskEncryptionGate(nil, false))
 	assert.NoError(t, diskEncryptionGate(nil, true))
+}
+
+// lockStatusCall scripts a `tailscale lock status --json` reply for the lock gate.
+func lockStatusCall(enabled bool) shell.Call {
+	body := `{"Enabled":false}`
+	if enabled {
+		body = `{"Enabled":true}`
+	}
+	return shell.Call{Result: shell.Result{Stdout: body}}
+}
+
+// newLockGateCC builds a minimal cmdContext driving lockGate with a scripted
+// `tailscale lock status --json` reply.
+func newLockGateCC(t *testing.T, statusCall shell.Call) (*cmdContext, Printer, *bytes.Buffer) {
+	t.Helper()
+	var buf bytes.Buffer
+	cc := &cmdContext{cfg: config.Defaults(), runner: shell.NewMockRunner(statusCall)}
+	return cc, &testPrinter{out: &buf}, &buf
+}
+
+// TestLockGate_Enabled_Passes: live Tailnet Lock ON ⇒ gate passes, no audit entry.
+func TestLockGate_Enabled_Passes(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cc, p, _ := newLockGateCC(t, lockStatusCall(true))
+
+	require.NoError(t, lockGate(context.Background(), p, cc, false),
+		"Tailnet Lock enabled must pass the gate")
+	assert.NoFileExists(t, auditLogPathForTest(t), "no audit entry when the gate simply passes")
+}
+
+// TestLockGate_OffWithoutFlag_Refuses: live lock OFF and no override flag ⇒ the
+// gate refuses (fail-closed) and the message names --accept-lock-disabled.
+func TestLockGate_OffWithoutFlag_Refuses(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cc, p, _ := newLockGateCC(t, lockStatusCall(false))
+
+	err := lockGate(context.Background(), p, cc, false)
+	require.Error(t, err, "lock off + no flag must refuse")
+	assert.Contains(t, err.Error(), "--accept-lock-disabled",
+		"the refusal must name the explicit opt-out flag")
+	assert.NoFileExists(t, auditLogPathForTest(t),
+		"a refusal (no override exercised) must not write a consent audit entry")
+}
+
+// TestLockGate_ConfigDisabledStillGated: config `tailnet.lock.enabled=false`
+// (intent only) plus a live-off tailnet and no flag ⇒ STILL refuses. Proves the
+// gate keys off LIVE status, not config — config cannot bypass it.
+func TestLockGate_ConfigDisabledStillGated(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cc, p, _ := newLockGateCC(t, lockStatusCall(false))
+	cc.cfg.Tailnet.Lock.Enabled = false // intent to disable — must NOT act as consent
+
+	err := lockGate(context.Background(), p, cc, false)
+	require.Error(t, err, "config lock-disabled must not bypass the live-status gate")
+	assert.Contains(t, err.Error(), "--accept-lock-disabled")
+}
+
+// TestLockGate_NonLockerBackendConfigStillLiveGated: config `backend.type=headscale`
+// (whose adapter is NOT a backend.Locker) must NOT make the lock gate "not
+// applicable". The tailscale module is always in allModules and still shells
+// `tailscale set --ssh`, so the gate keys off the LIVE `tailscale lock status`
+// and refuses when lock is off — regardless of the config backend capability
+// (LOCK-BACKEND-01). Proves the gate no longer branches on cc.backend().
+func TestLockGate_NonLockerBackendConfigStillLiveGated(t *testing.T) {
+	for _, backendType := range []string{"headscale", "netbird"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cc, p, _ := newLockGateCC(t, lockStatusCall(false))
+			cc.cfg.Backend.Type = backendType // non-Locker backend must NOT bypass the live gate
+
+			err := lockGate(context.Background(), p, cc, false)
+			require.Error(t, err, "a non-Locker backend config must not skip the live lock gate")
+			assert.Contains(t, err.Error(), "--accept-lock-disabled",
+				"the refusal must name the explicit opt-out flag")
+			assert.NoFileExists(t, auditLogPathForTest(t),
+				"a refusal (no override exercised) must not write a consent audit entry")
+		})
+	}
+}
+
+// TestLockGate_NonLockerBackendOverrideAudits: with a non-Locker backend config
+// AND --accept-lock-disabled, the gate proceeds via the LIVE probe and still
+// writes the audited consent entry — parity with the Tailscale path. Guards
+// against the fix regressing into a config-keyed bypass that skips the audit.
+func TestLockGate_NonLockerBackendOverrideAudits(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cc, p, _ := newLockGateCC(t, lockStatusCall(false))
+	cc.cfg.Backend.Type = "headscale"
+
+	require.NoError(t, lockGate(context.Background(), p, cc, true),
+		"lock off WITH the override flag must proceed even on a non-Locker backend config")
+
+	raw, err := os.ReadFile(auditLogPathForTest(t))
+	require.NoError(t, err, "override must write a consent audit entry")
+	assert.Contains(t, string(raw), "lock-override-consent")
+	assert.Contains(t, string(raw), "tailnet-lock")
+}
+
+// TestLockGate_OffWithFlag_ProceedsAndAudits: live lock OFF + --accept-lock-disabled
+// ⇒ proceeds (nil) AND writes an audit entry op=lock-override-consent,
+// target=tailnet-lock, with no secret/body bytes (content=nil).
+func TestLockGate_OffWithFlag_ProceedsAndAudits(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cc, p, _ := newLockGateCC(t, lockStatusCall(false))
+
+	require.NoError(t, lockGate(context.Background(), p, cc, true),
+		"lock off WITH the override flag must proceed")
+
+	raw, err := os.ReadFile(auditLogPathForTest(t))
+	require.NoError(t, err, "override must write a consent audit entry")
+	s := string(raw)
+	assert.Contains(t, s, "lock-override-consent", "audit op must be lock-override-consent")
+	assert.Contains(t, s, "tailnet-lock", "audit target must be tailnet-lock")
+	// No secret/body ever: content=nil, so no disablement-secret material can leak.
+	assert.NotContains(t, s, "tlsdis:", "audit entry must not contain a disablement secret")
+	assert.NotContains(t, s, "tlpub:", "audit entry must not contain lock key material")
+}
+
+// TestLockGate_UnknownFailsClosed_NonOverridable: an undeterminable lock status
+// (exec error / non-zero exit / unparseable JSON) refuses EVEN WITH the override
+// flag — UNKNOWN is fail-closed and non-overridable (D-05 posture).
+func TestLockGate_UnknownFailsClosed_NonOverridable(t *testing.T) {
+	cases := map[string]shell.Call{
+		"exec-error":    {Err: errors.New("socket unreachable")},
+		"non-zero-exit": {Result: shell.Result{ExitCode: 1, Stderr: "not logged in"}},
+		"garbage-json":  {Result: shell.Result{Stdout: "wat, not json"}},
+	}
+	for name, call := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cc, p, _ := newLockGateCC(t, call)
+
+			// Even WITH the override flag, UNKNOWN must refuse.
+			err := lockGate(context.Background(), p, cc, true)
+			require.Error(t, err, "UNKNOWN lock status must refuse even with --accept-lock-disabled")
+			assert.Contains(t, err.Error(), "cannot be overridden",
+				"UNKNOWN refusal must state it is non-overridable")
+			assert.NoFileExists(t, auditLogPathForTest(t),
+				"a non-overridable UNKNOWN refusal must not write a consent audit entry")
+		})
+	}
+}
+
+// auditLogPathForTest returns the audit-log path under the test's XDG_STATE_HOME.
+func auditLogPathForTest(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(os.Getenv("XDG_STATE_HOME"), "abysslink", "audit.log")
 }
 
 // TestInteractiveActionsFromActions_TailscaleLogin asserts that an action whose

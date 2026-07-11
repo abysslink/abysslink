@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
@@ -302,16 +303,22 @@ func TestSecFunnelSchema(t *testing.T) {
 	})
 }
 
-// fakeDiskPlatform is a platform.Platform stub overriding only disk encryption.
+// fakeDiskPlatform is a platform.Platform stub overriding only disk encryption
+// and OS(). OS defaults to "" (non-darwin ⇒ the host-posture checks return
+// not-applicable), keeping the aggregator roster tests deterministic without a
+// live host.
 type fakeDiskPlatform struct {
 	platform.Platform
 	state platform.DiskState
 	err   error
+	os    string
 }
 
 func (f fakeDiskPlatform) DiskEncryptionStatus(_ context.Context) (platform.DiskState, error) {
 	return f.state, f.err
 }
+
+func (f fakeDiskPlatform) OS() string { return f.os }
 
 func TestSecDiskEncryption(t *testing.T) {
 	ctx := context.Background()
@@ -339,6 +346,98 @@ func TestSecDiskEncryption(t *testing.T) {
 		f := secDiskEncryptionCheck(ctx, nil)
 		assert.Equal(t, modules.SeverityFatal, f.Severity)
 	})
+	// BKLG-02: mid-encryption is NOT-safe ⇒ FATAL (treated like unencrypted).
+	t.Run("encrypting is fatal", func(t *testing.T) {
+		f := secDiskEncryptionCheck(ctx, fakeDiskPlatform{state: platform.DiskEncrypting})
+		assert.Equal(t, "sec-disk-encryption", f.Check)
+		assert.Equal(t, modules.SeverityFatal, f.Severity)
+		assert.Contains(t, f.Message, "IN PROGRESS")
+	})
+}
+
+// lockBackendForTest builds the default (tailscale) backend over a mock runner
+// scripting the `tailscale lock status --json` reply for secTailnetLockCheck.
+func lockBackendForTest(t *testing.T, statusCall shell.Call) backend.Client {
+	t.Helper()
+	b, err := backend.New(config.Defaults(), shell.NewMockRunner(statusCall))
+	require.NoError(t, err)
+	return b
+}
+
+// TestSecTailnetLockCheck exercises the BKLG-01/04 doctor surface: enabled ⇒ OK,
+// off ⇒ WARN, undeterminable ⇒ WARN (never silently OK).
+func TestSecTailnetLockCheck(t *testing.T) {
+	ctx := context.Background()
+	t.Run("enabled is ok", func(t *testing.T) {
+		b := lockBackendForTest(t, shell.Call{Result: shell.Result{Stdout: `{"Enabled":true}`}})
+		f := secTailnetLockCheck(ctx, b)
+		assert.Equal(t, "sec-tailnet-lock", f.Check)
+		assert.Equal(t, modules.SeverityOK, f.Severity)
+	})
+	t.Run("disabled is warn", func(t *testing.T) {
+		b := lockBackendForTest(t, shell.Call{Result: shell.Result{Stdout: `{"Enabled":false}`}})
+		f := secTailnetLockCheck(ctx, b)
+		assert.Equal(t, modules.SeverityWarning, f.Severity)
+		assert.Contains(t, f.Message, "NOT enabled")
+	})
+	t.Run("undeterminable is warn not ok", func(t *testing.T) {
+		b := lockBackendForTest(t, shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "not logged in"}})
+		f := secTailnetLockCheck(ctx, b)
+		assert.Equal(t, modules.SeverityWarning, f.Severity)
+		assert.NotEqual(t, modules.SeverityOK, f.Severity, "an undeterminable lock must never report OK")
+	})
+	t.Run("nil backend is warn", func(t *testing.T) {
+		f := secTailnetLockCheck(ctx, nil)
+		assert.Equal(t, modules.SeverityWarning, f.Severity)
+	})
+}
+
+// TestSecAutoLoginCheck exercises the macOS auto-login posture check (BKLG-04).
+func TestSecAutoLoginCheck(t *testing.T) {
+	ctx := context.Background()
+	t.Run("non-darwin is not applicable", func(t *testing.T) {
+		f := secAutoLoginCheck(ctx, shell.NewMockRunner(), "linux")
+		assert.Equal(t, "sec-autologin", f.Check)
+		assert.Equal(t, modules.SeverityOK, f.Severity)
+	})
+	t.Run("key absent (non-zero exit) is off/ok", func(t *testing.T) {
+		r := shell.NewMockRunner(shell.Call{Result: shell.Result{ExitCode: 1, Stderr: "does not exist"}})
+		f := secAutoLoginCheck(ctx, r, "darwin")
+		assert.Equal(t, modules.SeverityOK, f.Severity)
+	})
+	t.Run("username present is warn", func(t *testing.T) {
+		r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "someuser\n"}})
+		f := secAutoLoginCheck(ctx, r, "darwin")
+		assert.Equal(t, modules.SeverityWarning, f.Severity)
+		assert.Contains(t, f.Message, "ENABLED")
+		assert.NotContains(t, f.Message, "someuser", "the username must not be echoed into the finding")
+	})
+}
+
+// TestSecRemoteLoginCheck exercises the public sshd / Remote Login posture check.
+func TestSecRemoteLoginCheck(t *testing.T) {
+	ctx := context.Background()
+	t.Run("non-darwin is not applicable", func(t *testing.T) {
+		f := secRemoteLoginCheck(ctx, shell.NewMockRunner(), "linux")
+		assert.Equal(t, "sec-remote-login", f.Check)
+		assert.Equal(t, modules.SeverityOK, f.Severity)
+	})
+	t.Run("remote login off is ok", func(t *testing.T) {
+		r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "Remote Login: Off\n"}})
+		f := secRemoteLoginCheck(ctx, r, "darwin")
+		assert.Equal(t, modules.SeverityOK, f.Severity)
+	})
+	t.Run("remote login on is warn", func(t *testing.T) {
+		r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "Remote Login: On\n"}})
+		f := secRemoteLoginCheck(ctx, r, "darwin")
+		assert.Equal(t, modules.SeverityWarning, f.Severity)
+		assert.Contains(t, f.Message, "ENABLED")
+	})
+	t.Run("unrecognized output is warn", func(t *testing.T) {
+		r := shell.NewMockRunner(shell.Call{Result: shell.Result{Stdout: "???"}})
+		f := secRemoteLoginCheck(ctx, r, "darwin")
+		assert.Equal(t, modules.SeverityWarning, f.Severity)
+	})
 }
 
 // TestSecBinarySignedAlias_ReusesPrecomputedSupplyFindings is the W8 regression
@@ -358,7 +457,7 @@ func TestSecBinarySignedAlias_ReusesPrecomputedSupplyFindings(t *testing.T) {
 	}}
 
 	findings := secDoctorFindings(ctx, cc, deps, false, nil, nil, nil, supply)
-	require.Len(t, findings, 20+phase37SecCheckCount(), "supply alias must keep the full sec roster")
+	require.Len(t, findings, 23+phase37SecCheckCount(), "supply alias must keep the full sec roster (20 base + 3 Phase-38 + Phase-37)")
 	var got *modules.Finding
 	for i := range findings {
 		if findings[i].Check == "sec-binary-signed" {
@@ -426,8 +525,8 @@ func TestSecDoctorFindings(t *testing.T) {
 
 	findings := secDoctorFindings(ctx, cc, deps, false, metFindings, webuiFindings, auditFindings)
 
-	require.Len(t, findings, 20+phase37SecCheckCount(),
-		"secDoctorFindings must return exactly the legacy 20 findings plus the Phase 37 additions")
+	require.Len(t, findings, 23+phase37SecCheckCount(),
+		"secDoctorFindings must return the legacy 20 findings plus the 3 Phase-38 host-posture checks plus the Phase 37 additions")
 
 	want := map[string]bool{
 		"sec-ssh-permitroot": true, "sec-ssh-x11forwarding": true, "sec-ssh-agentforwarding": true,
@@ -437,6 +536,8 @@ func TestSecDoctorFindings(t *testing.T) {
 		"sec-disk-encryption": true, "sec-binary-signed": true, "sec-upgrade-verified": true,
 		"sec-metrics-bind": true, "sec-webui-bind": true, "sec-audit-anchor-age": true,
 		"sec-audit-epoch": true, "sec-mlock": true,
+		// Phase-38 host-posture footguns (BKLG-01/04).
+		"sec-tailnet-lock": true, "sec-autologin": true, "sec-remote-login": true,
 		// Phase 37 (HWK-03): always present, appended at the end.
 		"sec-hwkey-kind": true,
 	}
@@ -459,4 +560,34 @@ func TestSecDoctorFindings(t *testing.T) {
 	for id := range want {
 		assert.True(t, got[id], "missing check ID %q", id)
 	}
+}
+
+// TestSecRoster_StableOrder pins the 23-check base+Phase-38 roster prefix AND
+// its stable order: the three Phase-38 host-posture checks are inserted directly
+// after sec-disk-encryption, before sec-audit-epoch (BKLG-04). The Phase-37
+// additions (sec-hwkey-kind + one sec-attest-* per GOOS probe) are appended
+// after this prefix and are asserted by count, not position, since they are
+// platform-dependent.
+func TestSecRoster_StableOrder(t *testing.T) {
+	ctx := context.Background()
+	cc := &cmdContext{cfg: config.Defaults(), runner: shell.NewMockRunner()}
+	deps := modules.Deps{Platform: fakeDiskPlatform{state: platform.DiskEncrypted}}
+
+	findings := secDoctorFindings(ctx, cc, deps, false, nil, nil, nil)
+	require.Len(t, findings, 23+phase37SecCheckCount(),
+		"roster must be the 23 base + Phase-38 checks plus the Phase-37 additions")
+
+	order := make([]string, len(findings))
+	for i, f := range findings {
+		order[i] = f.Check
+	}
+	assert.Equal(t, []string{
+		"sec-ssh-permitroot", "sec-ssh-x11forwarding", "sec-ssh-agentforwarding",
+		"sec-ssh-maxauthtries", "sec-ssh-logingracetime", "sec-ssh-ciphers",
+		"sec-audit-log-exists", "sec-audit-log-perms", "sec-no-world-readable-config",
+		"sec-daemon-socket-perms", "sec-listener-bind", "sec-funnel-schema", "sec-disk-encryption",
+		"sec-tailnet-lock", "sec-autologin", "sec-remote-login",
+		"sec-audit-epoch", "sec-mlock", "sec-binary-signed", "sec-upgrade-verified",
+		"sec-metrics-bind", "sec-webui-bind", "sec-audit-anchor-age",
+	}, order[:23], "sec roster order must be stable with the three Phase-38 checks after sec-disk-encryption (Phase-37 checks append after this prefix)")
 }
