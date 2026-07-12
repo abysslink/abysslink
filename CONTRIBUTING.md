@@ -9,6 +9,8 @@ make dev-setup   # one-time: wires .githooks (pre-commit gitleaks secret scan)
 make lint test
 ```
 
+`make dev-setup` also enables the commit-msg hook that enforces DCO sign-off locally.
+
 ## Commit format
 
 Use conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`

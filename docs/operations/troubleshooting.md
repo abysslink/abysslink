@@ -185,3 +185,61 @@ Check the daemon logs:
 journalctl --user -u dev.abysslink.abysslinkd --since "1 hour ago"   # Linux
 log show --predicate 'process == "abysslinkd"' --last 1h  # macOS
 ```
+
+## First-run stumbles
+
+Things people hit in the first ten minutes. None of them mean anything is broken.
+
+### Fresh machine: `doctor` exits 2 with a DANGER box pointing at `repair`
+
+On a machine that has never run `abysslink up --apply`, `abysslink doctor` exits 2 and ends in a red DANGER box telling you to run `repair --apply`.
+
+**Cause:** the audit log does not exist until the first apply, and its absence is scored as a fatal finding — even though there is nothing to repair yet.
+
+**Fix:** ignore the box on a fresh machine. Run the normal setup instead:
+
+```sh
+abysslink init
+abysslink up --apply
+```
+
+The first apply creates the audit log and the finding clears. (The box text is being improved to say this itself.)
+
+### `abysslink --version` errors with an unknown flag
+
+The version is a subcommand, not a flag:
+
+```sh
+abysslink version
+```
+
+### `notify` fails with `daemon client: notify rejected: HTTP 502`
+
+The daemon is up and accepted the request, but its ntfy backend isn't reachable — typically because ntfy has not been converged yet, or its service is down.
+
+**Fix:** confirm the daemon first, then converge ntfy:
+
+```sh
+abysslink daemon status
+abysslink up --apply
+```
+
+If you don't want the ntfy module at all, turn it off instead:
+
+```sh
+abysslink disable ntfy --apply
+```
+
+### macOS 26: `doctor` says "Application Firewall is disabled" when it is enabled
+
+Known false positive: macOS 26 changed the JSON keys `system_profiler` emits for the firewall state, so the check misreads an enabled firewall as disabled. The fix is tracked in the issue tracker.
+
+**Fix:** verify the real state manually and disregard the finding when it reports enabled:
+
+```sh
+/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+```
+
+### `abysslink version` prints `dev (unknown)`
+
+Expected for source builds (`go install`, `go build`): release version and provenance metadata are injected only by the release pipeline. Everything works except `abysslink verify` and `abysslink upgrade`, which need a released binary — use the installer script, Homebrew, or a release tarball for signed, upgradable binaries.

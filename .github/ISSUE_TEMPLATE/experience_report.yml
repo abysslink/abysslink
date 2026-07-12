@@ -1,0 +1,55 @@
+---
+name: Experience report
+description: >-
+  Tell us how your setup went — good, bad, or confusing. This shapes
+  what gets fixed next.
+labels: ["experience"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for taking the time. There are no wrong answers here —
+        the confusing parts are the most useful ones.
+  - type: textarea
+    id: setup
+    attributes:
+      label: What you set up
+      description: >-
+        OS, install method, which commands you ran, what you were
+        trying to achieve.
+    validations:
+      required: true
+  - type: textarea
+    id: worked
+    attributes:
+      label: What worked
+    validations:
+      required: true
+  - type: textarea
+    id: confusing
+    attributes:
+      label: What was confusing or got in the way
+    validations:
+      required: true
+  - type: input
+    id: time-taken
+    attributes:
+      label: How long it took
+      placeholder: e.g. 10 minutes to first phone notification
+  - type: dropdown
+    id: recommend
+    attributes:
+      label: Would you recommend Abysslink to someone with your setup?
+      options:
+        - "Yes"
+        - Yes, with caveats
+        - Not yet
+        - "No"
+  - type: checkboxes
+    id: quote-consent
+    attributes:
+      label: Quoting
+      options:
+        - label: >-
+            You may quote this report publicly (e.g. on the website or
+            README), attributed to my GitHub username.

@@ -50,6 +50,7 @@ nav:
   - Operations:
     - Troubleshooting: operations/troubleshooting.md
     - FAQ: operations/faq.md
+    - Uninstall: operations/uninstall.md
     - Audit evidence: operations/audit-evidence.md
     - "Agent Diary": operations/agent-diary.md
     - "Headscale HA": headscale-ha.md
@@ -59,6 +60,7 @@ nav:
   - Testing:
     - "CI Fire Drill": testing/ci-firedrill.md
     - "Push Real-Device Runbook": testing/push-real-device.md
+    - "Performance Budget": testing/perf-budget.md
   - Contributing:
     - Contributing: contributing.md
     - "Built with AI": ai-story.md

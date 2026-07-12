@@ -1,0 +1,37 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Abysslink Contributors
+#
+# Enforces DCO sign-off locally: rejects a commit whose message does not
+# end with a "Signed-off-by:" trailer. Merge commits are exempt.
+# Activate with: make dev-setup (git config core.hooksPath .githooks)
+
+msg_file="$1"
+
+# Skip merge commits.
+first_line=$(sed -n '1p' "$msg_file")
+case "$first_line" in
+    "Merge "*) exit 0 ;;
+esac
+
+# The last non-empty, non-comment line must be a Signed-off-by trailer.
+last_line=$(grep -v '^#' "$msg_file" | sed '/^[[:space:]]*$/d' | tail -n 1)
+case "$last_line" in
+    "Signed-off-by: "*) exit 0 ;;
+esac
+
+cat >&2 <<'EOF'
+commit rejected: missing DCO sign-off.
+
+Every commit needs a Signed-off-by trailer (DCO 1.1 — not a CLA).
+Recommit with:
+
+    git commit -s
+
+or add the trailer to the last commit with:
+
+    git commit --amend -s --no-edit
+
+See CONTRIBUTING.md for details.
+EOF
+exit 1
