@@ -87,6 +87,11 @@ Persistent flags on the root command, available to every subcommand:
 | Command | Local flags | Description |
 |---|---|---|
 | `panic` | — | Disconnect, revoke the phone, destroy the local API key — **no confirmation**. |
+| `duress enable` | `--apply` | Enrol a real + decoy credential (read from **stdin**, never argv; only argon2id digests stored in the keychain) and turn the decoy on in `abysslink.yaml`. Dry-run by default. |
+| `duress unlock` | — | Present a credential on **stdin**: the real one shows the real rig view; the **decoy** one shows a benign view **and** degrades the real session for real via the kill-switch. Anything else is a verbatim `authentication failed` (exit 1). No `--apply` — like `panic`, it acts immediately (emergency design contract); the degradation is non-destructive and reversible. |
+| `duress status` | — | Report whether the decoy is configured (no secrets, no decoy-vs-real detail). |
+
+> **Duress decoy** is a **casual-coercion** mitigation (a shoulder-glance, a border-guard "show me") — it buys seconds-to-minutes, **not** forensic plausible-deniability. There is, by design and by test, **no destructive wipe**. Full-disk encryption (FileVault / LUKS) is the real at-rest control. See [Threat Model → Duress decoy](security/threat-model.md).
 
 **Module names** accepted by `enable`/`disable`: `ssh`, `tmux`, `mosh`, `ntfy`, `notify`, `watch`, `claudecode`, `code-server`, `ttyd`, `eternal-terminal`, `syncthing`, `upsnap`, `atuin`, `sandbox`, `asciinema`. (The web dashboard is configured via the `webui` stanza, not `enable`.)
 
