@@ -5,7 +5,7 @@ The README hero demo (`abysslink.gif` + `abysslink.mp4`) is generated from
 
 ## What the demo shows
 
-Three real value moments, in ~16 seconds: `abysslink up` printing its dry-run
+Three real value moments, in under 15 seconds: `abysslink up` printing its dry-run
 convergence plan ("6 changes planned … run `abysslink up --apply`"),
 `abysslink quorum eval` returning a DENY verdict for `tailscale funnel 443`
 without ever executing it (the compiled deny-floor), and `abysslink threat-model`
@@ -18,7 +18,7 @@ shown is read-only or dry-run — the demo never mutates the recording machine.
 # 1. Build a current binary onto your PATH (the tape's `Require abysslink`).
 make build && export PATH="$PWD:$PATH"
 
-# 2. Render from the repo root (~16s of playback).
+# 2. Render from the repo root (under 15 seconds of playback).
 vhs demo/abysslink.tape          # writes demo/abysslink.gif + demo/abysslink.mp4
 ```
 

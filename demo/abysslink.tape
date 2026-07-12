@@ -38,16 +38,16 @@ Sleep 400ms
 # 1 · The product promise: converge the whole stack, preview first, apply explicitly.
 Type "# preview every change before it happens"  Sleep 250ms  Enter
 Type "abysslink up"  Sleep 250ms  Enter
-Sleep 3.5s
+Sleep 3s
 Type "clear" Enter
 
 # 2 · The deny-floor: public exposure is un-askable, and the command never runs.
 Type "# dangerous actions hit a compiled deny-floor"  Sleep 250ms  Enter
 Type "abysslink quorum eval -- tailscale funnel 443"  Sleep 250ms  Enter
-Sleep 2.8s
+Sleep 2.3s
 Type "clear" Enter
 
 # 3 · The receipts: every defense in the threat model, checked live.
 Type "# every defense, verified live"  Sleep 250ms  Enter
 Type "abysslink threat-model"  Sleep 250ms  Enter
-Sleep 3.6s
+Sleep 3.1s
