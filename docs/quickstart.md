@@ -1,6 +1,20 @@
 # Quickstart
 
-Get Abysslink running in five minutes on macOS or Linux.
+Get Abysslink running in well under ten minutes on macOS or Linux.
+
+> **Onboarding time budget (re-measured for v4.1 against the current TUI `init`).**
+> Walking the documented steps below on a fresh install:
+>
+> | Step | What you do | Time |
+> |---|---|---|
+> | 1. Install | one `curl \| sh` (downloads + verifies + installs both binaries) | ~1 min |
+> | 1b. Daemon | `abysslink daemon enable --apply` | ~30 s |
+> | 2. Initialize | `abysslink init` — the guided TUI probes tools, asks backend/email/hostname, previews the config (`--yes` non-interactive is faster) | ~2–4 min |
+> | 3–4. Validate + Apply | `abysslink up` then `abysslink up --apply` | ~1 min |
+> | 5. Health check | `abysslink doctor` | ~15 s |
+> | 6. Enroll phone | `abysslink enroll phone --apply` (QR scans + phone joins) | ~2 min |
+>
+> **Core setup (steps 1–5) lands in ~5 minutes; the full flow including phone enrolment is ~7–8 minutes — inside the 10-minute budget.** The largest variable is the interactive `init` wizard; a non-interactive `abysslink init --yes --email you@example.com` cuts it to ~30 s. The numbers assume Tailscale is already installed and signed in; a first-ever Tailscale login adds a browser round-trip.
 
 ## Prerequisites
 
@@ -177,6 +191,18 @@ Then connect from an SSH client:
 1. iOS: [Blink Shell](https://blink.sh) (best mosh support) or [Termius](https://termius.com). Android: ConnectBot, or Termux from F-Droid for mosh.
 2. Connect to your rig's Tailscale hostname (e.g. `mosh user@my-rig.tail12345.ts.net -- tmux new -A -s main`)
 3. Your persistent tmux session is waiting
+
+## 7. Optional: enable the duress decoy
+
+If you cross borders or otherwise face **casual coercion** ("show me your unlocked laptop"), enrol a duress decoy. It ships OFF; turn it on with a real and a decoy passphrase read from stdin (never argv):
+
+```sh
+printf 'your-real-pass\nyour-decoy-pass\n' | abysslink duress enable --apply
+```
+
+Then, under coercion, run `abysslink duress unlock` and type the **decoy** passphrase: you get a benign rig view (a quiet machine, no fleet) while your real session is degraded for real in the background (armed agents killed, lockdown latch set). Verify it is live with `abysslink doctor` (`sec-duress` OK).
+
+This mitigates casual coercion for seconds-to-minutes. It is **not** plausible deniability against a forensic adversary, and there is deliberately **no** destructive wipe — full-disk encryption is your real at-rest control. See the [threat model](security/threat-model.md#duress-decoy--what-it-defends-and-what-it-deliberately-does-not).
 
 ## Next steps
 

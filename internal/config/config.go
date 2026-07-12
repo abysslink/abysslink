@@ -132,6 +132,62 @@ type Config struct {
 	// flags one narrow sensitive-read-then-egress pattern; the always-on posture
 	// when enabled is flag+audit only, quarantine is a further opt-in.
 	Sentinel SentinelConfig `yaml:"sentinel"`
+
+	// Duress holds the Phase 39 duress-decoy configuration (DUR-01..03). OPT-IN
+	// and ships OFF: an alternate credential unlocks a benign rig view and
+	// triggers the (reversible) kill-switch degradation. NON-DESTRUCTIVE by
+	// design — there is deliberately NO destructive-wipe field.
+	Duress DuressConfig `yaml:"duress"`
+
+	// Decoy holds the benign rig view shown on a duress unlock (Phase 39).
+	// OPT-IN, ships OFF. Pure read-substitution.
+	Decoy DecoyConfig `yaml:"decoy"`
+}
+
+// DuressConfig holds the Phase 39 duress-decoy settings (DUR-01..03). OPT-IN,
+// ships OFF (the zero value is disabled — KnownFields-safe: a config without
+// the stanza decodes to disabled). The credential itself is NEVER stored here:
+// only a non-secret selector (secret_source) lives in config; the real/decoy
+// credential DIGESTS live in the OS keychain (internal/duress).
+//
+// Deliberately-absent keys (schema-level rejection via KnownFields(true) — the
+// Funnel pattern): duress.wipe / duress.wipe_real / duress.destroy /
+// duress.plaintext_pin. A destructive duress-wipe is an EXPLICIT anti-feature
+// (security theater + self-DoS + detectable); there is no field, and therefore
+// no code path, that can request one.
+type DuressConfig struct {
+	// Enabled gates the feature. Ships false (opt-in).
+	Enabled bool `yaml:"enabled"`
+	// SecretSource selects where the credential digests are read from. The only
+	// storing value is "keychain" (the credential NEVER lives in config); "none"
+	// explicitly disables resolution. Empty resolves to "keychain" when Enabled.
+	SecretSource string `yaml:"secret_source,omitempty"`
+}
+
+// DuressSecretSourceKeychain is the only secret_source that stores credential
+// digests (in the OS keychain, never in config).
+const DuressSecretSourceKeychain = "keychain"
+
+// ResolvedSecretSource returns the effective secret source ("" -> "keychain").
+func (d DuressConfig) ResolvedSecretSource() string {
+	if d.SecretSource == "" {
+		return DuressSecretSourceKeychain
+	}
+	return d.SecretSource
+}
+
+// DecoyConfig holds the benign rig view shown when the DECOY credential is
+// entered. OPT-IN (ships off). The view is pure read-substitution — no field
+// here can request a destructive action.
+//
+// Deliberately-absent keys (KnownFields rejection): decoy.wipe_real /
+// decoy.plaintext_pin / decoy.reveal_real.
+type DecoyConfig struct {
+	// Enabled gates the benign-view substitution. Ships false (opt-in).
+	Enabled bool `yaml:"enabled"`
+	// Hostname is the benign hostname shown in the decoy view. Empty resolves to
+	// a generic default in internal/duress. Validated DNS-safe when set.
+	Hostname string `yaml:"hostname,omitempty"`
 }
 
 // HardwareKeysConfig holds Phase 37 hardware-backed SSH key settings.
@@ -1083,6 +1139,12 @@ func Defaults() *Config {
 		Quorum: QuorumConfig{
 			Enabled: true,
 		},
+		// Duress / Decoy defaults (Phase 39, DUR-01..03): OPT-IN and ship OFF.
+		// A false trigger — or a benign view an operator forgot they enabled —
+		// is an availability/confusion risk, so both default disabled. The
+		// credential digests live in the keychain, never in config.
+		Duress: DuressConfig{Enabled: false},
+		Decoy:  DecoyConfig{Enabled: false},
 	}
 }
 
@@ -1250,6 +1312,8 @@ func Validate(cfg *Config) error {
 		validateMobileGrantPorts,
 		validateQuorum,
 		validateSentinel,
+		validateDuress,
+		validateDecoy,
 	} {
 		if err := validate(cfg); err != nil {
 			return err
@@ -1676,6 +1740,44 @@ func validateDeadman(cfg *Config) error {
 	if d.IntervalHours != 0 && d.IntervalHours < DeadmanIntervalFloorHours {
 		return fmt.Errorf("config: deadman.interval_hours %d must be >= %d (the no-contact floor); 0 means the %dh default",
 			d.IntervalHours, DeadmanIntervalFloorHours, DeadmanDefaultIntervalHours)
+	}
+	return nil
+}
+
+// validateDuress enforces the DUR-01..03 config contract. A DISABLED stanza
+// never constrains (opt-in). When ENABLED, secret_source must be the keychain
+// selector (or empty, which resolves to keychain) or the explicit "none" — any
+// other value is a load error, never a clamp, so a typo can never silently
+// leave the decoy inert (a config typo must fail closed, not be papered over).
+// The credential itself is NEVER in config; there is nothing else to validate
+// here. The doctor sec-duress check verifies the digest is actually stored.
+func validateDuress(cfg *Config) error {
+	d := cfg.Duress
+	if !d.Enabled {
+		return nil
+	}
+	switch d.SecretSource {
+	case "", DuressSecretSourceKeychain, "none":
+		return nil
+	default:
+		return fmt.Errorf("config: duress.secret_source %q must be %q or none — the credential digest lives in the OS keychain, never in config",
+			d.SecretSource, DuressSecretSourceKeychain)
+	}
+}
+
+// validateDecoy enforces the benign-view contract. A DISABLED stanza never
+// constrains. When ENABLED, an explicit hostname must be DNS-safe — it is a
+// display value, but is validated defensively so it can never carry a
+// leading-dash argv token (D-03 argv-site guard, reusing ValidateHostname).
+func validateDecoy(cfg *Config) error {
+	dc := cfg.Decoy
+	if !dc.Enabled {
+		return nil
+	}
+	if dc.Hostname != "" {
+		if err := ValidateHostname(dc.Hostname); err != nil {
+			return fmt.Errorf("config: decoy.hostname %q is not DNS-safe: %w", dc.Hostname, err)
+		}
 	}
 	return nil
 }
