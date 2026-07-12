@@ -47,6 +47,7 @@ import (
 	"github.com/abysslink/abysslink/internal/metrics"
 	notifymod "github.com/abysslink/abysslink/internal/modules"
 	notify "github.com/abysslink/abysslink/internal/modules/notify"
+	"github.com/abysslink/abysslink/internal/modules/sentinel"
 	"github.com/abysslink/abysslink/internal/notifyv2"
 	platformauto "github.com/abysslink/abysslink/internal/platform/auto"
 	"github.com/abysslink/abysslink/internal/push"
@@ -209,7 +210,16 @@ func main() {
 	} else if cfg.Gate.Enforcing {
 		slog.Warn("abysslinkd: quorum disabled with an enforcing gate — EVERY exec requires approval (pre-quorum behavior, strictly tighter)")
 	}
-	gated := gate.New(base, gateOpts...)
+	// P-B2 compromised-agent SENTINEL: a non-invasive shell.Runner decorator
+	// placed INSIDE the gate so it sees full argv on every gated exec without
+	// touching the single-slot gate observer that budget.Watcher owns. Disabled
+	// by default (cfg.Sentinel.Enabled=false) — then a nil engine makes it a pure
+	// pass-through. When enabled it flags the read-then-egress exfil pattern and,
+	// only behind cfg.Sentinel.Quarantine, invokes the reversible dead-man
+	// lockdown. Wraps ONLY the gated user/agent-exec chain; `base` stays raw for
+	// the D-40 daemon-internal consumers.
+	sentEng := buildSentinelEngine(ctx, cfg)
+	gated := gate.New(sentinel.New(base, sentEng), gateOpts...)
 
 	kc, kerr := secrets.NewStore(ctx, gated)
 	if kerr != nil {

@@ -566,6 +566,11 @@ var atRiskTightenedChecks = map[string]bool{
 	// E4.1: an at-risk operator must have the quorum gate ENFORCING — shadow
 	// evaluation or a disabled quorum escalates from WARN to FATAL.
 	"sec-quorum-enabled": true,
+	// P-B2/E4.2: an at-risk operator should have the compromised-agent
+	// exfil-pattern detector armed — a disabled detector escalates from WARN to
+	// FATAL. The rule self-test (sec-sentinel-rules) is already FATAL in every
+	// profile when broken and is not in this map.
+	"sec-sentinel-enabled": true,
 }
 
 // deadmanRequiredCheck is the check ID for the at-risk FATAL finding emitted

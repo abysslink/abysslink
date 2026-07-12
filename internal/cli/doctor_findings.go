@@ -159,6 +159,11 @@ func collectDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Dep
 	// after the sec family so they group under the same module heading.
 	findings = append(findings, quorumDoctorFindings(ctx, cc.cfg)...)
 
+	// P-B2 compromised-agent SENTINEL posture (sec-sentinel-*): two
+	// deterministic, hermetic checks appended right after the quorum family so
+	// they group under the same "sec" module heading.
+	findings = append(findings, sentinelDoctorFindings(ctx, cc.cfg)...)
+
 	// Phase 21 optional-module posture.
 	findings = append(findings, mod3DoctorFindings(ctx, cc.cfg, cc.runner)...)
 
