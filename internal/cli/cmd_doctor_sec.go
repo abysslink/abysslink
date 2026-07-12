@@ -32,6 +32,7 @@ import (
 	"github.com/abysslink/abysslink/internal/backend"
 	"github.com/abysslink/abysslink/internal/config"
 	"github.com/abysslink/abysslink/internal/daemon"
+	"github.com/abysslink/abysslink/internal/duress"
 	"github.com/abysslink/abysslink/internal/hwkey"
 	"github.com/abysslink/abysslink/internal/modules"
 	"github.com/abysslink/abysslink/internal/platform"
@@ -751,7 +752,41 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 // SECTION 3 — aggregator
 // ---------------------------------------------------------------------------
 
-// secDoctorFindings runs all 23 sec-*  checks in a stable order and returns the
+// secDuressCheck surfaces the duress-decoy posture as a sec-* finding (DUR-01..
+// 03 / POL-02). The footgun the check guards is an INERT decoy: an operator who
+// enabled duress but whose decoy credential cannot actually be resolved has a
+// false sense of safety — that silent-downgrade is FATAL in every profile
+// (precedent: secHwkeyKindCheck software-key case). A correctly-configured decoy
+// is OK; a keychain that cannot be reached to confirm the digest is WARN
+// (tightened to FATAL under --profile at-risk). nil-safe on cc.cfg / deps.Keychain.
+func secDuressCheck(ctx context.Context, cc *cmdContext, deps modules.Deps) modules.Finding {
+	const check = "sec-duress"
+	if cc.cfg == nil || !cc.cfg.Duress.Enabled {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+			Message: "duress decoy: disabled (opt-in)"}
+	}
+	if cc.cfg.Duress.ResolvedSecretSource() != config.DuressSecretSourceKeychain {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
+			Message: fmt.Sprintf("duress is enabled but secret_source is %q — the decoy is INERT (no credential store); set secret_source: keychain and re-run `abysslink duress enable --apply`",
+				cc.cfg.Duress.ResolvedSecretSource())}
+	}
+	if deps.Keychain == nil {
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: "duress enabled but the keychain is unavailable — cannot confirm the decoy credential is stored; re-run once the keychain is reachable. Reminder: the decoy mitigates casual coercion only (seconds-to-minutes), not a forensic adversary"}
+	}
+	if _, err := deps.Keychain.Get(ctx, duress.KeychainService, duress.DecoyAccount); err != nil {
+		if errors.Is(err, secrets.ErrNotFound) {
+			return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityFatal,
+				Message: "duress is enabled but no decoy credential is stored — the decoy is INERT; run `abysslink duress enable --apply` to enrol it"}
+		}
+		return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityWarning,
+			Message: "duress enabled but the decoy credential could not be read: " + err.Error() + " — re-run once the keychain is reachable"}
+	}
+	return modules.Finding{Module: "sec", Check: check, Severity: modules.SeverityOK,
+		Message: "duress decoy configured (casual-coercion mitigation only — NOT forensic deniability; the config stanza is itself a forensic tell)"}
+}
+
+// secDoctorFindings runs all 24 sec-*  checks in a stable order and returns the
 // findings. The 3 alias checks read from the pre-computed metFindings /
 // webuiFindings / auditFindings slices so the underlying Phase-17/18/19 checks
 // run exactly once (RESEARCH Pitfall 3). The 6 SSH checks degrade gracefully —
@@ -770,7 +805,7 @@ func secAliasFromFindings(findings []modules.Finding, srcCheck, newCheck, okMsg 
 func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, pentest bool,
 	metFindings, webuiFindings, auditFindings []modules.Finding,
 	supplyFindings ...[]modules.Finding) []modules.Finding {
-	findings := make([]modules.Finding, 0, 23)
+	findings := make([]modules.Finding, 0, 24)
 
 	// SSH checks (6) — guarded so a parse failure never crashes the doctor run.
 	findings = append(findings, safeSSHCheck("sec-ssh-permitroot", func() modules.Finding { return secSSHPermitRootCheck(ctx, cc.runner, pentest) }))
@@ -847,6 +882,12 @@ func secDoctorFindings(ctx context.Context, cc *cmdContext, deps modules.Deps, p
 	// kind (HWK-03) + local boot-state attestation (ATT-02).
 	findings = append(findings, secHwkeyKindCheck(ctx, cc))
 	findings = append(findings, secAttestChecks(ctx, cc)...)
+
+	// Phase 39 (DUR-01..03 / POL-02): duress-decoy posture. Appended at the very
+	// END so the position-asserted 23-prefix + Phase-37 additions are unchanged;
+	// deterministic over a config with no duress stanza (OK) so it renders one
+	// stable line in the golden.
+	findings = append(findings, secDuressCheck(ctx, cc, deps))
 
 	return findings
 }

@@ -43,12 +43,24 @@ Four setup-guide footguns are enforced by dedicated gate/doctor/HMAC seams:
 - **The per-rig notification HMAC is domain-separated.** It binds a fixed protocol domain tag, a format version, and the rig identity as length-prefixed fields, so a signature cannot be replayed across rigs or protocols even under a shared key; the comparison is constant-time (`hmac.Equal`).
 - **New host-posture checks are strict under at-risk.** `sec-tailnet-lock`, `sec-autologin`, and `sec-remote-login` are WARN by default and become FATAL under `abysslink doctor --profile at-risk`.
 
+## Duress decoy (v4.1, opt-in)
+
+The duress decoy is a **human-factors mitigation for casual coercion** (a shoulder-glance, a border-guard "show me", a grabbed terminal). It ships OFF; enable it with `abysslink duress enable --apply`.
+
+- **A decoy credential shows a benign view AND degrades the real session for real.** Entering the decoy credential renders a benign rig view (a quiet machine, no fleet, no live sessions) and, at the same time, fires the kill-switch: armed agents are frozen and killed and a persisted lockdown latch is set so nothing re-arms.
+- **The decoy is non-destructive by design and by test.** There is no code path that deletes, truncates, or overwrites real data; a destructive duress-wipe is an explicit anti-feature (security theater + self-DoS + detectable). The static and behavioural no-wipe guarantee is enforced by `internal/duress/nowipe_test.go`.
+- **The credential comparison is constant-time over fixed-width digests.** The presented value is reduced to a 32-byte argon2id digest before a `crypto/subtle` compare, and every candidate slot is evaluated with no short-circuit, so neither the credential length nor which slot matched leaks through timing.
+- **Duress credentials never live in config.** Only a non-secret `secret_source: keychain` selector is stored in `abysslink.yaml`; the real and decoy credential digests live in the OS keychain.
+- **Duress activation is audit-logged without revealing which credential was used.** The activation records a single generic hash-only entry (no decoy-vs-real discriminator, no credential body).
+- **An enabled-but-inert decoy fails closed in doctor.** If duress is enabled but no decoy credential is resolvable, `abysslink doctor` reports `sec-duress` as FATAL (a false sense of safety is worse than none).
+
 ## Explicit non-goals
 
 - Protecting a laptop whose OS is already compromised (rootkit, malicious local user).
 - Hardening the phone-side terminal app or the phone's OS.
 - Auditing the security of Tailscale / Headscale / NetBird / mosh / ntfy themselves.
 - Anonymity or traffic-shape obfuscation — Abysslink is about access control, not anti-surveillance.
+- **Forensic plausible-deniability and destructive duress-wipe.** The duress decoy defends only casual coercion (seconds-to-minutes); it does not hide the real config from a forensic adversary, and there is deliberately no destructive duress-wipe.
 
 ## Supported versions
 
