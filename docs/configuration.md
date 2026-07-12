@@ -199,6 +199,17 @@ Opt-in compromised-agent exfil-pattern detector (see [agent-safety.md](agent-saf
 | `extra_sensitive_paths` | list | — | **Add-only** extra sensitive path prefixes or basenames, union-merged with the compiled defaults. |
 | `egress_allowlist` | list | — | **Add-only** extra benign egress hosts (`*.suffix`, a CIDR, or a bare host), union-merged with the compiled registries/tailnet/loopback defaults. |
 
+## `duress` / `decoy`
+
+Opt-in **casual-coercion** decoy (buys seconds-to-minutes; **not** forensic plausible-deniability; **no destructive wipe** by design). Enrol with `abysslink duress enable --apply` — credentials are read from stdin and only their argon2id **digests** are stored in the keychain, never in this file. See [Threat Model → Duress decoy](security/threat-model.md).
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `duress.enabled` | bool | `false` | Gates the feature (opt-in). |
+| `duress.secret_source` | string | `keychain` | Where credential digests are read from. Only `keychain` stores (the credential never lives in config); `none` disables resolution. Empty resolves to `keychain` when enabled. |
+| `decoy.enabled` | bool | `false` | Gates the benign-view substitution (opt-in). |
+| `decoy.hostname` | string | generic | Benign hostname shown in the decoy view; validated DNS-safe when set. Empty resolves to a generic default. |
+
 ## Self-hosted backends — `server`
 
 Used only when `backend.type` is `headscale` or `netbird`. See [headscale-ha.md](headscale-ha.md) and [netbird-scim.md](netbird-scim.md).
