@@ -580,6 +580,7 @@ make conformance        # behavioural conformance suite against a built binary
 - [ ] Hosted documentation site
 - [x] Secure memory (best-effort `mlock`/zeroize, defense-in-depth) & audit HMAC-key rotation (versioned epochs)
 - [x] Hardware-backed keys (Secure Enclave / FIDO2, opt-in)
+- [x] Duress decoy (non-destructive, constant-time; casual-coercion mitigation, opt-in)
 - [ ] Windows (WSL) tier-2 support
 
 ---
