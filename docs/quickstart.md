@@ -202,7 +202,7 @@ printf 'your-real-pass\nyour-decoy-pass\n' | abysslink duress enable --apply
 
 Then, under coercion, run `abysslink duress unlock` and type the **decoy** passphrase: you get a benign rig view (a quiet machine, no fleet) while your real session is degraded for real in the background (armed agents killed, lockdown latch set). Verify it is live with `abysslink doctor` (`sec-duress` OK).
 
-This mitigates casual coercion for seconds-to-minutes. It is **not** plausible deniability against a forensic adversary, and there is deliberately **no** destructive wipe — full-disk encryption is your real at-rest control. See the [threat model](security/threat-model.md#duress-decoy--what-it-defends-and-what-it-deliberately-does-not).
+This mitigates casual coercion for seconds-to-minutes. It is **not** plausible deniability against a forensic adversary, and there is deliberately **no** destructive wipe — full-disk encryption is your real at-rest control. See the [threat model](security/threat-model.md#duress-decoy-what-it-defends-and-what-it-deliberately-does-not).
 
 ## Next steps
 

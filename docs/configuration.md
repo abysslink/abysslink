@@ -186,6 +186,30 @@ Kill-switch thresholds used by `abysslink arm`. Shadow mode by default — the S
 | `enabled` | bool | `false` | Opt-in no-contact lockdown timer hosted by `abysslinkd`. |
 | `interval_hours` | int | `0` = 24 | No-contact window before lockdown; floor 1 h when enabled. |
 
+## `sentinel`
+
+Opt-in compromised-agent exfil-pattern detector (see [agent-safety.md](agent-safety.md) for the full honest scope and the measured false-positive rate). Ships **off**; every knob is **tighten-only** — the window bounds accept only values at or below the shipped defaults (a smaller window is stricter) and the lists are **add-only** unions with the compiled defaults. Deliberately-absent weakening keys (`disable_rules`, `remove_sensitive_paths`, `remove_allowlist`, any per-rule off switch) are rejected at the schema level by `KnownFields(true)` — the Funnel pattern.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Arms the detector. Off = a pure pass-through tap. |
+| `quarantine` | bool | `false` | On a fired detection, additionally invoke the reversible dead-man lockdown (disarm armed runs + latch the lockdown flag). Off = flag+audit only; ships off to avoid a false-quarantine self-DoS. |
+| `window_execs` | int | `0` = 5 | Max exec distance between the sensitive-read leg and the egress leg. Only `[1, 5]` accepted; larger is a load error. |
+| `window_seconds` | int | `0` = 60 | Max wall-clock gap between the legs. Only `[1, 60]` accepted; larger is a load error. |
+| `extra_sensitive_paths` | list | — | **Add-only** extra sensitive path prefixes or basenames, union-merged with the compiled defaults. |
+| `egress_allowlist` | list | — | **Add-only** extra benign egress hosts (`*.suffix`, a CIDR, or a bare host), union-merged with the compiled registries/tailnet/loopback defaults. |
+
+## `duress` / `decoy`
+
+Opt-in **casual-coercion** decoy (buys seconds-to-minutes; **not** forensic plausible-deniability; **no destructive wipe** by design). Enrol with `abysslink duress enable --apply` — credentials are read from stdin and only their argon2id **digests** are stored in the keychain, never in this file. See [Threat Model → Duress decoy](security/threat-model.md).
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `duress.enabled` | bool | `false` | Gates the feature (opt-in). |
+| `duress.secret_source` | string | `keychain` | Where credential digests are read from. Only `keychain` stores (the credential never lives in config); `none` disables resolution. Empty resolves to `keychain` when enabled. |
+| `decoy.enabled` | bool | `false` | Gates the benign-view substitution (opt-in). |
+| `decoy.hostname` | string | generic | Benign hostname shown in the decoy view; validated DNS-safe when set. Empty resolves to a generic default. |
+
 ## Self-hosted backends — `server`
 
 Used only when `backend.type` is `headscale` or `netbird`. See [headscale-ha.md](headscale-ha.md) and [netbird-scim.md](netbird-scim.md).

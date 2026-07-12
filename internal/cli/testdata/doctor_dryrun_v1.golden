@@ -116,6 +116,8 @@
     ✓  sec-quorum-floor
     ✓  sec-quorum-selftest
     ✓  sec-quorum-tripwire
+    ⚠  WARN  sec-sentinel-enabled  compromised-agent exfil-pattern detector is OFF (sentinel.enabled=false) — no read-then-egress signal or audit trail; defense-in-depth only, not a boundary
+    ✓  sec-sentinel-rules
   ────────────────────────────────────────────────────
   cli
     ⚠  WARN  ntfy-version  ntfy-version: could not probe version ("ntfy" --version exited 1) — version is unknown; upgrade to >= 2.21 (CVE-2026-39087, CVSS 9.8) to be safe

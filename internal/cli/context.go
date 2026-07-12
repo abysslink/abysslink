@@ -42,6 +42,7 @@ import (
 	"github.com/abysslink/abysslink/internal/modules/ntfy"
 	"github.com/abysslink/abysslink/internal/modules/power"
 	sandbox "github.com/abysslink/abysslink/internal/modules/sandbox"
+	"github.com/abysslink/abysslink/internal/modules/sentinel"
 	"github.com/abysslink/abysslink/internal/modules/ssh"
 	syncthing "github.com/abysslink/abysslink/internal/modules/syncthing"
 	tsmod "github.com/abysslink/abysslink/internal/modules/tailscale"
@@ -62,7 +63,7 @@ import (
 // (binary + hashes, never raw argv) and delegated verbatim — zero behavior
 // change this phase. Tests override this var to inject a MockRunner without
 // changing production behavior.
-var newRunner = func() shell.Runner { return gate.New(&shell.ExecRunner{}) }
+var newRunner = func() shell.Runner { return gate.New(sentinel.New(&shell.ExecRunner{}, nil)) }
 
 // cmdContext holds shared state for a command invocation.
 type cmdContext struct {

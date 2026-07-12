@@ -127,6 +127,12 @@ type Config struct {
 	// (the single D-04 arm switch). Every knob is tighten-only.
 	Quorum QuorumConfig `yaml:"quorum"`
 
+	// Sentinel holds the P-B2 compromised-agent exfil-pattern detector
+	// configuration (E4.2). OPT-IN and ships OFF (Enabled=false): the detector
+	// flags one narrow sensitive-read-then-egress pattern; the always-on posture
+	// when enabled is flag+audit only, quarantine is a further opt-in.
+	Sentinel SentinelConfig `yaml:"sentinel"`
+
 	// Duress holds the Phase 39 duress-decoy configuration (DUR-01..03). OPT-IN
 	// and ships OFF: an alternate credential unlocks a benign rig view and
 	// triggers the (reversible) kill-switch degradation. NON-DESTRUCTIVE by
@@ -341,6 +347,55 @@ func parseTierName(name string) (approve.TierLevel, error) {
 		return approve.TierBenign, fmt.Errorf("unknown tier %q (want sensitive or critical)", name)
 	}
 }
+
+// SentinelConfig holds the P-B2 compromised-agent exfil-pattern detector
+// settings (E4.2). OPT-IN, ships OFF (the zero value is a no-op tap:
+// KnownFields-safe, a config without the stanza decodes to disabled). Every
+// knob is TIGHTEN-ONLY: the window bounds accept only values at or below the
+// shipped defaults (a smaller window is stricter), and the lists are ADD-ONLY
+// unions with the compiled defaults.
+//
+// Deliberately-absent keys (schema-level rejection via KnownFields(true) — the
+// Funnel pattern): sentinel.disable_rules, sentinel.remove_sensitive_paths,
+// sentinel.remove_allowlist, and any per-rule off switch. A config can only
+// ADD sensitive paths / allowed egress hosts and only TIGHTEN the window — it
+// can never loosen the detector.
+type SentinelConfig struct {
+	// Enabled arms the detector. Ships false (opt-in). A disabled sentinel is a
+	// pure pass-through tap with no behavior change.
+	Enabled bool `yaml:"enabled"`
+	// Quarantine enables the reversible Tier-1 lockdown (disarm armed pgids +
+	// latch the lockdown flag, reusing the dead-man seam) on a fired detection.
+	// Ships false: a single heuristic is not enough confidence to auto-nuke a
+	// live session (a false quarantine is a self-DoS), so the default posture is
+	// flag+audit only. Meaningful only when Enabled.
+	Quarantine bool `yaml:"quarantine,omitempty"`
+	// WindowExecs is the max exec distance between the sensitive-read leg and the
+	// egress leg. Zero means the shipped default (SentinelDefaultWindowExecs).
+	// Only values in [1, default] are accepted — a larger window loosens the
+	// detector and is a load error.
+	WindowExecs int `yaml:"window_execs,omitempty"`
+	// WindowSeconds is the max wall-clock gap between the legs. Zero means the
+	// shipped default (SentinelDefaultWindowSeconds). Only values in
+	// [1, default] are accepted.
+	WindowSeconds int `yaml:"window_seconds,omitempty"`
+	// ExtraSensitivePaths are ADD-ONLY extra sensitive path prefixes or bare
+	// basenames, union-merged with the compiled defaults (~/.ssh, cloud creds,
+	// .env, browser secret stores, ...).
+	ExtraSensitivePaths []string `yaml:"extra_sensitive_paths,omitempty"`
+	// EgressAllowlist are ADD-ONLY extra benign egress hosts, union-merged with
+	// the compiled defaults (package registries, the tailnet, loopback). Use
+	// "*.example.com" for a suffix, a CIDR for a network, or a bare host.
+	EgressAllowlist []string `yaml:"egress_allowlist,omitempty"`
+}
+
+// SentinelDefaultWindowExecs is the shipped (loosest-allowed) exec-distance
+// window for the sensitive-read-then-egress fusion rule.
+const SentinelDefaultWindowExecs = 5
+
+// SentinelDefaultWindowSeconds is the shipped (loosest-allowed) wall-clock
+// window for the fusion rule.
+const SentinelDefaultWindowSeconds = 60
 
 // DeadmanConfig holds Phase 32 dead-man switch settings (SUPL-06).
 // The switch is OPT-IN and ships OFF (Enabled=false) per 32-CONTEXT.md — a
@@ -1256,6 +1311,7 @@ func Validate(cfg *Config) error {
 		ValidateHardwareKeys,
 		validateMobileGrantPorts,
 		validateQuorum,
+		validateSentinel,
 		validateDuress,
 		validateDecoy,
 	} {
@@ -1790,6 +1846,40 @@ func validateQuorumTierOverrides(q QuorumConfig) error {
 		if t < shippedTier {
 			return fmt.Errorf("config: quorum.tier_overrides[%s] = %q would LOWER the shipped tier (%s) — "+
 				"tier overrides are raise-only (D-08)", code, name, tierNameOf(shippedTier))
+		}
+	}
+	return nil
+}
+
+// validateSentinel enforces the P-B2 tighten-only detector config contract
+// (E4.2). The window bounds accept only values at or below the shipped defaults
+// (a smaller window is stricter); a larger window would loosen the detector and
+// is a load error (rejected, never clamped — the house style). List entries
+// must be non-empty. There is no field — and therefore no validation branch —
+// that can remove or disable the compiled sensitive-path set or egress
+// allowlist. The contract holds regardless of Enabled so a stanza can never be
+// pre-loaded with a loosening value.
+func validateSentinel(cfg *Config) error {
+	s := cfg.Sentinel
+	if n := s.WindowExecs; n != 0 && (n < 1 || n > SentinelDefaultWindowExecs) {
+		return fmt.Errorf("config: sentinel.window_execs %d must be in [1, %d] — "+
+			"a larger exec window than the shipped default would loosen the detector; 0 means the default",
+			n, SentinelDefaultWindowExecs)
+	}
+	if t := s.WindowSeconds; t != 0 && (t < 1 || t > SentinelDefaultWindowSeconds) {
+		return fmt.Errorf("config: sentinel.window_seconds %d must be in [1, %d] — "+
+			"a larger time window than the shipped default would loosen the detector; 0 means the default",
+			t, SentinelDefaultWindowSeconds)
+	}
+	for listName, list := range map[string][]string{
+		"extra_sensitive_paths": s.ExtraSensitivePaths,
+		"egress_allowlist":      s.EgressAllowlist,
+	} {
+		for _, entry := range list {
+			if strings.TrimSpace(entry) == "" {
+				return fmt.Errorf("config: sentinel.%s contains an empty entry — "+
+					"an empty entry would match nothing or everything; remove it", listName)
+			}
 		}
 	}
 	return nil
