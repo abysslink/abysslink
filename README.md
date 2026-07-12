@@ -575,7 +575,7 @@ make conformance        # behavioural conformance suite against a built binary
 - [x] Fleet / multi-rig fan-out + Wake-on-LAN
 - [x] Read-only web dashboard + Prometheus metrics (opt-in)
 - [x] Per-device revocable credentials (SSH CA + KRL) & one-scan phone enrollment
-- [x] Agent safety: `arm` kill-switch, phone approve loop, dead-man switch
+- [x] Agent safety: `arm` kill-switch, phone approve loop, dead-man switch, quorum action gate, compromised-agent sentinel (high-precision exfil-pattern detector, opt-in)
 - [x] Push gateway with sovereign UnifiedPush path (direct APNs/FCM legs experimental, off by default)
 - [ ] Hosted documentation site
 - [x] Secure memory (best-effort `mlock`/zeroize, defense-in-depth) & audit HMAC-key rotation (versioned epochs)
