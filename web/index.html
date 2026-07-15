@@ -52,10 +52,17 @@
 }
 /* ---------- base ---------- */
 *{box-sizing:border-box;margin:0}
-html{scroll-behavior:smooth}
+html{scroll-behavior:smooth;background:#04050a}
+@media (prefers-color-scheme: light){html{background:#DFE6F1}}
 body{
   color:var(--fg);font-family:var(--sans);line-height:1.65;font-size:17px;overflow-x:clip;
-  background:linear-gradient(to bottom,var(--bg) 0,var(--bg) 30%,var(--bg-deep) 100%);
+  /* the water column: sunlit surface → hadal black */
+  background:linear-gradient(to bottom,
+    #141a29 0%, #10131d 16%, #0f1117 34%, #0b0d14 58%, #07080d 80%, #04050a 100%);
+}
+@media (prefers-color-scheme: light){
+  body{background:linear-gradient(to bottom,
+    #FDFEFF 0%, #FAFBFD 20%, #F2F5FA 45%, #E9EEF6 72%, #DFE6F1 100%)}
 }
 img,video{max-width:100%;height:auto;display:block}
 a{color:var(--cyan);text-decoration-thickness:1px;text-underline-offset:3px}
@@ -76,21 +83,33 @@ section{padding:5.5rem 0;position:relative}
 }
 .zone::before,.zone::after{content:"";height:1px;background:var(--border);flex:1}
 .zone b{color:var(--cyan);font-weight:400}
-/* ---------- the sounding line + live depth HUD (signature) ---------- */
+/* ---------- the descent gauge + live depth HUD (signature) ---------- */
 .sound{position:relative}
-.sound::before{
-  content:"";position:absolute;top:0;bottom:0;left:max(1.4rem,calc(50% - 640px));width:2px;
+#gauge{
+  position:fixed;top:0;bottom:0;left:max(1.4rem,calc(50% - 640px));width:2px;z-index:5;
   background:repeating-linear-gradient(to bottom,var(--line) 0 6px,transparent 6px 24px);
-  opacity:.55;pointer-events:none;
+  opacity:.5;pointer-events:none;
+}
+#gauge i{
+  position:absolute;inset:0;display:block;
+  background:linear-gradient(to bottom,var(--cyan),var(--indigo) 60%,var(--violet));
+  transform-origin:top;transform:scaleY(var(--p,0));
+  box-shadow:0 0 12px 0 var(--glow);
+}
+#gauge::after{ /* the plumb bob riding the fill line */
+  content:"";position:absolute;left:50%;top:calc(var(--p,0)*100%);
+  width:9px;height:9px;border-radius:50%;transform:translate(-50%,-4px);
+  background:var(--cyan);box-shadow:0 0 14px 3px var(--glow);
 }
 #hud{
   position:fixed;bottom:1.2rem;left:1.1rem;z-index:20;font-family:var(--mono);font-size:.78rem;
-  color:var(--muted);background:color-mix(in srgb,var(--bg) 78%,transparent);
-  border:1px solid var(--border);border-radius:999px;padding:.34rem .9rem;
-  backdrop-filter:blur(8px);pointer-events:none;
+  color:var(--muted);background:color-mix(in srgb,var(--bg) 80%,transparent);
+  border:1px solid var(--border);border-radius:999px;padding:.38rem 1rem;
+  backdrop-filter:blur(8px);pointer-events:none;white-space:nowrap;
 }
 #hud b{color:var(--cyan);font-weight:400}
-@media (max-width:900px){.sound::before{display:none}#hud{font-size:.72rem}}
+#hud .z{color:var(--violet)}
+@media (max-width:900px){#gauge{display:none}#hud{font-size:.72rem;padding:.3rem .8rem}}
 /* ---------- bioluminescence (deep sections) ---------- */
 .plankton{position:absolute;inset:0;overflow:hidden;pointer-events:none}
 .plankton i{
@@ -102,6 +121,15 @@ section{padding:5.5rem 0;position:relative}
   .plankton i:nth-child(2n){animation-duration:19s;animation-delay:-6s}
   .plankton i:nth-child(3n){animation-duration:23s;animation-delay:-11s}
   @keyframes drift{from{transform:translateY(0)}to{transform:translateY(-46px)}}
+}
+/* the lure — one anglerfish light in the abyssal dark */
+.lure{position:absolute;right:9%;top:14%;width:6px;height:6px;border-radius:50%;
+  background:var(--warn);box-shadow:0 0 18px 5px rgba(255,208,96,.25);pointer-events:none}
+.lure::after{content:"";position:absolute;left:2px;top:5px;width:26px;height:26px;
+  border-left:1.5px solid rgba(255,208,96,.28);border-radius:0 0 0 22px;transform:rotate(-12deg)}
+@media (prefers-reduced-motion: no-preference){
+  .lure{animation:lurepulse 4.5s ease-in-out infinite}
+  @keyframes lurepulse{0%,100%{opacity:.85}50%{opacity:.35}}
 }
 /* ---------- nav ---------- */
 nav{position:sticky;top:0;z-index:10;background:color-mix(in srgb,var(--bg) 86%,transparent);
@@ -130,10 +158,29 @@ nav .links a:hover{color:var(--fg)}
 @media (prefers-color-scheme: light){.btn.primary{color:#FAFBFD}.btn.primary:hover{color:#FAFBFD}}
 .btn svg{flex:none}
 /* ---------- hero ---------- */
-.hero{padding:6rem 0 4.5rem;text-align:center;position:relative}
+.hero{padding:6rem 0 4rem;text-align:center;position:relative}
 .hero::before{
   content:"";position:absolute;inset:0;pointer-events:none;
   background:radial-gradient(720px 340px at 50% 0,var(--glow),transparent 70%);
+}
+/* god-rays: sunlight breaking the surface */
+.hero::after{
+  content:"";position:absolute;inset:0;pointer-events:none;opacity:.5;
+  background:
+    linear-gradient(112deg,transparent 42%,var(--glow) 47%,transparent 53%),
+    linear-gradient(94deg,transparent 30%,var(--glow) 34%,transparent 39%),
+    linear-gradient(76deg,transparent 60%,var(--glow) 66%,transparent 71%);
+  mask-image:linear-gradient(to bottom,#000 0,transparent 78%);
+  -webkit-mask-image:linear-gradient(to bottom,#000 0,transparent 78%);
+}
+/* the invitation to dive */
+.cue{display:inline-flex;align-items:center;gap:.55rem;margin-top:3rem;
+  font-family:var(--mono);font-size:.82rem;color:var(--muted);text-decoration:none}
+.cue:hover{color:var(--cyan)}
+.cue svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round}
+@media (prefers-reduced-motion: no-preference){
+  .cue svg{animation:bob 1.8s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(5px)}}
 }
 .hero h1{font-size:clamp(1.9rem,5.2vw,3.3rem);max-width:24ch;margin:0 auto 1rem;position:relative}
 .hero h1 .grad{background:linear-gradient(100deg,var(--cyan),var(--violet));
@@ -230,7 +277,10 @@ nav .links a:hover{color:var(--fg)}
 .faq p{color:var(--muted);margin-top:.7rem;font-size:.95rem}
 /* ---------- floor / footer ---------- */
 .floor{text-align:center}
-footer{border-top:1px solid var(--border);padding:3.5rem 0 5rem;color:var(--muted);font-size:.92rem}
+footer{border-top:1px solid var(--border);padding:3.5rem 0 5rem;color:var(--muted);font-size:.92rem;
+  background:linear-gradient(to bottom,transparent,rgba(44,224,245,.03))}
+footer .bed{font-family:var(--mono);font-size:.72rem;letter-spacing:.3em;text-transform:uppercase;
+  text-align:center;color:var(--muted);opacity:.65;margin-top:3.5rem}
 footer .cols{display:flex;flex-wrap:wrap;gap:2.5rem;justify-content:space-between;align-items:flex-start}
 footer a{color:var(--muted)}footer a:hover{color:var(--cyan)}
 footer .tag{font-family:var(--mono);color:var(--fg)}
@@ -238,7 +288,8 @@ footer .tag{font-family:var(--mono);color:var(--fg)}
 </head>
 <body>
 
-<div id="hud" aria-hidden="true">depth <b>0 m</b></div>
+<div id="gauge" aria-hidden="true"><i></i></div>
+<div id="hud" aria-hidden="true">depth <b>0 m</b> · <span class="z">surface</span></div>
 
 <nav aria-label="Main">
   <div class="wrap">
@@ -273,12 +324,13 @@ footer .tag{font-family:var(--mono);color:var(--fg)}
       <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span>dev@rig — abysslink</span></div>
       <video src="/assets/demo.mp4" poster="/assets/demo-poster.jpg" width="1200" height="600" autoplay loop muted playsinline aria-label="Terminal demo: abysslink up previews six planned changes without applying them, quorum eval denies a tailscale funnel command outright, and threat-model prints a live checklist of security defenses"></video>
     </div>
+    <a class="cue" href="#story"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M6 14l6 6 6-6"/></svg>begin the descent — the floor is 6,000 m down</a>
   </div>
 </header>
 
 <section class="sound" id="story">
   <div class="wrap">
-    <p class="zone">0–200 m · <b>sunlight zone</b> · where you live</p>
+    <p class="zone">−200 m · <b>sunlight zone</b> · where you live</p>
     <h2>Leave the desk. Keep the leash.</h2>
     <p class="lede">You start a long agent run and walk away. Your laptop stays home, unexposed. Three things can happen next — Abysslink has a move for each.</p>
 
@@ -334,7 +386,7 @@ footer .tag{font-family:var(--mono);color:var(--fg)}
 </section>
 
 <section class="sound" id="how-it-works">
-  <div class="plankton" aria-hidden="true"><i style="left:8%;top:20%"></i><i style="left:88%;top:12%"></i><i style="left:72%;top:70%"></i><i style="left:22%;top:82%"></i></div>
+  <div class="plankton" aria-hidden="true"><i style="left:8%;top:20%"></i><i style="left:88%;top:12%"></i><i style="left:72%;top:70%"></i><i style="left:22%;top:82%"></i><i style="left:52%;top:36%"></i><i style="left:34%;top:58%"></i></div>
   <div class="wrap">
     <p class="zone">−1,000 m · <b>midnight zone</b> · how it works</p>
     <h2>Nobody in the middle.</h2>
@@ -390,9 +442,10 @@ footer .tag{font-family:var(--mono);color:var(--fg)}
 </section>
 
 <section class="sound" id="trust">
-  <div class="plankton" aria-hidden="true"><i style="left:14%;top:30%"></i><i style="left:80%;top:55%"></i><i style="left:45%;top:85%"></i></div>
+  <div class="plankton" aria-hidden="true"><i style="left:14%;top:30%"></i><i style="left:80%;top:55%"></i><i style="left:45%;top:85%"></i><i style="left:64%;top:18%"></i></div>
+  <div class="lure" aria-hidden="true"></div>
   <div class="wrap">
-    <p class="zone">−2,500 m · <b>abyssal zone</b> · what it refuses to do</p>
+    <p class="zone">−4,000 m · <b>abyssal zone</b> · what it refuses to do</p>
     <h2>Security that argues back.</h2>
     <p class="lede">Warnings get clicked through, so the dangerous paths simply don't exist. Enforced in code — you cannot configure your way past them.</p>
     <ul class="refuse">
@@ -416,7 +469,7 @@ footer .tag{font-family:var(--mono);color:var(--fg)}
 
 <section class="sound floor" id="install">
   <div class="wrap">
-    <p class="zone">−3,800 m · <b>the floor</b> · you made it — get linked</p>
+    <p class="zone">−6,000 m · <b>hadal zone — the floor</b> · you made it, get linked</p>
     <h2>Install in one line.</h2>
     <p class="lede" style="margin:0 auto">macOS 13+ or Linux (amd64/arm64), disk encryption on, a Tailscale account (or self-hosted backend). About five minutes of commands to a phone-drivable rig — the <a href="/docs/quickstart/">quickstart</a> walks every step.</p>
     <div style="text-align:left;max-width:860px;margin:0 auto">
@@ -448,6 +501,7 @@ footer .tag{font-family:var(--mono);color:var(--fg)}
 
 <section class="faq sound" id="faq" style="padding-top:2rem">
   <div class="wrap">
+    <p class="zone">ascending · <b>decompression stop</b> · questions people actually ask</p>
     <h2>Questions people actually ask</h2>
     <details><summary>Does it phone home?</summary><p>No. Zero telemetry, enforced by a CI check that scans the codebase for telemetry imports. The only outbound calls are ones you invoke: your VPN backend's API, GitHub during <code>upgrade</code>/<code>verify</code>, your own push server. Every push path's visibility is documented in <a href="/docs/who-sees-what/">who sees what</a>.</p></details>
     <details><summary>What can my push provider read?</summary><p>A device token and a generic title — never content. The notification body has no field on the push wire by construction; your phone fetches it from your own machine over the private network with a single-use token.</p></details>
@@ -480,6 +534,7 @@ footer .tag{font-family:var(--mono);color:var(--fg)}
     <script defer data-domain="abysslink.dev" src="https://plausible.io/js/script.js"></script>
     <script data-goatcounter="https://YOURCODE.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
     -->
+    <p class="bed">⚓ sea floor · −6,000 m · the link holds</p>
   </div>
 </footer>
 
@@ -514,16 +569,30 @@ fetch('https://api.github.com/repos/abysslink/abysslink/releases/latest')
   setTimeout(cycle,1800);
 })();
 
-/* live depth HUD — rAF-throttled */
+/* live descent: HUD (depth · pressure · zone) + gauge fill — rAF-throttled */
 (function(){
-  var hud=document.getElementById('hud'),b=hud.querySelector('b'),ticking=false;
+  var hud=document.getElementById('hud'),b=hud.querySelector('b'),z=hud.querySelector('.z');
+  var gauge=document.getElementById('gauge'),ticking=false;
+  var MAX=6000;
+  function zone(d){
+    if(d<20)return'surface';
+    if(d<200)return'sunlight zone';
+    if(d<1000)return'twilight zone';
+    if(d<4000)return'midnight zone';
+    if(d<5900)return'abyssal zone';
+    return'hadal zone — the floor';
+  }
   function update(){
     var max=document.documentElement.scrollHeight-innerHeight;
-    var d=max>0?Math.round((scrollY/max)*3800):0;
-    b.textContent=d===0?'0 m':'−'+d.toLocaleString('en')+' m';
+    var p=max>0?scrollY/max:0;
+    var d=Math.round(p*MAX);
+    b.textContent=d===0?'0 m':'−'+d.toLocaleString('en')+' m · '+Math.round(1+d/10).toLocaleString('en')+' atm';
+    z.textContent=zone(d);
+    gauge.style.setProperty('--p',p.toFixed(4));
     ticking=false;
   }
   addEventListener('scroll',function(){if(!ticking){requestAnimationFrame(update);ticking=true}},{passive:true});
+  addEventListener('resize',update,{passive:true});
   update();
 })();
 
