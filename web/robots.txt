@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://abysslink.dev/sitemap.xml

@@ -35,6 +35,7 @@ Icon
 # Build
 goreleaser/
 site/
+_site/
 
 # Local planning (not committed)
 .planning/

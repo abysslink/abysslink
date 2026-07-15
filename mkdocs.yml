@@ -1,6 +1,6 @@
 site_name: Abysslink
 site_description: Paranoid-by-default phone-to-laptop remote setup over Tailscale
-site_url: https://abysslink.github.io/abysslink/
+site_url: https://abysslink.dev/docs/
 
 repo_name: abysslink/abysslink
 repo_url: https://github.com/abysslink/abysslink

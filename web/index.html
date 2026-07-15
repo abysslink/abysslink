@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Abysslink — vibe-code Claude from your phone, securely</title>
+<meta name="description" content="Hardened phone-to-laptop remote control over your own private mesh. Approve, watch, or kill an AI coding agent from your pocket. Zero telemetry.">
+<link rel="canonical" href="https://abysslink.dev/">
+<meta name="theme-color" content="#0f1117" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#FAFBFD" media="(prefers-color-scheme: light)">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://abysslink.dev/">
+<meta property="og:title" content="Abysslink — vibe-code Claude from your phone, securely">
+<meta property="og:description" content="Hardened phone-to-laptop remote control over your own private mesh. Approve, watch, or kill an AI coding agent from your pocket. Zero telemetry.">
+<meta property="og:image" content="https://abysslink.dev/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Abysslink — vibe-code Claude from your phone, securely">
+<meta name="twitter:description" content="Hardened phone-to-laptop control over your own private mesh. Zero telemetry.">
+<meta name="twitter:image" content="https://abysslink.dev/assets/og-image.png">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/assets/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="preload" href="/assets/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/jetbrains-mono-700.woff2" as="font" type="font/woff2" crossorigin>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Abysslink","operatingSystem":"macOS, Linux","applicationCategory":"DeveloperApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"license":"https://www.apache.org/licenses/LICENSE-2.0","url":"https://abysslink.dev/","downloadUrl":"https://github.com/abysslink/abysslink/releases/latest","softwareVersion":"4.1.0","description":"Hardened phone-to-laptop remote control over a private mesh VPN. Approve, watch, or kill an AI coding agent from your pocket. Zero telemetry."}
+</script>
+<style>
+/* ---------- fonts ---------- */
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url(/assets/fonts/jetbrains-mono-400.woff2) format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:700;font-display:swap;src:url(/assets/fonts/jetbrains-mono-700.woff2) format('woff2')}
+/* ---------- tokens (locked to internal/ui/theme.go) ---------- */
+:root{
+  --bg:#0f1117;--surface:#1a1d27;--border:#2a2d3a;--fg:#F8F8F2;--muted:#8B95A5;
+  --cyan:#2CE0F5;--indigo:#6E80F7;--violet:#B57BFF;--ok:#04B575;--warn:#FFD060;--fatal:#FF5F87;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --line:rgba(44,224,245,.55);
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#FAFBFD;--surface:#EFF2F7;--border:#D8DDE7;--fg:#101423;--muted:#475569;
+    --cyan:#0E7490;--indigo:#2540C0;--violet:#7C3AED;--ok:#02764C;--warn:#946200;--fatal:#B3003A;
+    --line:rgba(14,116,144,.45);
+    color-scheme:light;
+  }
+}
+/* ---------- base ---------- */
+*{box-sizing:border-box;margin:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.6;font-size:17px;overflow-x:clip}
+img,video{max-width:100%;height:auto;display:block}
+a{color:var(--cyan);text-decoration-thickness:1px;text-underline-offset:3px}
+a:hover{color:var(--violet)}
+code,pre,.mono{font-family:var(--mono)}
+:focus-visible{outline:2px solid var(--cyan);outline-offset:3px;border-radius:2px}
+::selection{background:var(--violet);color:var(--bg)}
+h1,h2,h3{font-family:var(--mono);letter-spacing:-.02em;line-height:1.2}
+h2{font-size:clamp(1.5rem,3.5vw,2.1rem);margin-bottom:.75rem}
+section{padding:5rem 0;position:relative}
+.wrap{max-width:1060px;margin:0 auto;padding:0 1.25rem}
+/* ---------- the sounding line (signature element) ---------- */
+.sound{position:relative}
+.sound::before{
+  content:"";position:absolute;top:0;bottom:0;left:max(1.5rem,calc(50% - 620px));width:2px;
+  background:repeating-linear-gradient(to bottom,var(--line) 0 6px,transparent 6px 22px);
+  opacity:.5;pointer-events:none;
+}
+.depth{
+  position:absolute;top:4.75rem;left:max(1.5rem,calc(50% - 620px));transform:translateX(-42%);
+  font-family:var(--mono);font-size:.72rem;color:var(--muted);background:var(--bg);
+  padding:.2rem 0;writing-mode:vertical-rl;letter-spacing:.12em;
+}
+@media (max-width:900px){.sound::before,.depth{display:none}}
+/* ---------- nav ---------- */
+nav{position:sticky;top:0;z-index:10;background:color-mix(in srgb,var(--bg) 88%,transparent);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
+nav .wrap{display:flex;align-items:center;gap:1rem;padding-top:.7rem;padding-bottom:.7rem}
+nav .brand{display:flex;align-items:center;gap:.55rem;font-family:var(--mono);font-weight:700;
+  font-size:1.05rem;color:var(--fg);text-decoration:none}
+nav .brand:hover{color:var(--cyan)}
+nav .links{margin-left:auto;display:flex;align-items:center;gap:1.1rem;font-size:.92rem}
+nav .links a{color:var(--muted);text-decoration:none}
+nav .links a:hover{color:var(--fg)}
+@media (max-width:480px){
+  nav .wrap{flex-wrap:wrap;row-gap:.4rem}
+  nav .brand{font-size:.98rem}
+  nav .links{gap:.7rem;font-size:.85rem}
+  nav .links .btn{padding:.45rem .8rem;font-size:.85rem}
+}
+/* ---------- buttons ---------- */
+.btn{display:inline-flex;align-items:center;gap:.5rem;font-family:var(--mono);font-size:.95rem;
+  padding:.65rem 1.15rem;border-radius:8px;text-decoration:none;border:1px solid var(--border);
+  color:var(--fg);transition:transform .15s,border-color .15s}
+.btn:hover{transform:translateY(-1px);color:var(--fg)}
+.btn.primary{background:linear-gradient(120deg,var(--cyan),var(--indigo));color:#0f1117;
+  border:none;font-weight:700}
+.btn.primary:hover{color:#0f1117;filter:brightness(1.08)}
+@media (prefers-color-scheme: light){.btn.primary{color:#FAFBFD}.btn.primary:hover{color:#FAFBFD}}
+.btn svg{flex:none}
+/* ---------- hero ---------- */
+.hero{padding:5.5rem 0 4rem;text-align:center}
+.hero h1{font-size:clamp(1.9rem,5vw,3.1rem);max-width:21ch;margin:0 auto .9rem}
+.hero h1 .grad{background:linear-gradient(100deg,var(--cyan),var(--violet));
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.hero .sub{color:var(--muted);max-width:62ch;margin:0 auto 2rem;font-size:1.06rem}
+.hero .ctas{display:flex;gap:.8rem;justify-content:center;flex-wrap:wrap;margin-bottom:.9rem}
+.chip{display:inline-block;font-family:var(--mono);font-size:.8rem;color:var(--muted);
+  border:1px solid var(--border);border-radius:999px;padding:.25rem .8rem;margin-bottom:1.6rem}
+.chip b{color:var(--ok);font-weight:400}
+/* terminal frame */
+.term{max-width:880px;margin:2.4rem auto 0;border:1px solid var(--border);border-radius:12px;
+  background:#0f1117;box-shadow:0 24px 70px -30px rgba(44,224,245,.25);overflow:hidden;text-align:left}
+.term .bar{display:flex;gap:.45rem;padding:.6rem .9rem;border-bottom:1px solid var(--border);align-items:center}
+.term .bar i{width:.72rem;height:.72rem;border-radius:50%;display:block}
+.term .bar i:nth-child(1){background:var(--fatal)}.term .bar i:nth-child(2){background:var(--warn)}
+.term .bar i:nth-child(3){background:var(--ok)}
+.term .bar span{margin-left:.5rem;font-family:var(--mono);font-size:.78rem;color:#8B95A5}
+.term video{width:100%;aspect-ratio:2/1;background:#0f1117}
+/* entrance moment */
+@media (prefers-reduced-motion: no-preference){
+  .hero h1,.hero .sub,.hero .ctas,.hero .chip{animation:rise .6s cubic-bezier(.2,.7,.2,1) both}
+  .hero .sub{animation-delay:.08s}.hero .ctas{animation-delay:.16s}.hero .chip{animation-delay:.2s}
+  .term{animation:rise .7s .25s cubic-bezier(.2,.7,.2,1) both}
+  @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+}
+/* ---------- steps ---------- */
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem;margin-top:2rem}
+.step{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.4rem}
+.step .k{font-family:var(--mono);color:var(--cyan);font-size:.85rem;margin-bottom:.5rem;display:block}
+.step h3{font-size:1.02rem;margin-bottom:.45rem}
+.step p{color:var(--muted);font-size:.95rem}
+/* ---------- diagram ---------- */
+.diagram{margin:2.2rem auto 0;max-width:760px}
+.diagram svg{width:100%;height:auto}
+/* ---------- features ---------- */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin-top:2rem}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.4rem}
+.card svg{width:26px;height:26px;stroke:var(--cyan);fill:none;stroke-width:1.8;
+  stroke-linecap:round;stroke-linejoin:round;margin-bottom:.7rem}
+.card h3{font-size:1rem;margin-bottom:.4rem}
+.card p{color:var(--muted);font-size:.94rem}
+/* ---------- trust ---------- */
+.trust{border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--surface)}
+.trust ul{list-style:none;display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+  gap:1.2rem;padding:0;margin-top:1.6rem}
+.trust li{font-size:.95rem;color:var(--muted)}
+.trust li b{display:block;color:var(--fg);font-family:var(--mono);font-size:.92rem;margin-bottom:.3rem}
+.trust li b::before{content:"✓ ";color:var(--ok)}
+/* ---------- install ---------- */
+.tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:1.8rem 0 0}
+.tabs button{font-family:var(--mono);font-size:.88rem;padding:.5rem 1rem;border-radius:8px 8px 0 0;
+  border:1px solid var(--border);border-bottom:none;background:transparent;color:var(--muted);cursor:pointer}
+.tabs button[aria-selected="true"]{background:var(--surface);color:var(--fg)}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:0 12px 12px 12px;padding:1.3rem}
+.panel[hidden]{display:none}
+.cmd{display:flex;align-items:center;gap:.7rem;background:var(--bg);border:1px solid var(--border);
+  border-radius:8px;padding:.8rem 1rem;margin:.6rem 0;overflow-x:auto}
+.cmd code{font-size:.86rem;white-space:pre;flex:1}
+.cmd code::before{content:"$ ";color:var(--muted)}
+.copy{flex:none;font-family:var(--mono);font-size:.75rem;color:var(--muted);background:none;
+  border:1px solid var(--border);border-radius:6px;padding:.3rem .6rem;cursor:pointer}
+.copy:hover{color:var(--cyan);border-color:var(--cyan)}
+.panel p{color:var(--muted);font-size:.9rem;margin-top:.5rem}
+/* ---------- faq ---------- */
+.faq details{border:1px solid var(--border);border-radius:10px;background:var(--surface);
+  padding:1rem 1.2rem;margin-top:.7rem}
+.faq summary{font-family:var(--mono);font-size:.97rem;cursor:pointer;color:var(--fg)}
+.faq p{color:var(--muted);margin-top:.7rem;font-size:.95rem}
+/* ---------- footer ---------- */
+footer{border-top:1px solid var(--border);padding:3.5rem 0 4.5rem;color:var(--muted);font-size:.92rem}
+footer .cols{display:flex;flex-wrap:wrap;gap:2.5rem;justify-content:space-between;align-items:flex-start}
+footer a{color:var(--muted)}footer a:hover{color:var(--cyan)}
+footer .tag{font-family:var(--mono);color:var(--fg)}
+.center{text-align:center}
+.mt{margin-top:2rem}
+</style>
+</head>
+<body>
+
+<nav aria-label="Main">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <svg width="26" height="26" viewBox="0 0 512 512" aria-hidden="true"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#2CE0F5" offset="0"/><stop stop-color="#B57BFF" offset="1"/></linearGradient></defs><path d="M256 64 L116 448M256 64 L396 448" fill="none" stroke="url(#g)" stroke-width="52" stroke-linecap="round"/><rect x="150" y="320" width="212" height="74" rx="37" fill="none" stroke="url(#g)" stroke-width="30"/></svg>
+      abysslink
+    </a>
+    <div class="links">
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/abysslink/abysslink">GitHub</a>
+      <a class="btn primary" href="#install">Get started</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+
+<header class="hero sound">
+  <span class="depth" aria-hidden="true">0 m — surface</span>
+  <div class="wrap">
+    <p class="chip">latest release <b id="ver">v4.1.0</b></p>
+    <h1>Vibe-code Claude from your phone — <span class="grad">securely</span>.</h1>
+    <p class="sub">One Go binary wires Tailscale, hardened SSH, tmux/mosh, and self-hosted push into a phone-controlled dev rig. Dry-run by default. Audited. Reversible. Zero telemetry. Works with any agent — or none.</p>
+    <div class="ctas">
+      <a class="btn primary" href="#install">Get started</a>
+      <a class="btn" href="https://github.com/abysslink/abysslink">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        Star on GitHub
+      </a>
+    </div>
+    <div class="term">
+      <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span>dev@rig — abysslink</span></div>
+      <video src="/assets/demo.mp4" poster="/assets/demo-poster.jpg" width="1200" height="600" autoplay loop muted playsinline aria-label="Terminal demo: abysslink up previews six planned changes without applying them, quorum eval denies a tailscale funnel command outright, and threat-model prints a live checklist of security defenses"></video>
+    </div>
+  </div>
+</header>
+
+<section class="sound" id="how-it-feels">
+  <span class="depth" aria-hidden="true">−200 m</span>
+  <div class="wrap">
+    <h2>Leave the desk. Keep control.</h2>
+    <p style="color:var(--muted);max-width:60ch">You start an AI coding agent on your laptop and walk away. Nothing about your machine is exposed to the internet — yet you're never out of the loop.</p>
+    <div class="steps">
+      <div class="step"><span class="k">1 · buzz</span><h3>Your phone taps you</h3><p>"rig-1 · claude · needs input." Not marketing spam — the agent actually stopped and is waiting. The notification body never touches a third-party server.</p></div>
+      <div class="step"><span class="k">2 · tap</span><h3>You're in the live session</h3><p>One tap opens the exact terminal on your laptop — same screen, same scrollback, cursor where the agent left it. Read, type the next instruction, pocket the phone.</p></div>
+      <div class="step"><span class="k">3 · veto</span><h3>Or you stop it cold</h3><p>Off the rails? The kill-switch freezes it mid-keystroke and can roll the code back to the snapshot taken before it started. From your pocket.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sound" id="how-it-works">
+  <span class="depth" aria-hidden="true">−600 m</span>
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p style="color:var(--muted);max-width:60ch">Your phone and laptop talk directly over an encrypted private mesh. The coordination server exchanges keys only — it never sees your traffic, your code, or your commands.</p>
+    <div class="diagram">
+      <svg viewBox="0 0 760 300" role="img" aria-label="Diagram: a phone and a laptop connected directly by an encrypted tunnel; a coordination server off to the side exchanges keys only; the laptop runs the abysslink daemon, tmux and an AI agent">
+        <defs><linearGradient id="tun" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2CE0F5"/><stop offset="1" stop-color="#B57BFF"/></linearGradient></defs>
+        <!-- phone -->
+        <rect x="30" y="80" width="120" height="150" rx="16" fill="none" stroke="#2CE0F5" stroke-width="2.5"/>
+        <rect x="70" y="205" width="40" height="6" rx="3" fill="#2CE0F5"/>
+        <text x="90" y="130" text-anchor="middle" fill="var(--fg)" font-size="15" font-family="var(--mono)">phone</text>
+        <text x="90" y="155" text-anchor="middle" fill="var(--muted)" font-size="11" font-family="var(--mono)">mosh · ntfy</text>
+        <!-- tunnel -->
+        <path d="M160 155 H 470" stroke="url(#tun)" stroke-width="3" stroke-dasharray="7 7"/>
+        <text x="315" y="140" text-anchor="middle" fill="var(--muted)" font-size="12" font-family="var(--mono)">WireGuard tunnel — end-to-end encrypted</text>
+        <!-- laptop -->
+        <rect x="480" y="70" width="250" height="160" rx="12" fill="none" stroke="#B57BFF" stroke-width="2.5"/>
+        <text x="605" y="103" text-anchor="middle" fill="var(--fg)" font-size="15" font-family="var(--mono)">your laptop</text>
+        <text x="605" y="130" text-anchor="middle" fill="var(--muted)" font-size="11.5" font-family="var(--mono)">abysslinkd · tmux · agent</text>
+        <text x="605" y="152" text-anchor="middle" fill="var(--muted)" font-size="11.5" font-family="var(--mono)">self-hosted push · audit log</text>
+        <text x="605" y="188" text-anchor="middle" fill="#04B575" font-size="11.5" font-family="var(--mono)">nothing exposed to the internet</text>
+        <!-- control plane -->
+        <rect x="255" y="238" width="180" height="44" rx="22" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="4 5"/>
+        <text x="345" y="265" text-anchor="middle" fill="var(--muted)" font-size="11.5" font-family="var(--mono)">control plane — keys only</text>
+        <path d="M240 200 Q 250 240 265 252" stroke="var(--muted)" stroke-width="1.2" fill="none" stroke-dasharray="3 5"/>
+        <path d="M480 210 Q 460 240 435 252" stroke="var(--muted)" stroke-width="1.2" fill="none" stroke-dasharray="3 5"/>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<section class="sound" id="features">
+  <span class="depth" aria-hidden="true">−1,000 m</span>
+  <div class="wrap">
+    <h2>Built like it expects trouble</h2>
+    <div class="grid">
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+        <h3>Session-aware pushes</h3><p>Every wake names the rig, agent, and pane that needs you — a tap drops you into that exact live tmux session, not a guess.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4H4v16h16v-7"/><path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>
+        <h3>Preview before apply</h3><p>Every mutating command plans first and changes nothing until you add <code>--apply</code>. You always see the diff coming.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="M9 12l2 2 4-4"/></svg>
+        <h3>Locked down by default</h3><p>Tailnet-only binds, Funnel rejected at the config schema, disk encryption required — <code>doctor</code> fails closed rather than warn-and-hope.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 9h6v6H9z"/></svg>
+        <h3>Kill-switch for agents</h3><p><code>arm</code> wraps a run with wall-clock and loop budgets: freeze it, approve or kill from your phone, roll back to the pre-run snapshot.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5 15.5 15.5M6 9v6a3 3 0 0 0 3 3h3"/></svg>
+        <h3>Tamper-evident audit trail</h3><p>Every file change is backed up first and chained into an HMAC-signed log. <code>uninstall</code> reverses everything from those backups.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+        <h3>Fleet-ready</h3><p>Enroll every machine you own as a named rig; fan out status, doctor, and panic with <code>--all-rigs</code>. Wake a sleeping box over LAN.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="trust sound" id="trust">
+  <span class="depth" aria-hidden="true">−2,000 m</span>
+  <div class="wrap">
+    <h2>The trust facts</h2>
+    <ul>
+      <li><b>Zero telemetry</b>A CI conformance check rejects telemetry imports on every build. Outbound calls happen only when you invoke the feature that needs them.</li>
+      <li><b>Signed, reproducible releases</b>Cosign-signed with SLSA Build L3 provenance; builds are byte-reproducible and CI-verified. <a href="https://github.com/abysslink/abysslink/blob/main/docs/VERIFYING.md">Verify yourself</a>.</li>
+      <li><b>Claims audited</b>Every security sentence in the docs maps to a code pointer in <a href="https://github.com/abysslink/abysslink/blob/main/CLAIMS-AUDIT.md">CLAIMS-AUDIT.md</a>.</li>
+      <li><b>Apache-2.0, forever free</b>Stable v4.x line. No paid tier, no cloud service, no account with us — there is no "us" server to have an account on.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="sound" id="install">
+  <span class="depth" aria-hidden="true">−3,000 m</span>
+  <div class="wrap">
+    <h2>Install</h2>
+    <p style="color:var(--muted)">macOS 13+ or Linux (amd64/arm64). Full walkthrough in the <a href="/docs/quickstart/">quickstart</a>.</p>
+    <div class="tabs" role="tablist" aria-label="Install method">
+      <button role="tab" aria-selected="true" aria-controls="p-script" id="t-script">script</button>
+      <button role="tab" aria-selected="false" aria-controls="p-brew" id="t-brew">homebrew</button>
+      <button role="tab" aria-selected="false" aria-controls="p-nix" id="t-nix">nix</button>
+      <button role="tab" aria-selected="false" aria-controls="p-src" id="t-src">source</button>
+    </div>
+    <div class="panel" id="p-script" role="tabpanel" aria-labelledby="t-script">
+      <div class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh</code><button class="copy" aria-label="Copy install script command">copy</button></div>
+      <p>Verifies the SHA-256 manifest always, and the cosign signature bundle when <code>cosign</code> is installed (set <code>ABYSSLINK_REQUIRE_COSIGN=1</code> to require it). No sudo. Then run <code>abysslink init</code>.</p>
+    </div>
+    <div class="panel" id="p-brew" role="tabpanel" aria-labelledby="t-brew" hidden>
+      <div class="cmd"><code>brew install --cask abysslink/tap/abysslink</code><button class="copy" aria-label="Copy homebrew command">copy</button></div>
+      <p>Installs both the CLI and the optional daemon; the cask is auto-published with each release. Then run <code>abysslink init</code>.</p>
+    </div>
+    <div class="panel" id="p-nix" role="tabpanel" aria-labelledby="t-nix" hidden>
+      <div class="cmd"><code>nix build github:abysslink/abysslink#abysslink</code><button class="copy" aria-label="Copy nix command">copy</button></div>
+      <p>Flake with a NixOS VM check in CI. Then run <code>abysslink init</code>.</p>
+    </div>
+    <div class="panel" id="p-src" role="tabpanel" aria-labelledby="t-src" hidden>
+      <div class="cmd"><code>git clone https://github.com/abysslink/abysslink && cd abysslink && make build</code><button class="copy" aria-label="Copy build from source command">copy</button></div>
+      <p>Reproducible build (Go 1.26+). Note: source builds report <code>dev (unknown)</code>, so <code>verify</code>/<code>upgrade</code> can't self-attest — releases can.</p>
+    </div>
+  </div>
+</section>
+
+<section class="faq sound" id="faq">
+  <span class="depth" aria-hidden="true">−3,800 m — abyssal zone</span>
+  <div class="wrap">
+    <h2>Questions people actually ask</h2>
+    <details><summary>Does it phone home?</summary><p>No. Zero telemetry, enforced by a CI check that scans the codebase for telemetry imports. The only outbound calls are ones you invoke: your VPN backend's API, GitHub during <code>upgrade</code>/<code>verify</code>, your own push server. Every push path's visibility is documented in <a href="/docs/who-sees-what/">who sees what</a>.</p></details>
+    <details><summary>What can my push provider read?</summary><p>A device token and a generic title — never content. The notification body has no field on the push wire by construction; your phone fetches it from your own machine over the private network with a single-use token.</p></details>
+    <details><summary>iPhone or Android?</summary><p>Both. Any mosh/SSH client (Blink, Termius, Termux) plus the ntfy app. There is no Abysslink mobile app — nothing extra to trust or keep updated.</p></details>
+    <details><summary>What if my phone is stolen?</summary><p><code>abysslink panic</code> revokes the phone's VPN key, push token, and SSH certificate in seconds. Sessions re-check every 12 hours, bounding how long a stolen device stays useful.</p></details>
+    <details><summary>Do I need an AI agent to use it?</summary><p>No. Without the opt-in agent hooks it's a hardened, audited phone-to-laptop SSH/tmux/mosh setup with push notifications for anything: <code>abysslink notify -- make test</code>.</p></details>
+    <details><summary>How do I uninstall?</summary><p><code>abysslink uninstall</code> previews, then reverses every system change from its backups. Binary removal per install method is in the <a href="/docs/operations/uninstall/">uninstall guide</a>.</p></details>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <p class="tag">Across the abyss. Linked.</p>
+        <p style="margin-top:.6rem">Apache-2.0 · © Abysslink Contributors</p>
+      </div>
+      <div>
+        <p><a href="https://github.com/abysslink/abysslink">GitHub</a> · <a href="/docs/">Docs</a> · <a href="https://github.com/abysslink/abysslink/blob/main/SECURITY.md">Security policy</a></p>
+        <p style="margin-top:.6rem"><a href="https://github.com/abysslink/abysslink/releases.atom">Subscribe to releases</a> · <a href="https://github.com/abysslink/abysslink">Star the repo</a> if this should exist</p>
+      </div>
+      <div>
+        <p>Built with Go, Tailscale, ntfy,<br>tmux, mosh &amp; <a href="https://github.com/charmbracelet/vhs">VHS</a></p>
+      </div>
+    </div>
+    <!-- Privacy-friendly analytics slot (no cookies, no tracking by default).
+         To enable, uncomment ONE of the following and create the matching account:
+    <script defer data-domain="abysslink.dev" src="https://plausible.io/js/script.js"></script>
+    <script data-goatcounter="https://YOURCODE.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+    -->
+  </div>
+</footer>
+
+<script>
+/* version chip — graceful static fallback stays if the fetch fails */
+fetch('https://api.github.com/repos/abysslink/abysslink/releases/latest')
+  .then(r=>r.ok?r.json():null)
+  .then(d=>{if(d&&d.tag_name)document.getElementById('ver').textContent=d.tag_name})
+  .catch(()=>{});
+/* install tabs */
+document.querySelectorAll('.tabs [role=tab]').forEach(t=>{
+  t.addEventListener('click',()=>{
+    document.querySelectorAll('.tabs [role=tab]').forEach(x=>x.setAttribute('aria-selected','false'));
+    document.querySelectorAll('.panel').forEach(p=>p.hidden=true);
+    t.setAttribute('aria-selected','true');
+    document.getElementById(t.getAttribute('aria-controls')).hidden=false;
+  });
+});
+/* copy buttons */
+document.querySelectorAll('.copy').forEach(b=>{
+  b.addEventListener('click',()=>{
+    navigator.clipboard.writeText(b.previousElementSibling.textContent).then(()=>{
+      const o=b.textContent;b.textContent='copied ✓';setTimeout(()=>b.textContent=o,1500);
+    });
+  });
+});
+</script>
+</body>
+</html>
