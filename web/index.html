@@ -140,11 +140,8 @@ nav .links a:hover{color:var(--fg)}
   -webkit-background-clip:text;background-clip:text;color:transparent}
 /* rotating agent word — terminal typewriter */
 .agent{display:inline-block;color:var(--cyan);min-width:8.6ch;text-align:left;white-space:nowrap}
-.agent::after{content:"▍";color:var(--cyan);margin-left:.04em}
-@media (prefers-reduced-motion: no-preference){
-  .agent::after{animation:caret 1.05s steps(1) infinite}
-  @keyframes caret{50%{opacity:0}}
-}
+.agent::after{content:"▍";color:var(--cyan);margin-left:.04em;animation:caret 1.05s steps(1) infinite}
+@keyframes caret{50%{opacity:0}}
 .hero .sub{color:var(--muted);max-width:64ch;margin:0 auto 2.1rem;font-size:1.07rem}
 .hero .ctas{display:flex;gap:.8rem;justify-content:center;flex-wrap:wrap;margin-bottom:1rem}
 .chip{display:inline-block;font-family:var(--mono);font-size:.8rem;color:var(--muted);
@@ -493,16 +490,13 @@ fetch('https://api.github.com/repos/abysslink/abysslink/releases/latest')
   .then(d=>{if(d&&d.tag_name)document.getElementById('ver').textContent=d.tag_name})
   .catch(()=>{});
 
-/* rotating agent word — typewriter erase/retype; instant swap under reduced motion */
+/* rotating agent word — typewriter erase/retype (text change, not vestibular motion,
+   so it runs regardless of prefers-reduced-motion; the movers elsewhere stay gated) */
 (function(){
   var words=['Claude','Codex','Aider','Cursor','Gemini','anything'];
   var span=document.querySelector('#agent .w');
   if(!span)return;
   var i=0;
-  if(matchMedia('(prefers-reduced-motion: reduce)').matches){
-    setInterval(function(){i=(i+1)%words.length;span.textContent=words[i]},2600);
-    return;
-  }
   function erase(done){
     var t=span.textContent;
     if(!t.length){done();return}
