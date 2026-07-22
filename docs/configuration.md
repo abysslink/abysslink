@@ -197,7 +197,7 @@ Opt-in compromised-agent exfil-pattern detector (see [agent-safety.md](agent-saf
 | `window_execs` | int | `0` = 5 | Max exec distance between the sensitive-read leg and the egress leg. Only `[1, 5]` accepted; larger is a load error. |
 | `window_seconds` | int | `0` = 60 | Max wall-clock gap between the legs. Only `[1, 60]` accepted; larger is a load error. |
 | `extra_sensitive_paths` | list | — | **Add-only** extra sensitive path prefixes or basenames, union-merged with the compiled defaults. |
-| `egress_allowlist` | list | — | **Add-only** extra benign egress hosts (`*.suffix`, a CIDR, or a bare host), union-merged with the compiled registries/tailnet/loopback defaults. |
+| `egress_allowlist` | list | — | **Add-only** extra benign egress hosts (`*.suffix`, a CIDR, or a bare host), union-merged with the compiled registries/tailnet/loopback defaults. An entry broad enough to swallow the whole address space — a `/0` universe CIDR or a bare top-level-domain wildcard (`*.com`) — is a **load error** (it would silently make the detector vacuous); use a specific host or a narrower suffix like `*.corp.example.com`. |
 
 ## `duress` / `decoy`
 

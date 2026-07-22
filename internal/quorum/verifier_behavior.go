@@ -17,6 +17,7 @@ package quorum
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -102,7 +103,11 @@ type behaviorVerifier struct {
 
 // newBehaviorVerifier builds V3 with resolved (tighten-only) thresholds.
 func newBehaviorVerifier(spendLimit float64, rateMaxOps, rateWindowSeconds int, now func() time.Time, spend func() float64) *behaviorVerifier {
-	if spendLimit <= 0 {
+	// A non-finite spendLimit (NaN/±Inf) reaching a direct construction — config
+	// load rejects it, this is the defense-in-depth for other callers — would make
+	// `spend() >= spendLimit` never true and silently disable the Critical spend
+	// escalation; restore the shipped default instead.
+	if spendLimit <= 0 || math.IsNaN(spendLimit) || math.IsInf(spendLimit, 0) {
 		spendLimit = DefaultSpendThresholdUSD
 	}
 	if rateMaxOps <= 0 {

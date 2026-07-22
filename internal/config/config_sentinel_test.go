@@ -77,6 +77,37 @@ func TestValidateSentinel_LooseningRejected(t *testing.T) {
 	}
 }
 
+// TestValidateSentinel_OverbroadEgressRejected: an egress_allowlist entry broad
+// enough to swallow a whole address space — a /0 universe CIDR or a bare
+// top-level-domain wildcard — would silently make the detector vacuous, so it is
+// a load error (the same tighten-only contract the window bounds enforce).
+func TestValidateSentinel_OverbroadEgressRejected(t *testing.T) {
+	cases := []SentinelConfig{
+		{Enabled: true, EgressAllowlist: []string{"0.0.0.0/0"}},
+		{Enabled: true, EgressAllowlist: []string{"::/0"}},
+		{Enabled: true, EgressAllowlist: []string{"*.com"}},
+		{Enabled: true, EgressAllowlist: []string{"*.net"}},
+		{Enabled: true, EgressAllowlist: []string{"ok.example", "*.org"}},
+	}
+	for _, tc := range cases {
+		cfg := Defaults()
+		cfg.Sentinel = tc
+		assert.Error(t, validateSentinel(cfg), "%+v must be rejected as an over-broad allowlist", tc)
+	}
+
+	// Narrow entries — a specific host, a real subnet, a multi-label suffix —
+	// remain accepted.
+	for _, tc := range []SentinelConfig{
+		{Enabled: true, EgressAllowlist: []string{"mirror.corp.example.com"}},
+		{Enabled: true, EgressAllowlist: []string{"10.0.0.0/8"}},
+		{Enabled: true, EgressAllowlist: []string{"*.corp.example.com"}},
+	} {
+		cfg := Defaults()
+		cfg.Sentinel = tc
+		require.NoError(t, validateSentinel(cfg), "%+v is narrow and must be accepted", tc)
+	}
+}
+
 // TestValidateSentinel_EmptyListEntryRejected: an empty allowlist/path entry is
 // a load error.
 func TestValidateSentinel_EmptyListEntryRejected(t *testing.T) {

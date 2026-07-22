@@ -72,10 +72,25 @@ func TestSecSentinelEnabled_AtRiskFATAL(t *testing.T) {
 }
 
 // TestSecSentinelRules_Intact: the embedded rule self-test holds on a healthy
-// binary.
+// binary with the default config.
 func TestSecSentinelRules_Intact(t *testing.T) {
-	f := secSentinelRulesCheck(context.Background())
+	f := secSentinelRulesCheck(context.Background(), config.Defaults())
 	assert.Equal(t, modules.SeverityOK, f.Severity, "message: %s", f.Message)
+}
+
+// TestSecSentinelRules_LiveVacuousConfigFatal: an over-broad egress allowlist
+// that swallows the canned exfil host makes the LIVE detector vacuous, and the
+// rules check must catch it (FATAL) rather than replaying the compiled defaults
+// and staying green.
+func TestSecSentinelRules_LiveVacuousConfigFatal(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Sentinel.Enabled = true
+	// A narrow-but-swallowing suffix the config validator does not reject (it has
+	// a dot, so it is not a bare-TLD wildcard) yet covers exfil.example.net.
+	cfg.Sentinel.EgressAllowlist = []string{"*.example.net"}
+	f := secSentinelRulesCheck(context.Background(), cfg)
+	assert.Equal(t, modules.SeverityFatal, f.Severity,
+		"a live config that swallows the exfil probe host must fail the rules check; message: %s", f.Message)
 }
 
 // TestSentinelDoctorFindings_StableOrder: the family emits both checks in the

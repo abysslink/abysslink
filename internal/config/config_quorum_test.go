@@ -87,6 +87,11 @@ func TestValidateQuorum_LooseningRejected(t *testing.T) {
 	}{
 		{"raised spend threshold", "quorum:\n  enabled: true\n  spend_threshold_usd: 100\n"},
 		{"negative spend threshold", "quorum:\n  enabled: true\n  spend_threshold_usd: -1\n"},
+		// yaml.v3 resolves `.nan` to a float64 NaN; every ordered comparison
+		// against NaN is false, so without an explicit IsNaN guard it would slip
+		// past the range check and silently disable the spend gate.
+		{"NaN spend threshold", "quorum:\n  enabled: true\n  spend_threshold_usd: .nan\n"},
+		{"+Inf spend threshold", "quorum:\n  enabled: true\n  spend_threshold_usd: .inf\n"},
 		{"more destructive ops per window", "quorum:\n  enabled: true\n  rate_max_ops: 50\n"},
 		{"shorter (looser) rate window", "quorum:\n  enabled: true\n  rate_window_seconds: 60\n"},
 		// A window so long it overflows time.Duration would silently DISABLE the
