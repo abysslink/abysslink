@@ -1,16 +1,14 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/abysslink-mark-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="assets/brand/abysslink-mark-light.svg">
-  <img src="assets/brand/abysslink-mark.svg" alt="Abysslink mark: a letter A made of falling cyan data streams, bridged by a chain-link crossbar" width="160" height="160">
-</picture>
+<img src="logos/abysslink.png" alt="Abysslink logo: a letter A of cyan data streams around a dark vortex, its crossbar a chrome chain" width="200" height="168">
 
 # Abysslink
 
 ### Across the abyss. Linked.
 
 **Vibe-code Claude from your phone — securely.**
+
+**New to Abysslink? Start with the plain-English intro → [abysslink.github.io/abysslink](https://abysslink.github.io/abysslink/)**
 
 *A Go CLI and optional daemon that turn your laptop into a hardened, phone-controlled dev rig: private mesh networking, SSH, tmux/mosh, self-hosted push, and an auditable undo path.*
 
@@ -21,8 +19,6 @@
 [![Go](https://img.shields.io/badge/go-1.26.5%2B-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache--2.0-success?style=flat-square)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-success?style=flat-square)](#installation)
-
-**New to Abysslink? Start with the plain-English intro → [abysslink.github.io/abysslink](https://abysslink.github.io/abysslink/)**
 
 </div>
 
@@ -39,20 +35,20 @@ Long AI coding jobs make a short break feel risky: the agent might need you, or 
 - **No telemetry.** A CI conformance check rejects telemetry imports; remote calls happen only when you invoke a feature that needs its named provider.
 - **Your notification body stays on your network.** The self-hosted push path sends routing metadata for the wake; the daemon serves the body over the tailnet. See [who sees what](docs/who-sees-what.md).
 - **Every managed file change is recoverable.** Abysslink backs it up first and records an entry in a hash-chained audit log; `abysslink uninstall` previews and reverses its changes.
-- **Early, but released.** `v4.1.0` is the current stable release line. The public repository has no stars yet, so field reports and corrections genuinely shape the project.
+- **Early, but released.** `v4.1.0` is the current stable line; security fixes land on the latest minor ([policy](SECURITY.md)). The public repository has no stars yet, so field reports and corrections genuinely shape the project.
 
 ## Quick start
 
 You need macOS 13+ or a supported Linux distribution, FileVault or LUKS, and a Tailscale account (or a supported Headscale/NetBird setup). Enable MagicDNS and HTTPS certificates if you want the daemon-backed notification content fetch and one-scan phone enrolment.
 
-This is the shortest verified setup path. `init` is interactive; complete its prompts before the next line runs.
+This is the shortest verified setup path — core setup lands in about five minutes, and the full flow with phone enrolment takes ~7–8. `init` is interactive; complete its prompts before the next line runs.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh
 abysslink init
 abysslink up
 abysslink up --apply
-abysslink daemon enable --apply
+abysslink daemon enable --apply   # optional: watchers, receipts, one-scan pairing
 abysslink doctor
 abysslink enroll phone --apply
 ```
@@ -61,14 +57,14 @@ abysslink enroll phone --apply
 
 ## Installation
 
-The release installer, Homebrew cask, and release archives install both `abysslink` and the optional `abysslinkd`. The daemon adds background watchers, notification-body fetches, receipt tracking, and the phone approval loop.
+The release installer, Homebrew cask, and release archives install both `abysslink` and the optional `abysslinkd`. Every release ships SHA-256 manifests, cosign bundles, SBOMs, and SLSA provenance — check any download with `abysslink verify` or the recipe in [Verifying a release](docs/VERIFYING.md). The daemon adds background watchers, notification-body fetches, receipt tracking, and the phone approval loop.
 
 | Method | Platforms | Status | Install |
 |---|---|---|---|
 | Release installer | macOS and Linux; amd64 and arm64 | ✅ Full first-run verified on macOS arm64; release assets are published for every listed target. | `curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh \| sh` |
-| Homebrew cask | macOS and Linux; amd64 and arm64 | ⚠️ Published and versioned; a clean-machine install proof is still pending. | `brew install --cask abysslink/tap/abysslink` |
+| Homebrew cask | macOS; arm64 and amd64 | ⚠️ Published and versioned; a clean-machine install proof is still pending. | `brew install --cask abysslink/tap/abysslink` |
 | GitHub Releases | macOS and Linux; amd64 and arm64 | ✅ Checksums, cosign bundle, SBOMs, and `.deb`/`.rpm` packages are published with the release. | [Download a release](https://github.com/abysslink/abysslink/releases/latest) |
-| Nix flake | macOS and Linux | ✅ The flake and a NixOS fire-drill are exercised in CI. | `nix build github:abysslink/abysslink#abysslink` |
+| Nix flake | macOS and Linux | ✅ Flake build verified; a scheduled NixOS VM fire-drill runs weekly in CI. | `nix build github:abysslink/abysslink#abysslink` |
 | Go source | macOS and Linux with Go 1.26.5+ | ⚠️ Works, but reports `dev (unknown)`, so `verify` and `upgrade` cannot self-attest. | `go install github.com/abysslink/abysslink/cmd/abysslink@latest` |
 
 Install the daemon from source too when you choose `go install`:
@@ -181,6 +177,7 @@ Yes. `abysslink uninstall` previews its reversal, then restores managed system c
 - [Configuration](docs/configuration.md) — the full YAML schema.
 - [Security](docs/security.md) and [threat model](docs/security/threat-model.md) — guarantees and boundaries.
 - [Modules](docs/modules/) — Tailscale, SSH, tmux, mosh, ntfy, Claude Code, and more.
+- [Verifying a release](docs/VERIFYING.md) — cosign, SLSA provenance, checksums.
 - [Claims audit](CLAIMS-AUDIT.md) — source pointers for security claims.
 
 ## Roadmap
@@ -190,8 +187,10 @@ There are no dated feature promises. The project is focused on validating the fi
 ## Community
 
 - [Report a bug, request a feature, or share an experience](https://github.com/abysslink/abysslink/issues/new/choose)
-- [Read the release notes](https://github.com/abysslink/abysslink/releases)
+- [Read the release notes](https://github.com/abysslink/abysslink/releases) · [subscribe to the feed](https://github.com/abysslink/abysslink/releases.atom)
 - [Report a vulnerability privately](SECURITY.md)
+
+If Abysslink should exist, a star helps other people find it.
 
 ## Contributing
 

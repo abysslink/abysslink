@@ -53,6 +53,11 @@ CLAUDE.md
 .mine/
 .ghostty*
 
+# Local-only Codex agent instructions (mirror of the gitignored CLAUDE.md) and
+# its hooks — kept local for the same reason CLAUDE.md is: never tracked publicly.
+AGENTS.md
+.codex/
+
 # Coverage
 coverage.out
 coverage.html

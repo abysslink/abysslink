@@ -41,10 +41,14 @@ human-verified, operator-owned actions — no automated CI can claim them passed
 - [ ] **GATE-LNCH-06** (operator): Install funnel verified. A published (non-draft)
       GitHub release with `.bundle` assets exists; `curl -fsSL .../install.sh | sh`
       succeeds on a clean macOS and a clean Linux machine; the `abysslink/homebrew-tap`
-      repo exists and `brew tap abysslink/homebrew-tap && brew install abysslink`
-      installs. (Context: the release pipeline has been red since v3.0.0 — only v1.0.0
-      is published, without `.bundle` assets — and the tap repo does not exist yet.
-      The install commands in every post template depend on this gate.)
+      repo exists and `brew tap abysslink/tap && brew install abysslink`
+      installs. (Note: the tap COMMAND is `brew tap abysslink/tap` — Homebrew
+      auto-prefixes `homebrew-`, so it resolves to the `homebrew-tap` repo. Do NOT
+      write `brew tap abysslink/homebrew-tap`, which resolves to the nonexistent
+      `homebrew-homebrew-tap`. As of v4.1.0 the pipeline is green, v4.1.0 is published
+      with `.bundle` assets, and the tap + cask exist — what remains is the
+      clean-machine install proof. The install commands in every post template
+      depend on this gate.)
       Result: _______________ Tester: _______________ Date: _______________
 
 ---

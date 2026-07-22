@@ -7,6 +7,8 @@ repo_url: https://github.com/abysslink/abysslink
 
 theme:
   name: material
+  logo: assets/logo.png
+  favicon: assets/favicon.png
   palette:
     - scheme: slate
       primary: deep purple
