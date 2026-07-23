@@ -1,0 +1,886 @@
+<!doctype html>
+<!--
+  DESIGN RATIONALE (ui-ux-pro-max pass, 2026-07-18)
+  Pattern:  Real-Time / Operations landing — hero with live product preview,
+            verified metrics, how-it-works, trust signals, install CTA. Chosen for
+            ops/security tooling aimed at skeptical senior engineers.
+  Style:    Modern Dark (Cinema) — deep layered dark, ambient light, frosted nav,
+            glow accents; never pure #000. Fused with the product's own "descent
+            through the water column" identity: the page darkens from sunlit
+            surface (#141a29) to hadal floor (#04050a) with a scroll-tracking
+            descent gauge, live depth/pressure HUD, and oceanographically-correct
+            zone names. Light scheme derived from the same locked tokens.
+  Palette:  LOCKED to the CLI's internal/ui/theme.go — cyan #2CE0F5, indigo
+            #6E80F7, violet #B57BFF on #0f1117 (dark); #0E7490/#2540C0/#7C3AED on
+            #FAFBFD (light). All text pairs verified >= 4.5:1 (AA).
+  Type:     JetBrains Mono (self-hosted, OFL) for headings/UI — the skill's
+            font-pairing DB maps this exactly to security/CLI/terminal products —
+            with system-ui sans for body copy. Tight -0.02em tracking on headings.
+  Motion:   Standard tier — one hero entrance, staggered section reveals
+            (IntersectionObserver, transform/opacity only, expo-out
+            cubic-bezier(.16,1,.3,1)), scale press feedback, scroll-driven gauge.
+            Everything decorative is gated behind prefers-reduced-motion.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Abysslink — vibe-code Claude from your phone, securely</title>
+<meta name="description" content="Hardened phone-to-laptop remote control over your own private mesh. Approve, watch, or kill an AI coding agent from your pocket. Zero telemetry.">
+<link rel="canonical" href="https://abysslink.dev/">
+<meta name="theme-color" content="#0f1117" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#FAFBFD" media="(prefers-color-scheme: light)">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://abysslink.dev/">
+<meta property="og:title" content="Abysslink — vibe-code Claude from your phone, securely">
+<meta property="og:description" content="Hardened phone-to-laptop remote control over your own private mesh. Approve, watch, or kill an AI coding agent from your pocket. Zero telemetry.">
+<meta property="og:image" content="https://abysslink.dev/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Abysslink — vibe-code Claude from your phone, securely">
+<meta name="twitter:description" content="Hardened phone-to-laptop control over your own private mesh. Zero telemetry.">
+<meta name="twitter:image" content="https://abysslink.dev/assets/og-image.png">
+<link rel="icon" href="assets/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="preload" href="assets/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/jetbrains-mono-700.woff2" as="font" type="font/woff2" crossorigin>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Abysslink","operatingSystem":"macOS, Linux","applicationCategory":"DeveloperApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"license":"https://www.apache.org/licenses/LICENSE-2.0","url":"https://abysslink.dev/","downloadUrl":"https://github.com/abysslink/abysslink/releases/latest","softwareVersion":"4.1.0","description":"Hardened phone-to-laptop remote control over a private mesh VPN. Approve, watch, or kill an AI coding agent from your pocket. Zero telemetry."}
+</script>
+<style>
+/* ---------- fonts ---------- */
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url(assets/fonts/jetbrains-mono-400.woff2) format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:700;font-display:swap;src:url(assets/fonts/jetbrains-mono-700.woff2) format('woff2')}
+/* ---------- tokens (locked to internal/ui/theme.go) ---------- */
+:root{
+  --bg:#0f1117;--bg-deep:#07080d;--surface:#1a1d27;--surface-2:#141722;--border:#2a2d3a;
+  --fg:#F8F8F2;--muted:#8B95A5;
+  --cyan:#2CE0F5;--indigo:#6E80F7;--violet:#B57BFF;--ok:#04B575;--warn:#FFD060;--fatal:#FF5F87;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --line:rgba(44,224,245,.5);--glow:rgba(44,224,245,.14);
+  --ease-out:cubic-bezier(.16,1,.3,1);
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#FAFBFD;--bg-deep:#E9EEF6;--surface:#EFF2F7;--surface-2:#F4F6FA;--border:#D8DDE7;
+    --fg:#101423;--muted:#475569;
+    --cyan:#0E7490;--indigo:#2540C0;--violet:#7C3AED;--ok:#02764C;--warn:#946200;--fatal:#B3003A;
+    --line:rgba(14,116,144,.4);--glow:rgba(14,116,144,.08);
+    color-scheme:light;
+  }
+}
+/* ---------- base ---------- */
+*{box-sizing:border-box;margin:0}
+html{background:#04050a}
+@media (prefers-reduced-motion: no-preference){html{scroll-behavior:smooth}}
+@media (prefers-color-scheme: light){html{background:#DFE6F1}}
+body{
+  color:var(--fg);font-family:var(--sans);line-height:1.65;font-size:17px;overflow-x:hidden;overflow-x:clip;
+  /* the water column: sunlit surface → hadal black */
+  background:linear-gradient(to bottom,
+    #141a29 0%, #10131d 16%, #0f1117 34%, #0b0d14 58%, #07080d 80%, #04050a 100%);
+}
+@media (prefers-color-scheme: light){
+  body{background:linear-gradient(to bottom,
+    #FDFEFF 0%, #FAFBFD 20%, #F2F5FA 45%, #E9EEF6 72%, #DFE6F1 100%)}
+}
+img,video{max-width:100%;height:auto;display:block}
+a{color:var(--cyan);text-decoration-thickness:1px;text-underline-offset:3px}
+a:hover{color:var(--violet)}
+code,pre,.mono{font-family:var(--mono)}
+:focus-visible{outline:2px solid var(--cyan);outline-offset:3px;border-radius:2px}
+::selection{background:var(--violet);color:var(--bg)}
+h1,h2,h3{font-family:var(--mono);letter-spacing:-.02em;line-height:1.18}
+h2{font-size:clamp(1.6rem,3.6vw,2.3rem);margin-bottom:.9rem}
+section{padding:5.5rem 0;position:relative}
+.wrap{max-width:1080px;margin:0 auto;padding:0 1.25rem}
+.lede{color:var(--muted);max-width:62ch;font-size:1.05rem}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+.skip{position:absolute;left:1rem;top:-3rem;z-index:50;background:var(--surface);color:var(--fg);
+  font-family:var(--mono);font-size:.85rem;padding:.5rem 1rem;border:1px solid var(--cyan);
+  border-radius:8px;transition:top .15s var(--ease-out)}
+.skip:focus{top:1rem}
+/* ---------- zone banner ---------- */
+.zone{
+  font-family:var(--mono);font-size:.78rem;letter-spacing:.28em;text-transform:uppercase;
+  color:var(--muted);display:flex;align-items:center;gap:1rem;margin-bottom:2.6rem;
+}
+.zone::before,.zone::after{content:"";height:1px;background:var(--border);flex:1}
+.zone b{color:var(--cyan);font-weight:400}
+/* ---------- the descent gauge + live depth HUD (signature) ---------- */
+.sound{position:relative;isolation:isolate}
+#gauge{
+  position:fixed;top:64px;bottom:0;left:max(1.4rem,calc(50% - 640px));width:2px;z-index:5;
+  background:repeating-linear-gradient(to bottom,var(--line) 0 6px,transparent 6px 24px);
+  opacity:.5;pointer-events:none;
+}
+#gauge i{
+  position:absolute;inset:0;display:block;
+  background:linear-gradient(to bottom,var(--cyan),var(--indigo) 60%,var(--violet));
+  transform-origin:top;transform:scaleY(var(--p,0));
+  box-shadow:0 0 12px 0 var(--glow);
+}
+#gauge::after{ /* the plumb bob riding the fill line */
+  content:"";position:absolute;left:50%;top:calc(var(--p,0)*100%);
+  width:9px;height:9px;border-radius:50%;transform:translate(-50%,-4px);
+  background:var(--cyan);box-shadow:0 0 14px 3px var(--glow);
+}
+#hud{
+  position:fixed;bottom:1.2rem;left:1.1rem;z-index:20;font-family:var(--mono);font-size:.78rem;
+  color:var(--muted);background:var(--bg);background:color-mix(in srgb,var(--bg) 80%,transparent);
+  border:1px solid var(--border);border-radius:999px;padding:.38rem 1rem;
+  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);pointer-events:none;white-space:nowrap;
+}
+#hud b{color:var(--cyan);font-weight:400}
+#hud .z{color:var(--violet)}
+@media (max-width:1140px){#gauge{display:none}}
+@media (max-width:900px){#hud{font-size:.72rem;padding:.3rem .8rem}}
+/* ---------- bioluminescence (deep sections) ---------- */
+.plankton{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+.plankton i{
+  position:absolute;width:3px;height:3px;border-radius:50%;
+  background:var(--cyan);opacity:.25;box-shadow:0 0 8px 2px var(--glow);
+}
+@media (prefers-reduced-motion: no-preference){
+  .plankton i{animation:drift 14s ease-in-out infinite alternate}
+  .plankton i:nth-child(2n){animation-duration:19s;animation-delay:-6s}
+  .plankton i:nth-child(3n){animation-duration:23s;animation-delay:-11s}
+  @keyframes drift{from{transform:translateY(0)}to{transform:translateY(-46px)}}
+}
+/* ambient abyss glow — cinema-dark light blobs, far behind content */
+.blob{position:absolute;border-radius:50%;filter:blur(90px);pointer-events:none;opacity:.35;z-index:-1}
+.blob.cy{background:radial-gradient(circle,rgba(44,224,245,.16),transparent 70%)}
+.blob.vi{background:radial-gradient(circle,rgba(181,123,255,.13),transparent 70%)}
+@media (prefers-reduced-motion: no-preference){
+  .blob{animation:blobdrift 26s ease-in-out infinite alternate;will-change:transform}
+  .blob:nth-child(2n){animation-duration:34s;animation-delay:-12s}
+  @keyframes blobdrift{from{transform:translate(0,0)}to{transform:translate(60px,-40px)}}
+}
+/* staggered scroll reveals */
+.rv{opacity:1}
+@media (prefers-reduced-motion: no-preference){
+  .js .rv{opacity:0;transform:translateY(18px);transition:opacity .5s var(--ease-out),transform .5s var(--ease-out)}
+  .js .rv.on{opacity:1;transform:none}
+}
+/* press feedback */
+.btn:active,.copy:active,.card:active{transform:scale(.97)}
+/* the lure — one anglerfish light in the abyssal dark */
+.lure{position:absolute;right:9%;top:14%;width:6px;height:6px;border-radius:50%;
+  background:var(--warn);box-shadow:0 0 18px 5px rgba(255,208,96,.25);pointer-events:none}
+.lure::after{content:"";position:absolute;left:2px;top:5px;width:26px;height:26px;
+  border-left:1.5px solid rgba(255,208,96,.28);border-radius:0 0 0 22px;transform:rotate(-12deg)}
+@media (prefers-reduced-motion: no-preference){
+  .lure{animation:lurepulse 4.5s ease-in-out infinite}
+  @keyframes lurepulse{0%,100%{opacity:.85}50%{opacity:.35}}
+}
+/* ---------- nav ---------- */
+nav{position:sticky;top:0;z-index:10;background:var(--bg);
+  background:color-mix(in srgb,var(--bg) 86%,transparent);
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
+nav .wrap{display:flex;align-items:center;gap:1rem;padding-top:.7rem;padding-bottom:.7rem}
+nav .brand{display:flex;align-items:center;gap:.55rem;font-family:var(--mono);font-weight:700;
+  font-size:1.05rem;color:var(--fg);text-decoration:none}
+nav .brand:hover{color:var(--cyan)}
+nav .links{margin-left:auto;display:flex;align-items:center;gap:1.1rem;font-size:.92rem}
+nav .links a{color:var(--muted);text-decoration:none}
+nav .links a:hover{color:var(--fg)}
+@media (max-width:600px){nav .links .aux{display:none}}
+@media (max-width:480px){
+  nav .wrap{flex-wrap:wrap;row-gap:.4rem}
+  nav .brand{font-size:.98rem}
+  nav .links{gap:.7rem;font-size:.85rem}
+  nav .links .btn{padding:.45rem .8rem;font-size:.85rem}
+}
+/* ---------- buttons ---------- */
+.btn{display:inline-flex;align-items:center;gap:.5rem;font-family:var(--mono);font-size:.95rem;
+  padding:.68rem 1.2rem;border-radius:8px;text-decoration:none;border:1px solid var(--border);
+  color:var(--fg);transition:transform .15s,border-color .15s,box-shadow .15s}
+.btn:hover{transform:translateY(-1px);color:var(--fg);border-color:var(--muted)}
+.btn.primary{background:linear-gradient(120deg,var(--cyan),var(--indigo));color:#0f1117;
+  border:none;font-weight:700}
+.btn.primary:hover{color:#0f1117;filter:brightness(1.1);box-shadow:0 6px 24px -8px var(--cyan)}
+@media (prefers-color-scheme: light){.btn.primary{color:#FAFBFD}.btn.primary:hover{color:#FAFBFD}}
+.btn svg{flex:none}
+/* ---------- hero ---------- */
+.hero{padding:6rem 0 4rem;text-align:center;position:relative}
+.hero::before{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(720px 340px at 50% 0,var(--glow),transparent 70%);
+}
+/* god-rays: sunlight breaking the surface */
+.hero::after{
+  content:"";position:absolute;inset:0;pointer-events:none;opacity:.5;
+  background:
+    linear-gradient(112deg,transparent 42%,var(--glow) 47%,transparent 53%),
+    linear-gradient(94deg,transparent 30%,var(--glow) 34%,transparent 39%),
+    linear-gradient(76deg,transparent 60%,var(--glow) 66%,transparent 71%);
+  mask-image:linear-gradient(to bottom,#000 0,transparent 78%);
+  -webkit-mask-image:linear-gradient(to bottom,#000 0,transparent 78%);
+}
+/* the invitation to dive */
+.cue{display:inline-flex;align-items:center;gap:.55rem;margin-top:3rem;
+  font-family:var(--mono);font-size:.82rem;color:var(--muted);text-decoration:none}
+.cue:hover{color:var(--cyan)}
+.cue svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round}
+@media (prefers-reduced-motion: no-preference){
+  .cue svg{animation:bob 1.8s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(5px)}}
+}
+.hero h1{font-size:clamp(1.9rem,5.2vw,3.3rem);max-width:24ch;margin:0 auto 1rem;position:relative}
+.hero h1 .grad{background:linear-gradient(100deg,var(--cyan),var(--violet));
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+/* rotating agent word — terminal typewriter */
+.agent{display:inline-block;color:var(--cyan);min-width:9.2ch;text-align:left;white-space:nowrap}
+.agent::after{content:"▍";color:var(--cyan);margin-left:.04em;animation:caret 1.05s steps(1) infinite}
+@keyframes caret{50%{opacity:0}}
+.hero .sub{color:var(--muted);max-width:64ch;margin:0 auto 2.1rem;font-size:1.07rem}
+.hero .ctas{display:flex;gap:.8rem;justify-content:center;flex-wrap:wrap;margin-bottom:1rem}
+.chip{display:inline-block;font-family:var(--mono);font-size:.8rem;color:var(--muted);
+  border:1px solid var(--border);border-radius:999px;padding:.26rem .85rem;margin-bottom:1.7rem}
+.chip b{color:var(--ok);font-weight:400}
+.hero .fine{font-family:var(--mono);font-size:.78rem;color:var(--muted);margin-top:.4rem}
+/* terminal frame */
+.term{max-width:900px;margin:2.6rem auto 0;border:1px solid var(--border);border-radius:12px;
+  background:#0f1117;box-shadow:0 30px 90px -34px rgba(44,224,245,.3);overflow:hidden;text-align:left}
+.term .bar{display:flex;gap:.45rem;padding:.6rem .9rem;border-bottom:1px solid var(--border);align-items:center}
+.term .bar i{width:.72rem;height:.72rem;border-radius:50%;display:block}
+.term .bar i:nth-child(1){background:var(--fatal)}.term .bar i:nth-child(2){background:var(--warn)}
+.term .bar i:nth-child(3){background:var(--ok)}
+.term .bar span{margin-left:.5rem;font-family:var(--mono);font-size:.78rem;color:#8B95A5}
+.term video{width:100%;aspect-ratio:2/1;background:#0f1117}
+@media (prefers-reduced-motion: no-preference){
+  .hero h1,.hero .sub,.hero .ctas,.hero .chip,.hero .fine{animation:rise .6s cubic-bezier(.2,.7,.2,1) both}
+  .hero .sub{animation-delay:.08s}.hero .ctas{animation-delay:.16s}.hero .fine{animation-delay:.2s}
+  .term{animation:rise .7s .26s cubic-bezier(.2,.7,.2,1) both}
+  @keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+}
+/* ---------- moments (story + real terminal output) ---------- */
+.moment{display:grid;grid-template-columns:1fr 1fr;gap:2.6rem;align-items:center;margin-top:3.4rem}
+.moment.flip .shot{order:-1}
+@media (max-width:820px){.moment{grid-template-columns:1fr}.moment.flip .shot{order:0}}
+.moment .k{font-family:var(--mono);color:var(--cyan);font-size:.85rem;display:block;margin-bottom:.6rem;letter-spacing:.06em}
+.moment h3{font-size:1.35rem;margin-bottom:.7rem}
+.moment p{color:var(--muted)}
+.moment p code{color:var(--violet);font-size:.9em}
+.shot{background:#0f1117;border:1px solid var(--border);border-radius:10px;padding:1.1rem 1.25rem;
+  font-family:var(--mono);font-size:.83rem;line-height:1.75;overflow-x:auto;
+  box-shadow:0 18px 50px -28px var(--glow)}
+.shot .c{color:#2CE0F5}.shot .v{color:#B57BFF}.shot .g{color:#04B575}
+.shot .y{color:#FFD060}.shot .r{color:#FF5F87}.shot .d{color:#8B95A5}.shot .w{color:#F8F8F2}
+/* ---------- stats strip ---------- */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin-top:3.4rem}
+.stat{border:1px solid var(--border);border-radius:12px;padding:1.2rem 1rem;text-align:center;background:var(--surface-2)}
+.stat b{display:block;font-family:var(--mono);font-size:1.7rem;font-weight:700;
+  background:linear-gradient(100deg,var(--cyan),var(--violet));-webkit-background-clip:text;background-clip:text;color:transparent}
+.stat span{font-size:.82rem;color:var(--muted)}
+/* ---------- diagram ---------- */
+#tun stop:first-child{stop-color:var(--cyan)}#tun stop:last-child{stop-color:var(--violet)}
+#g stop:first-child{stop-color:var(--cyan)}#g stop:last-child{stop-color:var(--violet)}
+.diagram{margin:2.4rem auto 0;max-width:780px}
+.diagram svg{width:100%;height:auto}
+/* ---------- features ---------- */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:1.05rem;margin-top:2.4rem}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;
+  transition:transform .18s,border-color .18s,box-shadow .18s}
+.card:hover{transform:translateY(-3px);border-color:color-mix(in srgb,var(--cyan) 45%,var(--border));
+  box-shadow:0 16px 44px -22px var(--glow)}
+.card svg{width:26px;height:26px;stroke:var(--cyan);fill:none;stroke-width:1.8;
+  stroke-linecap:round;stroke-linejoin:round;margin-bottom:.75rem}
+.card h3{font-size:1.02rem;margin-bottom:.45rem}
+.card p{color:var(--muted);font-size:.94rem}
+.card code{font-size:.85em;color:var(--violet)}
+/* ---------- refuses ---------- */
+.refuse{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:.65rem;margin-top:2.2rem;padding:0}
+.refuse li{list-style:none;font-family:var(--mono);font-size:.88rem;color:var(--muted);
+  border:1px solid var(--border);border-radius:9px;padding:.75rem 1rem;background:var(--surface-2)}
+.refuse li::before{content:"✗ ";color:var(--fatal)}
+.refuse li b{color:var(--fg);font-weight:400}
+/* ---------- trust ---------- */
+.trustlist{list-style:none;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:1.3rem;padding:0;margin-top:3rem}
+.trustlist li{font-size:.95rem;color:var(--muted)}
+.trustlist li b{display:block;color:var(--fg);font-family:var(--mono);font-size:.93rem;margin-bottom:.35rem}
+.trustlist li b::before{content:"✓ ";color:var(--ok)}
+/* ---------- hero copy block ---------- */
+.herocmd{max-width:640px;margin:1.4rem auto 0;display:flex;align-items:center;gap:.7rem;
+  background:#0f1117;background:color-mix(in srgb,#0f1117 82%,transparent);border:1px solid var(--border);
+  border-radius:10px;padding:.8rem 1rem;overflow-x:auto;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.herocmd code{font-family:var(--mono);font-size:.84rem;white-space:pre;flex:1;color:#F8F8F2;text-align:left}
+.herocmd code::before{content:"$ ";color:#8B95A5}
+.herocmd .copy{color:#8B95A5;border-color:#2a2d3a}
+.herocmd .copy:hover{color:#2CE0F5;border-color:#2CE0F5}
+/* ---------- comparison table ---------- */
+.cmp{margin-top:2.4rem;overflow-x:auto;border:1px solid var(--border);border-radius:12px}
+.cmp table{width:100%;border-collapse:collapse;font-size:.9rem;min-width:680px}
+.cmp th,.cmp td{padding:.85rem 1rem;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+.cmp th{font-family:var(--mono);font-size:.82rem;color:var(--muted);font-weight:400;background:var(--surface-2)}
+.cmp td:first-child,.cmp th:first-child{font-family:var(--mono);font-size:.84rem}
+.cmp tbody th[scope=row]{font-family:var(--mono);font-size:.84rem;font-weight:400;color:var(--fg);background:transparent}
+.cmp tbody tr:last-child td{border-bottom:none}
+.cmp .yes{color:var(--ok)}.cmp .no{color:var(--fatal)}.cmp .meh{color:var(--warn)}
+.cmp .hl{background:color-mix(in srgb,var(--cyan) 5%,transparent)}
+.cmp .not td{color:var(--muted);font-size:.86rem;background:var(--surface-2)}
+/* ---------- quickstart ---------- */
+.qs{max-width:860px;margin:2.6rem auto 0;text-align:left;counter-reset:step}
+.qs li{list-style:none;display:flex;gap:1rem;align-items:baseline;padding:.55rem 0;border-bottom:1px dashed var(--border)}
+.qs li:last-child{border-bottom:none}
+.qs li::before{counter-increment:step;content:counter(step);flex:none;width:1.7rem;height:1.7rem;
+  display:grid;place-items:center;border:1px solid var(--border);border-radius:50%;
+  font-family:var(--mono);font-size:.78rem;color:var(--cyan);transform:translateY(.2rem)}
+.qs code{font-family:var(--mono);font-size:.88rem;color:var(--fg)}
+.qs span{color:var(--muted);font-size:.85rem}
+/* ---------- install ---------- */
+.tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:2rem 0 0}
+.tabs button{font-family:var(--mono);font-size:.88rem;padding:.55rem 1.05rem;border-radius:8px 8px 0 0;
+  border:1px solid var(--border);border-bottom:none;background:transparent;color:var(--muted);cursor:pointer}
+.tabs button[aria-selected="true"]{background:var(--surface);color:var(--fg)}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:0 12px 12px 12px;padding:1.35rem}
+.panel[hidden]{display:none}
+.cmd{display:flex;align-items:center;gap:.7rem;background:var(--bg);border:1px solid var(--border);
+  border-radius:8px;padding:.85rem 1rem;margin:.6rem 0;overflow-x:auto}
+.cmd code{font-size:.86rem;white-space:pre;flex:1}
+.cmd code::before{content:"$ ";color:var(--muted)}
+.copy{flex:none;font-family:var(--mono);font-size:.75rem;color:var(--muted);background:none;
+  border:1px solid var(--border);border-radius:6px;padding:.3rem .6rem;cursor:pointer}
+.copy:hover{color:var(--cyan);border-color:var(--cyan)}
+.panel p{color:var(--muted);font-size:.9rem;margin-top:.5rem}
+/* ---------- faq ---------- */
+.faq details{border:1px solid var(--border);border-radius:10px;background:var(--surface);
+  padding:1rem 1.25rem;margin-top:.7rem}
+.faq summary{font-family:var(--mono);font-size:.97rem;cursor:pointer;color:var(--fg)}
+.faq p{color:var(--muted);margin-top:.7rem;font-size:.95rem}
+/* ---------- touchdown at the floor ---------- */
+#floorfx{position:absolute;left:.4rem;top:50%;z-index:3;pointer-events:none}
+@media (max-width:1140px){#floorfx{display:none}}
+.zone{position:relative}
+#floorfx .core{position:absolute;left:-4.5px;top:-4.5px;width:9px;height:9px;border-radius:50%;
+  background:var(--cyan);box-shadow:0 0 14px 3px var(--glow)}
+#floorfx .ring{position:absolute;left:-30px;top:-30px;width:60px;height:60px;border-radius:50%;
+  border:2px solid var(--cyan);box-shadow:0 0 22px 4px var(--glow),inset 0 0 14px 2px var(--glow);
+  animation:ringout 1.7s var(--ease-out) infinite}
+#floorfx .ring.r2{border-color:var(--violet);animation-delay:.85s}
+#floorfx i{position:absolute;left:0;top:0;width:5px;height:5px;border-radius:50%;
+  animation:mote 1.8s var(--ease-out) infinite}
+@keyframes ringout{0%{transform:scale(.15);opacity:.95}70%{opacity:.25}100%{transform:scale(3.2);opacity:0}}
+@media (prefers-reduced-motion: reduce){
+  #floorfx i{display:none}
+  #floorfx .ring{animation:none;transform:scale(.55);opacity:.45}
+  #floorfx .ring.r2{animation:none;transform:scale(1);opacity:.2}
+}
+@keyframes mote{0%{transform:translate(0,0) scale(1);opacity:0}12%{opacity:1}100%{transform:translate(var(--dx),var(--dy)) scale(.4);opacity:0}}
+#hud.landed{border-color:var(--cyan)}
+@media (prefers-reduced-motion: no-preference){
+  #hud.landed{animation:hudland 2.4s ease-in-out infinite}
+}
+@keyframes hudland{0%,100%{box-shadow:0 0 4px 0 rgba(44,224,245,.35)}50%{box-shadow:0 0 24px 8px rgba(181,123,255,.35)}}
+#gauge::after{transition:opacity .35s var(--ease-out)}
+#gauge.landed::after{opacity:0}
+/* ---------- floor / footer ---------- */
+.floor{text-align:center}
+footer{border-top:1px solid var(--border);padding:3.5rem 0 5rem;color:var(--muted);font-size:.92rem;
+  background:linear-gradient(to bottom,transparent,rgba(44,224,245,.03))}
+footer .bed{font-family:var(--mono);font-size:.72rem;letter-spacing:.3em;text-transform:uppercase;
+  text-align:center;color:var(--muted);margin-top:3.5rem}
+footer .cols{display:flex;flex-wrap:wrap;gap:2.5rem;justify-content:space-between;align-items:flex-start}
+footer a{color:var(--muted)}footer a:hover{color:var(--cyan)}
+footer .tag{font-family:var(--mono);color:var(--fg)}
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+<noscript><style>.panel[hidden]{display:block}.tabs,#hud,#gauge{display:none}</style></noscript>
+<div id="gauge" aria-hidden="true"><i></i></div>
+<div id="hud" aria-hidden="true">depth <b>0 m</b> · <span class="z">surface</span></div>
+
+<nav aria-label="Main">
+  <div class="wrap">
+    <a class="brand" href="./">
+      <img src="assets/logo.png" alt="" width="30" height="25">
+      abysslink
+    </a>
+    <div class="links">
+      <a class="aux" href="#how-it-works">Features</a>
+      <a class="aux" href="#trust">Security</a>
+      <a href="docs/">Docs</a>
+      <a href="https://github.com/abysslink/abysslink">GitHub</a>
+      <a class="btn primary" href="#install">Install</a>
+    </div>
+  </div>
+</nav>
+
+<main id="main">
+
+<header class="hero sound">
+  <div class="blob cy" style="width:520px;height:520px;left:-160px;top:-120px" aria-hidden="true"></div>
+  <div class="blob vi" style="width:460px;height:460px;right:-140px;top:220px" aria-hidden="true"></div>
+  <div class="wrap">
+    <a class="chip" href="https://github.com/abysslink/abysslink/releases/latest" style="text-decoration:none">latest release <b id="ver">v4.1.0</b> →</a>
+    <h1>Vibe-code <span class="agent" id="agent" aria-hidden="true"><span class="w">Claude</span></span><span class="sr">any coding agent</span> from your phone — <span class="grad">securely</span>.</h1>
+    <p class="sub">One Go binary wires Tailscale, hardened SSH, tmux/mosh, and self-hosted push into a phone-controlled dev rig. Dry-run by default. Audited. Reversible. Zero telemetry.</p>
+    <div class="herocmd">
+      <code>curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh</code><button class="copy" aria-label="Copy the install command">copy</button>
+    </div>
+    <div class="ctas" style="margin-top:1.3rem">
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn" href="https://github.com/abysslink/abysslink">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        View on GitHub
+      </a>
+    </div>
+    <p class="fine">agent-agnostic by design — Claude Code is one opt-in module, not a dependency</p>
+    <div class="term">
+      <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span>dev@rig — abysslink</span></div>
+      <video src="assets/demo.mp4" poster="assets/demo-poster.jpg" width="1200" height="600" autoplay loop muted playsinline controls aria-label="Terminal demo: abysslink up previews six planned changes without applying them, quorum eval denies a tailscale funnel command outright, and threat-model prints a live checklist of security defenses"></video>
+    </div>
+    <a class="cue" href="#story"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M6 14l6 6 6-6"/></svg>begin the descent — the floor is 6,000 m down</a>
+  </div>
+</header>
+
+<section class="sound" id="story">
+  <div class="wrap">
+    <p class="zone" data-depth="200">−200 m · <b>sunlight zone</b> · where you live</p>
+    <h2>Leave the desk. Keep the leash.</h2>
+    <p class="lede">You start a long agent run and walk away. Your laptop stays home, unexposed. Three things can happen next — Abysslink has a move for each.</p>
+
+    <div class="moment">
+      <div>
+        <span class="k">moment 01 · the buzz</span>
+        <h3>It needs you. You know in one second.</h3>
+        <p>The agent stops to ask permission — at 9pm, while you're on the couch. Your phone buzzes with the exact rig, session, and pane that's waiting. The push carries routing metadata only; the content is fetched from your own machine over the tailnet.</p>
+      </div>
+      <div class="shot" role="img" aria-label="Phone notification: rig-1, claude, pane 3 needs input — with open, approve and deny actions">
+<span class="d">— push notification ————————————</span><br>
+<span class="c">▲ rig-1</span> <span class="d">·</span> <span class="v">claude</span> <span class="d">·</span> <span class="w">pane %3 needs input</span><br>
+<span class="d">   body fetched over tailnet · single-use token</span><br>
+<span class="d">   [</span><span class="g">open session</span><span class="d">]  [</span><span class="y">approve</span><span class="d">]  [</span><span class="r">deny</span><span class="d">]</span>
+      </div>
+    </div>
+
+    <div class="moment flip">
+      <div>
+        <span class="k">moment 02 · the tap</span>
+        <h3>One tap. You're in the real terminal.</h3>
+        <p>Not a chat transcript of your terminal — the actual live tmux session, same scrollback, cursor where the agent left it. mosh keeps it alive through wifi↔cell hops and subway tunnels. Read what it did, type the next instruction, pocket the phone.</p>
+      </div>
+      <div class="shot" role="img" aria-label="Terminal: mosh into the rig attaches the existing tmux session named main, where the agent is waiting for an answer">
+<span class="d">$</span> <span class="w">mosh rig -- tmux new -A -s main</span><br>
+<span class="g">✓</span> <span class="w">attached — session</span> <span class="c">main</span> <span class="d">(3 windows)</span><br>
+<span class="v">claude</span><span class="d">›</span> <span class="w">Plan ready. Apply the migration? (y/n)</span><br>
+<span class="c">█</span>
+      </div>
+    </div>
+
+    <div class="moment">
+      <div>
+        <span class="k">moment 03 · the veto</span>
+        <h3>Going rogue? Frozen mid-keystroke.</h3>
+        <p>Dangerous commands hit a four-verifier quorum gate with a compiled deny-floor — some things are un-askable, no approval path exists. And <code>abysslink arm</code> wraps whole runs in a kill-switch: freeze from your phone, roll back to the pre-run snapshot. Ships shadow-first by design: observe, calibrate, then flip <code>gate.enforcing</code> to enforce.</p>
+      </div>
+      <div class="shot" role="img" aria-label="Terminal: quorum eval denies tailscale funnel — compiled deny-floor, the command is never executed">
+<span class="d">$</span> <span class="w">abysslink quorum eval -- tailscale funnel 443</span><br>
+<span class="d">read-only — the command is never executed</span><br>
+<span class="w">outcome:</span> <span class="r">DENY — no approval path</span><br>
+<span class="w">reason:</span>  <span class="y">compiled deny-floor — un-askable</span>
+      </div>
+    </div>
+
+    <div class="stats" role="group" aria-label="Verified numbers">
+      <div class="stat"><b>78</b><span>doctor checks, fail-closed</span></div>
+      <div class="stat"><b>64</b><span>security claims mapped to code</span></div>
+      <div class="stat"><b>100%</b><span>of managed file changes backed up &amp; reversible</span></div>
+      <div class="stat"><b>0</b><span>telemetry, CI-enforced</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="sound" id="how-it-works">
+  <div class="plankton" aria-hidden="true"><i style="left:8%;top:20%"></i><i style="left:88%;top:12%"></i><i style="left:72%;top:70%"></i><i style="left:22%;top:82%"></i><i style="left:52%;top:36%"></i><i style="left:34%;top:58%"></i></div>
+  <div class="wrap">
+    <p class="zone" data-depth="800">−800 m · <b>twilight zone</b> · how it works</p>
+    <h2>Nobody in the middle.</h2>
+    <p class="lede">Phone and laptop talk directly over an encrypted private mesh — Tailscale by default, self-hosted Headscale or NetBird if even the coordination should be yours. The control plane exchanges public keys only; it never sees traffic, code, or commands.</p>
+    <div class="diagram">
+      <svg viewBox="0 0 760 300" role="img" aria-label="Diagram: a phone and a laptop connected directly by an encrypted tunnel; a coordination server off to the side exchanges keys only; the laptop runs the abysslink daemon, tmux and an AI agent">
+        <defs><linearGradient id="tun" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2CE0F5"/><stop offset="1" stop-color="#B57BFF"/></linearGradient></defs>
+        <rect x="30" y="80" width="120" height="150" rx="16" fill="none" stroke="var(--cyan)" stroke-width="2.5"/>
+        <rect x="70" y="205" width="40" height="6" rx="3" fill="var(--cyan)"/>
+        <text x="90" y="130" text-anchor="middle" fill="var(--fg)" font-size="15" font-family="var(--mono)">phone</text>
+        <text x="90" y="155" text-anchor="middle" fill="var(--muted)" font-size="11" font-family="var(--mono)">mosh · ntfy</text>
+        <path d="M160 155 H 470" stroke="url(#tun)" stroke-width="3" stroke-dasharray="7 7"/>
+        <text x="315" y="140" text-anchor="middle" fill="var(--muted)" font-size="12" font-family="var(--mono)">WireGuard tunnel — end-to-end encrypted</text>
+        <rect x="480" y="70" width="250" height="160" rx="12" fill="none" stroke="var(--violet)" stroke-width="2.5"/>
+        <text x="605" y="103" text-anchor="middle" fill="var(--fg)" font-size="15" font-family="var(--mono)">your laptop</text>
+        <text x="605" y="130" text-anchor="middle" fill="var(--muted)" font-size="11.5" font-family="var(--mono)">abysslinkd · tmux · agent</text>
+        <text x="605" y="152" text-anchor="middle" fill="var(--muted)" font-size="11.5" font-family="var(--mono)">self-hosted push · audit log</text>
+        <text x="605" y="188" text-anchor="middle" fill="var(--ok)" font-size="11.5" font-family="var(--mono)">nothing exposed to the internet</text>
+        <rect x="255" y="238" width="180" height="44" rx="22" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="4 5"/>
+        <text x="345" y="265" text-anchor="middle" fill="var(--muted)" font-size="11.5" font-family="var(--mono)">control plane — keys only</text>
+        <path d="M240 200 Q 250 240 265 252" stroke="var(--muted)" stroke-width="1.2" fill="none" stroke-dasharray="3 5"/>
+        <path d="M480 210 Q 460 240 435 252" stroke="var(--muted)" stroke-width="1.2" fill="none" stroke-dasharray="3 5"/>
+      </svg>
+    </div>
+
+    <div class="shot rv" style="max-width:640px;margin:2.6rem auto 0" role="img" aria-label="Terminal: abysslink up plans six changes — tailscale hostname, tmux config, tailnet ACL, ntfy server, notify service, pane watchers — and asks for --apply">
+<span class="d">$</span> <span class="w">abysslink up</span><br>
+<span class="c">6 changes planned</span><br>
+<span class="d">  →</span> <span class="v">tailscale</span>  <span class="w">set hostname to "rig"</span><br>
+<span class="d">  →</span> <span class="v">tmux</span>       <span class="w">write ~/.tmux.conf if changed</span><br>
+<span class="d">  →</span> <span class="v">acl</span>        <span class="w">ensure tailnet ACL restricts tag:mobile → tag:laptop</span><br>
+<span class="d">  →</span> <span class="v">ntfy</span>       <span class="w">run ntfy server in Docker</span><br>
+<span class="d">  →</span> <span class="v">notify</span>     <span class="w">set ntfy service</span><br>
+<span class="d">  →</span> <span class="v">watch</span>      <span class="w">configure pane watchers</span><br>
+<span class="w">Run</span> <span class="g">abysslink up --apply</span> <span class="w">to apply 6 changes.</span>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+        <h3>Session-aware pushes</h3><p>Watchers fire when a pane goes idle, a log line matches, or an HTTP check flips — each wake names the exact rig, agent, and pane.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4H4v16h16v-7"/><path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>
+        <h3>Preview before apply</h3><p>Every mutating command plans first: <code>up</code> shows what it would change and touches nothing until <code>--apply</code>.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="M9 12l2 2 4-4"/></svg>
+        <h3>Hardened, fail-closed</h3><p>Tailnet-only binds, Funnel rejected at the schema, FileVault/LUKS required, 12h SSH re-check. <code>doctor</code> refuses to pass unsafe states.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 9h6v6H9z"/></svg>
+        <h3>Agent containment</h3><p>Phone approve loop (never auto-approves), quorum gate, apoptosis kill-switch, dead-man switch, exfil sentinel — five independent layers, shadow-first by default.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5 15.5 15.5M6 9v6a3 3 0 0 0 3 3h3"/></svg>
+        <h3>Tamper-evident audit trail</h3><p>Backup + HMAC-chained log entry on every file change; signed evidence bundles for auditors; <code>uninstall</code> restores everything.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+        <h3>Fleet-ready</h3><p>Enroll every machine as a named rig; <code>--all-rigs</code> fans out status, doctor, notify, panic. Wake-on-LAN included.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sound" id="compare">
+  <div class="blob vi" style="width:420px;height:420px;left:-180px;bottom:-80px" aria-hidden="true"></div>
+  <div class="wrap">
+    <p class="zone" data-depth="3000">−3,000 m · <b>midnight zone</b> · how it compares</p>
+    <h2>Choose your vessel.</h2>
+    <p class="lede">Honest comparison — several of these are excellent, they just make a different trade.</p>
+    <div class="cmp rv">
+      <table>
+        <thead><tr><th scope="col"></th><th scope="col">Abysslink</th><th scope="col">Happy</th><th scope="col">Tailscale + tmux + scripts</th><th scope="col">Cloud agent service</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Who can read your session</th><td class="hl yes">nobody — E2E WireGuard (encrypted DERP fallback)</td><td class="yes">nobody (E2E relay)</td><td class="yes">nobody</td><td class="no">the vendor</td></tr>
+          <tr><th scope="row">Real terminal into your machine</th><td class="hl yes">✓ SSH + tmux + mosh</td><td class="no">✗ wraps the agent UI</td><td class="yes">✓ if you build it</td><td class="no">✗ their VM, not your rig</td></tr>
+          <tr><th scope="row">Agent-agnostic</th><td class="hl yes">✓ any command</td><td class="meh">Claude + Codex</td><td class="yes">✓</td><td class="no">✗ one vendor</td></tr>
+          <tr><th scope="row">Host hardening + audit + undo</th><td class="hl yes">✓ automated, fail-closed</td><td class="no">✗</td><td class="no">✗ DIY, usually skipped</td><td class="no">n/a</td></tr>
+          <tr><th scope="row">Setup effort</th><td class="hl">~5 min guided</td><td class="meh">app + relay account</td><td class="no">a weekend of footguns</td><td class="yes">zero — that's the trade</td></tr>
+          <tr class="not"><th scope="row">When NOT to use Abysslink</th><td colspan="4">Your dev box runs Windows (unsupported) · you want a GUI, not a terminal · you can't run disk encryption — <code>doctor</code> fails closed without FileVault/LUKS · you want zero setup and don't mind a vendor cloud.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="sound" id="trust">
+  <div class="plankton" aria-hidden="true"><i style="left:14%;top:30%"></i><i style="left:80%;top:55%"></i><i style="left:45%;top:85%"></i><i style="left:64%;top:18%"></i></div>
+  <div class="lure" aria-hidden="true"></div>
+  <div class="wrap">
+    <p class="zone" data-depth="4500">−4,500 m · <b>abyssal zone</b> · what it refuses to do</p>
+    <h2>Security that argues back.</h2>
+    <p class="lede">Warnings get clicked through, so the dangerous paths simply don't exist. Enforced in code — you cannot configure your way past them.</p>
+    <ul class="refuse">
+      <li><b>Bind to 0.0.0.0</b> — listeners resolve to the tailnet IP, full stop</li>
+      <li><b>Enable Tailscale Funnel</b> — rejected at the YAML schema; no flag exists</li>
+      <li><b>Put a secret on argv</b> — stdin or OS keychain only</li>
+      <li><b>Write secrets to the audit log</b> — titles and diff hashes only</li>
+      <li><b>Run on an unencrypted disk</b> — doctor exits fatal, no override</li>
+      <li><b>Upgrade to an unverified binary</b> — <code>upgrade</code> checks cosign + SLSA provenance, refuses root</li>
+      <li><b>Mutate without a plan</b> — dry-run default, --apply is deliberate</li>
+      <li><b>Phone home</b> — zero telemetry, CI-enforced</li>
+    </ul>
+    <p style="color:var(--muted);font-size:.9rem;margin-top:1.4rem">Don't take the page's word for it — <code style="color:var(--cyan)">abysslink threat-model</code> is read-only, needs zero setup, and checks these defenses live on your machine.</p>
+    <ul class="trustlist">
+      <li><b>Signed, reproducible releases</b>Cosign keyless + SLSA Build L3 provenance; byte-reproducible builds checked in CI. <a href="https://github.com/abysslink/abysslink/blob/main/docs/VERIFYING.md">Verify a release yourself</a>.</li>
+      <li><b>Every claim maps to code</b>64 audited rows in <a href="https://github.com/abysslink/abysslink/blob/main/CLAIMS-AUDIT.md">CLAIMS-AUDIT.md</a> — quote → file → doctor check.</li>
+      <li><b>Honest threat model</b>Duress decoy scoped to casual coercion (no wipe, by test); sentinel is defense-in-depth, not a boundary. <a href="docs/security/">Read the non-goals</a>.</li>
+      <li><b>Apache-2.0, free</b>Stable v4.x; security fixes land on the latest minor (<a href="https://github.com/abysslink/abysslink/blob/main/SECURITY.md">policy</a>). No paid tier, no cloud service, no account — there is no server of ours to sign into.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="sound floor" id="install">
+  <div class="wrap">
+    <p class="zone" data-depth="6000">−6,000 m · <b>hadal zone — the floor</b> · you made it, get linked</p>
+    <h2>Install in one line.</h2>
+    <p class="lede" style="margin:0 auto">macOS 13+ or Linux (amd64/arm64), disk encryption on, a Tailscale account (or self-hosted backend). About five minutes of commands, plus a couple more to enroll your phone — the <a href="docs/quickstart/">quickstart</a> walks every step.</p>
+    <div style="text-align:left;max-width:860px;margin:0 auto">
+    <div class="tabs" role="tablist" aria-label="Install method">
+      <button role="tab" aria-selected="true" aria-controls="p-script" id="t-script">script</button>
+      <button role="tab" aria-selected="false" aria-controls="p-brew" id="t-brew">homebrew</button>
+      <button role="tab" aria-selected="false" aria-controls="p-nix" id="t-nix">nix</button>
+      <button role="tab" aria-selected="false" aria-controls="p-src" id="t-src">source</button>
+    </div>
+    <div class="panel" id="p-script" role="tabpanel" aria-labelledby="t-script">
+      <div class="cmd"><code>curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh</code><button class="copy" aria-label="Copy install script command">copy</button></div>
+      <p>Verifies the SHA-256 manifest always, and the cosign signature bundle when <code>cosign</code> is installed (set <code>ABYSSLINK_REQUIRE_COSIGN=1</code> to require it). No sudo. Then: <code>abysslink init</code>.</p>
+    </div>
+    <div class="panel" id="p-brew" role="tabpanel" aria-labelledby="t-brew" hidden>
+      <div class="cmd"><code>brew install --cask abysslink/tap/abysslink</code><button class="copy" aria-label="Copy homebrew command">copy</button></div>
+      <p>Installs the CLI and the optional daemon; auto-published with each release. Then: <code>abysslink init</code>.</p>
+    </div>
+    <div class="panel" id="p-nix" role="tabpanel" aria-labelledby="t-nix" hidden>
+      <div class="cmd"><code>nix build github:abysslink/abysslink#abysslink</code><button class="copy" aria-label="Copy nix command">copy</button></div>
+      <p>Flake with a NixOS VM check in CI. Then: <code>abysslink init</code>.</p>
+    </div>
+    <div class="panel" id="p-src" role="tabpanel" aria-labelledby="t-src" hidden>
+      <div class="cmd"><code>git clone https://github.com/abysslink/abysslink && cd abysslink && make build</code><button class="copy" aria-label="Copy build from source command">copy</button></div>
+      <p>Reproducible build (Go 1.26.5+). Source builds report <code>dev (unknown)</code>, so <code>verify</code>/<code>upgrade</code> can't self-attest — releases can.</p>
+    </div>
+    </div>
+    <p style="color:var(--muted);font-size:.85rem;margin-top:1rem;font-family:var(--mono)">Don't trust the installer? <a href="docs/VERIFYING/">Verify the release yourself</a> — cosign keyless + SLSA L3 provenance, checksums signed on every release.</p>
+
+    <ol class="qs rv" aria-label="Quickstart — seven steps">
+      <li><code>curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh</code></li>
+      <li><code>abysslink init</code> <span>— interactive wizard writes abysslink.yaml</span></li>
+      <li><code>abysslink up</code> <span>— preview the plan; nothing is touched</span></li>
+      <li><code>abysslink up --apply</code> <span>— converge when the plan looks right</span></li>
+      <li><code>abysslink daemon enable --apply</code> <span>— optional: watchers, receipts, one-scan pairing</span></li>
+      <li><code>abysslink doctor</code> <span>— fail-closed health check</span></li>
+      <li><code>abysslink enroll phone --apply</code> <span>— QR pairing; then mosh in from your phone</span></li>
+    </ol>
+  </div>
+</section>
+
+<section class="faq sound" id="faq" style="padding-top:2rem">
+  <div class="wrap">
+    <p class="zone">ascending · <b>decompression stop</b> · questions people actually ask</p>
+    <h2>Straight answers.</h2>
+    <details><summary>Do I need Claude Code?</summary><p>No. The core is a generic notify/watch/approve layer that wraps <em>any</em> command — Claude Code support is one opt-in module that wires its hooks in. Codex, Aider, a long test run, <code>make deploy</code>: all plug into the same pipeline.</p></details>
+    <details><summary>What does it cost?</summary><p>Nothing for Abysslink itself — Apache-2.0, no paid tier, no cloud service, no Abysslink account. A free Tailscale account (or a self-hosted backend) is the only external requirement; any VPN plan or hardware cost is yours and separate.</p></details>
+    <details><summary>Does it phone home?</summary><p>No. Zero telemetry, enforced by a CI check that scans the codebase for telemetry imports. The only outbound calls are ones you invoke: your VPN backend's API, GitHub during <code>upgrade</code>/<code>verify</code>, your own push server. Every push path's visibility is documented in <a href="docs/who-sees-what/">who sees what</a>.</p></details>
+    <details><summary>What can my push provider read?</summary><p>A device token and a generic title — never content. The notification body has no field on the push wire by construction; your phone fetches it from your own machine over the private network with a single-use token.</p></details>
+    <details><summary>What if my devices can't connect directly?</summary><p>Traffic falls back to Tailscale's DERP relays — still end-to-end WireGuard-encrypted, so the relay forwards ciphertext it cannot read. The coordination server itself only ever exchanges public keys.</p></details>
+    <details><summary>Which platforms does the rig side run on?</summary><p>macOS 13+ and Linux (amd64/arm64) only. No Windows — that's a deliberate scope line, listed under "when not to use" above.</p></details>
+    <details><summary>iPhone or Android?</summary><p>Both. Any mosh/SSH client (Blink, Termius, Termux) plus the ntfy app. There is no Abysslink mobile app — nothing extra to trust or keep updated.</p></details>
+    <details><summary>What if my phone is stolen?</summary><p><code>abysslink panic</code> revokes the phone's VPN key, push token, and SSH certificate in seconds. Sessions re-check every 12 hours, bounding how long a stolen device stays useful.</p></details>
+    <details><summary>How do I uninstall?</summary><p><code>abysslink uninstall</code> previews, then reverses every system change from its backups. Binary removal per install method is in the <a href="docs/operations/uninstall/">uninstall guide</a>.</p></details>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <p class="tag">Across the abyss. Linked.</p>
+        <p style="margin-top:.6rem">Apache-2.0 · © Abysslink Contributors</p>
+      </div>
+      <div>
+        <p><a href="#install">Install</a> · <a href="https://github.com/abysslink/abysslink">GitHub</a> · <a href="docs/">Docs</a> · <a href="https://github.com/abysslink/abysslink/blob/main/SECURITY.md">Security policy</a></p>
+        <p style="margin-top:.6rem"><a href="https://github.com/abysslink/abysslink/releases">Release notes</a> · <a href="https://github.com/abysslink/abysslink/releases.atom">RSS</a> · <a href="https://github.com/abysslink/abysslink">Star the repo</a> if this should exist</p>
+        <p style="margin-top:.6rem">This page is static HTML — no cookies, no trackers, no third-party requests. <a href="https://github.com/abysslink/abysslink/blob/main/web/index.html">View source</a>.</p>
+      </div>
+      <div>
+        <p>Built with Go, Tailscale, ntfy,<br>tmux, mosh &amp; <a href="https://github.com/charmbracelet/vhs">VHS</a></p>
+      </div>
+    </div>
+    <!-- Privacy-friendly analytics slot (no cookies, no tracking by default).
+         To enable, uncomment ONE of the following and create the matching account:
+    <script defer data-domain="abysslink.dev" src="https://plausible.io/js/script.js"></script>
+    <script data-goatcounter="https://YOURCODE.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+    -->
+    <p class="bed">⚓ sea floor · −6,000 m · the link holds</p>
+  </div>
+</footer>
+
+<script>
+document.documentElement.classList.add('js');
+
+/* No fetches, no beacons: this page makes zero requests beyond its own assets.
+   The version chip is baked at release time and links to the releases page. */
+
+/* respect reduced motion for the demo video: poster + controls instead of autoplay */
+(function(){
+  if(matchMedia('(prefers-reduced-motion: reduce)').matches){
+    var v=document.querySelector('.term video');
+    if(v){v.removeAttribute('autoplay');v.pause()}
+  }
+})();
+
+/* staggered section reveals — transform/opacity only, interruptible, RM-gated via CSS */
+(function(){
+  var els=document.querySelectorAll('.moment,.stats,.grid .card,.refuse li,.trustlist li,.cmp,.qs,.shot.rv,.faq details');
+  els.forEach(function(el){el.classList.add('rv')});
+  if(!('IntersectionObserver' in window)){els.forEach(function(el){el.classList.add('on')});return}
+  var io=new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if(e.isIntersecting){e.target.classList.add('on');io.unobserve(e.target)}
+    });
+  },{rootMargin:'0px 0px -8% 0px'});
+  els.forEach(function(el,i){
+    el.style.transitionDelay=(i%5)*55+'ms';
+    io.observe(el);
+  });
+})();
+
+/* rotating agent word — typewriter erase/retype (text change, not vestibular motion,
+   so it runs regardless of prefers-reduced-motion; the movers elsewhere stay gated) */
+(function(){
+  var words=['Claude','Codex','Aider','Cursor','Gemini','anything'];
+  var span=document.querySelector('#agent .w');
+  if(!span)return;
+  var i=0;
+  function erase(done){
+    var t=span.textContent;
+    if(!t.length){done();return}
+    span.textContent=t.slice(0,-1);
+    setTimeout(function(){erase(done)},42);
+  }
+  function type(w,j){
+    if(j>w.length){setTimeout(cycle,2200);return}
+    span.textContent=w.slice(0,j);
+    setTimeout(function(){type(w,j+1)},68);
+  }
+  function cycle(){
+    erase(function(){i=(i+1)%words.length;type(words[i],1)});
+  }
+  setTimeout(cycle,1800);
+})();
+
+/* live descent: continuous scroll-linked depth with exact plateaus. While a zone
+   banner is anywhere prominent on screen (20%–85% of the viewport) the meter pins
+   to that banner's exact depth; between sections it interpolates smoothly, so the
+   number always decrements live with the scroll and always matches the label. */
+(function(){
+  var hud=document.getElementById('hud'),b=hud.querySelector('b'),z=hud.querySelector('.z');
+  var gauge=document.getElementById('gauge');
+  var MAX=6000,pts=[],ticking=false;
+  function measure(){
+    var H=innerHeight,max=document.documentElement.scrollHeight-H;
+    pts=[{y:0,d:0}];
+    var last=0;
+    document.querySelectorAll('.zone[data-depth]').forEach(function(el){
+      var by=el.getBoundingClientRect().top+scrollY,d=+el.dataset.depth;
+      var a=Math.max(last+1,Math.min(by-0.85*H,max)),c=Math.max(a+1,Math.min(by-0.20*H,max));
+      pts.push({y:a,d:d});pts.push({y:c,d:d});
+      last=c;
+    });
+    pts.push({y:Math.max(last+1,max),d:MAX});
+  }
+  function depthAt(y){
+    if(y<=pts[0].y)return pts[0].d;
+    for(var i=1;i<pts.length;i++){
+      if(y<=pts[i].y){
+        var a=pts[i-1],c=pts[i];
+        return c.y===a.y?c.d:a.d+(c.d-a.d)*((y-a.y)/(c.y-a.y));
+      }
+    }
+    return pts[pts.length-1].d;
+  }
+  var fx=null,floorEl=null;
+  function engage(){
+    hud.classList.add('landed');gauge.classList.add('landed');
+    if(fx||getComputedStyle(gauge).display==='none')return;
+    fx=document.createElement('div');fx.id='floorfx';
+    fx.innerHTML='<b class="core"></b><b class="ring"></b><b class="ring r2"></b>';
+    var cols=['var(--cyan)','var(--indigo)','var(--violet)','var(--ok)'];
+    for(var i=0;i<14;i++){
+      var m=document.createElement('i');
+      var ang=Math.PI*(0.15+0.7*Math.random()),dist=55+Math.random()*130;
+      m.style.setProperty('--dx',Math.cos(ang)*dist*(Math.random()<.5?-1:1)+'px');
+      m.style.setProperty('--dy',(-Math.sin(ang)*dist)+'px');
+      m.style.background=cols[i%4];
+      m.style.boxShadow='0 0 10px 2px '+cols[i%4];
+      m.style.animationDelay=(Math.random()*1.8)+'s';
+      m.style.animationDuration=(1.4+Math.random()*0.9)+'s';
+      fx.appendChild(m);
+    }
+    if(!floorEl)floorEl=document.querySelector('.zone[data-depth="6000"]');
+    floorEl.appendChild(fx);
+    alignfx();
+  }
+  function alignfx(){
+    /* park the churn on the gauge column so the pointer dissolves into it */
+    if(!fx||!floorEl)return;
+    var gx=gauge.getBoundingClientRect().left,bx=floorEl.getBoundingClientRect().left;
+    fx.style.left=(gx-bx+1)+'px';
+  }
+  function disengage(){
+    hud.classList.remove('landed');gauge.classList.remove('landed');
+    if(fx){fx.remove();fx=null}
+  }
+  function update(){
+    var d=Math.round(depthAt(scrollY));
+    b.textContent=d===0?'0 m':'−'+d.toLocaleString('en')+' m · '+Math.round(1+d/10).toLocaleString('en')+' atm';
+    z.textContent=d<20?'surface':d<200?'sunlight zone':d<1000?'twilight zone':d<4000?'midnight zone':d<5900?'abyssal zone':'hadal zone — the floor';
+    var gr=gauge.getBoundingClientRect();
+    /* travel ends at the landing line: where the floor banner sits at the instant
+       depth hits 6000 (plateau trigger = banner-top at 85% of the viewport) */
+    var stopF=Math.max(0.5,Math.min(0.95,(0.85*innerHeight-gr.top)/gr.height));
+    if(d>=MAX){
+      /* landed: pointer + churn live inside the banner; the fill tip stays glued
+         to that docked marker — it never paints past the touch point */
+      if(!floorEl)floorEl=document.querySelector('.zone[data-depth="6000"]');
+      var fr=floorEl.getBoundingClientRect();
+      var tip=Math.max(0,Math.min(stopF,((fr.top+fr.height/2)-gr.top)/gr.height));
+      gauge.style.setProperty('--p',tip.toFixed(4));
+      engage();
+    }else{
+      gauge.style.setProperty('--p',(stopF*d/MAX).toFixed(4));
+      disengage();
+    }
+    ticking=false;
+  }
+  function onscroll(){if(!ticking){requestAnimationFrame(update);ticking=true}}
+  function remeasure(){measure();update();alignfx()}
+  addEventListener('scroll',onscroll,{passive:true});
+  addEventListener('resize',remeasure,{passive:true});
+  addEventListener('load',remeasure);
+  remeasure();
+  window.__depth={measure:measure,at:depthAt,pts:function(){return pts},engage:engage,disengage:disengage};
+})();
+
+/* install tabs — click + roving arrow keys (ARIA tabs pattern) */
+(function(){
+  var tabs=Array.prototype.slice.call(document.querySelectorAll('.tabs [role=tab]'));
+  function select(t){
+    tabs.forEach(function(x){x.setAttribute('aria-selected','false');x.tabIndex=-1});
+    document.querySelectorAll('.panel').forEach(function(p){p.hidden=true});
+    t.setAttribute('aria-selected','true');t.tabIndex=0;
+    document.getElementById(t.getAttribute('aria-controls')).hidden=false;
+  }
+  tabs.forEach(function(t,i){
+    t.tabIndex=t.getAttribute('aria-selected')==='true'?0:-1;
+    t.addEventListener('click',function(){select(t)});
+    t.addEventListener('keydown',function(e){
+      var j=null;
+      if(e.key==='ArrowRight')j=(i+1)%tabs.length;
+      else if(e.key==='ArrowLeft')j=(i-1+tabs.length)%tabs.length;
+      else if(e.key==='Home')j=0;
+      else if(e.key==='End')j=tabs.length-1;
+      if(j!==null){e.preventDefault();select(tabs[j]);tabs[j].focus()}
+    });
+  });
+})();
+
+/* copy buttons — announced via aria-live, guarded for non-secure contexts */
+document.querySelectorAll('.copy').forEach(b=>{
+  b.setAttribute('aria-live','polite');
+  b.addEventListener('click',()=>{
+    const done=t=>{const o='copy';b.textContent=t;setTimeout(()=>b.textContent=o,1500)};
+    if(!navigator.clipboard){done('select + ⌘C');return}
+    navigator.clipboard.writeText(b.previousElementSibling.textContent)
+      .then(()=>done('copied ✓')).catch(()=>done('copy failed'));
+  });
+});
+</script>
+</body>
+</html>

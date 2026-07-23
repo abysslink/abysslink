@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="40 5 1200 630" width="1200" height="630" role="img" aria-label="Abysslink — vibe-code Claude from your phone, securely">
+  <!-- Open Graph image, 1200x630 (cropped from the social card). Real logo art + locked palette (internal/ui/theme.go). -->
+  <defs>
+    <radialGradient id="glow" cx="0.24" cy="0.45" r="0.8">
+      <stop stop-color="#1a2438" offset="0"/>
+      <stop stop-color="#0f1117" offset="1"/>
+    </radialGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <!-- faint rain field -->
+  <g stroke="#2CE0F5" stroke-width="4" stroke-linecap="round" stroke-dasharray="2 22" opacity="0.12">
+    <path d="M1000 40 V240"/><path d="M1080 90 V330"/><path d="M1150 30 V260"/>
+    <path d="M1225 110 V350"/><path d="M940 400 V580"/><path d="M1255 420 V560"/>
+  </g>
+  <!-- the real logo -->
+  <image href="logo.png" x="44" y="70" width="560" height="470"/>
+  <!-- copy -->
+  <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+    <text x="656" y="240" font-size="40" fill="#F8F8F2" font-weight="700">Vibe-code Claude from</text>
+    <text x="656" y="292" font-size="40" fill="#F8F8F2" font-weight="700">your phone — <tspan fill="#2CE0F5">securely</tspan>.</text>
+    <text x="657" y="348" font-size="23" fill="#8B95A5">Hardened phone-to-laptop control over your own mesh.</text>
+    <text x="657" y="382" font-size="23" fill="#8B95A5">Approve, watch, or kill an AI agent from your pocket.</text>
+  </g>
+  <!-- trust chips -->
+  <g font-family="Menlo, Consolas, monospace" font-size="19">
+    <rect x="656" y="422" width="188" height="42" rx="21" fill="none" stroke="#2a2d3a" stroke-width="2"/>
+    <text x="680" y="449" fill="#04B575">zero telemetry</text>
+    <rect x="856" y="422" width="200" height="42" rx="21" fill="none" stroke="#2a2d3a" stroke-width="2"/>
+    <text x="880" y="449" fill="#2CE0F5">signed releases</text>
+    <rect x="1068" y="422" width="160" height="42" rx="21" fill="none" stroke="#2a2d3a" stroke-width="2"/>
+    <text x="1092" y="449" fill="#B57BFF">Apache-2.0</text>
+  </g>
+  <g font-family="Menlo, Consolas, monospace">
+    <text x="657" y="540" font-size="24" fill="#64748B">Across the abyss. Linked.</text>
+  </g>
+</svg>

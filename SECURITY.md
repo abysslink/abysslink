@@ -6,14 +6,16 @@ Only the latest minor release line receives security fixes. Upgrade with `abyssl
 
 | Version | Supported          |
 | ------- | ------------------ |
-| Latest minor release line (`v3.x` at time of writing) | :white_check_mark: |
+| Latest minor release line (`v4.x` at time of writing) | :white_check_mark: |
 | Older release lines | :x:                |
 
 ## Reporting a Vulnerability
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Please report security vulnerabilities by emailing **security@abysslink.dev** with a GPG-encrypted report. Our GPG key is published at https://keys.openpgp.org.
+**Primary channel:** [GitHub Private Vulnerability Reporting](https://github.com/abysslink/abysslink/security/advisories/new) — this opens a private advisory visible only to you and the maintainers.
+
+**Secondary channel:** email **security@abysslink.dev** (email forwarding for this address is being provisioned — prefer the GitHub channel).
 
 When reporting, please include:
 

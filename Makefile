@@ -35,7 +35,7 @@ LDFLAGS    := -s -w \
   -X $(MODULE)/internal/cli.buildDate=$(BUILD_DATE)
 
 .PHONY: build test bench lint cover release install clean conformance security-audit repro-check
-.PHONY: check-webui-isolation check-webui-build-tags check-htmx-sri vendor-htmx security-gosec check-install-sync dev-setup
+.PHONY: check-webui-isolation check-webui-build-tags check-htmx-sri vendor-htmx security-gosec check-install-sync dev-setup docs-drift
 .PHONY: vex-suppression-proof
 
 ## build: compile CLI and daemon binaries (reproducible: SOURCE_DATE_EPOCH from git)
@@ -157,6 +157,10 @@ BENCHTIME  ?= 100x
 BENCH_PKGS := ./internal/audit/... ./internal/evidence/... ./internal/config/...
 bench:
 	$(GO) test -bench=. -benchmem -run=^$$ -benchtime=$(BENCHTIME) $(BENCH_PKGS)
+
+## docs-drift: fail when user docs drift from the shipped CLI/config surface
+docs-drift:
+	bash scripts/docs-drift-check.sh
 
 ## cover: run tests with coverage report
 cover:

@@ -13,24 +13,24 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         version = if self ? rev then self.shortRev else "dev";
-        # go.mod requires go >= 1.26.4; nixpkgs-unstable currently ships
-        # 1.26.3, so build the exact toolchain from the upstream source
-        # tarball. Drop this override once nixpkgs catches up.
-        go_1_26_4 = pkgs.go.overrideAttrs (old: {
-          version = "1.26.4";
+        # go.mod requires go >= 1.26.5; nixpkgs-unstable lags behind, so build
+        # the exact toolchain from the upstream source tarball. Drop this
+        # override once nixpkgs catches up.
+        go_1_26_5 = pkgs.go.overrideAttrs (old: {
+          version = "1.26.5";
           src = pkgs.fetchurl {
-            url = "https://go.dev/dl/go1.26.4.src.tar.gz";
-            hash = "sha256-T2aKMvv8ETLmqIH7lowvHa2mMUkqM5IRc1+7JVpCYC0=";
+            url = "https://go.dev/dl/go1.26.5.src.tar.gz";
+            hash = "sha256-SVvkvIcXasVnOS5bQRar2YRm0z17SdQedkzMaXay3EI=";
           };
         });
-        buildGoModule = pkgs.buildGoModule.override { go = go_1_26_4; };
+        buildGoModule = pkgs.buildGoModule.override { go = go_1_26_5; };
       in {
         packages = {
           abysslink = buildGoModule {
             pname = "abysslink";
             inherit version;
             src = ./.;
-            vendorHash = "sha256-ZT094nVSjFBQHTV3GBwgEVxVx3GJ5cYLWf+yDttIc8Q=";
+            vendorHash = "sha256-nmBp9al6BkygR7f4hwcP7T2b5nEsyPn/CpG/vLj9y64=";
             subPackages = [ "cmd/abysslink" "cmd/abysslinkd" ];
             ldflags = [
               "-s"

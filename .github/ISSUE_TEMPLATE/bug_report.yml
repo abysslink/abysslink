@@ -1,0 +1,65 @@
+---
+name: Bug report
+description: Something doesn't work as expected.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >-
+        What you ran and what it did. Exact commands and output beat prose.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Abysslink version
+      placeholder: paste output of 'abysslink version'
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: e.g. macOS 26.0, Ubuntu 24.04
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - Installer script (install.sh)
+        - Homebrew
+        - Release tarball
+        - deb/rpm
+        - Nix
+        - go install
+        - Built from source
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: >-
+        Run `abysslink logs --since 1h` and paste the lines around the
+        failure. **Redact anything that looks like a secret before
+        posting** — tokens, keys, topic names, hostnames you don't want
+        public.
+      render: text
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output (optional)
+      description: >-
+        `abysslink doctor` output often pinpoints the broken layer.
+        Same redaction rule applies.
+      render: text

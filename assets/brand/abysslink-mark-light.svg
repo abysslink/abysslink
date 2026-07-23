@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Abysslink mark: a letter A of falling cyan data streams, its crossbar a chain link over the abyss">
+  <!-- Abysslink brand mark. Original vector, Apache-2.0.
+       Palette is LOCKED to internal/ui/theme.go:
+       cyan #2CE0F5 · indigo #6E80F7 · violet #B57BFF (dark)
+       cyan #0E7490 · indigo #2540C0 · violet #7C3AED (light)
+       Fixed light-theme variant for GitHub <picture> use. -->
+  <defs>
+    <linearGradient id="abyss" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#0E7490" offset="0"/>
+      <stop stop-color="#2540C0" offset="0.55"/>
+      <stop stop-color="#7C3AED" offset="1"/>
+    </linearGradient>
+  </defs>
+  <!-- The two legs of the A -->
+  <path d="M256 64 L116 448" fill="none" stroke="url(#abyss)" stroke-width="38" stroke-linecap="round"/>
+  <path d="M256 64 L396 448" fill="none" stroke="url(#abyss)" stroke-width="38" stroke-linecap="round"/>
+  <!-- Matrix-rain streams falling into the counter of the A -->
+  <g stroke="#0E7490" fill="none" stroke-width="11" stroke-linecap="round" stroke-dasharray="3 27">
+    <path d="M256 118 V258"/>
+    <path d="M224 158 V272" opacity="0.72"/>
+    <path d="M288 158 V272" opacity="0.72"/>
+    <path d="M196 210 V284" opacity="0.45"/>
+    <path d="M316 210 V284" opacity="0.45"/>
+  </g>
+  <!-- Chain-link crossbar bridging the legs -->
+  <g fill="none" stroke-width="22">
+    <rect stroke="#2540C0" x="148" y="326" width="112" height="62" rx="31"/>
+    <rect stroke="#7C3AED" x="252" y="326" width="112" height="62" rx="31"/>
+  </g>
+</svg>

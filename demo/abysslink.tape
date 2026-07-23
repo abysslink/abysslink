@@ -1,63 +1,53 @@
 # Abysslink README demo — rendered with VHS (https://github.com/charmbracelet/vhs)
 #
-#   vhs demo/abysslink.tape        # -> demo/abysslink.gif
+#   vhs demo/abysslink.tape        # run from the repo root
+#                                  # -> demo/abysslink.gif + demo/abysslink.mp4
 #
-# Deterministic + fast: runs only infra-free commands (--help / version), so it
-# never hangs on a missing tailnet and always renders the same. Output is sliced
-# with `sed` to (a) keep each frame tight and (b) drop cobra's "Global Flags"
-# block, which prints the absolute config path and would leak a real home dir.
+# Three real value moments, all read-only / dry-run — nothing mutates the host:
+#   1. `abysslink up`            — the convergence plan (dry-run is the default)
+#   2. `abysslink quorum eval`   — the compiled deny-floor rejecting Funnel
+#   3. `abysslink threat-model`  — the live ✓/✗ defense table
+#
+# Deterministic + leak-free: the hidden setup points HOME at a throwaway
+# sandbox and installs demo/abysslink.demo.yaml (generic identity: dev@rig),
+# so no real hostname, user, IP, or home path can appear in a frame.
+# Theme matches the product palette in internal/ui/theme.go.
 
 Output demo/abysslink.gif
+Output demo/abysslink.mp4
 Require abysslink
 
 Set Shell        "bash"
-Set FontSize     16
-Set Width        1100
-Set Height       520
-Set Padding      20
-Set TypingSpeed  25ms
-Set Theme        "Catppuccin Mocha"
+Set FontSize     18
+Set Width        1200
+Set Height       600
+Set Padding      24
+Set TypingSpeed  20ms
+Set Framerate    24
+Set Theme        {"name":"abyss","background":"#0f1117","foreground":"#F8F8F2","black":"#1a1d27","brightBlack":"#64748B","red":"#FF5F87","brightRed":"#FF5F87","green":"#04B575","brightGreen":"#04B575","yellow":"#FFD060","brightYellow":"#FFD060","blue":"#6E80F7","brightBlue":"#6E80F7","magenta":"#B57BFF","brightMagenta":"#B57BFF","cyan":"#2CE0F5","brightCyan":"#2CE0F5","white":"#F8F8F2","brightWhite":"#F8F8F2","cursor":"#2CE0F5","selection":"#B57BFF"}
 
-# Clean, neutral prompt — no real home path leaks into the frame.
+# Invisible setup: sandbox HOME + sanitized config + neutral prompt.
 Hide
-Type `export PS1='\[\033[36m\]abysslink\[\033[0m\] \[\033[90m\]~/dev\[\033[0m\] $ '` Enter
+Type `export HOME=/tmp/abysslink-demo-home && mkdir -p "$HOME/.config/abysslink" && cp demo/abysslink.demo.yaml "$HOME/.config/abysslink/abysslink.yaml"` Enter
+Type `export PS1='\[\033[36m\]dev@rig\[\033[0m\] \[\033[90m\]~\[\033[0m\] $ '` Enter
 Type "clear" Enter
 Show
 
-Sleep 600ms
+Sleep 400ms
 
-# 1 · The workflow, front and center — init, converge, pair, check. With exit codes.
-Type "abysslink --help | sed -n '1,19p'"  Sleep 250ms  Enter
-Sleep 2.6s
+# 1 · The product promise: converge the whole stack, preview first, apply explicitly.
+Type "# preview every change before it happens"  Sleep 250ms  Enter
+Type "abysslink up"  Sleep 250ms  Enter
+Sleep 3s
 Type "clear" Enter
 
-# 2 · Every mutating command is dry-run by default; weakening a default is explicit.
-Type "abysslink up --help | sed -n '1,21p'"  Sleep 250ms  Enter
-Sleep 2.6s
+# 2 · The deny-floor: public exposure is un-askable, and the command never runs.
+Type "# dangerous actions hit a compiled deny-floor"  Sleep 250ms  Enter
+Type "abysslink quorum eval -- tailscale funnel 443"  Sleep 250ms  Enter
+Sleep 2.3s
 Type "clear" Enter
 
-# 3 · Verify the binary you're about to trust.
-Type "abysslink version --provenance"  Sleep 250ms  Enter
-Sleep 2.2s
-Type "clear" Enter
-
-# 4 · The kill switch is one word — and it's reversible.
-Type "abysslink panic --help | sed -n '1,14p'"  Sleep 250ms  Enter
-Sleep 2.6s
-Type "clear" Enter
-
-# 5 · One-scan phone enrollment — credential pull without copy-pasting keys.
-Type "abysslink enroll phone --help | sed -n '1,16p'"  Sleep 250ms  Enter
-Sleep 2.6s
-Type "clear" Enter
-
-# 6 · Session-typed notification — the rig knows which pane needs attention.
-Type "abysslink notify --help | sed -n '1,13p'"  Sleep 250ms  Enter
-Sleep 2.6s
-Type "clear" Enter
-
-# 7 · Agent kill-switch (Apoptosis) — freeze a runaway agent from your pocket.
-Type "abysslink arm --help | sed -n '1,15p'"  Sleep 250ms  Enter
-Sleep 2.6s
-
-Sleep 1s
+# 3 · The receipts: every defense in the threat model, checked live.
+Type "# every defense, verified live"  Sleep 250ms  Enter
+Type "abysslink threat-model"  Sleep 250ms  Enter
+Sleep 3.1s

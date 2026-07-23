@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Abysslink Contributors
-name: Docs
+name: Site
 
 on:
   push:
@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    name: Build docs site
+    name: Build landing page + docs
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner
@@ -48,13 +48,18 @@ jobs:
       - name: Install docs build deps
         run: python3 -m pip install -r docs/requirements.txt
 
-      - name: Build site (strict)
-        run: mkdocs build --strict
+      - name: Build docs (strict)
+        run: mkdocs build --strict --site-dir _site/docs
+
+      - name: Assemble site (landing page at /, docs under /docs/, installer at /install.sh)
+        run: |
+          cp -R web/. _site/
+          cp install.sh _site/install.sh
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: site
+          path: _site
 
   deploy:
     name: Deploy to GitHub Pages

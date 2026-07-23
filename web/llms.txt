@@ -1,0 +1,42 @@
+# Abysslink
+
+> Abysslink is an open-source (Apache-2.0) Go CLI and optional daemon that turn a macOS or
+> Linux laptop into a hardened, phone-controlled dev rig: private mesh VPN (Tailscale, or
+> self-hosted Headscale/NetBird), hardened SSH, tmux + mosh session persistence, and
+> self-hosted push notifications whose bodies never touch third-party servers. It is built
+> for supervising AI coding agents (Claude Code, Aider, Codex, or any CLI agent) from a
+> phone: get a push the moment the agent needs input, tap into the live tmux session,
+> approve or deny risky actions, or kill the run outright. Dry-run is the default for every
+> mutating command; every file change is backed up and written to a tamper-evident,
+> HMAC-chained audit log; `abysslink uninstall` reverses everything. Zero telemetry,
+> enforced by CI.
+
+Key facts:
+- Current stable line: v4.x (semver; security fixes on the latest minor).
+- Platforms: macOS 13+ and Linux (amd64/arm64). No Windows.
+- Requires: disk encryption (FileVault/LUKS — the doctor command fails closed without it)
+  and a Tailscale account or self-hosted control plane.
+- Install: `curl -fsSL https://raw.githubusercontent.com/abysslink/abysslink/main/install.sh | sh`
+  or `brew install --cask abysslink/tap/abysslink`. Releases are cosign-signed with
+  SLSA Build L3 provenance.
+- Not affiliated with Anthropic; "Claude Code" integration is one opt-in module of a
+  generic, agent-agnostic notify/watch core.
+
+## Docs
+
+- [Documentation home](https://abysslink.dev/docs/): overview and orientation
+- [Quickstart](https://abysslink.dev/docs/quickstart/): install to phone-paired in ~5-8 minutes
+- [CLI reference](https://abysslink.dev/docs/cli-reference/): every command and flag
+- [Configuration](https://abysslink.dev/docs/configuration/): full abysslink.yaml schema
+- [Security & threat model](https://abysslink.dev/docs/security/): defenses, non-goals, hardening
+- [Agent safety](https://abysslink.dev/docs/agent-safety/): kill-switch, approve loop, quorum gate, dead-man switch
+- [Who sees what](https://abysslink.dev/docs/who-sees-what/): per-push-path data visibility
+- [FAQ](https://abysslink.dev/docs/operations/faq/)
+- [Uninstall](https://abysslink.dev/docs/operations/uninstall/)
+
+## Source
+
+- [GitHub repository](https://github.com/abysslink/abysslink)
+- [Releases (signed)](https://github.com/abysslink/abysslink/releases)
+- [Security policy](https://github.com/abysslink/abysslink/blob/main/SECURITY.md)
+- [Claims audit — every security claim mapped to code](https://github.com/abysslink/abysslink/blob/main/CLAIMS-AUDIT.md)

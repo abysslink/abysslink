@@ -1,12 +1,14 @@
 site_name: Abysslink
 site_description: Paranoid-by-default phone-to-laptop remote setup over Tailscale
-site_url: https://abysslink.github.io/abysslink/
+site_url: https://abysslink.dev/docs/
 
 repo_name: abysslink/abysslink
 repo_url: https://github.com/abysslink/abysslink
 
 theme:
   name: material
+  logo: assets/logo.png
+  favicon: assets/favicon.png
   palette:
     - scheme: slate
       primary: deep purple
@@ -50,6 +52,7 @@ nav:
   - Operations:
     - Troubleshooting: operations/troubleshooting.md
     - FAQ: operations/faq.md
+    - Uninstall: operations/uninstall.md
     - Audit evidence: operations/audit-evidence.md
     - "Agent Diary": operations/agent-diary.md
     - "Headscale HA": headscale-ha.md
@@ -59,6 +62,7 @@ nav:
   - Testing:
     - "CI Fire Drill": testing/ci-firedrill.md
     - "Push Real-Device Runbook": testing/push-real-device.md
+    - "Performance Budget": testing/perf-budget.md
   - Contributing:
     - Contributing: contributing.md
     - "Built with AI": ai-story.md
