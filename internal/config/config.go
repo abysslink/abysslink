@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -1791,7 +1792,12 @@ func validateDecoy(cfg *Config) error {
 // that can remove or disable the compiled deny-floor.
 func validateQuorum(cfg *Config) error {
 	q := cfg.Quorum
-	if s := q.SpendThresholdUSD; s != 0 && (s < 0 || s > quorum.DefaultSpendThresholdUSD) {
+	// math.IsNaN is explicit: yaml.v3 resolves `.nan` to a float64 NaN, and every
+	// ordered comparison against NaN is false — without this guard `.nan` would
+	// slip past the range check and silently disable the spend gate (the
+	// comparison v.spend() >= NaN can never be true). +Inf is caught by
+	// `s > default`, -Inf by `s < 0`.
+	if s := q.SpendThresholdUSD; s != 0 && (math.IsNaN(s) || s < 0 || s > quorum.DefaultSpendThresholdUSD) {
 		return fmt.Errorf("config: quorum.spend_threshold_usd %v must be in (0, %v] — "+
 			"raising the spend threshold above the shipped default would loosen the gate; 0 means the default",
 			s, quorum.DefaultSpendThresholdUSD)
@@ -1880,7 +1886,36 @@ func validateSentinel(cfg *Config) error {
 				return fmt.Errorf("config: sentinel.%s contains an empty entry — "+
 					"an empty entry would match nothing or everything; remove it", listName)
 			}
+			if listName == "egress_allowlist" {
+				if err := rejectOverbroadEgress(entry); err != nil {
+					return err
+				}
+			}
 		}
+	}
+	return nil
+}
+
+// rejectOverbroadEgress fails an egress_allowlist entry that would swallow a
+// whole address space and quietly make the sentinel vacuous — a universe CIDR
+// (/0) or a bare top-level-domain wildcard (*.com). These are the loosening
+// axes the ADD-ONLY allowlist can't otherwise reject: they violate the same
+// tighten-only contract validateSentinel enforces for the window bounds.
+// Narrow entries (a specific host, a /8+ subnet, *.corp.example.com) pass.
+func rejectOverbroadEgress(entry string) error {
+	h := strings.ToLower(strings.TrimSpace(entry))
+	if strings.Contains(h, "/") {
+		if _, n, err := net.ParseCIDR(h); err == nil {
+			if ones, _ := n.Mask.Size(); ones == 0 {
+				return fmt.Errorf("config: sentinel.egress_allowlist %q matches every host — "+
+					"a /0 CIDR would disable the detector; list specific hosts or a narrower subnet", entry)
+			}
+		}
+		return nil
+	}
+	if rest, ok := strings.CutPrefix(h, "*."); ok && !strings.Contains(rest, ".") {
+		return fmt.Errorf("config: sentinel.egress_allowlist %q matches an entire top-level domain — "+
+			"use a specific host or a narrower suffix like *.corp.example.com", entry)
 	}
 	return nil
 }

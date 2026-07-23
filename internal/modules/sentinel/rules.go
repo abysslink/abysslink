@@ -67,7 +67,6 @@ type vocabulary struct {
 	// Benign egress allowlist.
 	allowExact  map[string]bool
 	allowSuffix []string
-	allowPrefix []string
 	allowCIDR   []*net.IPNet
 }
 
@@ -168,8 +167,14 @@ func (v *vocabulary) buildAllowlist(extra []string) {
 	}
 	// Suffix wildcards: base itself and any sub.base.
 	v.allowSuffix = []string{"npmjs.org", "docker.io", "ts.net", "pythonhosted.org"}
-	// Prefix wildcards: goproxy.* mirrors GOPROXY custom hosts.
-	v.allowPrefix = []string{"goproxy."}
+	// Known public GOPROXY mirrors, matched EXACTLY. This replaces an earlier
+	// unanchored "goproxy." host-PREFIX wildcard that fail-opened the egress leg:
+	// it allowlisted any attacker-registrable host beginning with that label
+	// (goproxy.attacker.com). A private/site-specific mirror is added by its exact
+	// host via egress_allowlist (ADD-ONLY, exact match) — never by prefix.
+	for _, h := range []string{"goproxy.cn", "goproxy.io"} {
+		v.allowExact[h] = true
+	}
 	// Tailnet + loopback CIDRs.
 	for _, c := range []string{"100.64.0.0/10", "127.0.0.0/8", "::1/128"} {
 		if _, n, err := net.ParseCIDR(c); err == nil {
@@ -355,10 +360,13 @@ func looksLikePrivateKeyName(base string) bool {
 	return false
 }
 
-// normalize resolves a token to a cleaned absolute path: leading ~ expands to
-// HOME; a relative path resolves against the cwd; then filepath.Clean.
+// normalize resolves a token to a cleaned absolute path: a leading '@' (curl's
+// -d/--data/--data-binary file-read sigil, the way an upload reads a file from
+// disk) is stripped first so the path underneath resolves and can match a
+// sensitive prefix; leading ~ expands to HOME; a relative path resolves against
+// the cwd; then filepath.Clean.
 func (v *vocabulary) normalize(tok string) string {
-	p := tok
+	p := strings.TrimPrefix(tok, "@")
 	switch {
 	case p == "~":
 		p = v.home
@@ -396,11 +404,6 @@ func (v *vocabulary) isAllowlisted(host string) bool {
 	}
 	for _, s := range v.allowSuffix {
 		if h == s || strings.HasSuffix(h, "."+s) {
-			return true
-		}
-	}
-	for _, p := range v.allowPrefix {
-		if strings.HasPrefix(h, p) {
 			return true
 		}
 	}

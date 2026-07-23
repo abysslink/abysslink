@@ -38,7 +38,7 @@ const (
 func sentinelDoctorFindings(ctx context.Context, cfg *config.Config) []modules.Finding {
 	return []modules.Finding{
 		secSentinelEnabledCheck(cfg),
-		secSentinelRulesCheck(ctx),
+		secSentinelRulesCheck(ctx, cfg),
 	}
 }
 
@@ -67,12 +67,21 @@ func secSentinelEnabledCheck(cfg *config.Config) modules.Finding {
 	}
 }
 
-// secSentinelRulesCheck runs the embedded hermetic self-test: the canonical
-// exfil pair must fire exactly once and a canned benign sequence must stay
-// silent. A failure means the compiled detector is broken or vacuous — FATAL in
-// every profile.
-func secSentinelRulesCheck(ctx context.Context) modules.Finding {
-	if err := sentinel.SelfTest(ctx); err != nil {
+// secSentinelRulesCheck runs the embedded hermetic self-test against the LIVE
+// configuration: the canonical exfil pair must fire exactly once and a canned
+// benign sequence must stay silent. Feeding the operator's actual sentinel
+// config (windows, extra paths, egress allowlist) means an over-broad allowlist
+// that swallows the canned exfil host is caught here — the check proves the
+// RUNNING detector is non-vacuous, not merely the compiled defaults. A failure
+// means the detector is broken or vacuous — FATAL in every profile.
+func secSentinelRulesCheck(ctx context.Context, cfg *config.Config) modules.Finding {
+	econf := sentinel.Config{
+		WindowExecs:         cfg.Sentinel.WindowExecs,
+		WindowSeconds:       cfg.Sentinel.WindowSeconds,
+		ExtraSensitivePaths: cfg.Sentinel.ExtraSensitivePaths,
+		ExtraAllowlist:      cfg.Sentinel.EgressAllowlist,
+	}
+	if err := sentinel.SelfTestWith(ctx, econf); err != nil {
 		return modules.Finding{
 			Module:   "sec",
 			Check:    checkSecSentinelRules,
